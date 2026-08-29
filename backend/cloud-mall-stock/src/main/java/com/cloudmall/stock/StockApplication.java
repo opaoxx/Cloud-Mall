@@ -1,0 +1,1 @@
+package com.cloudmall.stock; import org.springframework.boot.*; import org.springframework.boot.autoconfigure.*; @SpringBootApplication public class StockApplication{public static void main(String[] a){SpringApplication.run(StockApplication.class,a);}}

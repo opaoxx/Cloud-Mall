@@ -1,0 +1,10 @@
+server: {port: 8083}
+spring:
+  application: {name: cloud-mall-cart}
+  data.redis: {host: localhost, port: 6379, password: root, timeout: 2s}
+  jackson.time-zone: Asia/Shanghai
+management.endpoints.web.exposure.include: health,info,prometheus
+cloudmall.cart.ttl: 30d
+spring.cloud.nacos.discovery.server-addr: localhost:8848
+spring.cloud.nacos.discovery.username: root
+spring.cloud.nacos.discovery.password: root

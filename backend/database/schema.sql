@@ -1,0 +1,25 @@
+-- CloudMall local development schema. Execute in MySQL 8.0 after creating logical databases.
+CREATE DATABASE IF NOT EXISTS cloudmall_user DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS cloudmall_product DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS cloudmall_order DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS cloudmall_stock DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS cloudmall_pay DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE cloudmall_user;
+CREATE TABLE IF NOT EXISTS mall_user (id BIGINT PRIMARY KEY, username VARCHAR(64) NOT NULL UNIQUE, password_hash VARCHAR(255) NOT NULL, role VARCHAR(16) NOT NULL DEFAULT 'USER', nickname VARCHAR(128), phone VARCHAR(32), status TINYINT NOT NULL DEFAULT 1, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL);
+CREATE TABLE IF NOT EXISTS user_address (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, receiver_name VARCHAR(64) NOT NULL, receiver_phone VARCHAR(32) NOT NULL, region_detail VARCHAR(512) NOT NULL, is_default TINYINT NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_user_id(user_id));
+USE cloudmall_product;
+CREATE TABLE IF NOT EXISTS product_category (id BIGINT PRIMARY KEY, parent_id BIGINT NOT NULL DEFAULT 0, name VARCHAR(128) NOT NULL, sort_no INT NOT NULL DEFAULT 0, status TINYINT NOT NULL DEFAULT 1, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL);
+CREATE TABLE IF NOT EXISTS product (id BIGINT PRIMARY KEY, category_id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, main_image VARCHAR(512), description TEXT, price DECIMAL(18,2) NOT NULL, status TINYINT NOT NULL DEFAULT 0, version INT NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_category_status(category_id,status));
+CREATE TABLE IF NOT EXISTS product_sku (id BIGINT PRIMARY KEY, product_id BIGINT NOT NULL, sku_code VARCHAR(64) NOT NULL UNIQUE, spec_json JSON NOT NULL, price DECIMAL(18,2) NOT NULL, status TINYINT NOT NULL DEFAULT 1, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL);
+USE cloudmall_stock;
+CREATE TABLE IF NOT EXISTS stock_sku (sku_id BIGINT PRIMARY KEY, product_id BIGINT NOT NULL, total_quantity INT NOT NULL, available_quantity INT NOT NULL, reserved_quantity INT NOT NULL, sold_quantity INT NOT NULL, version INT NOT NULL DEFAULT 0, updated_at DATETIME(3) NOT NULL);
+CREATE TABLE IF NOT EXISTS stock_flow (id BIGINT PRIMARY KEY, sku_id BIGINT NOT NULL, order_no VARCHAR(64) NOT NULL, flow_type VARCHAR(32) NOT NULL, quantity INT NOT NULL, idempotency_key VARCHAR(128) NOT NULL UNIQUE, created_at DATETIME(3) NOT NULL);
+USE cloudmall_pay;
+CREATE TABLE IF NOT EXISTS pay_record (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL UNIQUE, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, status VARCHAR(32) NOT NULL, paid_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL);
+CREATE TABLE IF NOT EXISTS pay_callback_log (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL, callback_id VARCHAR(128) NOT NULL UNIQUE, callback_status VARCHAR(32) NOT NULL, payload JSON, processed_at DATETIME(3), created_at DATETIME(3) NOT NULL);
+USE cloudmall_order;
+-- Pre-create the current and near-term physical tables required by the frozen monthly strategy.
+CREATE TABLE IF NOT EXISTS mall_order_template (id BIGINT PRIMARY KEY, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, status VARCHAR(32) NOT NULL, total_amount DECIMAL(18,2) NOT NULL, pay_amount DECIMAL(18,2) NOT NULL, address_snapshot JSON NOT NULL, expire_at DATETIME(3), paid_at DATETIME(3), cancelled_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_user_created(user_id,created_at), KEY idx_status_expire(status,expire_at));
+CREATE TABLE IF NOT EXISTS mall_order_202608 LIKE mall_order_template;
+CREATE TABLE IF NOT EXISTS mall_order_item_202608 (id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL, order_no VARCHAR(64) NOT NULL, product_id BIGINT NOT NULL, sku_id BIGINT NOT NULL, product_name_snapshot VARCHAR(255) NOT NULL, sku_snapshot JSON, unit_price DECIMAL(18,2) NOT NULL, quantity INT NOT NULL, line_amount DECIMAL(18,2) NOT NULL, created_at DATETIME(3) NOT NULL, KEY idx_order_no(order_no));
+CREATE TABLE IF NOT EXISTS order_status_log_202608 (id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL, order_no VARCHAR(64) NOT NULL, from_status VARCHAR(32), to_status VARCHAR(32) NOT NULL, event_type VARCHAR(64) NOT NULL, operator_id BIGINT, remark VARCHAR(512), created_at DATETIME(3) NOT NULL, KEY idx_order_created(order_id,created_at));

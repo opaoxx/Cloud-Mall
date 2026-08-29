@@ -1,0 +1,17 @@
+server: {port: 8080}
+spring:
+  application: {name: cloud-mall-gateway}
+  cloud:
+    gateway:
+      discovery: {locator: {enabled: true}}
+      routes:
+        - {id: user, uri: lb://cloud-mall-user, predicates: [Path=/api/auth/**,/api/users/**]}
+        - {id: product, uri: lb://cloud-mall-product, predicates: [Path=/api/products/**,/api/categories/**]}
+        - {id: cart, uri: lb://cloud-mall-cart, predicates: [Path=/api/cart/**]}
+        - {id: order, uri: lb://cloud-mall-order, predicates: [Path=/api/orders/**,/api/seckill/**]}
+        - {id: stock, uri: lb://cloud-mall-stock, predicates: [Path=/api/stock/**]}
+        - {id: pay, uri: lb://cloud-mall-pay, predicates: [Path=/api/payments/**]}
+management.endpoints.web.exposure.include: health,info,prometheus
+cloudmall.gateway.auth.enabled: false
+spring.cloud.nacos.discovery.server-addr: localhost:8848
+spring.cloud.nacos.config.server-addr: localhost:8848

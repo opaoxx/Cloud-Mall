@@ -1,0 +1,27 @@
+# Java/Maven build output
+backend/**/target/
+*.class
+
+# Node/Vite dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/*.tsbuildinfo
+
+# IDE metadata
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Local environment overrides and logs
+**/.env
+**/.env.*
+!**/.env.example
+*.log
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini

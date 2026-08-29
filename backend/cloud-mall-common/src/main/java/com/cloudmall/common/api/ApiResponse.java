@@ -1,0 +1,2 @@
+package com.cloudmall.common.api;
+public class ApiResponse<T>{ public String code; public String message; public T data; public String requestId; public ApiResponse(){} public ApiResponse(String c,String m,T d){code=c;message=m;data=d;requestId=java.util.UUID.randomUUID().toString();} public static <T> ApiResponse<T> ok(T d){return new ApiResponse<>("0","OK",d);} public static <T> ApiResponse<T> error(String c,String m){return new ApiResponse<>(c,m,null);} }

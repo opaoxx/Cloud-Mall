@@ -1,0 +1,9 @@
+server: {port: 8086}
+spring:
+  application: {name: cloud-mall-pay}
+  rabbitmq: {host: localhost, port: 5672, username: root, password: root}
+  jackson.time-zone: Asia/Shanghai
+management.endpoints.web.exposure.include: health,info,prometheus
+spring.cloud.nacos.discovery.server-addr: localhost:8848
+spring.cloud.nacos.discovery.username: root
+spring.cloud.nacos.discovery.password: root

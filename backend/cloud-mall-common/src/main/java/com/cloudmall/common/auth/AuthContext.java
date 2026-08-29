@@ -1,0 +1,2 @@
+package com.cloudmall.common.auth;
+public final class AuthContext {private static final ThreadLocal<Long> USER=new ThreadLocal<>(); private static final ThreadLocal<String> ROLE=new ThreadLocal<>(); private AuthContext(){} public static void set(Long id,String role){USER.set(id);ROLE.set(role);} public static Long userId(){return USER.get();} public static String role(){return ROLE.get();} public static void clear(){USER.remove();ROLE.remove();} public static boolean isAdmin(){return "ADMIN".equals(ROLE.get());}}
