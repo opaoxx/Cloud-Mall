@@ -1,18 +1,18 @@
 server: {port: 8080}
 spring:
   application: {name: cloud-mall-gateway}
-  data.redis: {host: localhost, port: 6379, password: root, timeout: 2s}
+  redis: {host: 127.0.0.1, port: 16379, password: root, timeout: 2s}
   cloud:
     gateway:
       discovery: {locator: {enabled: true}}
       routes:
-        - {id: user, uri: lb://cloud-mall-user, predicates: [Path=/api/auth/**,/api/users/**]}
-        - {id: product, uri: lb://cloud-mall-product, predicates: [Path=/api/products/**,/api/categories/**]}
-        - {id: cart, uri: lb://cloud-mall-cart, predicates: [Path=/api/cart/**]}
-        - {id: seckill-activities, uri: lb://cloud-mall-product, predicates: [Path=/api/seckill/activities,/api/seckill/activities/**]}
-        - {id: order, uri: lb://cloud-mall-order, predicates: [Path=/api/orders/**,/api/seckill/orders,/api/seckill/orders/**]}
-        - {id: stock, uri: lb://cloud-mall-stock, predicates: [Path=/api/stock/**]}
-        - {id: pay, uri: lb://cloud-mall-pay, predicates: [Path=/api/payments/**]}
+        - {id: user, uri: lb://cloud-mall-user, predicates: ["Path=/api/auth/**,/api/users/**"]}
+        - {id: product, uri: lb://cloud-mall-product, predicates: ["Path=/api/products/**,/api/categories/**"]}
+        - {id: cart, uri: lb://cloud-mall-cart, predicates: ["Path=/api/cart/**"]}
+        - {id: seckill-activities, uri: lb://cloud-mall-product, predicates: ["Path=/api/seckill/activities,/api/seckill/activities/**"]}
+        - {id: order, uri: lb://cloud-mall-order, predicates: ["Path=/api/orders/**,/api/seckill/orders,/api/seckill/orders/**"]}
+        - {id: stock, uri: lb://cloud-mall-stock, predicates: ["Path=/api/stock/**"]}
+        - {id: pay, uri: lb://cloud-mall-pay, predicates: ["Path=/api/payments/**"]}
 management.endpoints.web.exposure.include: health,info,prometheus
 cloudmall.gateway.auth.enabled: true
 spring.cloud.nacos.discovery.server-addr: localhost:8848

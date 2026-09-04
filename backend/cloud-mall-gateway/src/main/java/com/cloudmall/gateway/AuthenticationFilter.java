@@ -29,6 +29,7 @@ public class AuthenticationFilter implements GlobalFilter {
         String token = authorization.substring("Bearer ".length()).trim();
         if (token.isEmpty()) return unauthorized(exchange);
         return redis.opsForValue().get("auth:token:" + token)
+                .switchIfEmpty(Mono.just(""))
                 .flatMap(value -> {
                     String[] parts = value.split(":", 2);
                     if (parts.length != 2) return unauthorized(exchange);
@@ -39,8 +40,7 @@ public class AuthenticationFilter implements GlobalFilter {
                         headers.add("X-User-Role", parts[1]);
                     })).build();
                     return chain.filter(forwarded);
-                }).switchIfEmpty(unauthorized(exchange))
-                .onErrorResume(error -> unauthorized(exchange));
+                });
     }
 
     private boolean isPublic(HttpMethod method, String path) {

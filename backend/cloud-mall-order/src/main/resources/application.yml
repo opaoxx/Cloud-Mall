@@ -1,11 +1,11 @@
 server: {port: 8084}
 spring:
   application: {name: cloud-mall-order}
-  datasource: {url: jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai, username: root, password: root}
+  datasource: {url: "jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai", username: root, password: root}
   jackson.time-zone: Asia/Shanghai
   rabbitmq:
     host: localhost
-    port: 5672
+    port: 15673
     username: root
     password: root
     listener:
@@ -37,6 +37,8 @@ seata:
   service:
     vgroup-mapping:
       cloudmall_tx_group: default
+    grouplist:
+      default: 127.0.0.1:8091
 ---
 spring:
   config:

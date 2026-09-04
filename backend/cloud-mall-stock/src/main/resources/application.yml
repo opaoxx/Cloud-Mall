@@ -1,8 +1,9 @@
 server: {port: 8085}
 spring:
   application: {name: cloud-mall-stock}
-  data.redis: {host: localhost, port: 6379, password: root, timeout: 2s}
-  rabbitmq: {host: localhost, port: 5672, username: root, password: root}
+  datasource: {url: "jdbc:mysql://localhost:13307/cloudmall_stock?serverTimezone=Asia/Shanghai", username: root, password: root, driver-class-name: com.mysql.cj.jdbc.Driver}
+  redis: {host: 127.0.0.1, port: 16379, password: root, timeout: 2s}
+  rabbitmq: {host: localhost, port: 15673, username: root, password: root}
 management.endpoints.web.exposure.include: health,info,prometheus
 spring.cloud.nacos.discovery.server-addr: localhost:8848
 spring.cloud.nacos.discovery.username: root
