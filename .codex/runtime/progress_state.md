@@ -93,6 +93,48 @@
 - P1（归属 `frontend`）：首轮存在地址和管理员 CRUD 占位、接口字段/幂等头等问题；第二轮已处理，剩余真实联调待验证。
 - P1/P2（归属 `qa`）：真实接口联调、跨服务链路、浏览器 E2E、重启/并发场景尚未验收；首轮 QA 已确认业务服务 8080-8086 未启动属于环境阻塞。
 - 依赖状态：PowerShell 中 `mvn` 命令不可识别；已用 Docker Maven `maven:3.9.9-eclipse-temurin-17` 在恢复后的 backend 执行 `mvn -B -ntp test` 并获得 `BUILD SUCCESS`；本机 IDEA 仍需使用其配置的 Maven/JDK。
+
+## 2026-09-05 当前补充 Bug 批次
+
+### 已完成任务
+
+- 已读取用户补充日志，并在修复前将 Seata 1.5.2 + JDK 21 `InaccessibleObjectException` 记录到 `.codex/runtime/bugfix_log.md`。
+- 本地复核 Docker Compose：12 个常驻 CloudMall 容器均为运行/健康状态；当前未运行 8080–8086 的 Java 服务，端口已释放。
+- 已确认 `backend/README.md` 已记录 JDK 17 固定要求及 JDK 21 的 `--add-opens` 临时兼容参数。
+
+### 正在执行任务
+
+- `backend`：复核 order/pay 的 Seata 配置、IDEA/JDK 21 启动复现与 Maven 回归，禁止修改业务契约。
+- 主 Agent：复核 IDEA 可运行性、Compose 状态和最终证据，维护 bug 记录。
+
+### 待执行任务
+
+- 等待 backend 回报后，执行必要的全量后端构建/测试与 Seata 启动验证。
+- 若无代码级缺陷，补记“环境配置解决方案、验证结果、剩余风险”，并暂停等待用户在 IDEA 侧按说明启动。
+
+### 现存 Bug 与归属角色
+
+- P1（归属环境/IDEA 配置，backend 协助确认）：JDK 21 直接启动 order/pay 会触发 Seata 1.5.2 CGLIB 模块访问异常；推荐统一使用 JDK 17，或在 JDK 21 Run Configuration 加 `--add-opens java.base/java.lang=ALL-UNNAMED`。
+
+### backend 轮完成
+
+- backend 子 Agent Gibbs 已完成只读复核：确认 Seata 地址、Java 17 编译产物和现有 README 正确，本轮无代码修改。
+- 已实测 JDK 21 无参数失败、加入 `--add-opens java.base/java.lang=ALL-UNNAMED` 后 order/pay 启动并注册 Seata 成功。
+- Docker Maven `-pl cloud-mall-order,cloud-mall-pay -am test package` 成功；common 20 项测试通过。
+
+### 当前状态
+
+- 已完成任务：Seata/JDK21 启动问题定位、最小解决方案验证、Docker Compose 状态复核、bugfix_log 记录。
+- 正在执行任务：qa 只读回归及主 Agent 最终全量构建/配置检查。
+- 待执行任务：根据 QA 结果补写台账；若无新增缺陷，向用户交付 IDEA 启动设置并暂停。
+- 现存 bug：无代码级 bug；保留环境风险——JDK21 直接运行 order/pay 必须设置 VM options，推荐切换 JDK17。
+
+### qa 轮完成与最终回归
+
+- qa 子 Agent Faraday 已完成只读复核：Compose、Seata health、Seata 地址、Java 17/JDK21 说明及 `wire_api` 清理通过；仅因宿主 PATH 无 Maven 无法自行运行 Maven。
+- 主 Agent 使用 Docker Maven `maven:3.9.9-eclipse-temurin-17` 执行 backend 全量 `mvn -B -ntp test`：9 个模块 BUILD SUCCESS；common 20 项、product 16 项测试通过，其余模块无测试失败。
+- 已将 QA 和最终回归结果写入 `.codex/runtime/bugfix_log.md`。
+- 当前批次状态：已闭环，无需业务代码修复；等待用户在 IDEA 将 order/pay 的 JRE 设为 JDK17，或为 JDK21 Run Configuration 添加 `--add-opens java.base/java.lang=ALL-UNNAMED`。
 - Docker 诊断（启动前）：Docker Desktop 4.88.1、context `desktop-linux`、Server 29.7.2 正常；当时 Compose 项目仅 `hmall` 与 `jike-hotrank-engine`，CloudMall 尚无 Compose 文件/容器。用户随后明确要求改用 Docker Compose，未触碰其他项目容器。
 - Docker Compose：根 `docker-compose.yml` 已通过 `docker compose config --quiet`；恢复时发现 `docker compose start` 因 Windows TCP 排除端口范围 `3307-3906` 无法绑定 MySQL `3307:3306`，主 Agent 已改为 `13307:3306`，并用 `docker compose up -d` 成功恢复 MySQL/Nginx/Kibana/Grafana。
 - Compose 实测（恢复后）：12 个常驻 CloudMall 容器均运行，MySQL/Nginx/Kibana/Redis/RabbitMQ/Nacos/ES/Zipkin 健康；Nacos bootstrap 为一次性 Exited(0)，不属于故障。

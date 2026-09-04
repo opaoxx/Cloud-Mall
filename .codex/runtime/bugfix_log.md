@@ -97,3 +97,29 @@
 ### 验证记录
 
 > 详见“修复记录”和后续 QA 回归结果。
+
+## 2026-09-05：当前补充批次——Seata 在 IDEA/JDK 21 下启动失败
+
+### 发现的问题
+
+21. order/pay 使用 IDEA 的 JDK 21 直接启动时，Seata 1.5.2 内置 CGLIB 反射访问 `java.lang.ClassLoader#defineClass`，触发 `InaccessibleObjectException`，导致 Spring Boot Application 启动失败。
+
+### 处理边界
+
+- 该问题首先按运行时兼容性问题诊断，不升级计划冻结的 Seata 1.5.2，不关闭 Seata，也不修改业务契约。
+- backend 负责确认代码/配置是否已包含 Seata 地址和 JDK 21 兼容说明；IDEA 的 Project SDK、Maven Runner JRE 和 Run Configuration JRE 仍需由使用者按项目说明设置。
+
+### 诊断、修复与验证结果
+
+- backend 复核确认：order/pay 的 Seata `service.grouplist.default` 均为 `127.0.0.1:8091`，Seata 1.5.2 与 Java 17 编译目标均符合项目冻结约束；本轮无需修改 backend 文件。
+- JDK 21 无 VM 参数时，order JAR 稳定复现 `module java.base does not "opens java.lang" to unnamed module`；加入 `--add-opens java.base/java.lang=ALL-UNNAMED` 后，order/pay 均启动成功、监听 8084/8086，并打印 `register TM success`。
+- Docker Maven Temurin 17 执行 order/pay 及 common 的 `test package` 成功；common 20 项测试通过，order/pay 编译打包成功。
+- 最终解决方案：IDEA 的 Project SDK、Maven Runner JRE、order/pay Run Configuration JRE 统一使用 JDK 17；若必须使用 JDK 21，将参数放入 VM options（不是 Program arguments）。
+- 当前剩余风险：本机可见 JDK 为 21.0.10，若用户仍直接点击 IDEA Run 且未设置上述参数，order/pay 会再次复现同一启动失败；这是本地运行环境配置风险，不是代码修复项。
+
+### QA 复核
+
+- qa 只读检查：Compose 配置、Seata health、order/pay Seata 地址、Java 17/JDK 21 运行说明均通过。
+- qa 检查活动源码/配置/部署文件未发现 `wire_api`、`javaagent`、`--add-exports`、`illegal-access` 等过时启动参数。
+- qa 因宿主 PowerShell PATH 没有 `mvn` 将本机 Maven 项目标为环境阻塞；主 Agent 已使用 `maven:3.9.9-eclipse-temurin-17` Docker Maven 补跑全量 `backend` 测试，9 个模块 `BUILD SUCCESS`，common 20 项、product 16 项测试全部通过，其余模块无测试失败。
+- 本批闭环结论：无新增代码级 bug；问题由 IDEA 使用 JDK 21 且未设置 VM options 引起，归属开发环境配置。
