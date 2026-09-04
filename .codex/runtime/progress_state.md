@@ -69,6 +69,17 @@
 
 ## 现存 Bug 与归属角色
 
+- 2026-09-05 在线 QA 新发现：user/product 缺 Nacos Discovery 依赖导致无实例、Gateway 商品/用户路由 503（P1）；订单缺 `Idempotency-Key` 返回 500 而非 400（P2）。
+- `backend` 子 Agent Bacon（`01a06d92-4265-76e3-aee2-7a918259b22d`）正在修复上述问题，完成后必须重新打包、重启和 Gateway 在线回归。
+
+- 2026-09-05 Bug 批次已记录于 `.codex/runtime/bugfix_log.md`；backend 已修复 Feign LoadBalancer、Gateway YAML predicates、JDBC URL、stock datasource、Redis/Seata 配置，并同步 RabbitMQ 15673/Redis 16379。
+- Compose 已修复 Nacos public 权限、Sentinel root/root、RabbitMQ/Kibana/Grafana 端口冲突；当前 12 个常驻容器运行，新增 healthcheck 均 healthy。
+- 等价 IDEA 启动验证：user/product/cart/gateway/order/pay/stock 7 个服务均已启动并监听 8080-8086；order/pay 使用 JDK21 `--add-opens`，stock 使用 Redis `127.0.0.1:16379`。
+- 当前执行轮：QA 子 Agent Dewey 正在进行真实接口/跨服务回归；若发现新的 bug，必须先追加到 `bugfix_log.md` 再修复。
+- 本轮 QA 新发现：user/product 缺 Nacos Discovery 已修复并重启后注册正常；Gateway 仍因缺 LoadBalancer 依赖返回 503。backend Kepler（`01a06d9c-bc22-7d60-bf55-17ac85a8645c`）正在修复并回归。
+- 2026-09-05 最新启动验证：7 个服务均监听 8080-8086；Nacos 7 个实例均 healthy；Gateway `/api/products` 返回 200；无 Token `/api/cart` 返回 401；Docker 中 RabbitMQ/Kibana/Grafana/Sentinel/Nacos/Redis 均已恢复。
+- `qa` 子 Agent Kant（`01a06da4-11d1-7c62-8ce2-eec84cc6437e`）正在执行最新在线业务回归。
+
 - 2026-09-04 最终静态回归：Gateway、商品参数/SKU、秒杀实时库存、事件 envelope、ES 异步索引、删除幂等、Rabbit 重试/DLX、Compose healthcheck 均通过；主流程 Docker Maven `mvn -B -ntp test` BUILD SUCCESS，9 模块成功，common 10 项、product 16 项通过。
 - 当前唯一阻塞（归属环境/用户启动）：业务服务 8080-8086 尚未由 IDEA 启动，因此注册登录、Gateway 在线转发、Nacos 注册、Feign、Seata、RabbitMQ 实际消费、订单/支付/库存/秒杀和浏览器 E2E 未验证。请启动 Gateway/user/product/cart/order/stock/pay 后，再继续 QA 在线回归。
 
@@ -87,6 +98,30 @@
 - Compose 实测（恢复后）：12 个常驻 CloudMall 容器均运行，MySQL/Nginx/Kibana/Redis/RabbitMQ/Nacos/ES/Zipkin 健康；Nacos bootstrap 为一次性 Exited(0)，不属于故障。
 - 规则阻塞已修正：AGENTS.md 已从“规格目录为空、仅初始化”更新为“规格已完成、允许进入实现”。
 - 新增硬约束（主 Agent）：全部后端与前端代码必须适配 IntelliJ IDEA 导入、编译和运行。
+
+## 2026-09-05 恢复批次台账
+
+- 已读取用户补充的 Bug 批次并先记录到 `.codex/runtime/bugfix_log.md`。
+- 已修复并验证：Nacos `root/root` public 权限、Sentinel `root/root`、RabbitMQ/Kibana/Grafana 端口冲突、Redis 16379 隔离、Feign LoadBalancer、Gateway YAML 与秒杀路由、JDBC/stock datasource、Seata JDK21 兼容参数、user/product Nacos 注册、Prometheus 依赖。
+- 等价 IDEA 启动验证：user/product/cart/order/stock/pay/gateway 均监听 8080-8086，并注册 Nacos；Gateway `/api/products` 200、无 token `/api/cart` 401。
+- 主流程 Docker Maven `mvn -B -ntp test` 与 `package -DskipTests` 均已获得 `BUILD SUCCESS`；当前批次新增配置/回归修改仍需提交后再由用户确认 Git 基线。
+- 当前待处理：有效 Bearer 经 Gateway 的业务响应体和 Prometheus 端点曾由 QA 报告异常，但后续最新启动验证需继续复核；商品/分类测试数据为空，订单支付秒杀完整链路尚未用有效业务数据闭环验证。
+- 后续规则：每批新 Bug 必须先追加到 `.codex/runtime/bugfix_log.md`，修复后补充方案、验证结果和遗留风险；qa 只读，不直接修复。
+
+## 2026-09-05 在线回归续记
+
+- Meitner 已完成 Gateway 鉴权响应体修复和 7 个服务 Prometheus registry 接入；主流程已重新打包并启动验证。
+- 最新启动证据：7 个业务服务监听 8080-8086，user/product/cart/order/stock/pay/gateway 均注册 Nacos；Gateway `/api/products` 200、有效 Bearer `/api/users/me` 返回 JSON、无 token `/api/cart` 401；Prometheus targets 全部 up。
+- Pauli QA（`01a06db6-9c21-76f3-88a8-a45da3b50902`）正在执行最新在线回归；新 Bug 必须先记录到 `.codex/runtime/bugfix_log.md` 再修复。
+
+## 2026-09-05 Bug 批次最终状态
+
+- Bug 批次已记录并完成修复说明，详见 `.codex/runtime/bugfix_log.md`。
+- Docker Compose：Nacos public 权限、Sentinel root/root、RabbitMQ/Kibana/Grafana/Redis 端口和 healthcheck 已修复；当前 CloudMall 基础设施可运行，宿主端口为 MySQL 13307、Redis 16379、RabbitMQ 15673/15674、Kibana 15675。
+- IDEA 等价启动：7 个业务 JAR 均成功启动并注册 Nacos；JDK21 下 order/pay 需 `--add-opens java.base/java.lang=ALL-UNNAMED`，项目推荐 IDEA 使用 JDK17。
+- 在线 QA：健康检查、Nacos、Gateway 商品/鉴权、用户注册登录/me/logout、地址、Prometheus 7/7、Rabbit/Kibana/Grafana/Sentinel 均通过；当前无确认代码 P1。
+- 未闭环项：商品/SKU/库存/活动测试数据为空，订单、支付、库存、秒杀和 ES 业务链路未完成有效数据回归；等待后续准备测试数据后再由 QA 验收。
+- 本轮主 Agent 已停止验证用的 CloudMall Java 进程，释放 8080-8086；Docker 基础设施容器保持运行。未触碰 hmall/jike-hotrank-engine。
 
 ## 变更纪律
 

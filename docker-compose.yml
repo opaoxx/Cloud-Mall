@@ -31,7 +31,8 @@ services:
       TZ: Asia/Shanghai
     command: redis-server --appendonly yes --requirepass root
     ports:
-      - "6379:6379"
+      # Host 6379 has competing Docker/WSL relay listeners; isolate CloudMall on 16379.
+      - "16379:6379"
     volumes:
       - cloud_mall_redis_data:/data
     healthcheck:
@@ -50,8 +51,9 @@ services:
       RABBITMQ_DEFAULT_USER: root
       RABBITMQ_DEFAULT_PASS: root
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      # Windows excludes 5633-6132; use free host ports while container ports stay standard.
+      - "15673:5672"
+      - "15674:15672"
     volumes:
       - cloud_mall_rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -102,7 +104,13 @@ services:
       test -n "$$token";
       curl -fsS -X POST -H "accessToken: $$token"
       -d 'username=root&password=root'
-      http://nacos:8848/nacos/v1/auth/users || true
+      http://nacos:8848/nacos/v1/auth/users || true;
+      curl -fsS -X POST -H "accessToken: $$token"
+      -d 'username=root&role=cloudmall_admin'
+      http://nacos:8848/nacos/v1/auth/roles || true;
+      curl -fsS -X POST -H "accessToken: $$token"
+      -d 'role=cloudmall_admin&resource=:*:*&action=rw'
+      http://nacos:8848/nacos/v1/auth/permissions || true
     networks: [cloud-mall]
 
   seata-server:
@@ -155,7 +163,8 @@ services:
       ELASTICSEARCH_HOSTS: http://elasticsearch:9200
       TZ: Asia/Shanghai
     ports:
-      - "5601:5601"
+      # Windows excludes 5533-6132; use a free host port while Kibana keeps 5601 in-container.
+      - "15675:5601"
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -229,6 +238,7 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
+      JAVA_TOOL_OPTIONS: -Dauth.username=root -Dauth.password=root
     ports:
       - "8858:8858"
     healthcheck:
