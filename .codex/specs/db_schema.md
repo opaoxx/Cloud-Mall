@@ -21,34 +21,23 @@
 
 ## 3. 用户域表
 
-### 3.1 `user_account`
+### 3.1 `mall_user`
 
 | 字段 | 类型/约束 | 说明 |
 | --- | --- | --- |
 | `id` | BIGINT PK | 用户 ID |
 | `username` | VARCHAR(64) UNIQUE NOT NULL | 登录名 |
 | `password_hash` | VARCHAR(255) NOT NULL | 密码摘要，不存明文 |
-| `status` | TINYINT NOT NULL | 1 正常，0 禁用 |
-| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的审计时间 |
-
-索引：`uk_username(username)`、`idx_status_created(status, created_at)`。密码不得明文保存，算法由实现采用安全单向散列，不改变业务契约。
-
-### 3.2 `user_profile`
-
-| 字段 | 类型/约束 | 说明 |
-| --- | --- | --- |
-| `id` | BIGINT PK | 资料 ID |
-| `user_id` | BIGINT UNIQUE NOT NULL | 用户 ID |
-| `nickname` | VARCHAR(64) | 昵称 |
+| `role` | VARCHAR(16) NOT NULL DEFAULT 'USER' | 用户角色，当前支持 `USER`、`ADMIN` |
+| `nickname` | VARCHAR(128) | 昵称 |
 | `phone` | VARCHAR(32) | 联系电话，脱敏展示 |
 | `avatar_url` | VARCHAR(512) | 头像地址 |
+| `status` | TINYINT NOT NULL DEFAULT 1 | 1 正常，0 禁用 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的审计时间 |
 
-### 3.3 `user_role`、`user_account_role`
+索引：`username` 唯一索引。密码不得明文保存，算法由实现采用安全单向散列，不改变业务契约。当前规格将账号、基础资料和角色字段合并在 `mall_user`，不另建 `user_account`、`user_profile`、`user_role`、`user_account_role`。
 
-`user_role(id, role_code UNIQUE, role_name, status, created_at, updated_at)` 保存角色；`user_account_role(user_id, role_id, created_at)` 使用联合主键 `(user_id, role_id)`，分别建立 `idx_role_id(role_id)`。
-
-### 3.4 `user_address`
+### 3.2 `user_address`
 
 | 字段 | 类型/约束 | 说明 |
 | --- | --- | --- |
@@ -60,7 +49,7 @@
 | `is_default` | TINYINT NOT NULL | 是否默认 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的审计时间 |
 
-索引：`idx_user_id(user_id)`、`idx_user_default(user_id, is_default)`。
+索引：`idx_user_id(user_id)`。默认地址切换由用户服务按 `user_id` 更新 `is_default`，当前 SQL 未额外建立 `idx_user_default`。
 
 ## 4. 商品域表
 

@@ -1,9 +1,19 @@
 server: {port: 8086}
+cloudmall.internal.callback-token: ${CLOUDMALL_INTERNAL_CALLBACK_TOKEN:cloudmall-local-callback}
 spring:
   application: {name: cloud-mall-pay}
+  datasource: {url: jdbc:mysql://localhost:13307/cloudmall_pay?serverTimezone=Asia/Shanghai, username: root, password: root}
   rabbitmq: {host: localhost, port: 5672, username: root, password: root}
   jackson.time-zone: Asia/Shanghai
+  cloud.openfeign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
 management.endpoints.web.exposure.include: health,info,prometheus
 spring.cloud.nacos.discovery.server-addr: localhost:8848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
+seata:
+  enabled: true
+  client.mode: AT
+  registry.type: file
+  config.type: file
+  tx-service-group: cloudmall_tx_group
+  service.vgroup-mapping.cloudmall_tx_group: default

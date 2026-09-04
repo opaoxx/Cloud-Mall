@@ -1,0 +1,274 @@
+name: cloud-mall
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: cloud-mall-mysql
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      # Windows excludes 3307-3906; IDEA services use the available host port 13307.
+      - "13307:3306"
+    volumes:
+      - cloud_mall_mysql_data:/var/lib/mysql
+      - ./backend/database/schema.sql:/docker-entrypoint-initdb.d/01-cloudmall.sql:ro
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -proot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [cloud-mall]
+
+  redis:
+    image: redis:7.0
+    container_name: cloud-mall-redis
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    command: redis-server --appendonly yes --requirepass root
+    ports:
+      - "6379:6379"
+    volumes:
+      - cloud_mall_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "root", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    container_name: cloud-mall-rabbitmq
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      RABBITMQ_DEFAULT_USER: root
+      RABBITMQ_DEFAULT_PASS: root
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - cloud_mall_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  nacos:
+    image: nacos/nacos-server:v2.2.0
+    container_name: cloud-mall-nacos
+    restart: unless-stopped
+    environment:
+      MODE: standalone
+      PREFER_HOST_MODE: hostname
+      TZ: Asia/Shanghai
+      NACOS_AUTH_ENABLE: "true"
+      NACOS_AUTH_IDENTITY_KEY: cloudmall
+      NACOS_AUTH_IDENTITY_VALUE: root
+      NACOS_AUTH_TOKEN: Y2xvdWRtYWxsLW5hY29zLWxvY2FsLXRva2VuLXNlY3JldA==
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+      - "9849:9849"
+    volumes:
+      - cloud_mall_nacos_data:/home/nacos/data
+      - cloud_mall_nacos_logs:/home/nacos/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8848/nacos/actuator/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+    networks: [cloud-mall]
+
+  nacos-bootstrap:
+    image: curlimages/curl:8.8.0
+    container_name: cloud-mall-nacos-bootstrap
+    restart: "no"
+    depends_on:
+      nacos:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >-
+      token=$$(curl -fsS -X POST -d 'username=nacos&password=nacos'
+      http://nacos:8848/nacos/v1/auth/login | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p');
+      test -n "$$token";
+      curl -fsS -X POST -H "accessToken: $$token"
+      -d 'username=root&password=root'
+      http://nacos:8848/nacos/v1/auth/users || true
+    networks: [cloud-mall]
+
+  seata-server:
+    image: seataio/seata-server:1.5.2
+    container_name: cloud-mall-seata
+    restart: unless-stopped
+    environment:
+      SEATA_IP: seata-server
+      SEATA_PORT: 8091
+      STORE_MODE: file
+      TZ: Asia/Shanghai
+    ports:
+      - "8091:8091"
+    volumes:
+      - cloud_mall_seata_data:/seata-server/sessionStore
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8091"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+    container_name: cloud-mall-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      TZ: Asia/Shanghai
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - cloud_mall_es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+    networks: [cloud-mall]
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.17.0
+    container_name: cloud-mall-kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      TZ: Asia/Shanghai
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5601/api/status >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+    networks: [cloud-mall]
+
+  zipkin:
+    image: openzipkin/zipkin:2.23.19
+    container_name: cloud-mall-zipkin
+    restart: unless-stopped
+    environment:
+      STORAGE_TYPE: mem
+      TZ: Asia/Shanghai
+    ports:
+      - "9411:9411"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9411/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: cloud-mall-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - cloud_mall_prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  grafana:
+    image: grafana/grafana:9.5.5
+    container_name: cloud-mall-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: root
+      GF_SECURITY_ADMIN_PASSWORD: root
+      TZ: Asia/Shanghai
+    ports:
+      - "3000:3000"
+    volumes:
+      - cloud_mall_grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  sentinel-dashboard:
+    image: bladex/sentinel-dashboard:1.8.6
+    container_name: cloud-mall-sentinel-dashboard
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "8858:8858"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8858/"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cloud-mall-nginx
+    restart: unless-stopped
+    ports:
+      - "8088:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      - nacos
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [cloud-mall]
+
+networks:
+  cloud-mall:
+    name: cloud-mall-network
+
+volumes:
+  cloud_mall_mysql_data:
+  cloud_mall_redis_data:
+  cloud_mall_rabbitmq_data:
+  cloud_mall_nacos_data:
+  cloud_mall_nacos_logs:
+  cloud_mall_seata_data:
+  cloud_mall_es_data:
+  cloud_mall_prometheus_data:
+  cloud_mall_grafana_data:

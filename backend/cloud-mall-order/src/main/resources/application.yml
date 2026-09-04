@@ -1,12 +1,73 @@
 server: {port: 8084}
 spring:
   application: {name: cloud-mall-order}
-  datasource: {url: jdbc:mysql://localhost:3306/cloudmall_order?serverTimezone=Asia/Shanghai, username: root, password: root}
+  datasource: {url: jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai, username: root, password: root}
   jackson.time-zone: Asia/Shanghai
-  rabbitmq: {host: localhost, port: 5672, username: root, password: root}
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: root
+    password: root
+    listener:
+      simple:
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 1000ms
+          multiplier: 2
+          max-interval: 10000ms
   cloud.openfeign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
   cloud.alibaba.seata.tx-service-group: cloudmall_tx_group
 management.endpoints.web.exposure.include: health,info,prometheus
 spring.cloud.nacos.discovery.server-addr: localhost:8848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
+seata:
+  enabled: true
+  client:
+    mode: AT
+    tm-commit-retry-count: 3
+    tm-rollback-retry-count: 3
+  registry:
+    type: file
+  config:
+    type: file
+  tx-service-group: cloudmall_tx_group
+  service:
+    vgroup-mapping:
+      cloudmall_tx_group: default
+---
+spring:
+  config:
+    activate:
+      on-profile: sharding
+  shardingsphere:
+    datasource:
+      names: ds0
+      ds0:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: com.mysql.cj.jdbc.Driver
+        jdbc-url: jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai
+        username: root
+        password: root
+    sharding:
+      tables:
+        mall_order:
+          actual-data-nodes: ds0.mall_order_$->{202608..202612}
+          table-strategy:
+            standard:
+              sharding-column: created_at
+              precise-algorithm-class-name: com.cloudmall.order.MonthlyOrderShardingAlgorithm
+        mall_order_item:
+          actual-data-nodes: ds0.mall_order_item_$->{202608..202612}
+          table-strategy:
+            standard:
+              sharding-column: created_at
+              precise-algorithm-class-name: com.cloudmall.order.MonthlyOrderShardingAlgorithm
+        order_status_log:
+          actual-data-nodes: ds0.order_status_log_$->{202608..202612}
+          table-strategy:
+            standard:
+              sharding-column: created_at
+              precise-algorithm-class-name: com.cloudmall.order.MonthlyOrderShardingAlgorithm

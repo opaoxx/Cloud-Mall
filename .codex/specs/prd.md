@@ -5,7 +5,7 @@
 - 项目：CloudMall 云购微商城。
 - 依据：`微服务电商实战项目开发计划书.md` 与项目根目录 `AGENTS.md`。
 - 范围：用户、商品、购物车、订单、库存、模拟支付、秒杀及必要的运营支撑。
-- 当前文档只描述可实现的业务需求与验收口径，不包含业务实现代码、SQL 初始化脚本或具体部署脚本。
+- 当前文档只描述可实现的业务需求与验收口径，不包含业务实现代码、SQL 初始化脚本或具体部署脚本；本地部署编排边界以架构规格中的 Docker Compose 设计为准。
 - 项目定位为个人技术实战项目，优先保证业务闭环、技术场景可复盘，不承诺生产级高可用和生产安全。
 
 ## 2. 目标与角色
@@ -101,12 +101,12 @@
 - Redis 用于登录态、购物车、热点商品、秒杀库存和限流计数；RabbitMQ 用于超时关单、支付通知、库存异步处理和浏览统计。
 - Sentinel 用于秒杀限流、熔断降级、热点参数限流；Seata 用于订单与库存、支付与订单的跨服务一致性场景。
 - Elasticsearch/Kibana 用于商品检索及日志分析；Micrometer Tracing/Zipkin 用于链路追踪；Prometheus/Grafana 用于 JVM、QPS、响应时间和中间件监控。
-- 所有中间件通过 Docker 部署；业务服务前期本地调试，后期再打包 Docker 镜像；Nginx 代理前端静态资源和请求分发。
+- Docker Compose 是本地开发部署编排入口，必须编排 Nacos、MySQL、Redis、RabbitMQ、Seata、Elasticsearch、Kibana、Zipkin、Prometheus、Grafana、Sentinel-Dashboard 和 Nginx；业务服务前期由 IDEA 本地调试，后期再打包 Docker 镜像。Nginx 代理前端静态资源和请求分发。
 - 认证中间件遵循 `root/root` 约定；无认证组件不得虚构账号密码。该约定仅适用于本地练习。
 - API 金额在 JSON 中使用字符串，Java 使用 `BigDecimal`；API 时间使用 ISO-8601 `+08:00`，数据库使用 Asia/Shanghai 语义的 `DATETIME(3)`。
 - 服务间使用 Spring Cloud OpenFeign + Nacos；连接超时 3 秒、读取超时 5 秒，仅对幂等 GET 允许有限重试。Seata 使用 file 模式。
 - 商品索引通过 RabbitMQ 异步同步；Trace ID 由 Micrometer Tracing 透传；Prometheus 通过 Spring Actuator 指标端点采集。
-- 本地 IDEA 调试端口固定为 Gateway 8080、user 8081、product 8082、cart 8083、order 8084、stock 8085、pay 8086，前端 Vite 使用 5173；本项目不编写 docker-compose。
+- 本地 IDEA 调试端口固定为 Gateway 8080、user 8081、product 8082、cart 8083、order 8084、stock 8085、pay 8086，前端 Vite 使用 5173。为保持 IDEA 本地调试约束和最小运行时复杂度，本期不将七个业务服务纳入 Compose 启动集合；现有业务 Dockerfile 依赖已构建的 `target/*.jar`，业务镜像化与 Compose 扩展留待后续评审。Compose 管理的 Nginx 不改变上述端口基线。
 - 本期不引入 Zuul、Eureka、Kubernetes、多级缓存和复杂风控。
 
 ## 6. 验收场景

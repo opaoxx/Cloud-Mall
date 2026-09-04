@@ -2,7 +2,7 @@
 
 ## 1. 架构目标与边界
 
-CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一职责拆分服务。网关作为统一入口，服务通过 Nacos 注册发现和配置管理；业务服务独立部署、独立迭代。本文只定义设计边界，不提供业务实现或 Docker Compose 脚本。
+CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一职责拆分服务。网关作为统一入口，服务通过 Nacos 注册发现和配置管理；业务服务独立部署、独立迭代。本文只定义设计边界，不提供业务实现代码；Docker Compose 作为本地开发部署编排入口，具体脚本属于后续交付物。
 
 ## 2. 固定技术栈
 
@@ -19,7 +19,7 @@ CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一�
 | 检索日志 | Elasticsearch 7.17.0 + Kibana 7.17.0 | 商品检索、日志分析 |
 | 观测 | Micrometer Tracing 1.9.5 + Zipkin 2.23.19；Prometheus 2.47.0 + Grafana 9.5.5 | 链路与指标监控 |
 | 前端/代理 | React + Vite；Nginx | 页面构建、静态资源代理、请求分发 |
-| 环境 | Docker | 所有中间件容器化，业务服务后期镜像化 |
+| 环境 | Docker Compose | 本地开发编排基础设施与 Nginx；业务服务前期保持 IDEA 本地运行，后期再镜像化 |
 
 ## 3. 服务划分与依赖
 
@@ -62,9 +62,9 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 Rabbi
 - 订单表由 Sharding-JDBC 按 `created_at` 路由到月度逻辑表，开发阶段预建当前月份及测试需要的物理表。
 - 日志通过 Kibana 分析，Micrometer Tracing 将 Trace ID 透传至 Zipkin，Prometheus 抓取 Spring Actuator 指标端点并在 Grafana 展示。
 
-## 6. Docker 中间件部署说明
+## 6. Docker Compose 本地开发部署说明
 
-所有中间件使用 Docker Desktop 容器运行，业务服务前期本地启动，后期再统一打包镜像。中间件清单如下：
+Docker Compose 是本地开发部署的统一编排入口，使用 Docker Desktop 管理基础设施容器、网络、数据卷、依赖启动顺序和健康检查。必须编排以下组件：Nacos、MySQL、Redis、RabbitMQ、Seata、Elasticsearch、Kibana、Zipkin、Prometheus、Grafana、Sentinel-Dashboard 和 Nginx。各组件版本与认证约定如下：
 
 | 容器组件 | 版本 | 认证 |
 | --- | --- | --- |
@@ -80,7 +80,9 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 Rabbi
 | Grafana | 9.5.5 | `root/root` |
 | Nginx | 以计划书预置镜像为准 | 默认无认证 |
 
-中间件容器名、网络名、数据卷路径和健康检查方式由本地 Docker 环境决定；本轮不编写 docker-compose。业务服务前期由 IntelliJ IDEA 以标准 Maven 多模块工程本地运行，端口固定为 Gateway 8080、user 8081、product 8082、cart 8083、order 8084、stock 8085、pay 8086；React/Vite 前端端口为 5173。所有容器应处于同一可达的本地开发网络，服务连接使用容器服务名或明确的本地映射。
+Compose 至少应提供统一的本地开发网络、持久化数据卷、健康检查和必要的启动依赖；容器间连接使用 Compose 服务名及容器端口，宿主机映射仅为 IDEA、浏览器或运维控制台访问所需。不得因 Compose 映射改变既定端口：Gateway/user/product/cart/order/stock/pay 仍分别使用 8080/8081/8082/8083/8084/8085/8086，React/Vite 开发服务器仍使用 5173。
+
+本轮不将七个业务服务纳入 Compose 启动集合。现有业务 Dockerfile 均以已构建的 `target/*.jar` 为输入，且当前开发约束要求业务服务前期由 IntelliJ IDEA 以标准 Maven 多模块工程本地运行；强行纳入会引入镜像构建前置条件、与 IDEA 进程的端口冲突及两套运行时配置。业务服务后期完成镜像化后，另行评审 Compose 扩展，不改变服务边界和固定端口。Nginx 虽由 Compose 编排，但只承担本地静态资源代理和请求分发；前端开发阶段仍可由 Vite 在 5173 提供资源。
 
 ## 7. 配置、安全与可观测性约束
 
@@ -93,7 +95,7 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 Rabbi
 
 ## 8. 部署阶段
 
-1. 环境阶段：启动 Docker 中间件，验证认证、网络、数据卷和健康状态。
+1. 环境阶段：通过 Docker Compose 启动基础设施与 Nginx，验证认证、网络、数据卷、健康状态和宿主机访问入口。
 2. 基础阶段：构建 common、Gateway、Nacos 配置和观测链路。
 3. 业务阶段：按 user/product/cart/order/stock/pay 服务边界开发和联调。
 4. 稳定性阶段：落地 Sentinel、RabbitMQ、秒杀和链路/指标监控。
@@ -101,4 +103,4 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 Rabbi
 
 ## 9. 设计冻结说明
 
-本轮已冻结 OpenFeign + Nacos 服务通信、3 秒连接超时、5 秒读取超时、仅幂等 GET 有限重试、RabbitMQ TTL + DLX 延迟关单、Seata file 模式、RabbitMQ 商品索引异步同步、Micrometer Tracing Trace ID 透传、Spring Actuator 指标端点以及 IDEA/Vite 本地端口。Docker 具体容器名、网络/卷名称和生产化安全不属于本地代码实现契约。
+本轮已冻结 OpenFeign + Nacos 服务通信、3 秒连接超时、5 秒读取超时、仅幂等 GET 有限重试、RabbitMQ TTL + DLX 延迟关单、Seata file 模式、RabbitMQ 商品索引异步同步、Micrometer Tracing Trace ID 透传、Spring Actuator 指标端点、Docker Compose 本地编排范围以及 IDEA/Vite 本地端口。Docker Compose 的具体容器名、网络/卷名称、镜像构建细节和生产化安全不属于本地代码实现契约。

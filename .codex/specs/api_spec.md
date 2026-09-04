@@ -103,7 +103,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | POST | `/api/products/{id}/unpublish` | 无 | 下架 |
 | GET | `/api/products/{id}/hot-stat` | 无 | 热度统计/排序信息 |
 
-商品写接口的完整请求 schema、图片上传方式、搜索排序枚举和参数模型待确认。前端展示库存是参考值，结算必须重新校验。
+商品写接口中的商品参数 `ProductParameter` 统一为 `{name: string, value: string}`；SKU 的 `specJson` 统一为 `Record<string, string>` 对应的 JSON 对象，不使用字符串化 JSON。数据库内部列名仍为 `param_name`/`param_value`，仅由后端负责 API 字段映射，无需修改 `db_schema.md`。商品写接口的其他完整请求 schema、图片上传方式和搜索排序枚举待确认。前端展示库存是参考值，结算必须重新校验。
 
 ## 6. 购物车服务接口
 

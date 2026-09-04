@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, auth, newIdempotencyKey } from './api'
-import { formatAddressSnapshot } from './App'
+import { formatAddressSnapshot, productDetailToForm, productFormToRequest } from './App'
 
 describe('CloudMall request conventions', () => {
   beforeEach(() => { localStorage.clear(); vi.restoreAllMocks() })
@@ -47,6 +47,27 @@ describe('CloudMall request conventions', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: 'OK', data: { accepted: true, orderNo: '202608ABC', status: 'PENDING_PAYMENT' } }), { status: 200 }))
     await expect(api.seckillOrder({ activityId: 9, skuId: 7 })).resolves.toMatchObject({ accepted: true, orderNo: '202608ABC' })
     expect(fetchMock.mock.calls[0][0]).toContain('/seckill/orders')
+  })
+
+  it('sends product parameters and SKU specJson using the frozen shapes', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: 'OK', data: { id: 1 } }), { status: 200 }))
+    const body = productFormToRequest({ name: '茶具', price: '39.90', categoryId: 2 }, '[{"name":"材质","value":"陶瓷"}]', '[{"skuCode":"BLACK","specJson":{"颜色":"黑色"},"price":"39.90","status":true}]')
+    await api.createProduct(body)
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      name: '茶具', price: '39.90', categoryId: 2, parameters: [{ name: '材质', value: '陶瓷' }],
+      skus: [{ skuCode: 'BLACK', specJson: { 颜色: '黑色' }, price: '39.90', status: true }],
+    })
+  })
+
+  it('maps product detail response fields back into the editable form', () => {
+    expect(productDetailToForm({ id: 1, name: '茶具', price: '39.90', categoryId: 2, status: 1, skus: [{ id: 8, skuCode: 'BLACK', specJson: { 颜色: '黑色' }, price: '39.90', status: true }], parameters: [{ name: '材质', value: '陶瓷' }] })).toEqual({
+      name: '茶具', price: '39.90', categoryId: 2, mainImage: '', description: '',
+      parameters: [{ name: '材质', value: '陶瓷' }], skus: [{ id: 8, skuCode: 'BLACK', specJson: { 颜色: '黑色' }, price: '39.90', status: true }],
+    })
+  })
+
+  it('rejects stringified SKU specJson before sending it', () => {
+    expect(() => productFormToRequest({ name: '茶具', price: '39.90', categoryId: 2 }, '[]', '[{"skuCode":"BLACK","specJson":"{\\"颜色\\":\\"黑色\\"}","price":"39.90","status":true}]')).toThrow('SKU specJson必须是 JSON 对象')
   })
 
   it('renders object and JSON-string address snapshots', () => {
