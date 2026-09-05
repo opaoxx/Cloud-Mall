@@ -23,7 +23,7 @@ public class CartController {
     private final ProductClient products;
     public CartController(StringRedisTemplate redis, ObjectMapper mapper, ProductClient products) { this.redis = redis; this.mapper = mapper; this.products = products; }
 
-    @GetMapping public ApiResponse<?> all() { return ApiResponse.ok(readItems()); }
+    @GetMapping public ApiResponse<?> all() { return ApiResponse.ok(refreshItems()); }
 
     @PostMapping("/items")
     public ApiResponse<?> add(@RequestBody Item request) {
@@ -68,6 +68,21 @@ public class CartController {
         return result;
     }
     private List<Item> readItems() { return new ArrayList<>(readMap().values()); }
+    private List<Item> refreshItems() {
+        List<Item> items = readItems();
+        for (Item item : items) {
+            try {
+                ProductClient.SkuView current = currentSku(item.skuId);
+                item.productId = current.productId();
+                item.productName = current.productName();
+                item.unitPrice = current.unitPrice();
+                write(item);
+            } catch (BizException ignored) {
+                // Keep an invalid cart item visible so the settlement flow can report it.
+            }
+        }
+        return items;
+    }
     private void write(Item item) { try { redis.opsForHash().put(key(), String.valueOf(item.skuId), mapper.writeValueAsString(item)); redis.expire(key(), TTL); } catch (Exception e) { throw new BizException(ErrorCodes.INTERNAL, "购物车保存失败", 500); } }
     private ProductClient.SkuView currentSku(Long skuId) { ApiResponse<ProductClient.SkuView> response = products.getSku(skuId); if (response == null || response.data == null) throw new BizException(ErrorCodes.NOT_FOUND, "商品或SKU不存在", 404); return response.data; }
     public static class Item { public Long skuId; public Long productId; public String productName = "CloudMall 商品"; public String unitPrice = "0.00"; public int quantity = 1; public Boolean checked = true; public String addedAt; }
