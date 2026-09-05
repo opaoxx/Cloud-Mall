@@ -1,0 +1,15 @@
+import { useEffect, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { api, OrderDetail } from '../api'
+
+const money = (value?: string | null) => `¥${Number(value || 0).toFixed(2)}`
+const labels: Record<string, string> = { PENDING_PAYMENT: '等待付款', PAID: '已付款', COMPLETED: '交易完成', CANCELLED: '订单已取消' }
+export default function ModernOrderDetailPage() {
+  const { no = '' } = useParams(); const navigate = useNavigate(); const [order, setOrder] = useState<OrderDetail | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  const load = () => { setBusy(true); api.order(no).then(setOrder).catch(() => setError('订单详情暂时无法加载')).finally(() => setBusy(false)) }
+  useEffect(load, [no])
+  const action = (fn: () => Promise<unknown>) => { setBusy(true); fn().then(load).catch(() => setError('操作失败，请稍后重试')).finally(() => setBusy(false)) }
+  if (!order && !error) return <section className="commerce-page"><div className="modern-loading">订单加载中…</div></section>
+  if (error || !order) return <section className="commerce-page"><div className="modern-alert">{error || '订单不存在'}</div></section>
+  return <section className="commerce-page"><div className="commerce-heading"><div><span className="modern-kicker">ORDER DETAIL</span><h1>{labels[order.status] || order.status}</h1><p>订单号：{order.orderNo}</p></div><Link className="commerce-back" to="/orders">返回订单列表</Link></div><div className="order-detail-layout"><div className="commerce-card"><div className="order-progress"><span className="done">下单</span><span className={order.status !== 'CANCELLED' ? 'done' : ''}>库存校验</span><span className={order.status === 'PAID' || order.status === 'COMPLETED' ? 'done' : ''}>支付</span><span className={order.status === 'COMPLETED' ? 'done' : ''}>完成</span></div><h2>商品明细</h2>{order.items?.map((item, index) => <div className="order-detail-item" key={index}><div><strong>{item.productNameSnapshot}</strong><small>数量：{item.quantity} · 单价：{money(item.unitPrice)}</small></div><b>{money(item.lineAmount)}</b></div>)}<div className="order-address"><strong>收货信息</strong><span>{typeof order.addressSnapshot === 'string' ? order.addressSnapshot : `${order.addressSnapshot?.receiver || ''} · ${order.addressSnapshot?.phone || ''} · ${order.addressSnapshot?.detailAddress || ''}`}</span></div></div><aside className="commerce-summary"><span>应付金额</span><strong>{money(order.payAmount)}</strong><small>订单创建时间：{new Date(order.createdAt).toLocaleString('zh-CN')}</small>{order.status === 'PENDING_PAYMENT' && <><Link className="modern-primary" to={`/pay/${order.orderNo}`}>去余额支付</Link><button className="commerce-secondary" disabled={busy} onClick={() => action(() => api.cancelOrder(order.orderNo, '用户取消'))}>取消订单</button></>}{order.status === 'PAID' && <button className="modern-primary" disabled={busy} onClick={() => action(() => api.confirmOrder(order.orderNo))}>确认收货</button>}<button className="commerce-secondary" onClick={() => navigate('/products')}>继续购物</button></aside></div></section>
+}

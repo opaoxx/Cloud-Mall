@@ -1,0 +1,16 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "CloudMall" [ref=e4] [cursor=pointer]:
+      - /url: /
+    - navigation [ref=e5]:
+      - link "商品" [ref=e6] [cursor=pointer]:
+        - /url: /products
+      - link "购物车" [ref=e7] [cursor=pointer]:
+        - /url: /cart
+      - link "我的订单" [ref=e8] [cursor=pointer]:
+        - /url: /orders
+    - link "登录" [ref=e10] [cursor=pointer]:
+      - /url: /login
+  - main [ref=e11]:
+    - paragraph [ref=e13]: 正在加载商品详情…
+  - contentinfo [ref=e14]: CloudMall 云购微商城 · 学习型微服务电商项目

@@ -20,8 +20,15 @@ async function request<T>(path: string, init: RequestInit = {}, idempotencyKey?:
     const charset = contentType.match(/charset\s*=\s*['"]?([^;\s'"]+)/i)?.[1] || 'utf-8'
     const bytes = await response.arrayBuffer()
     const text = new TextDecoder(charset).decode(bytes)
-    body = JSON.parse(text) as ApiEnvelope<T>
-  } catch { throw new ApiError('COMMON_INTERNAL_ERROR', '服务返回了无法解析的响应', response.status) }
+    if (!text.trim()) {
+      if (response.status === 401) { auth.clear(); window.dispatchEvent(new Event('auth-expired')); throw new ApiError('COMMON_UNAUTHORIZED', '请先登录', 401) }
+      throw new ApiError('COMMON_INTERNAL_ERROR', '服务返回了空响应', response.status)
+    }
+    try { body = JSON.parse(text) as ApiEnvelope<T> } catch { throw new ApiError('COMMON_INTERNAL_ERROR', '服务返回了无法解析的响应', response.status) }
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    throw new ApiError('COMMON_INTERNAL_ERROR', '服务返回了无法解析的响应', response.status)
+  }
   if (response.status === 401 || body.code === 'COMMON_UNAUTHORIZED' || body.code === 'USER_LOGIN_FAILED') { auth.clear(); window.dispatchEvent(new Event('auth-expired')) }
   if (!response.ok || body.code !== '0') throw new ApiError(body.code, body.message || '请求失败', response.status, body.requestId)
   return body.data

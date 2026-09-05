@@ -1,2 +1,2 @@
-import React from 'react'; import { createRoot } from 'react-dom/client'; import { BrowserRouter } from 'react-router-dom'; import App from './App'; import './styles.css'
+import React from 'react'; import { createRoot } from 'react-dom/client'; import { BrowserRouter } from 'react-router-dom'; import App from './App'; import './styles.css'; import './modern.css'; import './commerce.css'; import './catalog.css'; import './order-detail.css'; import './admin.css'
 createRoot(document.getElementById('root')!).render(<React.StrictMode><BrowserRouter><App /></BrowserRouter></React.StrictMode>)

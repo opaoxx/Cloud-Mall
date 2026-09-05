@@ -43,6 +43,13 @@ describe('CloudMall request conventions', () => {
     await expect(api.products()).rejects.toMatchObject({ code: 'GATEWAY_SERVICE_UNAVAILABLE' })
   })
 
+  it('turns an empty unauthorized response into a login error', async () => {
+    auth.set('expired')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 401 }))
+    await expect(api.addCart({ skuId: 7, quantity: 1 })).rejects.toMatchObject({ code: 'COMMON_UNAUTHORIZED', status: 401 })
+    expect(auth.get()).toBeNull()
+  })
+
   it('decodes Chinese category data from a UTF-8 JSON response', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: '成功', data: [{ id: 1, parentId: 0, name: '家居百货', sortNo: 1, status: 1 }] }), { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }))
     await expect(api.categories({ status: 1 })).resolves.toEqual([{ id: 1, parentId: 0, name: '家居百货', sortNo: 1, status: 1 }])
