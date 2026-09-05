@@ -1,5 +1,6 @@
 # Java/Maven build output
 backend/**/target/
+target/
 *.class
 
 # Node/Vite dependencies and build output

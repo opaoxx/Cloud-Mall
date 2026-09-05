@@ -9,7 +9,16 @@
     <spring-cloud-alibaba.version>2021.0.5.0</spring-cloud-alibaba.version>
     <sharding.version>4.1.1</sharding.version><mysql.version>8.0.33</mysql.version>
   </properties>
-  <modules><module>cloud-mall-common</module><module>cloud-mall-gateway</module><module>cloud-mall-user</module><module>cloud-mall-product</module><module>cloud-mall-cart</module><module>cloud-mall-order</module><module>cloud-mall-stock</module><module>cloud-mall-pay</module></modules>
+  <modules>
+    <module>backend/cloud-mall-common</module>
+    <module>backend/cloud-mall-gateway</module>
+    <module>backend/cloud-mall-user</module>
+    <module>backend/cloud-mall-product</module>
+    <module>backend/cloud-mall-cart</module>
+    <module>backend/cloud-mall-order</module>
+    <module>backend/cloud-mall-stock</module>
+    <module>backend/cloud-mall-pay</module>
+  </modules>
   <dependencyManagement>
     <dependencies>
       <dependency><groupId>org.springframework.cloud</groupId><artifactId>spring-cloud-dependencies</artifactId><version>${spring-cloud.version}</version><type>pom</type><scope>import</scope></dependency>
