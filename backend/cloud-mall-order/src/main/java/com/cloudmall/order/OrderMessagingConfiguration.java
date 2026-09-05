@@ -6,6 +6,7 @@ import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 
 import java.util.Map;
 
@@ -20,6 +21,7 @@ public class OrderMessagingConfiguration {
     public static final String SECKILL_QUEUE = "cloudmall.seckill.order.queue";
     public static final String SECKILL_DLX = "cloudmall.seckill.order.dlx.exchange";
     public static final String SECKILL_DLQ = "cloudmall.seckill.order.dlx";
+    @Bean Jackson2JsonMessageConverter rabbitJsonMessageConverter() { return new Jackson2JsonMessageConverter(); }
 
     @Bean DirectExchange timeoutExchange() { return new DirectExchange(TIMEOUT_EXCHANGE); }
     @Bean DirectExchange timeoutDlx() { return new DirectExchange(DLX); }

@@ -20,6 +20,7 @@ public class ProductMessagingConfiguration {
     public static final String PRODUCT_INDEX_CONTAINER_FACTORY = "productIndexContainerFactory";
     private static final String PRODUCT_INDEX_DLX = "cloudmall.product.index.dlx";
     private static final String PRODUCT_INDEX_DLQ = "cloudmall.product.index.dlq";
+    @Bean Jackson2JsonMessageConverter rabbitJsonMessageConverter() { return new Jackson2JsonMessageConverter(); }
     @Bean DirectExchange productExchange() { return new DirectExchange(PRODUCT_EXCHANGE, true, false); }
     @Bean DirectExchange productIndexDeadLetterExchange() { return new DirectExchange(PRODUCT_INDEX_DLX, true, false); }
     @Bean Queue productIndexQueue() { return new Queue(PRODUCT_INDEX_QUEUE, true, false, false, Map.of("x-dead-letter-exchange", PRODUCT_INDEX_DLX, "x-dead-letter-routing-key", PRODUCT_INDEX_DLQ)); }

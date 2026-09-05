@@ -98,6 +98,26 @@
 
 > 详见“修复记录”和后续 QA 回归结果。
 
+## 2026-09-05：Stock/Pay 启动端口冲突
+
+### 发现的问题
+
+22. `StockApplication` 启动时报 Web server port `8085` already in use。
+23. `PayApplication` 启动时报 Web server port `8086` already in use。
+
+### 初步诊断
+
+- 配置中的 Stock/Pay 端口仍分别为 8085/8086，未发现端口被错误改成相同值。
+- 当前复核时 8085/8086 均无 LISTEN 进程，也没有发现对应的 CloudMall Java 残留进程；倾向于 IDEA 重复启动同一服务或启动时已有旧实例占用。
+- 本批不改端口配置，先通过 PID/命令行确认占用者，避免掩盖重复启动问题。
+
+### 复现与确认结果
+
+- 直接运行 Stock JAR 在固定端口 8085 稳定复现 `PortInUseException`；将运行参数临时改为 `--server.address=127.0.0.1` 仍失败，排除 Spring Boot 默认全地址绑定导致的假象。
+- Stock 临时使用 `--server.port=18085` 后完整启动并注册 Nacos；Pay 临时使用 `--server.port=18086` 后也完整启动并注册 Seata，证明两个服务自身正常。
+- 端口占用证据：8085 对应 `svchost.exe` 的 `WpnService`，连接 `198.18.0.1:8085 -> 198.18.0.4:443`；8086 对应 `com.vortex.helper.exe`，连接 `192.168.1.4:8086 -> 4.145.79.82:443`。二者均不是 CloudMall Java 进程。
+- 处理结论：停止/退出占用这些端口的外部网络程序后，再从 IDEA 启动 Stock/Pay；不修改项目端口，不停止未知系统进程，不调整网关路由。
+
 ## 2026-09-05：当前补充批次——Seata 在 IDEA/JDK 21 下启动失败
 
 ### 发现的问题
@@ -123,3 +143,36 @@
 - qa 检查活动源码/配置/部署文件未发现 `wire_api`、`javaagent`、`--add-exports`、`illegal-access` 等过时启动参数。
 - qa 因宿主 PowerShell PATH 没有 `mvn` 将本机 Maven 项目标为环境阻塞；主 Agent 已使用 `maven:3.9.9-eclipse-temurin-17` Docker Maven 补跑全量 `backend` 测试，9 个模块 `BUILD SUCCESS`，common 20 项、product 16 项测试全部通过，其余模块无测试失败。
 - 本批闭环结论：无新增代码级 bug；问题由 IDEA 使用 JDK 21 且未设置 VM options 引起，归属开发环境配置。
+
+## 2026-09-05：SKU DTO、订单月表与 RabbitMQ JSON 消息批次
+
+### 发现的问题
+
+24. 商品 SKU 接口返回对象型 `skuSnapshot`，cart/order Feign DTO 声明为 `String`，导致购物车新增、普通下单和秒杀异步消费出现 `DecodeException`/500。
+25. 订单服务按当前月份动态访问物理表，但 schema 只预建到 202608；进入 202609 后订单表不存在。
+26. RabbitTemplate 默认发送 Java serialized object，消费者使用 JSON converter，商品索引和秒杀订单消息出现消息转换失败并进入 DLX。
+27. 修复过程中发现 order 秒杀消费者切换为 Map 参数后，catch 块变量名与消息变量冲突，导致编译失败。
+28. 运行时测试夹具 SKU 900001 未初始化 Redis `stock:available:900001`，普通下单被错误判定为库存不足；该项属于现有库存初始化缺口，未并入本批修复。
+
+### 修复方案与验证结果
+
+- cart/order 的 SKU DTO 统一为 `Map<String,String>`；订单写入 JSON 快照，订单查询将 JSON 反序列化回结构化对象。
+- 新增 `OrderTableInitializer`，启动时确保 order/item/status 模板及当前月前一月到未来两个月的物理表存在；schema 增加 item/status 模板表。
+- product/stock/order 统一注册 `Jackson2JsonMessageConverter`；stock 秒杀生产者发送 Map envelope，order 消费者直接接收 `Map<String,Object>`。
+- Docker Maven 全量 `test`：9 个模块 BUILD SUCCESS，common 20 项、product 16 项通过，其余模块无失败。
+- 运行时回归：购物车新增成功；普通订单成功落到 `mall_order_202609`；支付成功后订单为 `PAID`，库存从 100→99 且预扣转已售。
+- 分表初始化日志确认覆盖 2026-08 至 2026-11。秒杀入口在消费者参数修复前已验证 Redis 预扣正确；消费者参数修复后的秒杀消息回归待重新启动最新 order jar 后复测。
+
+### 后续构建问题
+
+29. order 进程仍运行旧 jar 时，Docker Maven 在 `spring-boot:repackage` 阶段无法把构建产物重命名为 `.original`，导致 order 定向打包失败。
+
+30. RabbitMQ JSON converter 已能将秒杀消息转换为 Map，但秒杀消费者分支仍直接把 Map 传入 MySQL JSON 列，触发 `Cannot create a JSON value from a string with CHARACTER SET 'binary'`，消息再次进入 DLX。
+
+### 修复完成补充
+
+- order 秒杀消费者改为直接接收 `Map<String,Object>`，并统一将结构化 SKU 快照序列化为 JSON 字符串后写入 JSON 列。
+- 停止占用 jar 的本轮 order 进程后重新打包，Docker Maven order/common `package` 成功；之前的变量名冲突和 jar 文件锁问题均已解除。
+- 最新运行时验证：购物车新增成功；普通订单落库并完成支付；秒杀入口 accepted 后订单成功落库为 `PENDING_PAYMENT`，主队列为 0，未新增 DLX，order 日志无 DecodeException/DataIntegrityViolation。
+- 第 28 项 RabbitMQ 消息转换问题已闭环；第 25 项分表问题由启动初始化器自动覆盖 2026-08 至 2026-11。
+- 第 28 项之外的库存 Redis key 初始化缺口仍未纳入本批业务修复，测试时通过夹具显式初始化 `stock:available:900001`。

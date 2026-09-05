@@ -26,4 +26,6 @@ CREATE TABLE IF NOT EXISTS mall_order_template (id BIGINT PRIMARY KEY, order_no 
 CREATE TABLE IF NOT EXISTS mall_order_202608 LIKE mall_order_template;
 CREATE TABLE IF NOT EXISTS mall_order_item_202608 (id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL, order_no VARCHAR(64) NOT NULL, product_id BIGINT NOT NULL, sku_id BIGINT NOT NULL, product_name_snapshot VARCHAR(255) NOT NULL, sku_snapshot JSON, unit_price DECIMAL(18,2) NOT NULL, quantity INT NOT NULL, line_amount DECIMAL(18,2) NOT NULL, created_at DATETIME(3) NOT NULL, KEY idx_order_no(order_no));
 CREATE TABLE IF NOT EXISTS order_status_log_202608 (id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL, order_no VARCHAR(64) NOT NULL, from_status VARCHAR(32), to_status VARCHAR(32) NOT NULL, event_type VARCHAR(64) NOT NULL, operator_id BIGINT, remark VARCHAR(512), created_at DATETIME(3) NOT NULL, KEY idx_order_created(order_id,created_at));
+CREATE TABLE IF NOT EXISTS mall_order_item_template LIKE mall_order_item_202608;
+CREATE TABLE IF NOT EXISTS order_status_log_template LIKE order_status_log_202608;
 CREATE TABLE IF NOT EXISTS order_idempotency (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, idempotency_key VARCHAR(128) NOT NULL, order_no VARCHAR(64) NOT NULL, created_at DATETIME(3) NOT NULL, UNIQUE KEY uk_order_idempotency(user_id,idempotency_key));
