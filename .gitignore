@@ -21,10 +21,12 @@ frontend/*.tsbuildinfo
 **/.env.*
 !**/.env.example
 *.log
+*.cp
 
 # Generated local performance-test output; keep reusable JMX plans and reports tracked
 .codex/runtime/jmeter-*/
 .codex/runtime/*-logs/
+.codex/runtime/*-regression/
 .codex/runtime/*.jtl
 
 # OS files
