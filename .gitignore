@@ -16,6 +16,17 @@ frontend/*.tsbuildinfo
 *.iws
 *.ipr
 
+# Internal notes, specifications and local progress logs
+*.md
+!/README.md
+.codex/runtime/
+.playwright-cli/
+
+# Build and test reports
+**/surefire-reports/
+**/reports/
+*.jtl
+
 # Local environment overrides and logs
 **/.env
 **/.env.*
