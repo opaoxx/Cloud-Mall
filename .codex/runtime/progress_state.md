@@ -143,6 +143,20 @@
 - IDEA Maven 导入指向 `$PROJECT_DIR$/pom.xml`，外层模块内容根保持 `F:\Cloud-Mall`。
 - 根目录聚合执行 Docker Maven `mvn -B -ntp test` 成功，9 个 reactor 项目全部 BUILD SUCCESS。
 - 待用户在 IDEA Reload Maven Projects；不需要再删除 `.idea`，也不要单独打开 `backend/pom.xml`。
+
+## 2026-09-05 Stock/Pay 端口冲突批次
+
+- 已记录新问题：StockApplication 启动时 8085 被占用，PayApplication 启动时 8086 被占用。
+- 已检查 `application.yml`：Stock=8085、Pay=8086，端口配置无冲突。
+- 当前复核时 8085/8086 均无监听进程，也无对应 CloudMall Java 残留进程，暂未执行任何停进程或改端口操作。
+- 当前判断：优先排查 IDEA 重复启动/旧实例占用；若问题再次出现，应立即记录 `OwningProcess` 和 Java 命令行后再处理。
+
+### 端口冲突复现完成
+
+- 已直接运行当前 Stock/Pay 构建产物复现 8085/8086 端口错误；使用临时端口 18085/18086 均可完整启动并注册，确认代码正常。
+- 已确认当前占用者为外部网络进程：8085=`svchost.exe/WpnService`，8086=`com.vortex.helper.exe`；均非 CloudMall Java 服务。
+- 已排除 `server.address` 和 Windows excluded port range 原因；当前待用户退出/暂停占用端口的网络程序后重启 Stock/Pay。
+- 不修改固定端口配置；项目端口规范仍为 Stock 8085、Pay 8086。
 - Docker 诊断（启动前）：Docker Desktop 4.88.1、context `desktop-linux`、Server 29.7.2 正常；当时 Compose 项目仅 `hmall` 与 `jike-hotrank-engine`，CloudMall 尚无 Compose 文件/容器。用户随后明确要求改用 Docker Compose，未触碰其他项目容器。
 - Docker Compose：根 `docker-compose.yml` 已通过 `docker compose config --quiet`；恢复时发现 `docker compose start` 因 Windows TCP 排除端口范围 `3307-3906` 无法绑定 MySQL `3307:3306`，主 Agent 已改为 `13307:3306`，并用 `docker compose up -d` 成功恢复 MySQL/Nginx/Kibana/Grafana。
 - Compose 实测（恢复后）：12 个常驻 CloudMall 容器均运行，MySQL/Nginx/Kibana/Redis/RabbitMQ/Nacos/ES/Zipkin 健康；Nacos bootstrap 为一次性 Exited(0)，不属于故障。

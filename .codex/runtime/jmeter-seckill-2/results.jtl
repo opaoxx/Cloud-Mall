@@ -1,0 +1,21 @@
+timeStamp,elapsed,label,responseCode,responseMessage,threadName,dataType,success,failureMessage,bytes,sentBytes,grpThreads,allThreads,URL,Latency,IdleTime,Connect
+1788596948307,45,POST /api/seckill/orders,200,OK,seckill-20-thread-burst 1-1,text,true,,308,360,3,3,http://localhost:8080/api/seckill/orders,43,0,14
+1788596948307,45,POST /api/seckill/orders,200,OK,seckill-20-thread-burst 1-2,text,true,,308,360,3,3,http://localhost:8080/api/seckill/orders,43,0,14
+1788596948325,27,POST /api/seckill/orders,200,OK,seckill-20-thread-burst 1-3,text,true,,308,360,3,3,http://localhost:8080/api/seckill/orders,25,0,1
+1788596948374,32,POST /api/seckill/orders,200,OK,seckill-20-thread-burst 1-4,text,true,,308,360,1,1,http://localhost:8080/api/seckill/orders,32,0,1
+1788596948424,28,POST /api/seckill/orders,200,OK,seckill-20-thread-burst 1-5,text,true,,308,360,1,1,http://localhost:8080/api/seckill/orders,28,0,1
+1788596948473,26,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-6,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,26,0,1
+1788596948523,35,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-7,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,35,0,1
+1788596948574,27,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-8,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,26,0,0
+1788596948624,22,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-9,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,22,0,1
+1788596948673,20,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-10,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,20,0,1
+1788596948723,30,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-11,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,30,0,1
+1788596948773,27,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-12,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,27,0,1
+1788596948823,21,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-13,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,21,0,1
+1788596948873,19,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-14,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,19,0,1
+1788596948923,35,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-15,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,35,0,1
+1788596948972,26,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-16,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,26,0,1
+1788596949023,22,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-17,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,22,0,1
+1788596949074,32,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-18,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,32,0,0
+1788596949123,30,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-19,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,30,0,1
+1788596949173,29,POST /api/seckill/orders,500,Internal Server Error,seckill-20-thread-burst 1-20,text,false,,272,360,1,1,http://localhost:8080/api/seckill/orders,29,0,0
