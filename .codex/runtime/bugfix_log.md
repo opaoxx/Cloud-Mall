@@ -211,6 +211,48 @@
 - 本批只在 stock 启动期校准，不在运行中定时覆盖 Redis，避免与正常扣库存并发竞态。
 - 秒杀库存使用独立 Redis key，未纳入普通库存校准；异常期间的 reservation 恢复和秒杀最终对账需另行设计。
 
+## 2026-09-05：Reservation 恢复、秒杀库存对账与运行中一致性检测
+
+### 发现的问题
+
+34. Redis 重启后普通 reservation 的 marker/lines 可能丢失，虽然 MySQL `stock_flow` 仍保留预扣事实，但订单无法继续确认或回滚。
+35. 秒杀库存只存在 Redis，缺少持久化 accepted ledger；Redis 丢失或秒杀入口与异步订单处理之间出现异常时，无法可靠对账和重建剩余库存。
+36. stock 运行期间没有 Redis/MySQL 普通库存差异检测，只能等下单失败或人工查询后发现缓存漂移。
+
+### 本批修复方案（待验证）
+
+- 启动恢复普通 reservation：按 `stock_flow` 净流水重建 reservation marker 和 lines。
+- 增加秒杀 reservation ledger、stockLimit meta 和安全对账/重建逻辑；对无法判定的异常只告警，不盲目补库存。
+- 增加低频、分布式锁保护的运行中只读一致性检查，默认 30 秒一次，可通过配置关闭或调整。
+
+### 后续回归问题
+
+37. order 秒杀消费者改为 Map 参数后，为避免与消息体变量重名而使用 `catch(Exception ex)`，触发既有 `BackendP1RulesTest` 对失败转 DLX 语义的静态断言失败；属于命名兼容问题，不改变运行行为。
+
+### 修复完成与验证结果
+
+- 新增 `StockConsistencyReconciler`：启动时恢复普通 reservation，重建秒杀 accepted ledger，并处理缺失秒杀库存 key。
+- 新增 `seckill_reservation` 持久化表；秒杀入口按 PENDING → Redis 预扣/MQ 入队 → ACCEPTED 记录状态，失败路径标记 REJECTED。
+- accepted key 增加 skuId，解决活动多 SKU 时无法精确对账的问题；活动发布时写入 `stockLimit` meta。
+- 增加 `@EnableScheduling` 和默认 30 秒只读差异检测；普通库存差异只告警，秒杀 key 缺失可按 durable ledger 安全重建，已有值不强制覆盖。
+- 真实验证：普通 reservation 删除 Redis marker/lines 后重启可恢复并 rollback；秒杀 accepted=1、stockLimit=2 时删除库存 key，重启恢复 remaining=1；运行中将 Redis 99 改为 1 后产生差异告警且不覆盖现值。
+- Docker Maven 全量 `test` 通过：9 个模块 BUILD SUCCESS，common 20 项、product 16 项通过，其余模块无失败。
+- 第 37 项静态测试命名兼容问题已修复；本批闭环完成。
+
+### 后续回归问题
+
+38. 秒杀幂等请求重复到达时，PENDING ledger upsert 会覆盖已有 ACCEPTED 记录的 orderNo；接口返回仍取 Redis 旧 orderNo，但 durable ledger 映射会被破坏。
+
+### 修复完成与验证结果
+
+- `StockConsistencyReconciler` 已支持普通 reservation 按 `stock_flow` 净流水恢复 marker/lines，并在启动及调度周期执行普通库存只读差异检测。
+- 新增 `seckill_reservation` ledger；秒杀入口记录 PENDING/ACCEPTED/REJECTED，accepted key 增加 skuId，活动 meta 增加 stockLimit。
+- 秒杀库存缺失时按 `stockLimit - ACCEPTED ledger count` 重建；已有 key 与 ledger 不一致只告警并保留现值，避免活跃请求期间误覆盖。
+- 修复幂等 ledger upsert，已 ACCEPTED 记录保留原 orderNo。
+- 真实验证：普通 reservation 删除 Redis marker/lines 后重启可恢复并 rollback；秒杀库存 2、accepted ledger 1 时删除库存 key，重启恢复 remaining=1；运行中 Redis=1、MySQL=99 时 2 秒内产生差异告警且不覆盖。
+- Docker Maven 全量 `test` 通过：9 个模块 BUILD SUCCESS，common 20 项、product 16 项通过，其余模块无失败。
+- 本批闭环完成；已恢复测试 SKU Redis 值并清理本轮专用秒杀测试 key/ledger，保留 reservation 审计流水。
+
 ## 2026-09-05：Redis 与数据库库存异常后的主动校准/重建
 
 ### 发现的问题
