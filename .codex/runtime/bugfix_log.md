@@ -176,3 +176,23 @@
 - 最新运行时验证：购物车新增成功；普通订单落库并完成支付；秒杀入口 accepted 后订单成功落库为 `PENDING_PAYMENT`，主队列为 0，未新增 DLX，order 日志无 DecodeException/DataIntegrityViolation。
 - 第 28 项 RabbitMQ 消息转换问题已闭环；第 25 项分表问题由启动初始化器自动覆盖 2026-08 至 2026-11。
 - 第 28 项之外的库存 Redis key 初始化缺口仍未纳入本批业务修复，测试时通过夹具显式初始化 `stock:available:900001`。
+
+## 2026-09-05：扩大修复范围——库存缓存初始化与测试产物管理
+
+### 发现的问题
+
+31. stock 服务启动初始化逻辑只写死 `stock:available:1=100`，数据库中其他 SKU 没有 Redis 可售库存 key，导致普通下单被错误判定为库存不足。
+32. JMeter 结果目录和本地服务日志未被 `.gitignore` 覆盖，容易把大体积、不可复用的运行产物误提交；JMX 计划和性能报告仍应纳入版本追踪。
+
+### 本批修复方案（待验证）
+
+- stock 启动时从 `stock_sku` 读取所有 SKU 的 `available_quantity`，对缺失 Redis key 执行初始化，不覆盖 Redis 中已有的运行态库存。
+- `.gitignore` 忽略 `.codex/runtime/jmeter-*`、`.codex/runtime/*-logs/` 和 `.codex/runtime/*.jtl`，保留 `.jmx` 计划、Markdown 报告和 Bug 日志。
+
+### 修复完成与验证结果
+
+- stock 启动初始化改为查询 `stock_sku` 全量 SKU，对缺失的 `stock:available:{skuId}` 执行 `setIfAbsent`，不覆盖已有 Redis 运行态库存。
+- Docker Maven stock/common `package` 成功；stock 模块无测试失败。
+- 删除 Redis `stock:available:900001` 后重启新 stock jar，Redis 自动恢复为数据库可售库存 `99`；`GET /api/stock/skus/900001` 返回 `availableQuantity=99`。
+- Git 忽略规则验证通过：JMeter 结果目录和本地日志不再出现在待提交列表；JMX 计划和 Markdown 报告仍可追踪。
+- 本批闭环结论：库存缓存初始化问题已修复；库存服务仍未实现 Redis 与数据库在异常崩溃后的主动重建/校准，该项保留为后续独立问题。
