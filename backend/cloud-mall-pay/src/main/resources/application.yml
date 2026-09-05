@@ -2,7 +2,7 @@ server: {port: 8086}
 cloudmall.internal.callback-token: ${CLOUDMALL_INTERNAL_CALLBACK_TOKEN:cloudmall-local-callback}
 spring:
   application: {name: cloud-mall-pay}
-  datasource: {url: "jdbc:mysql://localhost:13307/cloudmall_pay?serverTimezone=Asia/Shanghai", username: root, password: root}
+  datasource: {url: "jdbc:mysql://localhost:13307/cloudmall_pay?serverTimezone=Asia/Shanghai&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci", username: root, password: root}
   rabbitmq: {host: localhost, port: 15673, username: root, password: root}
   jackson.time-zone: Asia/Shanghai
   cloud.openfeign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}

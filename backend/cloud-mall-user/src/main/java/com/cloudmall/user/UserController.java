@@ -14,6 +14,7 @@ import javax.validation.Valid;
 import javax.validation.constraints.NotBlank;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.math.BigDecimal;
 import java.util.*;
 
 @RestController
@@ -30,8 +31,8 @@ public class UserController {
         Integer count = jdbc.queryForObject("select count(*) from mall_user where username = ?", Integer.class, "admin");
         if (count != null && count == 0) {
             OffsetDateTime now = OffsetDateTime.now();
-            jdbc.update("insert into mall_user(id,username,password_hash,role,status,created_at,updated_at) values(?,?,?,?,?,?,?)",
-                    System.currentTimeMillis(), "admin", ENCODER.encode("admin"), "ADMIN", 1, now, now);
+            jdbc.update("insert into mall_user(id,username,password_hash,role,balance,status,created_at,updated_at) values(?,?,?,?,?,?,?,?)",
+                    System.currentTimeMillis(), "admin", ENCODER.encode("admin"), "ADMIN", new BigDecimal("10000.00"), 1, now, now);
         }
     }
 
@@ -40,15 +41,15 @@ public class UserController {
         Integer count = jdbc.queryForObject("select count(*) from mall_user where username = ?", Integer.class, c.username);
         if (count != null && count > 0) throw new BizException("USER_DUPLICATE_USERNAME", "用户名已存在", 409);
         long id = System.currentTimeMillis(); OffsetDateTime now = OffsetDateTime.now();
-        jdbc.update("insert into mall_user(id,username,password_hash,role,status,created_at,updated_at) values(?,?,?,?,?,?,?)",
-                id, c.username, ENCODER.encode(c.password), "USER", 1, now, now);
+        jdbc.update("insert into mall_user(id,username,password_hash,role,balance,status,created_at,updated_at) values(?,?,?,?,?,?,?,?)",
+                id, c.username, ENCODER.encode(c.password), "USER", new BigDecimal("10000.00"), 1, now, now);
         return ApiResponse.ok(Map.of("userId", id, "username", c.username));
     }
 
     @PostMapping("/auth/login")
     public ApiResponse<?> login(@Valid @RequestBody Credentials c) {
-        List<User> users = jdbc.query("select id,username,password_hash,role,status,nickname,phone,avatar_url from mall_user where username=?",
-                (rs, row) -> new User(rs.getLong("id"), rs.getString("username"), rs.getString("password_hash"), rs.getString("role"), rs.getInt("status") == 1, rs.getString("nickname"), rs.getString("phone"), rs.getString("avatar_url")), c.username);
+        List<User> users = jdbc.query("select id,username,password_hash,role,balance,status,nickname,phone,avatar_url from mall_user where username=?",
+                (rs, row) -> user(rs), c.username);
         if (users.isEmpty() || !users.get(0).status || !ENCODER.matches(c.password, users.get(0).passwordHash)) throw new BizException("USER_LOGIN_FAILED", "用户名或密码错误", 401);
         User user = users.get(0); String token = UUID.randomUUID().toString();
         redis.opsForValue().set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
@@ -62,6 +63,26 @@ public class UserController {
     }
 
     @GetMapping("/users/me") public ApiResponse<?> me() { return ApiResponse.ok(current().view()); }
+
+    @PostMapping("/internal/users/{userId}/balance/debit")
+    public synchronized ApiResponse<?> debit(@PathVariable Long userId,
+                                              @RequestHeader(value = "X-User-Id", required = false) Long callerId,
+                                              @Valid @RequestBody DebitRequest request) {
+        if (!Objects.equals(userId, callerId)) throw new BizException(ErrorCodes.FORBIDDEN, "内部用户身份无效", 403);
+        if (request == null || request.paymentKey == null || request.paymentKey.isBlank()
+                || request.amount == null || request.amount.signum() <= 0) {
+            throw new BizException(ErrorCodes.INVALID, "扣款参数不完整", 400);
+        }
+        String resultKey = "balance:debit:" + userId + ":" + request.paymentKey;
+        String previous = redis.opsForValue().get(resultKey);
+        if (previous != null) return ApiResponse.ok(Map.of("balance", previous));
+        int changed = jdbc.update("update mall_user set balance=balance-?,updated_at=? where id=? and status=1 and balance>=?",
+                request.amount, OffsetDateTime.now(), userId, request.amount);
+        if (changed != 1) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
+        BigDecimal balance = jdbc.queryForObject("select balance from mall_user where id=?", BigDecimal.class, userId);
+        redis.opsForValue().set(resultKey, balance.toPlainString(), Duration.ofDays(30));
+        return ApiResponse.ok(Map.of("balance", balance.toPlainString()));
+    }
 
     @PutMapping("/users/me")
     public ApiResponse<?> update(@RequestBody Profile p) {
@@ -101,12 +122,17 @@ public class UserController {
     }
 
     private User current() {
-        return jdbc.queryForObject("select id,username,password_hash,role,status,nickname,phone,avatar_url from mall_user where id=?",
-                (rs, row) -> new User(rs.getLong("id"), rs.getString("username"), rs.getString("password_hash"), rs.getString("role"), rs.getInt("status") == 1, rs.getString("nickname"), rs.getString("phone"), rs.getString("avatar_url")), AuthContext.requireUserId());
+        return jdbc.queryForObject("select id,username,password_hash,role,balance,status,nickname,phone,avatar_url from mall_user where id=?",
+                (rs, row) -> user(rs), AuthContext.requireUserId());
+    }
+    private static User user(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return new User(rs.getLong("id"), rs.getString("username"), rs.getString("password_hash"), rs.getString("role"),
+                rs.getBigDecimal("balance"), rs.getInt("status") == 1, rs.getString("nickname"), rs.getString("phone"), rs.getString("avatar_url"));
     }
     private static Map<String,Object> address(long id,String receiver,String phone,String detail,boolean isDefault){return Map.of("id",id,"receiver",receiver,"phone",phone,"detailAddress",detail,"isDefault",isDefault);}
     public static class Credentials { @NotBlank public String username; @NotBlank public String password; }
     public static class Profile { public String nickname; public String phone; public String avatarUrl; }
+    public static class DebitRequest { @NotBlank public String paymentKey; public BigDecimal amount; }
     public static class AddressRequest { public String receiver; public String phone; public String detailAddress; public boolean isDefault; }
-    private record User(Long id,String username,String passwordHash,String role,boolean status,String nickname,String phone,String avatarUrl){Map<String,Object> view(){return Map.of("userId",id,"username",username,"role",role,"roles",List.of(role),"nickname",nickname==null?"":nickname,"phone",phone==null?"":phone,"avatarUrl",avatarUrl==null?"":avatarUrl);}}
+    private record User(Long id,String username,String passwordHash,String role,BigDecimal balance,boolean status,String nickname,String phone,String avatarUrl){Map<String,Object> view(){return Map.of("userId",id,"username",username,"role",role,"roles",List.of(role),"nickname",nickname==null?"":nickname,"phone",phone==null?"":phone,"avatarUrl",avatarUrl==null?"":avatarUrl,"balance",balance.toPlainString());}}
 }

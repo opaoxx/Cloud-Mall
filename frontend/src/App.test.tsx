@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, auth, newIdempotencyKey } from './api'
-import { formatAddressSnapshot, productDetailToForm, productFormToRequest } from './App'
+import { api, ApiError, auth, newIdempotencyKey, registerAndLogin } from './api'
+import { formatAddressSnapshot, productDetailToForm, productFormToRequest, resolveImageUrl } from './App'
 
 describe('CloudMall request conventions', () => {
   beforeEach(() => { localStorage.clear(); vi.restoreAllMocks() })
@@ -41,6 +41,34 @@ describe('CloudMall request conventions', () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'))
     await expect(api.products()).rejects.toEqual(expect.any(ApiError))
     await expect(api.products()).rejects.toMatchObject({ code: 'GATEWAY_SERVICE_UNAVAILABLE' })
+  })
+
+  it('decodes Chinese category data from a UTF-8 JSON response', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: '成功', data: [{ id: 1, parentId: 0, name: '家居百货', sortNo: 1, status: 1 }] }), { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }))
+    await expect(api.categories({ status: 1 })).resolves.toEqual([{ id: 1, parentId: 0, name: '家居百货', sortNo: 1, status: 1 }])
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/categories?status=1')
+  })
+
+  it('normalizes image paths and keeps a failed image eligible for a local fallback', () => {
+    expect(resolveImageUrl('https://cdn.example.test/item.jpg')).toBe('https://cdn.example.test/item.jpg')
+    expect(resolveImageUrl('/images/item.jpg')).toBe(`${window.location.origin}/images/item.jpg`)
+    expect(resolveImageUrl('')).toBe('')
+  })
+
+  it('creates an address with the frozen request fields', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: '成功', data: { id: 9, receiver: '小明', phone: '13800000000', detailAddress: '云购路 1 号', isDefault: true } }), { status: 200 }))
+    await expect(api.addAddress({ receiver: '小明', phone: '13800000000', detailAddress: '云购路 1 号', isDefault: true })).resolves.toMatchObject({ id: 9 })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ receiver: '小明', phone: '13800000000', detailAddress: '云购路 1 号', isDefault: true })
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Idempotency-Key')).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('registers a user and immediately creates the login session', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: '0', message: 'OK', data: { userId: 8, username: 'new-user' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: '0', message: 'OK', data: { token: 'new-token', user: { id: 8, username: 'new-user', roles: ['USER'] } } }), { status: 200 }))
+    await expect(registerAndLogin({ username: 'new-user', password: 'secret123' })).resolves.toMatchObject({ token: 'new-token' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual(['/api/auth/register', '/api/auth/login'])
   })
 
   it('keeps the seckill order number from the accepted async response', async () => {

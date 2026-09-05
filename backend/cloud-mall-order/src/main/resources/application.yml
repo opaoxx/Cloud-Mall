@@ -1,7 +1,7 @@
 server: {port: 8084}
 spring:
   application: {name: cloud-mall-order}
-  datasource: {url: "jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai", username: root, password: root}
+  datasource: {url: "jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci", username: root, password: root}
   jackson.time-zone: Asia/Shanghai
   rabbitmq:
     host: localhost
@@ -50,7 +50,7 @@ spring:
       ds0:
         type: com.zaxxer.hikari.HikariDataSource
         driver-class-name: com.mysql.cj.jdbc.Driver
-        jdbc-url: jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai
+        jdbc-url: jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci
         username: root
         password: root
     sharding:
