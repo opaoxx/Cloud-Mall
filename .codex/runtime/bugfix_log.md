@@ -196,3 +196,28 @@
 - 删除 Redis `stock:available:900001` 后重启新 stock jar，Redis 自动恢复为数据库可售库存 `99`；`GET /api/stock/skus/900001` 返回 `availableQuantity=99`。
 - Git 忽略规则验证通过：JMeter 结果目录和本地日志不再出现在待提交列表；JMX 计划和 Markdown 报告仍可追踪。
 - 本批闭环结论：库存缓存初始化问题已修复；库存服务仍未实现 Redis 与数据库在异常崩溃后的主动重建/校准，该项保留为后续独立问题。
+
+## 2026-09-05：Redis 与数据库库存异常后的主动校准/重建——完成
+
+### 修复结果
+
+- 新增 `StockCacheReconciler`，stock 启动时从 `stock_sku.available_quantity` 全量重建普通库存 Redis key，覆盖 key 缺失和已有值漂移两种情况。
+- 移除 `StockController` 中重复的库存初始化逻辑，避免多个启动钩子产生不同校准语义。
+- Docker Maven stock/common `package` 成功。
+- 将 `stock:available:900001` 人为改为 `1` 后重启 stock，Redis 恢复为数据库值 `99`；接口返回 `availableQuantity=99`；日志确认校准 1 个 SKU 且无启动异常。
+
+### 遗留边界
+
+- 本批只在 stock 启动期校准，不在运行中定时覆盖 Redis，避免与正常扣库存并发竞态。
+- 秒杀库存使用独立 Redis key，未纳入普通库存校准；异常期间的 reservation 恢复和秒杀最终对账需另行设计。
+
+## 2026-09-05：Redis 与数据库库存异常后的主动校准/重建
+
+### 发现的问题
+
+33. stock 服务此前只对缺失 key 做初始化，Redis 中 `stock:available:{skuId}` 已存在但数值错误时不会校准；Redis 数据整体丢失后也没有独立的全量重建入口。
+
+### 本批修复方案（待验证）
+
+- 新增 stock 启动期 `StockCacheReconciler`，以 MySQL `stock_sku.available_quantity` 为普通库存持久化基准，全量重建/校准 `stock:available:{skuId}`。
+- 删除 controller 中只处理 SKU 1 的硬编码初始化逻辑；不触碰秒杀库存 key 和运行中的周期性扣库存流程。
