@@ -12,7 +12,7 @@ class CartCleanupContractTest {
     String source =
         Files.readString(
             Path.of("src/main/java/com/cloudmall/order/service/impl/OrderServiceImpl.java"));
-    assertTrue(compact(source).contains("cart.deleteItem(item.skuId,uid)"));
+    assertTrue(compact(source).contains("cart.deleteItem(item.skuId,userId)"));
     assertTrue(source.contains("订单创建成功但购物车清理失败"));
   }
 

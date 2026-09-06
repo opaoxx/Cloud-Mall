@@ -60,18 +60,18 @@ class ProductContractTest {
     OffsetDateTime now = OffsetDateTime.of(2026, 9, 4, 12, 0, 0, 0, ZoneOffset.ofHours(8));
     OffsetDateTime end = now.plusHours(1);
 
-    assertEquals(7, ProductController.resolveRemainingStock("7", "STARTED", end, now));
-    assertEquals(0, ProductController.resolveRemainingStock(null, "STARTED", end, now));
+    assertEquals(7, ProductServiceImpl.resolveRemainingStock("7", "STARTED", end, now));
+    assertEquals(0, ProductServiceImpl.resolveRemainingStock(null, "STARTED", end, now));
     assertEquals(
-        0, ProductController.resolveRemainingStock("100", "STARTED", now.minusSeconds(1), now));
-    assertEquals(0, ProductController.resolveRemainingStock("not-a-number", "STARTED", end, now));
+        0, ProductServiceImpl.resolveRemainingStock("100", "STARTED", now.minusSeconds(1), now));
+    assertEquals(0, ProductServiceImpl.resolveRemainingStock("not-a-number", "STARTED", end, now));
   }
 
   @Test
   void productEventUsesTheFrozenEnvelopeAndMdcTraceId() {
     MDC.put("traceId", "trace-from-request");
     try {
-      JsonNode event = mapper.valueToTree(ProductController.eventEnvelope("PRODUCT_CHANGED", 42L));
+      JsonNode event = mapper.valueToTree(ProductServiceImpl.eventEnvelope("PRODUCT_CHANGED", 42L));
 
       assertTrue(event.hasNonNull("eventId"));
       assertEquals("PRODUCT_CHANGED", event.get("eventType").asText());
@@ -89,7 +89,7 @@ class ProductContractTest {
   void productEventProvidesTraceableFallbackWhenMdcIsAbsent() {
     MDC.clear();
 
-    JsonNode event = mapper.valueToTree(ProductController.eventEnvelope("CATEGORY_CHANGED", 7L));
+    JsonNode event = mapper.valueToTree(ProductServiceImpl.eventEnvelope("CATEGORY_CHANGED", 7L));
 
     assertTrue(event.get("traceId").asText().startsWith("cloudmall-product-"));
     assertEquals(7L, event.get("categoryId").asLong());
@@ -148,6 +148,6 @@ class ProductContractTest {
         assertThrows(
             InvocationTargetException.class,
             () -> event.invoke(controller, "PRODUCT_CHANGED", 42L));
-    assertTrue(thrown.getCause() instanceof ProductController.ProductEventPublishException);
+    assertTrue(thrown.getCause() instanceof ProductServiceImpl.ProductEventPublishException);
   }
 }

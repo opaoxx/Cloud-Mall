@@ -89,13 +89,13 @@ public class ProductServiceImpl implements ProductService {
         productSqlMapper.query(
             s.toString(),
             a.toArray(),
-            (r, n) ->
+            (row, rowNumber) ->
                 new Category(
-                    r.getLong("id"),
-                    r.getLong("parent_id"),
-                    r.getString("name"),
-                    r.getInt("sort_no"),
-                    r.getInt("status"))));
+                    row.getLong("id"),
+                    row.getLong("parent_id"),
+                    row.getString("name"),
+                    row.getInt("sort_no"),
+                    row.getInt("status"))));
   }
 
   @Transactional
@@ -201,15 +201,15 @@ public class ProductServiceImpl implements ProductService {
                 + w
                 + " order by updated_at desc,id desc limit ?,?",
             pa.toArray(),
-            (r, n) ->
+            (row, rowNumber) ->
                 read(
-                    r.getLong("id"),
-                    r.getLong("category_id"),
-                    r.getString("name"),
-                    r.getString("main_image"),
-                    r.getString("description"),
-                    r.getBigDecimal("price"),
-                    r.getInt("status")));
+                    row.getLong("id"),
+                    row.getLong("category_id"),
+                    row.getString("name"),
+                    row.getString("main_image"),
+                    row.getString("description"),
+                    row.getBigDecimal("price"),
+                    row.getInt("status")));
     return ApiResponse.ok(new PageResult<>(items, page, pageSize, total));
   }
 
@@ -236,24 +236,24 @@ public class ProductServiceImpl implements ProductService {
                 + " s.id=?",
             skuId);
     if (x.isEmpty()) throw new BizException("PRODUCT_SKU_NOT_FOUND", "SKU不存在", 404);
-    Map<String, Object> r = x.get(0);
-    if (((Number) r.get("product_status")).intValue() != 1
-        || ((Number) r.get("status")).intValue() != 1)
+    Map<String, Object> row = x.get(0);
+    if (((Number) row.get("product_status")).intValue() != 1
+        || ((Number) row.get("status")).intValue() != 1)
       throw new BizException("PRODUCT_OFF_SHELF", "商品已下架", 409);
     return ApiResponse.ok(
         Map.of(
             "skuId",
-            r.get("sku_id"),
+            row.get("sku_id"),
             "productId",
-            r.get("product_id"),
+            row.get("product_id"),
             "productName",
-            r.get("name"),
+            row.get("name"),
             "skuCode",
-            r.get("sku_code"),
+            row.get("sku_code"),
             "unitPrice",
-            money((BigDecimal) r.get("price")),
+            money((BigDecimal) row.get("price")),
             "skuSnapshot",
-            readSpecJson(r.get("spec_json"))));
+            readSpecJson(row.get("spec_json"))));
   }
 
   @GetMapping("/products/{id}/hot-stat")
@@ -267,14 +267,14 @@ public class ProductServiceImpl implements ProductService {
         productSqlMapper.query(
             "select product_id,view_count,search_count,hot_score from product_hot_stat where"
                 + " product_id=?",
-            (r, n) ->
+            (row, rowNumber) ->
                 new HotStatResponse(
-                    r.getLong("product_id"),
-                    r.getLong("view_count"),
-                    r.getLong("search_count"),
-                    r.getBigDecimal("hot_score") == null
+                    row.getLong("product_id"),
+                    row.getLong("view_count"),
+                    row.getLong("search_count"),
+                    row.getBigDecimal("hot_score") == null
                         ? "0.000000"
-                        : r.getBigDecimal("hot_score").toPlainString()),
+                        : row.getBigDecimal("hot_score").toPlainString()),
             id);
     return ApiResponse.ok(x.isEmpty() ? new HotStatResponse(id, 0, 0, "0.000000") : x.get(0));
   }
@@ -467,15 +467,15 @@ public class ProductServiceImpl implements ProductService {
         productSqlMapper.query(
             "select id,category_id,name,main_image,description,price,status from product where"
                 + " id=?",
-            (r, n) ->
+            (row, rowNumber) ->
                 read(
-                    r.getLong("id"),
-                    r.getLong("category_id"),
-                    r.getString("name"),
-                    r.getString("main_image"),
-                    r.getString("description"),
-                    r.getBigDecimal("price"),
-                    r.getInt("status")),
+                    row.getLong("id"),
+                    row.getLong("category_id"),
+                    row.getString("name"),
+                    row.getString("main_image"),
+                    row.getString("description"),
+                    row.getBigDecimal("price"),
+                    row.getInt("status")),
             id);
     if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "商品不存在", 404);
     return x.get(0);
@@ -493,14 +493,14 @@ public class ProductServiceImpl implements ProductService {
 
   /** 执行 read 相关操作。 */
   private Product read(
-      long id, long cat, String n, String image, String desc, BigDecimal price, int st) {
+      long id, long cat, String rowNumber, String image, String desc, BigDecimal price, int st) {
     // 1. 接收并整理 read 的业务请求。
     // 2. 执行 read 的核心业务校验与状态处理。
     // 3. 返回 read 的处理结果。
     Product p = new Product();
     p.id = id;
     p.categoryId = cat;
-    p.name = n;
+    p.name = rowNumber;
     p.mainImage = image;
     p.description = desc;
     p.price = money(price);
@@ -510,26 +510,26 @@ public class ProductServiceImpl implements ProductService {
         productSqlMapper.query(
             "select id,product_id,sku_code,spec_json,price,status from product_sku where"
                 + " product_id=? order by id",
-            (r, z) ->
+            (row, z) ->
                 new Sku(
-                    r.getLong("id"),
-                    r.getLong("product_id"),
-                    r.getString("sku_code"),
-                    readSpecJson(r.getString("spec_json")),
-                    money(r.getBigDecimal("price")),
-                    r.getInt("status") == 1),
+                    row.getLong("id"),
+                    row.getLong("product_id"),
+                    row.getString("sku_code"),
+                    readSpecJson(row.getString("spec_json")),
+                    money(row.getBigDecimal("price")),
+                    row.getInt("status") == 1),
             id);
     p.parameters =
         productSqlMapper.query(
             "select id,product_id,param_name,param_value,sort_no from product_parameter where"
                 + " product_id=? order by sort_no,id",
-            (r, z) ->
+            (row, z) ->
                 new ProductParameter(
-                    r.getLong("id"),
-                    r.getLong("product_id"),
-                    r.getString("param_name"),
-                    r.getString("param_value"),
-                    r.getInt("sort_no")),
+                    row.getLong("id"),
+                    row.getLong("product_id"),
+                    row.getString("param_name"),
+                    row.getString("param_value"),
+                    row.getInt("sort_no")),
             id);
     return p;
   }
@@ -624,13 +624,13 @@ public class ProductServiceImpl implements ProductService {
     }
   }
 
-  static final class ProductEventPublishException extends RuntimeException {
+  public static final class ProductEventPublishException extends RuntimeException {
     ProductEventPublishException(String type, long id, Exception cause) {
       super("商品事件发送失败，事件类型=" + type + "，商品/分类ID=" + id, cause);
     }
   }
 
-  static Map<String, Object> eventEnvelope(String type, long id) {
+  public static Map<String, Object> eventEnvelope(String type, long id) {
     String entityType = type.startsWith("CATEGORY") ? "CATEGORY" : "PRODUCT";
     String businessKeyName = "CATEGORY".equals(entityType) ? "categoryId" : "productId";
     OffsetDateTime occurredAt = now();
@@ -764,15 +764,15 @@ public class ProductServiceImpl implements ProductService {
         productSqlMapper.query(
             "select id,sku_id,start_at,end_at,stock_limit,per_user_limit,status from"
                 + " seckill_activity where id=?",
-            (r, n) ->
+            (row, rowNumber) ->
                 new ActivityRecord(
-                    r.getLong("id"),
-                    r.getLong("sku_id"),
-                    r.getTimestamp("start_at"),
-                    r.getTimestamp("end_at"),
-                    r.getInt("stock_limit"),
-                    r.getInt("per_user_limit"),
-                    r.getString("status")),
+                    row.getLong("id"),
+                    row.getLong("sku_id"),
+                    row.getTimestamp("start_at"),
+                    row.getTimestamp("end_at"),
+                    row.getInt("stock_limit"),
+                    row.getInt("per_user_limit"),
+                    row.getString("status")),
             id);
     if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "秒杀活动不存在", 404);
     return x.get(0);
@@ -794,7 +794,7 @@ public class ProductServiceImpl implements ProductService {
         a.status);
   }
 
-  static int resolveRemainingStock(
+  public static int resolveRemainingStock(
       String redisValue, String status, OffsetDateTime endAt, OffsetDateTime currentTime) {
     if (endAt == null
         || !endAt.isAfter(currentTime)
@@ -932,10 +932,10 @@ public class ProductServiceImpl implements ProductService {
     // 2. 执行 ProductParameter 的核心业务校验与状态处理。
     // 3. 返回 ProductParameter 的处理结果。
 
-    ProductParameter(Long i, Long p, String n, String v, int s) {
+    ProductParameter(Long i, Long p, String rowNumber, String v, int s) {
       id = i;
       productId = p;
-      name = n;
+      name = rowNumber;
       value = v;
       sortNo = s;
     }
@@ -952,10 +952,10 @@ public class ProductServiceImpl implements ProductService {
 
     Category() {}
 
-    Category(long i, long p, String n, int s, int st) {
+    Category(long i, long p, String rowNumber, int s, int st) {
       id = i;
       parentId = p;
-      name = n;
+      name = rowNumber;
       sortNo = s;
       status = st;
     }
@@ -994,12 +994,13 @@ public class ProductServiceImpl implements ProductService {
     /** 保存 status 的业务状态或配置。 */
     public final String status;
 
-    ActivityResponse(long a, long s, OffsetDateTime st, OffsetDateTime e, int r, int p, String v) {
+    ActivityResponse(
+        long a, long s, OffsetDateTime st, OffsetDateTime e, int row, int p, String v) {
       activityId = a;
       skuId = s;
       startAt = st;
       endAt = e;
-      remainingStock = r;
+      remainingStock = row;
       perUserLimit = p;
       status = v;
     }

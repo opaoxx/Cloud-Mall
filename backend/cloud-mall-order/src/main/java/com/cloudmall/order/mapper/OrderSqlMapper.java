@@ -24,7 +24,7 @@ public class OrderSqlMapper {
 
   /** 使用参数数组执行订单查询。 */
   public <T> List<T> query(String sql, Object[] arguments, RowMapper<T> rowMapper) {
-    return jdbcTemplate.query(sql, arguments, rowMapper);
+    return jdbcTemplate.query(sql, rowMapper, arguments);
   }
 
   /** 查询订单单值。 */

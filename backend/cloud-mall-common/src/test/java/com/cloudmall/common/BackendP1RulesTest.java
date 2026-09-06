@@ -35,7 +35,9 @@ class BackendP1RulesTest {
     assertTrue(source.contains("product_parameter"));
     assertTrue(source.contains("parameters"));
     assertTrue(source.contains("replaceParameters"));
-    assertTrue(compact.contains("db.update(\"deletefromproduct_parameterwhereproduct_id=?\""));
+    assertTrue(
+        compact.contains(
+            "productSqlMapper.update(\"deletefromproduct_parameterwhereproduct_id=?\""));
   }
 
   @Test

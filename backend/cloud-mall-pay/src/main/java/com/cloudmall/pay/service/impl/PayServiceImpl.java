@@ -57,7 +57,7 @@ public class PayServiceImpl implements PayService {
     // 1. 接收并整理 create 的业务请求。
     // 2. 执行 create 的核心业务校验与状态处理。
     // 3. 返回 create 的处理结果。
-    long uid = AuthContext.requireUserId();
+    long userId = AuthContext.requireUserId();
     if (key == null
         || key.isBlank()
         || req == null
@@ -66,19 +66,19 @@ public class PayServiceImpl implements PayService {
         || req.payAmount.signum() < 0) {
       throw new BizException(ErrorCodes.INVALID, "支付参数不完整", 400);
     }
-    OrderClient.OrderView order = order(req.orderNo, uid);
-    if (!Objects.equals(uid, order.userId()))
+    OrderClient.OrderView order = order(req.orderNo, userId);
+    if (!Objects.equals(userId, order.userId()))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权支付此订单", 403);
     if (!"PENDING_PAYMENT".equals(order.status()))
       throw new BizException(ErrorCodes.PAY_DONE, "订单不处于待支付状态", 409);
     if (req.payAmount.compareTo(order.payAmount()) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "支付金额与订单应付金额不一致", 409);
-    String payNo = payNoFor(uid, key);
+    String payNo = payNoFor(userId, key);
     List<Pay> keyed = findBy("pay_no", payNo);
     if (!keyed.isEmpty()) {
       Pay p = keyed.get(0);
       if (!Objects.equals(p.orderNo, req.orderNo)
-          || !Objects.equals(p.userId, uid)
+          || !Objects.equals(p.userId, userId)
           || p.amount.compareTo(req.payAmount) != 0) {
         throw new BizException(ErrorCodes.DUPLICATE, "Idempotency-Key已用于其他支付请求", 409);
       }
@@ -93,7 +93,7 @@ public class PayServiceImpl implements PayService {
         id(),
         payNo,
         req.orderNo,
-        uid,
+        userId,
         req.payAmount,
         ts(now),
         ts(now));
@@ -106,14 +106,14 @@ public class PayServiceImpl implements PayService {
     // 1. 接收并整理 get 的业务请求。
     // 2. 执行 get 的核心业务校验与状态处理。
     // 3. 返回 get 的处理结果。
-    long uid = AuthContext.requireUserId();
+    long userId = AuthContext.requireUserId();
     List<Pay> records =
         paySqlMapper.query(
             "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where order_no=?"
                 + " and user_id=?",
-            (r, n) -> pay(r),
+            (row, rowNumber) -> pay(row),
             orderNo,
-            uid);
+            userId);
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
     return ApiResponse.ok(records.get(0));
   }
@@ -177,7 +177,7 @@ public class PayServiceImpl implements PayService {
     if (!paySqlMapper
         .query(
             "select pay_no from pay_callback_log where callback_id=?",
-            (r, n) -> r.getString(1),
+            (row, rowNumber) -> row.getString(1),
             callbackId)
         .isEmpty()) {
       return ApiResponse.ok(find(c.payNo));
@@ -247,26 +247,26 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 执行 order 相关操作。 */
-  private OrderClient.OrderView order(String no, long uid) {
+  private OrderClient.OrderView order(String orderNo, long userId) {
     // 1. 接收并整理 order 的业务请求。
     // 2. 执行 order 的核心业务校验与状态处理。
     // 3. 返回 order 的处理结果。
-    ApiResponse<OrderClient.OrderView> response = orders.get(no, uid);
+    ApiResponse<OrderClient.OrderView> response = orders.get(orderNo, userId);
     if (response == null || response.data == null)
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     return response.data;
   }
 
   /** 执行 owned 相关操作。 */
-  private Pay owned(String no) {
+  private Pay owned(String orderNo) {
     // 1. 接收并整理 owned 的业务请求。
     // 2. 执行 owned 的核心业务校验与状态处理。
     // 3. 返回 owned 的处理结果。
-    return ownedForUser(no, AuthContext.requireUserId());
+    return ownedForUser(orderNo, AuthContext.requireUserId());
   }
 
   /** 执行 ownedForUpdate 相关操作。 */
-  private Pay ownedForUpdate(String no) {
+  private Pay ownedForUpdate(String orderNo) {
     // 1. 接收并整理 ownedForUpdate 的业务请求。
     // 2. 执行 ownedForUpdate 的核心业务校验与状态处理。
     // 3. 返回 ownedForUpdate 的处理结果。
@@ -274,8 +274,8 @@ public class PayServiceImpl implements PayService {
         paySqlMapper.query(
             "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where pay_no=?"
                 + " for update",
-            (r, n) -> pay(r),
-            no);
+            (row, rowNumber) -> pay(row),
+            orderNo);
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
     Pay p = records.get(0);
     if (!Objects.equals(p.userId, AuthContext.requireUserId()))
@@ -284,22 +284,22 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 执行 ownedForUser 相关操作。 */
-  private Pay ownedForUser(String no, long userId) {
+  private Pay ownedForUser(String orderNo, long userId) {
     // 1. 接收并整理 ownedForUser 的业务请求。
     // 2. 执行 ownedForUser 的核心业务校验与状态处理。
     // 3. 返回 ownedForUser 的处理结果。
-    Pay p = find(no);
+    Pay p = find(orderNo);
     if (!Objects.equals(p.userId, userId))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此支付记录", 403);
     return p;
   }
 
   /** 执行 find 相关操作。 */
-  private Pay find(String no) {
+  private Pay find(String orderNo) {
     // 1. 接收并整理 find 的业务请求。
     // 2. 执行 find 的核心业务校验与状态处理。
     // 3. 返回 find 的处理结果。
-    List<Pay> records = findBy("pay_no", no);
+    List<Pay> records = findBy("pay_no", orderNo);
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
     return records.get(0);
   }
@@ -313,19 +313,19 @@ public class PayServiceImpl implements PayService {
         "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where "
             + column
             + "=?",
-        (r, n) -> pay(r),
+        (row, rowNumber) -> pay(row),
         value);
   }
 
   /** 执行 payNoFor 相关操作。 */
-  private static String payNoFor(long uid, String key) {
+  private static String payNoFor(long userId, String key) {
     // 1. 接收并整理 payNoFor 的业务请求。
     // 2. 执行 payNoFor 的核心业务校验与状态处理。
     // 3. 返回 payNoFor 的处理结果。
     try {
       byte[] hash =
           MessageDigest.getInstance("SHA-256")
-              .digest((uid + ":" + key).getBytes(StandardCharsets.UTF_8));
+              .digest((userId + ":" + key).getBytes(StandardCharsets.UTF_8));
       StringBuilder result = new StringBuilder();
       for (byte value : hash) result.append(String.format("%02x", value));
       return result.substring(0, 48);
@@ -335,18 +335,18 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 执行 pay 相关操作。 */
-  private static Pay pay(java.sql.ResultSet r) throws java.sql.SQLException {
+  private static Pay pay(java.sql.ResultSet row) throws java.sql.SQLException {
     // 1. 接收并整理 pay 的业务请求。
     // 2. 执行 pay 的核心业务校验与状态处理。
     // 3. 返回 pay 的处理结果。
     Pay p = new Pay();
-    p.payNo = r.getString(1);
-    p.orderNo = r.getString(2);
-    p.userId = r.getLong(3);
-    p.amount = r.getBigDecimal(4);
-    p.status = r.getString(5);
-    if (r.getTimestamp(6) != null)
-      p.paidAt = r.getTimestamp(6).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
+    p.payNo = row.getString(1);
+    p.orderNo = row.getString(2);
+    p.userId = row.getLong(3);
+    p.amount = row.getBigDecimal(4);
+    p.status = row.getString(5);
+    if (row.getTimestamp(6) != null)
+      p.paidAt = row.getTimestamp(6).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
     return p;
   }
 

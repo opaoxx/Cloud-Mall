@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
+@SuppressWarnings("unchecked")
 public class OrderServiceImpl implements OrderService {
   /** 执行 ofPattern 相关操作。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
@@ -79,19 +80,19 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 create 的业务请求。
     // 2. 执行 create 的核心业务校验与状态处理。
     // 3. 返回 create 的处理结果。
-    long uid = AuthContext.requireUserId();
+    long userId = AuthContext.requireUserId();
     if (key == null || key.isBlank()) bad("Idempotency-Key不能为空");
     List<String> old =
         orderSqlMapper.query(
             "select order_no from order_idempotency where user_id=? and idempotency_key=?",
-            (r, n) -> r.getString(1),
-            uid,
+            (row, rowNumber) -> row.getString(1),
+            userId,
             key);
     if (!old.isEmpty()) return ApiResponse.ok(find(old.get(0)));
     if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
       bad("订单商品和地址不能为空");
     OffsetDateTime created = now();
-    String no = created.format(MONTH) + UUID.randomUUID().toString().replace("-", "");
+    String orderNo = created.format(MONTH) + UUID.randomUUID().toString().replace("-", "");
     String table = table(created);
     List<StockClient.Line> lines = new ArrayList<>();
     List<ItemRow> rows = new ArrayList<>();
@@ -107,7 +108,7 @@ public class OrderServiceImpl implements OrderService {
       lines.add(new StockClient.Line(i.skuId, i.quantity));
       rows.add(new ItemRow(s, line, i.quantity));
     }
-    ApiResponse<?> reserved = stock.reserve(new StockClient.Reservation(no, lines, "NORMAL"));
+    ApiResponse<?> reserved = stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL"));
     if (reserved == null || !"0".equals(reserved.code))
       throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
     Map<String, Object> address = findAddress(req.addressId);
@@ -118,8 +119,8 @@ public class OrderServiceImpl implements OrderService {
             + "(id,order_no,user_id,status,total_amount,pay_amount,address_snapshot,expire_at,created_at,updated_at)"
             + " values(?,?,?,?,?,?,?, ?,?,?)",
         id(),
-        no,
-        uid,
+        orderNo,
+        userId,
         "PENDING_PAYMENT",
         total,
         total,
@@ -127,37 +128,37 @@ public class OrderServiceImpl implements OrderService {
         ts(expire),
         ts(created),
         ts(created));
-    long oid =
+    long orderId =
         orderSqlMapper.queryForObject(
-            "select id from " + table + " where order_no=?", Long.class, no);
+            "select id from " + table + " where order_no=?", Long.class, orderNo);
     String itemTable = table.replace("mall_order_", "mall_order_item_");
-    for (ItemRow r : rows)
+    for (ItemRow row : rows)
       orderSqlMapper.update(
           "insert into "
               + itemTable
               + "(id,order_id,order_no,product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount,created_at)"
               + " values(?,?,?,?,?,?,?,?,?,?,?)",
           id(),
-          oid,
-          no,
-          r.sku.productId(),
-          r.sku.skuId(),
-          r.sku.productName(),
-          toJson(r.sku.skuSnapshot()),
-          r.sku.unitPrice(),
-          r.quantity,
-          r.line,
+          orderId,
+          orderNo,
+          row.sku.productId(),
+          row.sku.skuId(),
+          row.sku.productName(),
+          toJson(row.sku.skuSnapshot()),
+          row.sku.unitPrice(),
+          row.quantity,
+          row.line,
           ts(created));
     orderSqlMapper.update(
         "insert into order_idempotency(id,user_id,idempotency_key,order_no,created_at)"
             + " values(?,?,?,?,?)",
         id(),
-        uid,
+        userId,
         key,
-        no,
+        orderNo,
         ts(created));
     for (Item item : req.items) {
-      ApiResponse<?> removed = cart.deleteItem(item.skuId, uid);
+      ApiResponse<?> removed = cart.deleteItem(item.skuId, userId);
       if (removed == null || !"0".equals(removed.code))
         throw new BizException(ErrorCodes.INTERNAL, "订单创建成功但购物车清理失败", 500);
     }
@@ -165,12 +166,12 @@ public class OrderServiceImpl implements OrderService {
       rabbit.convertAndSend(
           "cloudmall.order.timeout.exchange",
           "",
-          no,
+          orderNo,
           m -> {
             m.getMessageProperties().setExpiration("1800000");
             return m;
           });
-    return ApiResponse.ok(find(no));
+    return ApiResponse.ok(find(orderNo));
   }
 
   @GetMapping("/orders")
@@ -184,7 +185,7 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 list 的业务请求。
     // 2. 执行 list 的核心业务校验与状态处理。
     // 3. 返回 list 的处理结果。
-    long uid = AuthContext.requireUserId();
+    long userId = AuthContext.requireUserId();
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
     OffsetDateTime start = parse(startTime, now().minusMonths(1)),
@@ -195,7 +196,7 @@ public class OrderServiceImpl implements OrderService {
     while (!m.isAfter(last)) {
       String t = "mall_order_" + m.format(MONTH);
       StringBuilder w = new StringBuilder(" where user_id=? and created_at>=? and created_at<?");
-      List<Object> a = new ArrayList<>(List.of(uid, ts(start), ts(end)));
+      List<Object> a = new ArrayList<>(List.of(userId, ts(start), ts(end)));
       if (status != null) {
         w.append(" and status=?");
         a.add(status);
@@ -209,7 +210,7 @@ public class OrderServiceImpl implements OrderService {
                     + t
                     + w,
                 a.toArray(),
-                (r, n) -> view(r)));
+                (row, rowNumber) -> view(row)));
       } catch (DataAccessException ignored) {
       }
       m = m.plusMonths(1);
@@ -242,8 +243,8 @@ public class OrderServiceImpl implements OrderService {
     // 2. 执行 cancel 的核心业务校验与状态处理。
     // 3. 返回 cancel 的处理结果。
     Order o = find(orderNo);
-    long uid = headerUser == null ? AuthContext.requireUserId() : headerUser;
-    if (o.userId != uid) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
+    long userId = headerUser == null ? AuthContext.requireUserId() : headerUser;
+    if (o.userId != userId) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
     if (!"PENDING_PAYMENT".equals(o.status)) return ApiResponse.ok(o);
     setStatus(o, "CANCELLED");
     stock.rollback(orderNo);
@@ -285,16 +286,16 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 seckill 的业务请求。
     // 2. 执行 seckill 的核心业务校验与状态处理。
     // 3. 返回 seckill 的处理结果。
-    long uid = AuthContext.requireUserId();
+    long userId = AuthContext.requireUserId();
     if (key == null || key.isBlank() || req == null || req.activityId == null || req.skuId == null)
       bad("秒杀参数不完整");
     Map<String, Object> b = new HashMap<>();
     b.put("activityId", req.activityId);
     b.put("skuId", req.skuId);
-    b.put("userId", uid);
+    b.put("userId", userId);
     b.put("idempotencyKey", key);
-    ApiResponse<?> r = stock.seckill(b);
-    return r == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : r;
+    ApiResponse<?> row = stock.seckill(b);
+    return row == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : row;
   }
 
   @RabbitListener(queues = OrderMessagingConfiguration.SECKILL_QUEUE)
@@ -305,14 +306,14 @@ public class OrderServiceImpl implements OrderService {
     // 2. 执行 consumeSeckill 的核心业务校验与状态处理。
     // 3. 返回 consumeSeckill 的处理结果。
     try {
-      String no = String.valueOf(event.get("orderNo")),
+      String orderNo = String.valueOf(event.get("orderNo")),
           key = String.valueOf(event.get("idempotencyKey"));
-      long uid = ((Number) event.get("userId")).longValue();
+      long userId = ((Number) event.get("userId")).longValue();
       if (!orderSqlMapper
           .query(
               "select order_no from order_idempotency where user_id=? and idempotency_key=?",
-              (r, n) -> r.getString(1),
-              uid,
+              (row, rowNumber) -> row.getString(1),
+              userId,
               key)
           .isEmpty()) return;
       ProductClient.SkuView s = products.sku(((Number) event.get("skuId")).longValue()).data;
@@ -325,8 +326,8 @@ public class OrderServiceImpl implements OrderService {
               + "(id,order_no,user_id,status,total_amount,pay_amount,address_snapshot,expire_at,created_at,updated_at)"
               + " values(?,?,?,?,?,?,?, ?,?,?)",
           id(),
-          no,
-          uid,
+          orderNo,
+          userId,
           "PENDING_PAYMENT",
           s.unitPrice(),
           s.unitPrice(),
@@ -334,9 +335,9 @@ public class OrderServiceImpl implements OrderService {
           ts(created.plusMinutes(30)),
           ts(created),
           ts(created));
-      long oid =
+      long orderId =
           orderSqlMapper.queryForObject(
-              "select id from " + t + " where order_no=?", Long.class, no);
+              "select id from " + t + " where order_no=?", Long.class, orderNo);
       String it = t.replace("mall_order_", "mall_order_item_");
       orderSqlMapper.update(
           "insert into "
@@ -344,8 +345,8 @@ public class OrderServiceImpl implements OrderService {
               + "(id,order_id,order_no,product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount,created_at)"
               + " values(?,?,?,?,?,?,?,?,?,?,?)",
           id(),
-          oid,
-          no,
+          orderId,
+          orderNo,
           s.productId(),
           s.skuId(),
           s.productName(),
@@ -358,9 +359,9 @@ public class OrderServiceImpl implements OrderService {
           "insert into order_idempotency(id,user_id,idempotency_key,order_no,created_at)"
               + " values(?,?,?,?,?)",
           id(),
-          uid,
+          userId,
           key,
-          no,
+          orderNo,
           ts(created));
     } catch (Exception e) {
       throw new IllegalStateException("秒杀订单消息消费失败，交由 RabbitMQ 重试或死信: " + event, e);
@@ -368,11 +369,11 @@ public class OrderServiceImpl implements OrderService {
   }
 
   /** 执行 owned 相关操作。 */
-  private Order owned(String no) {
+  private Order owned(String orderNo) {
     // 1. 接收并整理 owned 的业务请求。
     // 2. 执行 owned 的核心业务校验与状态处理。
     // 3. 返回 owned 的处理结果。
-    Order o = find(no);
+    Order o = find(orderNo);
     if (!o.userId.equals(AuthContext.requireUserId()))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
     return o;
@@ -383,9 +384,9 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 findAddress 的业务请求。
     // 2. 执行 findAddress 的核心业务校验与状态处理。
     // 3. 返回 findAddress 的处理结果。
-    ApiResponse<List<Map<String, Object>>> r = users.addresses();
-    if (r == null || r.data == null) throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
-    return r.data.stream()
+    ApiResponse<List<Map<String, Object>>> row = users.addresses();
+    if (row == null || row.data == null) throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
+    return row.data.stream()
         .filter(a -> a.get("id") instanceof Number && ((Number) a.get("id")).longValue() == id)
         .findFirst()
         .orElseThrow(() -> new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404));
@@ -432,11 +433,11 @@ public class OrderServiceImpl implements OrderService {
   }
 
   /** 执行 find 相关操作。 */
-  private Order find(String no) {
+  private Order find(String orderNo) {
     // 1. 接收并整理 find 的业务请求。
     // 2. 执行 find 的核心业务校验与状态处理。
     // 3. 返回 find 的处理结果。
-    String t = tableFromNo(no);
+    String t = tableFromNo(orderNo);
     List<Order> x =
         orderSqlMapper.query(
             "select"
@@ -444,8 +445,8 @@ public class OrderServiceImpl implements OrderService {
                 + " from "
                 + t
                 + " where order_no=?",
-            (r, n) -> view(r),
-            no);
+            (row, rowNumber) -> view(row),
+            orderNo);
     if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     Order o = x.get(0);
     o.items =
@@ -455,16 +456,16 @@ public class OrderServiceImpl implements OrderService {
                 + " from "
                 + t.replace("mall_order_", "mall_order_item_")
                 + " where order_no=? order by id",
-            (r, n) ->
+            (row, rowNumber) ->
                 new OrderItem(
-                    r.getLong(1),
-                    r.getLong(2),
-                    r.getString(3),
-                    readSnapshot(r.getString(4)),
-                    r.getBigDecimal(5),
-                    r.getInt(6),
-                    r.getBigDecimal(7)),
-            no);
+                    row.getLong(1),
+                    row.getLong(2),
+                    row.getString(3),
+                    readSnapshot(row.getString(4)),
+                    row.getBigDecimal(5),
+                    row.getInt(6),
+                    row.getBigDecimal(7)),
+            orderNo);
     return o;
   }
 
@@ -490,20 +491,20 @@ public class OrderServiceImpl implements OrderService {
   }
 
   /** 执行 view 相关操作。 */
-  private static Order view(java.sql.ResultSet r) throws java.sql.SQLException {
+  private static Order view(java.sql.ResultSet row) throws java.sql.SQLException {
     // 1. 接收并整理 view 的业务请求。
     // 2. 执行 view 的核心业务校验与状态处理。
     // 3. 返回 view 的处理结果。
     Order o = new Order();
-    o.orderNo = r.getString(1);
-    o.userId = r.getLong(2);
-    o.status = r.getString(3);
-    o.totalAmount = r.getBigDecimal(4);
-    o.payAmount = r.getBigDecimal(5);
-    o.addressSnapshot = r.getString(6);
-    o.createdAt = r.getTimestamp(7).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
-    if (r.getTimestamp(8) != null)
-      o.expireAt = r.getTimestamp(8).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
+    o.orderNo = row.getString(1);
+    o.userId = row.getLong(2);
+    o.status = row.getString(3);
+    o.totalAmount = row.getBigDecimal(4);
+    o.payAmount = row.getBigDecimal(5);
+    o.addressSnapshot = row.getString(6);
+    o.createdAt = row.getTimestamp(7).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
+    if (row.getTimestamp(8) != null)
+      o.expireAt = row.getTimestamp(8).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
     return o;
   }
 
@@ -516,18 +517,18 @@ public class OrderServiceImpl implements OrderService {
   }
 
   /** 执行 tableFromNo 相关操作。 */
-  private static String tableFromNo(String no) {
+  private static String tableFromNo(String orderNo) {
     // 1. 接收并整理 tableFromNo 的业务请求。
     // 2. 执行 tableFromNo 的核心业务校验与状态处理。
     // 3. 返回 tableFromNo 的处理结果。
-    if (no == null || !no.matches("\\d{6}[A-Za-z0-9]+"))
+    if (orderNo == null || !orderNo.matches("\\d{6}[A-Za-z0-9]+"))
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     try {
-      YearMonth.parse(no.substring(0, 6), DateTimeFormatter.ofPattern("yyyyMM"));
+      YearMonth.parse(orderNo.substring(0, 6), DateTimeFormatter.ofPattern("yyyyMM"));
     } catch (Exception e) {
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     }
-    return "mall_order_" + no.substring(0, 6);
+    return "mall_order_" + orderNo.substring(0, 6);
   }
 
   /** 执行 parse 相关操作。 */

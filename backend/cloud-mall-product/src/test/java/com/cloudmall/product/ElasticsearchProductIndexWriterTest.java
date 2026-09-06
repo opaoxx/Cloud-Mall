@@ -15,6 +15,7 @@ import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.rest.RestStatus;
 import org.junit.jupiter.api.Test;
 
+@SuppressWarnings("deprecation")
 class ElasticsearchProductIndexWriterTest {
   @Test
   void deletingMissingDocumentIsIdempotent() throws Exception {

@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 @Component
+@SuppressWarnings("deprecation")
 public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
   /** 保存 client 的业务状态或配置。 */
   private final RestHighLevelClient client;

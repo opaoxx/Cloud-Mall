@@ -19,7 +19,7 @@ class BalancePaymentContractTest {
     assertTrue(source.contains("PAYMENT_FAILED"));
     assertTrue(source.contains("where pay_no=?"));
     assertTrue(source.contains("for update"));
-    assertTrue(compact.contains("if(\"SUCCESS\".equals(p.status)){returnApiResponse.ok(p);}"));
+    assertTrue(compact.contains("if(\"SUCCESS\".equals(p.status))returnApiResponse.ok(p);"));
   }
 
   /** 执行 compact 相关操作。 */
