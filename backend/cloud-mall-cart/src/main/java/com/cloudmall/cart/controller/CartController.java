@@ -17,24 +17,43 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/cart")
 public class CartController {
+  /** 执行 ofDays 相关操作。 */
   private static final Duration TTL = Duration.ofDays(30);
+
+  /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
+
+  /** 保存 mapper 的业务状态或配置。 */
   private final ObjectMapper mapper;
+
+  /** 保存 products 的业务状态或配置。 */
   private final ProductClient products;
 
+  /** 创建 CartController 实例。 */
   public CartController(StringRedisTemplate redis, ObjectMapper mapper, ProductClient products) {
+    // 1. 接收并整理 CartController 的业务请求。
+    // 2. 执行 CartController 的核心业务校验与状态处理。
+    // 3. 返回 CartController 的处理结果。
     this.redis = redis;
     this.mapper = mapper;
     this.products = products;
   }
 
   @GetMapping
+  /** 执行 all 相关操作。 */
   public ApiResponse<?> all() {
+    // 1. 接收并整理 all 的业务请求。
+    // 2. 执行 all 的核心业务校验与状态处理。
+    // 3. 返回 all 的处理结果。
     return ApiResponse.ok(refreshItems());
   }
 
   @PostMapping("/items")
+  /** 执行 add 相关操作。 */
   public ApiResponse<?> add(@RequestBody Item request) {
+    // 1. 接收并整理 add 的业务请求。
+    // 2. 执行 add 的核心业务校验与状态处理。
+    // 3. 返回 add 的处理结果。
     if (request.skuId == null || request.quantity < 1)
       throw new BizException(ErrorCodes.INVALID, "购物车数量必须为正数", 400);
     ProductClient.SkuView current = currentSku(request.skuId);
@@ -58,7 +77,11 @@ public class CartController {
   }
 
   @PutMapping("/items/{skuId}")
+  /** 执行 update 相关操作。 */
   public ApiResponse<?> update(@PathVariable Long skuId, @RequestBody Item request) {
+    // 1. 接收并整理 update 的业务请求。
+    // 2. 执行 update 的核心业务校验与状态处理。
+    // 3. 返回 update 的处理结果。
     if (request.quantity < 1) throw new BizException(ErrorCodes.INVALID, "数量必须为正数", 400);
     Item item = readMap().get(String.valueOf(skuId));
     if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
@@ -69,13 +92,21 @@ public class CartController {
   }
 
   @DeleteMapping("/items/{skuId}")
+  /** 执行 delete 相关操作。 */
   public ApiResponse<?> delete(@PathVariable Long skuId) {
+    // 1. 接收并整理 delete 的业务请求。
+    // 2. 执行 delete 的核心业务校验与状态处理。
+    // 3. 返回 delete 的处理结果。
     redis.opsForHash().delete(key(), String.valueOf(skuId));
     return ApiResponse.ok(null);
   }
 
   @PutMapping("/items/{skuId}/checked")
+  /** 执行 checked 相关操作。 */
   public ApiResponse<?> checked(@PathVariable Long skuId, @RequestBody Map<String, Boolean> body) {
+    // 1. 接收并整理 checked 的业务请求。
+    // 2. 执行 checked 的核心业务校验与状态处理。
+    // 3. 返回 checked 的处理结果。
     Item item = readMap().get(String.valueOf(skuId));
     if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
     item.checked = Boolean.TRUE.equals(body.get("checked"));
@@ -84,7 +115,11 @@ public class CartController {
   }
 
   @DeleteMapping("/checked-items")
+  /** 执行 clearChecked 相关操作。 */
   public ApiResponse<?> clearChecked() {
+    // 1. 接收并整理 clearChecked 的业务请求。
+    // 2. 执行 clearChecked 的核心业务校验与状态处理。
+    // 3. 返回 clearChecked 的处理结果。
     readItems().stream()
         .filter(i -> Boolean.TRUE.equals(i.checked))
         .forEach(i -> redis.opsForHash().delete(key(), String.valueOf(i.skuId)));
@@ -92,7 +127,11 @@ public class CartController {
   }
 
   @PostMapping("/settlement/preview")
+  /** 执行 preview 相关操作。 */
   public ApiResponse<?> preview(@RequestBody Map<String, List<Long>> body) {
+    // 1. 接收并整理 preview 的业务请求。
+    // 2. 执行 preview 的核心业务校验与状态处理。
+    // 3. 返回 preview 的处理结果。
     Set<Long> selected = new HashSet<>(body.getOrDefault("skuIds", List.of()));
     List<Item> items =
         readItems().stream()
@@ -130,11 +169,19 @@ public class CartController {
             total.toPlainString()));
   }
 
+  /** 执行 key 相关操作。 */
   private String key() {
+    // 1. 接收并整理 key 的业务请求。
+    // 2. 执行 key 的核心业务校验与状态处理。
+    // 3. 返回 key 的处理结果。
     return "cart:" + AuthContext.requireUserId();
   }
 
+  /** 执行 readMap 相关操作。 */
   private Map<String, Item> readMap() {
+    // 1. 接收并整理 readMap 的业务请求。
+    // 2. 执行 readMap 的核心业务校验与状态处理。
+    // 3. 返回 readMap 的处理结果。
     Map<String, Item> result = new LinkedHashMap<>();
     redis
         .opsForHash()
@@ -151,11 +198,19 @@ public class CartController {
     return result;
   }
 
+  /** 执行 readItems 相关操作。 */
   private List<Item> readItems() {
+    // 1. 接收并整理 readItems 的业务请求。
+    // 2. 执行 readItems 的核心业务校验与状态处理。
+    // 3. 返回 readItems 的处理结果。
     return new ArrayList<>(readMap().values());
   }
 
+  /** 执行 refreshItems 相关操作。 */
   private List<Item> refreshItems() {
+    // 1. 接收并整理 refreshItems 的业务请求。
+    // 2. 执行 refreshItems 的核心业务校验与状态处理。
+    // 3. 返回 refreshItems 的处理结果。
     List<Item> items = readItems();
     for (Item item : items) {
       try {
@@ -171,7 +226,11 @@ public class CartController {
     return items;
   }
 
+  /** 执行 write 相关操作。 */
   private void write(Item item) {
+    // 1. 接收并整理 write 的业务请求。
+    // 2. 执行 write 的核心业务校验与状态处理。
+    // 3. 返回 write 的处理结果。
     try {
       redis.opsForHash().put(key(), String.valueOf(item.skuId), mapper.writeValueAsString(item));
       redis.expire(key(), TTL);
@@ -180,7 +239,11 @@ public class CartController {
     }
   }
 
+  /** 执行 currentSku 相关操作。 */
   private ProductClient.SkuView currentSku(Long skuId) {
+    // 1. 接收并整理 currentSku 的业务请求。
+    // 2. 执行 currentSku 的核心业务校验与状态处理。
+    // 3. 返回 currentSku 的处理结果。
     ApiResponse<ProductClient.SkuView> response = products.getSku(skuId);
     if (response == null || response.data == null)
       throw new BizException(ErrorCodes.NOT_FOUND, "商品或SKU不存在", 404);
@@ -188,12 +251,25 @@ public class CartController {
   }
 
   public static class Item {
+    /** 保存 skuId 的业务状态或配置。 */
     public Long skuId;
+
+    /** 保存 productId 的业务状态或配置。 */
     public Long productId;
+
+    /** 保存 productName 的业务状态或配置。 */
     public String productName = "CloudMall 商品";
+
+    /** 保存 unitPrice 的业务状态或配置。 */
     public String unitPrice = "0.00";
+
+    /** 保存 quantity 的业务状态或配置。 */
     public int quantity = 1;
+
+    /** 保存 checked 的业务状态或配置。 */
     public Boolean checked = true;
+
+    /** 保存 addedAt 的业务状态或配置。 */
     public String addedAt;
   }
 }

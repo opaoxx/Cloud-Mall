@@ -304,25 +304,30 @@ class BackendP1RulesTest {
     assertTrue(compact(order).contains("key==null||key.isBlank()"));
   }
 
+  /** 执行 resource 相关操作。 */
   private static String resource(String module) throws Exception {
     return Files.readString(
         Path.of("..", module, "src", "main", "resources", "application.yml").normalize());
   }
 
+  /** 执行 pom 相关操作。 */
   private static Path pom(String module) {
     return Path.of("..", module, "pom.xml").normalize();
   }
 
+  /** 执行 text 相关操作。 */
   private static String text(Element element, String tagName) {
     return element.getElementsByTagName(tagName).item(0).getTextContent();
   }
 
+  /** 执行 mapValue 相关操作。 */
   private static Map<?, ?> mapValue(Map<?, ?> map, String key, String module) {
     Object value = map.get(key);
     assertTrue(value instanceof Map, module + " must define spring." + key);
     return (Map<?, ?>) value;
   }
 
+  /** 执行 nestedOrDottedValue 相关操作。 */
   private static Object nestedOrDottedValue(Map<?, ?> map, String parentKey, String childKey) {
     Object dottedValue = map.get(parentKey + "." + childKey);
     if (dottedValue != null) {
@@ -335,6 +340,7 @@ class BackendP1RulesTest {
     return ((Map<?, ?>) parent).get(childKey);
   }
 
+  /** 执行 source 相关操作。 */
   private static String source(String module, String file) throws Exception {
     Path sourceRoot = Path.of("..", module, "src", "main", "java").normalize();
     try (var paths = Files.walk(sourceRoot)) {
@@ -347,6 +353,7 @@ class BackendP1RulesTest {
     }
   }
 
+  /** 执行 compact 相关操作。 */
   private static String compact(String source) {
     return source.replaceAll("\\s+", "");
   }

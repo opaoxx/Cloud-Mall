@@ -10,6 +10,7 @@ import org.apache.shardingsphere.api.sharding.standard.PreciseShardingValue;
 public final class MonthlyOrderShardingAlgorithm
     implements PreciseShardingAlgorithm<Comparable<?>> {
   @Override
+  /** 执行 doSharding 相关操作。 */
   public String doSharding(Collection<String> targets, PreciseShardingValue<Comparable<?>> value) {
     Object raw = value.getValue();
     YearMonth month;

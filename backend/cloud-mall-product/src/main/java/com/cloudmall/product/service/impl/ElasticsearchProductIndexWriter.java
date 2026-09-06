@@ -17,10 +17,16 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
+  /** 保存 client 的业务状态或配置。 */
   private final RestHighLevelClient client;
+
+  /** 保存 objectMapper 的业务状态或配置。 */
   private final ObjectMapper objectMapper;
+
+  /** 保存 indexName 的业务状态或配置。 */
   private final String indexName;
 
+  /** 创建 ElasticsearchProductIndexWriter 实例。 */
   public ElasticsearchProductIndexWriter(
       RestHighLevelClient client,
       ObjectMapper objectMapper,
@@ -31,7 +37,11 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
   }
 
   @Override
+  /** 执行 upsert 相关操作。 */
   public void upsert(ProductIndexDocument document) throws Exception {
+    // 1. 接收并整理 upsert 的业务请求。
+    // 2. 执行 upsert 的核心业务校验与状态处理。
+    // 3. 返回 upsert 的处理结果。
     Map<String, Object> source = new LinkedHashMap<>();
     source.put("id", document.id());
     source.put("categoryId", document.categoryId());
@@ -49,7 +59,11 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
   }
 
   @Override
+  /** 执行 delete 相关操作。 */
   public void delete(long productId) throws Exception {
+    // 1. 接收并整理 delete 的业务请求。
+    // 2. 执行 delete 的核心业务校验与状态处理。
+    // 3. 返回 delete 的处理结果。
     try {
       client.delete(
           new DeleteRequest(indexName, String.valueOf(productId)), RequestOptions.DEFAULT);

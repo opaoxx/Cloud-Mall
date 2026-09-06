@@ -24,17 +24,32 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api")
 public class OrderController {
+  /** 执行 ofPattern 相关操作。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
+
+  /** 保存 stock 的业务状态或配置。 */
   private final StockClient stock;
+
+  /** 保存 products 的业务状态或配置。 */
   private final ProductClient products;
+
+  /** 保存 users 的业务状态或配置。 */
   private final UserClient users;
+
+  /** 保存 cart 的业务状态或配置。 */
   private final CartClient cart;
+
+  /** 保存 db 的业务状态或配置。 */
   private final JdbcTemplate db;
+
+  /** 保存 mapper 的业务状态或配置。 */
   private final ObjectMapper mapper;
 
   @Autowired(required = false)
+  /** 保存 rabbit 的业务状态或配置。 */
   private RabbitTemplate rabbit;
 
+  /** 创建 OrderController 实例。 */
   public OrderController(
       StockClient stock,
       ProductClient products,
@@ -42,6 +57,9 @@ public class OrderController {
       CartClient cart,
       JdbcTemplate db,
       ObjectMapper mapper) {
+    // 1. 接收并整理 OrderController 的业务请求。
+    // 2. 执行 OrderController 的核心业务校验与状态处理。
+    // 3. 返回 OrderController 的处理结果。
     this.stock = stock;
     this.products = products;
     this.users = users;
@@ -52,8 +70,12 @@ public class OrderController {
 
   @Transactional
   @PostMapping("/orders")
+  /** 执行 create 相关操作。 */
   public synchronized ApiResponse<?> create(
       @RequestHeader("Idempotency-Key") String key, @RequestBody CreateRequest req) {
+    // 1. 接收并整理 create 的业务请求。
+    // 2. 执行 create 的核心业务校验与状态处理。
+    // 3. 返回 create 的处理结果。
     long uid = AuthContext.requireUserId();
     if (key == null || key.isBlank()) bad("Idempotency-Key不能为空");
     List<String> old =
@@ -147,12 +169,16 @@ public class OrderController {
   }
 
   @GetMapping("/orders")
+  /** 执行 list 相关操作。 */
   public ApiResponse<?> list(
       @RequestParam(required = false) String status,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "20") int pageSize,
       @RequestParam(required = false) String startTime,
       @RequestParam(required = false) String endTime) {
+    // 1. 接收并整理 list 的业务请求。
+    // 2. 执行 list 的核心业务校验与状态处理。
+    // 3. 返回 list 的处理结果。
     long uid = AuthContext.requireUserId();
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
@@ -193,15 +219,23 @@ public class OrderController {
   }
 
   @GetMapping("/orders/{orderNo}")
+  /** 执行 get 相关操作。 */
   public ApiResponse<?> get(@PathVariable("orderNo") String orderNo) {
+    // 1. 接收并整理 get 的业务请求。
+    // 2. 执行 get 的核心业务校验与状态处理。
+    // 3. 返回 get 的处理结果。
     return ApiResponse.ok(owned(orderNo));
   }
 
   @Transactional
   @PostMapping("/orders/{orderNo}/cancel")
+  /** 执行 cancel 相关操作。 */
   public synchronized ApiResponse<?> cancel(
       @PathVariable("orderNo") String orderNo,
       @RequestHeader(value = "X-User-Id", required = false) Long headerUser) {
+    // 1. 接收并整理 cancel 的业务请求。
+    // 2. 执行 cancel 的核心业务校验与状态处理。
+    // 3. 返回 cancel 的处理结果。
     Order o = find(orderNo);
     long uid = headerUser == null ? AuthContext.requireUserId() : headerUser;
     if (o.userId != uid) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
@@ -213,7 +247,11 @@ public class OrderController {
 
   @Transactional
   @PostMapping("/orders/{orderNo}/paid")
+  /** 执行 paid 相关操作。 */
   public synchronized ApiResponse<?> paid(@PathVariable("orderNo") String orderNo) {
+    // 1. 接收并整理 paid 的业务请求。
+    // 2. 执行 paid 的核心业务校验与状态处理。
+    // 3. 返回 paid 的处理结果。
     Order o = owned(orderNo);
     if ("PAID".equals(o.status)) return ApiResponse.ok(o);
     if (!"PENDING_PAYMENT".equals(o.status))
@@ -224,7 +262,11 @@ public class OrderController {
   }
 
   @PostMapping("/orders/{orderNo}/confirm")
+  /** 执行 confirm 相关操作。 */
   public ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo) {
+    // 1. 接收并整理 confirm 的业务请求。
+    // 2. 执行 confirm 的核心业务校验与状态处理。
+    // 3. 返回 confirm 的处理结果。
     Order o = owned(orderNo);
     if (!"PAID".equals(o.status)) throw new BizException(ErrorCodes.STATUS, "订单尚未支付", 409);
     setStatus(o, "COMPLETED");
@@ -232,8 +274,12 @@ public class OrderController {
   }
 
   @PostMapping("/seckill/orders")
+  /** 执行 seckill 相关操作。 */
   public ApiResponse<?> seckill(
       @RequestHeader("Idempotency-Key") String key, @RequestBody SeckillRequest req) {
+    // 1. 接收并整理 seckill 的业务请求。
+    // 2. 执行 seckill 的核心业务校验与状态处理。
+    // 3. 返回 seckill 的处理结果。
     long uid = AuthContext.requireUserId();
     if (key == null || key.isBlank() || req == null || req.activityId == null || req.skuId == null)
       bad("秒杀参数不完整");
@@ -248,7 +294,11 @@ public class OrderController {
 
   @RabbitListener(queues = OrderMessagingConfiguration.SECKILL_QUEUE)
   @Transactional
+  /** 执行 consumeSeckill 相关操作。 */
   public void consumeSeckill(Map<String, Object> event) {
+    // 1. 接收并整理 consumeSeckill 的业务请求。
+    // 2. 执行 consumeSeckill 的核心业务校验与状态处理。
+    // 3. 返回 consumeSeckill 的处理结果。
     try {
       String no = String.valueOf(event.get("orderNo")),
           key = String.valueOf(event.get("idempotencyKey"));
@@ -309,14 +359,22 @@ public class OrderController {
     }
   }
 
+  /** 执行 owned 相关操作。 */
   private Order owned(String no) {
+    // 1. 接收并整理 owned 的业务请求。
+    // 2. 执行 owned 的核心业务校验与状态处理。
+    // 3. 返回 owned 的处理结果。
     Order o = find(no);
     if (!o.userId.equals(AuthContext.requireUserId()))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
     return o;
   }
 
+  /** 执行 findAddress 相关操作。 */
   private Map<String, Object> findAddress(Long id) {
+    // 1. 接收并整理 findAddress 的业务请求。
+    // 2. 执行 findAddress 的核心业务校验与状态处理。
+    // 3. 返回 findAddress 的处理结果。
     ApiResponse<List<Map<String, Object>>> r = users.addresses();
     if (r == null || r.data == null) throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
     return r.data.stream()
@@ -325,7 +383,11 @@ public class OrderController {
         .orElseThrow(() -> new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404));
   }
 
+  /** 执行 readSnapshot 相关操作。 */
   private Map<String, String> readSnapshot(String value) {
+    // 1. 接收并整理 readSnapshot 的业务请求。
+    // 2. 执行 readSnapshot 的核心业务校验与状态处理。
+    // 3. 返回 readSnapshot 的处理结果。
     try {
       return value == null ? Map.of() : mapper.readValue(value, Map.class);
     } catch (Exception e) {
@@ -333,7 +395,11 @@ public class OrderController {
     }
   }
 
+  /** 执行 toJson 相关操作。 */
   private String toJson(Object v) {
+    // 1. 接收并整理 toJson 的业务请求。
+    // 2. 执行 toJson 的核心业务校验与状态处理。
+    // 3. 返回 toJson 的处理结果。
     try {
       return mapper.writeValueAsString(v);
     } catch (Exception e) {
@@ -343,7 +409,11 @@ public class OrderController {
 
   @RabbitListener(queues = OrderMessagingConfiguration.TIMEOUT_DLQ)
   @Transactional
+  /** 执行 consumeTimeout 相关操作。 */
   public void consumeTimeout(String orderNo) {
+    // 1. 接收并整理 consumeTimeout 的业务请求。
+    // 2. 执行 consumeTimeout 的核心业务校验与状态处理。
+    // 3. 返回 consumeTimeout 的处理结果。
     if (orderNo != null && !orderNo.isBlank()) {
       Order o = find(orderNo);
       if ("PENDING_PAYMENT".equals(o.status)) {
@@ -353,7 +423,11 @@ public class OrderController {
     }
   }
 
+  /** 执行 find 相关操作。 */
   private Order find(String no) {
+    // 1. 接收并整理 find 的业务请求。
+    // 2. 执行 find 的核心业务校验与状态处理。
+    // 3. 返回 find 的处理结果。
     String t = tableFromNo(no);
     List<Order> x =
         db.query(
@@ -386,7 +460,11 @@ public class OrderController {
     return o;
   }
 
+  /** 执行 setStatus 相关操作。 */
   private void setStatus(Order o, String st) {
+    // 1. 接收并整理 setStatus 的业务请求。
+    // 2. 执行 setStatus 的核心业务校验与状态处理。
+    // 3. 返回 setStatus 的处理结果。
     db.update(
         "update "
             + tableFromNo(o.orderNo)
@@ -403,7 +481,11 @@ public class OrderController {
         o.status);
   }
 
+  /** 执行 view 相关操作。 */
   private static Order view(java.sql.ResultSet r) throws java.sql.SQLException {
+    // 1. 接收并整理 view 的业务请求。
+    // 2. 执行 view 的核心业务校验与状态处理。
+    // 3. 返回 view 的处理结果。
     Order o = new Order();
     o.orderNo = r.getString(1);
     o.userId = r.getLong(2);
@@ -417,11 +499,19 @@ public class OrderController {
     return o;
   }
 
+  /** 执行 table 相关操作。 */
   private static String table(OffsetDateTime d) {
+    // 1. 接收并整理 table 的业务请求。
+    // 2. 执行 table 的核心业务校验与状态处理。
+    // 3. 返回 table 的处理结果。
     return "mall_order_" + d.format(MONTH);
   }
 
+  /** 执行 tableFromNo 相关操作。 */
   private static String tableFromNo(String no) {
+    // 1. 接收并整理 tableFromNo 的业务请求。
+    // 2. 执行 tableFromNo 的核心业务校验与状态处理。
+    // 3. 返回 tableFromNo 的处理结果。
     if (no == null || !no.matches("\\d{6}[A-Za-z0-9]+"))
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     try {
@@ -432,7 +522,11 @@ public class OrderController {
     return "mall_order_" + no.substring(0, 6);
   }
 
+  /** 执行 parse 相关操作。 */
   private static OffsetDateTime parse(String s, OffsetDateTime d) {
+    // 1. 接收并整理 parse 的业务请求。
+    // 2. 执行 parse 的核心业务校验与状态处理。
+    // 3. 返回 parse 的处理结果。
     try {
       return s == null ? d : OffsetDateTime.parse(s);
     } catch (Exception e) {
@@ -440,42 +534,72 @@ public class OrderController {
     }
   }
 
+  /** 执行 ts 相关操作。 */
   private static java.sql.Timestamp ts(OffsetDateTime d) {
+    // 1. 接收并整理 ts 的业务请求。
+    // 2. 执行 ts 的核心业务校验与状态处理。
+    // 3. 返回 ts 的处理结果。
     return java.sql.Timestamp.from(d.toInstant());
   }
 
+  /** 执行 now 相关操作。 */
   private static OffsetDateTime now() {
+    // 1. 接收并整理 now 的业务请求。
+    // 2. 执行 now 的核心业务校验与状态处理。
+    // 3. 返回 now 的处理结果。
     return OffsetDateTime.now(ZoneOffset.ofHours(8));
   }
 
+  /** 执行 id 相关操作。 */
   private static long id() {
+    // 1. 接收并整理 id 的业务请求。
+    // 2. 执行 id 的核心业务校验与状态处理。
+    // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
 
+  /** 执行 bad 相关操作。 */
   private static void bad(String s) {
+    // 1. 接收并整理 bad 的业务请求。
+    // 2. 执行 bad 的核心业务校验与状态处理。
+    // 3. 返回 bad 的处理结果。
     throw new BizException(ErrorCodes.INVALID, s, 400);
   }
 
   public static class CreateRequest {
+    /** 保存 items 的业务状态或配置。 */
     public List<Item> items;
+
+    /** 保存 addressId 的业务状态或配置。 */
     public Long addressId;
   }
 
   public static class Item {
+    /** 保存 skuId 的业务状态或配置。 */
     public Long skuId;
+
+    /** 保存 quantity 的业务状态或配置。 */
     public int quantity;
   }
 
   public static class SeckillRequest {
+    /** 保存 skuId 的业务状态或配置。 */
     public Long activityId, skuId;
   }
 
   private record ItemRow(ProductClient.SkuView sku, BigDecimal line, int quantity) {}
 
   public static class Order {
+    /** 保存 addressSnapshot 的业务状态或配置。 */
     public String orderNo, status, createdAt, expireAt, addressSnapshot;
+
+    /** 保存 userId 的业务状态或配置。 */
     public Long userId;
+
+    /** 保存 payAmount 的业务状态或配置。 */
     public BigDecimal totalAmount, payAmount;
+
+    /** 执行 业务操作 相关操作。 */
     public List<OrderItem> items = new ArrayList<>();
   }
 

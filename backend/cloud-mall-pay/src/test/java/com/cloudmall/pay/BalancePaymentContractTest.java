@@ -21,6 +21,7 @@ class BalancePaymentContractTest {
     assertTrue(compact.contains("if(\"SUCCESS\".equals(p.status)){returnApiResponse.ok(p);}"));
   }
 
+  /** 执行 compact 相关操作。 */
   private static String compact(String source) {
     return source.replaceAll("\\s+", "");
   }

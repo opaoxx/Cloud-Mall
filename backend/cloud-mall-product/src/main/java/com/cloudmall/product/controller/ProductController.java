@@ -30,17 +30,30 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api")
 public class ProductController {
+  /** 执行 getLogger 相关操作。 */
   private static final Logger log = LoggerFactory.getLogger(ProductController.class);
+
+  /** 保存 db 的业务状态或配置。 */
   private final JdbcTemplate db;
+
+  /** 保存 rabbit 的业务状态或配置。 */
   private final RabbitTemplate rabbit;
+
+  /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
+
+  /** 保存 objectMapper 的业务状态或配置。 */
   private final ObjectMapper objectMapper;
 
+  /** 创建 ProductController 实例。 */
   public ProductController(
       JdbcTemplate db,
       RabbitTemplate rabbit,
       StringRedisTemplate redis,
       ObjectMapper objectMapper) {
+    // 1. 接收并整理 ProductController 的业务请求。
+    // 2. 执行 ProductController 的核心业务校验与状态处理。
+    // 3. 返回 ProductController 的处理结果。
     this.db = db;
     this.rabbit = rabbit;
     this.redis = redis;
@@ -48,9 +61,13 @@ public class ProductController {
   }
 
   @GetMapping("/categories")
+  /** 执行 categories 相关操作。 */
   public ApiResponse<?> categories(
       @RequestParam(required = false) Long parentId,
       @RequestParam(required = false) Integer status) {
+    // 1. 接收并整理 categories 的业务请求。
+    // 2. 执行 categories 的核心业务校验与状态处理。
+    // 3. 返回 categories 的处理结果。
     StringBuilder s =
         new StringBuilder(
             "select id,parent_id,name,sort_no,status from product_category where 1=1");
@@ -79,7 +96,11 @@ public class ProductController {
 
   @Transactional
   @PostMapping("/categories")
+  /** 执行 addCategory 相关操作。 */
   public ApiResponse<?> addCategory(@RequestBody Category c) {
+    // 1. 接收并整理 addCategory 的业务请求。
+    // 2. 执行 addCategory 的核心业务校验与状态处理。
+    // 3. 返回 addCategory 的处理结果。
     AuthContext.requireAdmin();
     validateCategory(c);
     long id = id();
@@ -100,7 +121,11 @@ public class ProductController {
 
   @Transactional
   @PutMapping("/categories/{id}")
+  /** 执行 updateCategory 相关操作。 */
   public ApiResponse<?> updateCategory(@PathVariable Long id, @RequestBody Category c) {
+    // 1. 接收并整理 updateCategory 的业务请求。
+    // 2. 执行 updateCategory 的核心业务校验与状态处理。
+    // 3. 返回 updateCategory 的处理结果。
     AuthContext.requireAdmin();
     validateCategory(c);
     requireCategory(id);
@@ -119,7 +144,11 @@ public class ProductController {
 
   @Transactional
   @DeleteMapping("/categories/{id}")
+  /** 执行 deleteCategory 相关操作。 */
   public ApiResponse<?> deleteCategory(@PathVariable Long id) {
+    // 1. 接收并整理 deleteCategory 的业务请求。
+    // 2. 执行 deleteCategory 的核心业务校验与状态处理。
+    // 3. 返回 deleteCategory 的处理结果。
     AuthContext.requireAdmin();
     requireCategory(id);
     db.update("update product_category set status=0,updated_at=? where id=?", now(), id);
@@ -128,6 +157,7 @@ public class ProductController {
   }
 
   @GetMapping("/products")
+  /** 执行 products 相关操作。 */
   public ApiResponse<?> products(
       @RequestParam(required = false) String keyword,
       @RequestParam(required = false) Long categoryId,
@@ -135,6 +165,9 @@ public class ProductController {
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "20") int pageSize,
       @RequestParam(required = false) String sort) {
+    // 1. 接收并整理 products 的业务请求。
+    // 2. 执行 products 的核心业务校验与状态处理。
+    // 3. 返回 products 的处理结果。
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
     StringBuilder w = new StringBuilder(" where 1=1");
@@ -174,12 +207,20 @@ public class ProductController {
   }
 
   @GetMapping("/products/{id}")
+  /** 执行 product 相关操作。 */
   public ApiResponse<?> product(@PathVariable Long id) {
+    // 1. 接收并整理 product 的业务请求。
+    // 2. 执行 product 的核心业务校验与状态处理。
+    // 3. 返回 product 的处理结果。
     return ApiResponse.ok(requireProduct(id));
   }
 
   @GetMapping("/products/skus/{skuId}")
+  /** 执行 sku 相关操作。 */
   public ApiResponse<?> sku(@PathVariable Long skuId) {
+    // 1. 接收并整理 sku 的业务请求。
+    // 2. 执行 sku 的核心业务校验与状态处理。
+    // 3. 返回 sku 的处理结果。
     List<Map<String, Object>> x =
         db.queryForList(
             "select s.id"
@@ -209,7 +250,11 @@ public class ProductController {
   }
 
   @GetMapping("/products/{id}/hot-stat")
+  /** 执行 hot 相关操作。 */
   public ApiResponse<?> hot(@PathVariable Long id) {
+    // 1. 接收并整理 hot 的业务请求。
+    // 2. 执行 hot 的核心业务校验与状态处理。
+    // 3. 返回 hot 的处理结果。
     requireProduct(id);
     List<HotStatResponse> x =
         db.query(
@@ -229,7 +274,11 @@ public class ProductController {
 
   @Transactional
   @PostMapping("/products")
+  /** 执行 create 相关操作。 */
   public ApiResponse<?> create(@Valid @RequestBody Product p) {
+    // 1. 接收并整理 create 的业务请求。
+    // 2. 执行 create 的核心业务校验与状态处理。
+    // 3. 返回 create 的处理结果。
     AuthContext.requireAdmin();
     validateProduct(p);
     if (p.parameters == null) p.parameters = new ArrayList<>();
@@ -243,7 +292,11 @@ public class ProductController {
 
   @Transactional
   @PutMapping("/products/{id}")
+  /** 执行 update 相关操作。 */
   public ApiResponse<?> update(@PathVariable Long id, @RequestBody Product p) {
+    // 1. 接收并整理 update 的业务请求。
+    // 2. 执行 update 的核心业务校验与状态处理。
+    // 3. 返回 update 的处理结果。
     AuthContext.requireAdmin();
     validateProduct(p);
     requireProduct(id);
@@ -266,25 +319,41 @@ public class ProductController {
 
   @Transactional
   @PostMapping("/products/{id}/publish")
+  /** 执行 publish 相关操作。 */
   public ApiResponse<?> publish(@PathVariable Long id) {
+    // 1. 接收并整理 publish 的业务请求。
+    // 2. 执行 publish 的核心业务校验与状态处理。
+    // 3. 返回 publish 的处理结果。
     AuthContext.requireAdmin();
     return change(id, 1);
   }
 
   @Transactional
   @PostMapping("/products/{id}/unpublish")
+  /** 执行 unpublish 相关操作。 */
   public ApiResponse<?> unpublish(@PathVariable Long id) {
+    // 1. 接收并整理 unpublish 的业务请求。
+    // 2. 执行 unpublish 的核心业务校验与状态处理。
+    // 3. 返回 unpublish 的处理结果。
     AuthContext.requireAdmin();
     return change(id, 0);
   }
 
   @GetMapping("/seckill/activities/{id}")
+  /** 执行 activity 相关操作。 */
   public ApiResponse<?> activity(@PathVariable Long id) {
+    // 1. 接收并整理 activity 的业务请求。
+    // 2. 执行 activity 的核心业务校验与状态处理。
+    // 3. 返回 activity 的处理结果。
     return ApiResponse.ok(toActivityResponse(activityRecord(id)));
   }
 
   @PostMapping("/seckill/activities")
+  /** 执行 createActivity 相关操作。 */
   public ApiResponse<?> createActivity(@RequestBody Activity a) {
+    // 1. 接收并整理 createActivity 的业务请求。
+    // 2. 执行 createActivity 的核心业务校验与状态处理。
+    // 3. 返回 createActivity 的处理结果。
     AuthContext.requireAdmin();
     validateActivity(a);
     long id = id();
@@ -304,7 +373,11 @@ public class ProductController {
   }
 
   @PutMapping("/seckill/activities/{id}")
+  /** 执行 updateActivity 相关操作。 */
   public ApiResponse<?> updateActivity(@PathVariable Long id, @RequestBody Activity a) {
+    // 1. 接收并整理 updateActivity 的业务请求。
+    // 2. 执行 updateActivity 的核心业务校验与状态处理。
+    // 3. 返回 updateActivity 的处理结果。
     AuthContext.requireAdmin();
     validateActivity(a);
     activity(id);
@@ -323,7 +396,11 @@ public class ProductController {
   }
 
   @PostMapping("/seckill/activities/{id}/publish")
+  /** 执行 publishActivity 相关操作。 */
   public ApiResponse<?> publishActivity(@PathVariable Long id) {
+    // 1. 接收并整理 publishActivity 的业务请求。
+    // 2. 执行 publishActivity 的核心业务校验与状态处理。
+    // 3. 返回 publishActivity 的处理结果。
     AuthContext.requireAdmin();
     ActivityRecord a = activityRecord(id);
     db.update(
@@ -349,7 +426,11 @@ public class ProductController {
   }
 
   @PostMapping("/seckill/activities/{id}/start")
+  /** 执行 startActivity 相关操作。 */
   public ApiResponse<?> startActivity(@PathVariable Long id) {
+    // 1. 接收并整理 startActivity 的业务请求。
+    // 2. 执行 startActivity 的核心业务校验与状态处理。
+    // 3. 返回 startActivity 的处理结果。
     AuthContext.requireAdmin();
     activityRecord(id);
     db.update(
@@ -357,7 +438,11 @@ public class ProductController {
     return activity(id);
   }
 
+  /** 执行 change 相关操作。 */
   private ApiResponse<?> change(Long id, int st) {
+    // 1. 接收并整理 change 的业务请求。
+    // 2. 执行 change 的核心业务校验与状态处理。
+    // 3. 返回 change 的处理结果。
     Product p = requireProduct(id);
     db.update("update product set status=?,updated_at=? where id=?", st, now(), id);
     p.status = st;
@@ -366,7 +451,11 @@ public class ProductController {
     return ApiResponse.ok(p);
   }
 
+  /** 执行 requireProduct 相关操作。 */
   private Product requireProduct(Long id) {
+    // 1. 接收并整理 requireProduct 的业务请求。
+    // 2. 执行 requireProduct 的核心业务校验与状态处理。
+    // 3. 返回 requireProduct 的处理结果。
     List<Product> x =
         db.query(
             "select id,category_id,name,main_image,description,price,status from product where"
@@ -385,13 +474,21 @@ public class ProductController {
     return x.get(0);
   }
 
+  /** 执行 requireCategory 相关操作。 */
   private void requireCategory(Long id) {
+    // 1. 接收并整理 requireCategory 的业务请求。
+    // 2. 执行 requireCategory 的核心业务校验与状态处理。
+    // 3. 返回 requireCategory 的处理结果。
     if (db.queryForObject("select count(*) from product_category where id=?", Long.class, id) == 0)
       throw new BizException(ErrorCodes.NOT_FOUND, "分类不存在", 404);
   }
 
+  /** 执行 read 相关操作。 */
   private Product read(
       long id, long cat, String n, String image, String desc, BigDecimal price, int st) {
+    // 1. 接收并整理 read 的业务请求。
+    // 2. 执行 read 的核心业务校验与状态处理。
+    // 3. 返回 read 的处理结果。
     Product p = new Product();
     p.id = id;
     p.categoryId = cat;
@@ -429,7 +526,11 @@ public class ProductController {
     return p;
   }
 
+  /** 执行 save 相关操作。 */
   private void save(long id, Product p) {
+    // 1. 接收并整理 save 的业务请求。
+    // 2. 执行 save 的核心业务校验与状态处理。
+    // 3. 返回 save 的处理结果。
     db.update(
         "insert into"
             + " product(id,category_id,name,main_image,description,price,status,version,created_at,updated_at)"
@@ -446,7 +547,11 @@ public class ProductController {
     replaceParameters(id, p.parameters == null ? List.of() : p.parameters);
   }
 
+  /** 执行 replaceSkus 相关操作。 */
   private void replaceSkus(long pid, List<Sku> ss) {
+    // 1. 接收并整理 replaceSkus 的业务请求。
+    // 2. 执行 replaceSkus 的核心业务校验与状态处理。
+    // 3. 返回 replaceSkus 的处理结果。
     for (Sku s : ss) {
       if (s == null) throw new BizException(ErrorCodes.INVALID, "SKU参数无效", 400);
       if (s.id == null) s.id = id();
@@ -465,7 +570,11 @@ public class ProductController {
     }
   }
 
+  /** 执行 replaceParameters 相关操作。 */
   private void replaceParameters(long pid, List<ProductParameter> ps) {
+    // 1. 接收并整理 replaceParameters 的业务请求。
+    // 2. 执行 replaceParameters 的核心业务校验与状态处理。
+    // 3. 返回 replaceParameters 的处理结果。
     for (ProductParameter p : ps) {
       if (p == null || p.name == null || p.name.isBlank() || p.value == null)
         throw new BizException(ErrorCodes.INVALID, "商品参数无效", 400);
@@ -485,11 +594,19 @@ public class ProductController {
           now());
   }
 
+  /** 执行 readStatus 相关操作。 */
   private int readStatus(long id) {
+    // 1. 接收并整理 readStatus 的业务请求。
+    // 2. 执行 readStatus 的核心业务校验与状态处理。
+    // 3. 返回 readStatus 的处理结果。
     return requireProduct(id).status;
   }
 
+  /** 执行 event 相关操作。 */
   private void event(String type, long id) {
+    // 1. 接收并整理 event 的业务请求。
+    // 2. 执行 event 的核心业务校验与状态处理。
+    // 3. 返回 event 的处理结果。
     try {
       rabbit.convertAndSend(
           "cloudmall.product.exchange", "product.changed", eventEnvelope(type, id));
@@ -528,7 +645,11 @@ public class ProductController {
         payload);
   }
 
+  /** 执行 traceId 相关操作。 */
   private static String traceId(String eventId) {
+    // 1. 接收并整理 traceId 的业务请求。
+    // 2. 执行 traceId 的核心业务校验与状态处理。
+    // 3. 返回 traceId 的处理结果。
     for (String key : List.of("traceId", "trace_id", "X-B3-TraceId")) {
       String value = MDC.get(key);
       if (value != null && !value.isBlank()) return value;
@@ -536,7 +657,11 @@ public class ProductController {
     return "cloudmall-product-" + eventId;
   }
 
+  /** 执行 writeSpecJson 相关操作。 */
   private String writeSpecJson(Map<String, String> specJson) {
+    // 1. 接收并整理 writeSpecJson 的业务请求。
+    // 2. 执行 writeSpecJson 的核心业务校验与状态处理。
+    // 3. 返回 writeSpecJson 的处理结果。
     try {
       return objectMapper.writeValueAsString(specJson == null ? Collections.emptyMap() : specJson);
     } catch (JsonProcessingException e) {
@@ -544,7 +669,11 @@ public class ProductController {
     }
   }
 
+  /** 执行 readSpecJson 相关操作。 */
   private Map<String, String> readSpecJson(Object value) {
+    // 1. 接收并整理 readSpecJson 的业务请求。
+    // 2. 执行 readSpecJson 的核心业务校验与状态处理。
+    // 3. 返回 readSpecJson 的处理结果。
     try {
       JsonNode node = objectMapper.readTree(value == null ? "{}" : String.valueOf(value));
       if (!node.isObject()) throw new BizException(ErrorCodes.INVALID, "SKU规格格式错误", 400);
@@ -558,19 +687,35 @@ public class ProductController {
     }
   }
 
+  /** 执行 now 相关操作。 */
   private static OffsetDateTime now() {
+    // 1. 接收并整理 now 的业务请求。
+    // 2. 执行 now 的核心业务校验与状态处理。
+    // 3. 返回 now 的处理结果。
     return OffsetDateTime.now(ZoneOffset.ofHours(8));
   }
 
+  /** 执行 ts 相关操作。 */
   private static java.sql.Timestamp ts(OffsetDateTime x) {
+    // 1. 接收并整理 ts 的业务请求。
+    // 2. 执行 ts 的核心业务校验与状态处理。
+    // 3. 返回 ts 的处理结果。
     return java.sql.Timestamp.from(x.toInstant());
   }
 
+  /** 执行 id 相关操作。 */
   private static long id() {
+    // 1. 接收并整理 id 的业务请求。
+    // 2. 执行 id 的核心业务校验与状态处理。
+    // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
 
+  /** 执行 money 相关操作。 */
   private static String money(String x) {
+    // 1. 接收并整理 money 的业务请求。
+    // 2. 执行 money 的核心业务校验与状态处理。
+    // 3. 返回 money 的处理结果。
     try {
       return new BigDecimal(x == null ? "0" : x).setScale(2).toPlainString();
     } catch (Exception e) {
@@ -578,11 +723,19 @@ public class ProductController {
     }
   }
 
+  /** 执行 money 相关操作。 */
   private static String money(BigDecimal x) {
+    // 1. 接收并整理 money 的业务请求。
+    // 2. 执行 money 的核心业务校验与状态处理。
+    // 3. 返回 money 的处理结果。
     return x.setScale(2).toPlainString();
   }
 
+  /** 执行 secondsUntil 相关操作。 */
   private static long secondsUntil(Object value) {
+    // 1. 接收并整理 secondsUntil 的业务请求。
+    // 2. 执行 secondsUntil 的核心业务校验与状态处理。
+    // 3. 返回 secondsUntil 的处理结果。
     if (value instanceof java.sql.Timestamp t)
       return Math.max(
           1, Duration.between(now(), t.toInstant().atOffset(ZoneOffset.ofHours(8))).getSeconds());
@@ -594,7 +747,11 @@ public class ProductController {
     }
   }
 
+  /** 执行 activityRecord 相关操作。 */
   private ActivityRecord activityRecord(Long id) {
+    // 1. 接收并整理 activityRecord 的业务请求。
+    // 2. 执行 activityRecord 的核心业务校验与状态处理。
+    // 3. 返回 activityRecord 的处理结果。
     List<ActivityRecord> x =
         db.query(
             "select id,sku_id,start_at,end_at,stock_limit,per_user_limit,status from"
@@ -613,7 +770,11 @@ public class ProductController {
     return x.get(0);
   }
 
+  /** 执行 toActivityResponse 相关操作。 */
   private ActivityResponse toActivityResponse(ActivityRecord a) {
+    // 1. 接收并整理 toActivityResponse 的业务请求。
+    // 2. 执行 toActivityResponse 的核心业务校验与状态处理。
+    // 3. 返回 toActivityResponse 的处理结果。
     String stock = redis.opsForValue().get("seckill:stock:" + a.id + ":" + a.skuId);
     return new ActivityResponse(
         a.id,
@@ -639,24 +800,40 @@ public class ProductController {
     }
   }
 
+  /** 执行 toOffset 相关操作。 */
   private static OffsetDateTime toOffset(java.sql.Timestamp value) {
+    // 1. 接收并整理 toOffset 的业务请求。
+    // 2. 执行 toOffset 的核心业务校验与状态处理。
+    // 3. 返回 toOffset 的处理结果。
     return value.toInstant().atOffset(ZoneOffset.ofHours(8));
   }
 
+  /** 执行 validateCategory 相关操作。 */
   private static void validateCategory(Category c) {
+    // 1. 接收并整理 validateCategory 的业务请求。
+    // 2. 执行 validateCategory 的核心业务校验与状态处理。
+    // 3. 返回 validateCategory 的处理结果。
     if (c == null || c.name == null || c.name.isBlank())
       throw new BizException(ErrorCodes.INVALID, "分类名称不能为空", 400);
     if (c.parentId == null) c.parentId = 0L;
   }
 
+  /** 执行 validateProduct 相关操作。 */
   private static void validateProduct(Product p) {
+    // 1. 接收并整理 validateProduct 的业务请求。
+    // 2. 执行 validateProduct 的核心业务校验与状态处理。
+    // 3. 返回 validateProduct 的处理结果。
     if (p == null || p.name == null || p.name.isBlank())
       throw new BizException(ErrorCodes.INVALID, "商品名称不能为空", 400);
     money(p.price);
     if (p.categoryId == null) p.categoryId = 0L;
   }
 
+  /** 执行 validateActivity 相关操作。 */
   private static void validateActivity(Activity a) {
+    // 1. 接收并整理 validateActivity 的业务请求。
+    // 2. 执行 validateActivity 的核心业务校验与状态处理。
+    // 3. 返回 validateActivity 的处理结果。
     if (a == null
         || a.skuId == null
         || a.startAt == null
@@ -668,28 +845,53 @@ public class ProductController {
 
   public static class Product {
     @JsonSerialize(using = ToStringSerializer.class)
+    /** 保存 id 的业务状态或配置。 */
     public Long id;
 
+    /** 保存 categoryId 的业务状态或配置。 */
     public Long categoryId = 0L;
+
     @NotBlank public String name;
+
+    /** 保存 price 的业务状态或配置。 */
     public String mainImage, description, price;
+
+    /** 保存 published 的业务状态或配置。 */
     public boolean published;
+
+    /** 保存 status 的业务状态或配置。 */
     public int status;
+
+    /** 执行 业务操作 相关操作。 */
     public List<Sku> skus = new ArrayList<>();
+
+    /** 保存 parameters 的业务状态或配置。 */
     public List<ProductParameter> parameters;
   }
 
   public static class Sku {
+    /** 保存 id 的业务状态或配置。 */
     public Long id;
 
     @JsonSerialize(using = ToStringSerializer.class)
+    /** 保存 productId 的业务状态或配置。 */
     public Long productId;
 
+    /** 保存 price 的业务状态或配置。 */
     public String skuCode, price;
+
+    /** 执行 业务操作 相关操作。 */
     public Map<String, String> specJson = new LinkedHashMap<>();
+
+    /** 保存 status 的业务状态或配置。 */
     public boolean status;
 
+    /** 执行 Sku 相关操作。 */
     public Sku() {}
+
+    // 1. 接收并整理 Sku 的业务请求。
+    // 2. 执行 Sku 的核心业务校验与状态处理。
+    // 3. 返回 Sku 的处理结果。
 
     Sku(Long i, Long p, String c, Map<String, String> j, String v, boolean s) {
       id = i;
@@ -702,15 +904,25 @@ public class ProductController {
   }
 
   public static class ProductParameter {
+    /** 保存 id 的业务状态或配置。 */
     public Long id;
 
     @JsonSerialize(using = ToStringSerializer.class)
+    /** 保存 productId 的业务状态或配置。 */
     public Long productId;
 
+    /** 保存 value 的业务状态或配置。 */
     public String name, value;
+
+    /** 保存 sortNo 的业务状态或配置。 */
     public int sortNo;
 
+    /** 执行 ProductParameter 相关操作。 */
     public ProductParameter() {}
+
+    // 1. 接收并整理 ProductParameter 的业务请求。
+    // 2. 执行 ProductParameter 的核心业务校验与状态处理。
+    // 3. 返回 ProductParameter 的处理结果。
 
     ProductParameter(Long i, Long p, String n, String v, int s) {
       id = i;
@@ -722,8 +934,12 @@ public class ProductController {
   }
 
   public static class Category {
+    /** 保存 parentId 的业务状态或配置。 */
     public Long id, parentId = 0L;
+
     @NotBlank public String name;
+
+    /** 保存 status 的业务状态或配置。 */
     public int sortNo, status;
 
     Category() {}
@@ -738,8 +954,13 @@ public class ProductController {
   }
 
   public static class Activity {
+    /** 保存 skuId 的业务状态或配置。 */
     public Long skuId;
+
+    /** 保存 endAt 的业务状态或配置。 */
     public OffsetDateTime startAt, endAt;
+
+    /** 保存 perUserLimit 的业务状态或配置。 */
     public int stockLimit, perUserLimit;
   }
 
@@ -753,9 +974,16 @@ public class ProductController {
       String status) {}
 
   public static class ActivityResponse {
+    /** 保存 skuId 的业务状态或配置。 */
     public final long activityId, skuId;
+
+    /** 保存 endAt 的业务状态或配置。 */
     public final OffsetDateTime startAt, endAt;
+
+    /** 保存 perUserLimit 的业务状态或配置。 */
     public final int remainingStock, perUserLimit;
+
+    /** 保存 status 的业务状态或配置。 */
     public final String status;
 
     ActivityResponse(long a, long s, OffsetDateTime st, OffsetDateTime e, int r, int p, String v) {
@@ -770,7 +998,10 @@ public class ProductController {
   }
 
   public static class HotStatResponse {
+    /** 保存 searchCount 的业务状态或配置。 */
     public final long productId, viewCount, searchCount;
+
+    /** 保存 hotScore 的业务状态或配置。 */
     public final String hotScore;
 
     HotStatResponse(long p, long v, long s, String h) {

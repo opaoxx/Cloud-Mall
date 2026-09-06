@@ -14,11 +14,22 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class ProductMessagingConfiguration {
+  /** 保存 PRODUCT_EXCHANGE 的业务状态或配置。 */
   public static final String PRODUCT_EXCHANGE = "cloudmall.product.exchange";
+
+  /** 保存 PRODUCT_ROUTING_KEY 的业务状态或配置。 */
   public static final String PRODUCT_ROUTING_KEY = "product.changed";
+
+  /** 保存 PRODUCT_INDEX_QUEUE 的业务状态或配置。 */
   public static final String PRODUCT_INDEX_QUEUE = "cloudmall.product.index.queue";
+
+  /** 保存 PRODUCT_INDEX_CONTAINER_FACTORY 的业务状态或配置。 */
   public static final String PRODUCT_INDEX_CONTAINER_FACTORY = "productIndexContainerFactory";
+
+  /** 保存 PRODUCT_INDEX_DLX 的业务状态或配置。 */
   private static final String PRODUCT_INDEX_DLX = "cloudmall.product.index.dlx";
+
+  /** 保存 PRODUCT_INDEX_DLQ 的业务状态或配置。 */
   private static final String PRODUCT_INDEX_DLQ = "cloudmall.product.index.dlq";
 
   @Bean

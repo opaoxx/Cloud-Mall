@@ -19,24 +19,48 @@ import org.springframework.stereotype.Component;
 /** Recovers durable reservations and audits normal/seckill stock consistency. */
 @Component
 public class StockConsistencyReconciler {
+  /** 执行 getLogger 相关操作。 */
   private static final Logger log = LoggerFactory.getLogger(StockConsistencyReconciler.class);
+
+  /** 保存 NORMAL_PREFIX 的业务状态或配置。 */
   private static final String NORMAL_PREFIX = "stock:available:";
+
+  /** 保存 RESERVATION_PREFIX 的业务状态或配置。 */
   private static final String RESERVATION_PREFIX = "stock:reservation:";
+
+  /** 保存 SECKILL_META_PREFIX 的业务状态或配置。 */
   private static final String SECKILL_META_PREFIX = "seckill:meta:";
+
+  /** 保存 SECKILL_STOCK_PREFIX 的业务状态或配置。 */
   private static final String SECKILL_STOCK_PREFIX = "seckill:stock:";
+
+  /** 保存 SECKILL_ACCEPTED_PREFIX 的业务状态或配置。 */
   private static final String SECKILL_ACCEPTED_PREFIX = "seckill:accepted:";
+
+  /** 保存 LOCK_KEY 的业务状态或配置。 */
   private static final String LOCK_KEY = "stock:consistency:lock";
 
+  /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
+
+  /** 保存 db 的业务状态或配置。 */
   private final JdbcTemplate db;
 
+  /** 创建 StockConsistencyReconciler 实例。 */
   public StockConsistencyReconciler(StringRedisTemplate redis, JdbcTemplate db) {
+    // 1. 接收并整理 StockConsistencyReconciler 的业务请求。
+    // 2. 执行 StockConsistencyReconciler 的核心业务校验与状态处理。
+    // 3. 返回 StockConsistencyReconciler 的处理结果。
     this.redis = redis;
     this.db = db;
   }
 
   @PostConstruct
+  /** 执行 initialize 相关操作。 */
   public void initialize() {
+    // 1. 接收并整理 initialize 的业务请求。
+    // 2. 执行 initialize 的核心业务校验与状态处理。
+    // 3. 返回 initialize 的处理结果。
     ensureSeckillLedgerTable();
     recoverNormalReservations();
     recoverAcceptedSeckillLedger();
@@ -44,7 +68,11 @@ public class StockConsistencyReconciler {
   }
 
   @Scheduled(fixedDelayString = "${cloudmall.stock.consistency-interval-ms:30000}")
+  /** 执行 scheduledAudit 相关操作。 */
   public void scheduledAudit() {
+    // 1. 接收并整理 scheduledAudit 的业务请求。
+    // 2. 执行 scheduledAudit 的核心业务校验与状态处理。
+    // 3. 返回 scheduledAudit 的处理结果。
     String token = UUID.randomUUID().toString();
     if (!Boolean.TRUE.equals(
         redis.opsForValue().setIfAbsent(LOCK_KEY, token, Duration.ofSeconds(20)))) {
@@ -59,7 +87,11 @@ public class StockConsistencyReconciler {
     }
   }
 
+  /** 执行 ensureSeckillLedgerTable 相关操作。 */
   private void ensureSeckillLedgerTable() {
+    // 1. 接收并整理 ensureSeckillLedgerTable 的业务请求。
+    // 2. 执行 ensureSeckillLedgerTable 的核心业务校验与状态处理。
+    // 3. 返回 ensureSeckillLedgerTable 的处理结果。
     db.execute(
         "CREATE TABLE IF NOT EXISTS seckill_reservation (id BIGINT PRIMARY KEY, activity_id BIGINT"
             + " NOT NULL, sku_id BIGINT NOT NULL, user_id BIGINT NOT NULL, order_no VARCHAR(64) NOT"
@@ -69,7 +101,11 @@ public class StockConsistencyReconciler {
             + " uk_seckill_order(order_no), KEY idx_seckill_stock(activity_id,sku_id,status))");
   }
 
+  /** 执行 recoverNormalReservations 相关操作。 */
   private void recoverNormalReservations() {
+    // 1. 接收并整理 recoverNormalReservations 的业务请求。
+    // 2. 执行 recoverNormalReservations 的核心业务校验与状态处理。
+    // 3. 返回 recoverNormalReservations 的处理结果。
     List<Map<String, Object>> rows =
         db.queryForList(
             "select order_no,sku_id,sum(case when flow_type='RESERVE' then quantity "
@@ -99,7 +135,11 @@ public class StockConsistencyReconciler {
     }
   }
 
+  /** 执行 recoverAcceptedSeckillLedger 相关操作。 */
   private void recoverAcceptedSeckillLedger() {
+    // 1. 接收并整理 recoverAcceptedSeckillLedger 的业务请求。
+    // 2. 执行 recoverAcceptedSeckillLedger 的核心业务校验与状态处理。
+    // 3. 返回 recoverAcceptedSeckillLedger 的处理结果。
     Set<String> keys = redis.keys(SECKILL_ACCEPTED_PREFIX + "*");
     if (keys == null) return;
     for (String key : keys) {
@@ -123,7 +163,11 @@ public class StockConsistencyReconciler {
     }
   }
 
+  /** 执行 auditNormalStock 相关操作。 */
   private void auditNormalStock() {
+    // 1. 接收并整理 auditNormalStock 的业务请求。
+    // 2. 执行 auditNormalStock 的核心业务校验与状态处理。
+    // 3. 返回 auditNormalStock 的处理结果。
     for (Map<String, Object> row :
         db.queryForList("select sku_id,available_quantity from stock_sku")) {
       Number skuId = (Number) row.get("sku_id");
@@ -136,7 +180,11 @@ public class StockConsistencyReconciler {
     }
   }
 
+  /** 执行 reconcileSeckillStock 相关操作。 */
   private void reconcileSeckillStock() {
+    // 1. 接收并整理 reconcileSeckillStock 的业务请求。
+    // 2. 执行 reconcileSeckillStock 的核心业务校验与状态处理。
+    // 3. 返回 reconcileSeckillStock 的处理结果。
     Set<String> metaKeys = redis.keys(SECKILL_META_PREFIX + "*");
     if (metaKeys == null) return;
     for (String metaKey : metaKeys) {
@@ -169,11 +217,19 @@ public class StockConsistencyReconciler {
     }
   }
 
+  /** 执行 now 相关操作。 */
   private static OffsetDateTime now() {
+    // 1. 接收并整理 now 的业务请求。
+    // 2. 执行 now 的核心业务校验与状态处理。
+    // 3. 返回 now 的处理结果。
     return OffsetDateTime.now(ZoneOffset.ofHours(8));
   }
 
+  /** 执行 id 相关操作。 */
   private static long id() {
+    // 1. 接收并整理 id 的业务请求。
+    // 2. 执行 id 的核心业务校验与状态处理。
+    // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
 }

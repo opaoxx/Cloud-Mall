@@ -14,9 +14,16 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class ProductIndexConsumerTest {
+  /** 执行 ObjectMapper 相关操作。 */
   private final ObjectMapper mapper = new ObjectMapper();
+
+  /** 执行 mock 相关操作。 */
   private final ProductIndexDocumentLoader loader = mock(ProductIndexDocumentLoader.class);
+
+  /** 执行 mock 相关操作。 */
   private final ProductIndexWriter writer = mock(ProductIndexWriter.class);
+
+  /** 执行 ProductIndexConsumer 相关操作。 */
   private final ProductIndexConsumer consumer = new ProductIndexConsumer(mapper, loader, writer);
 
   @Test
@@ -123,6 +130,7 @@ class ProductIndexConsumerTest {
         IllegalStateException.class, () -> consumer.consume(event("PRODUCT_CHANGED", 42L)));
   }
 
+  /** 执行 event 相关操作。 */
   private byte[] event(String type, long productId) throws Exception {
     return mapper.writeValueAsBytes(
         Map.of(
@@ -142,6 +150,7 @@ class ProductIndexConsumerTest {
             Map.of("productId", productId)));
   }
 
+  /** 执行 categoryEvent 相关操作。 */
   private byte[] categoryEvent(String type, long categoryId) throws Exception {
     return mapper.writeValueAsBytes(
         Map.of(

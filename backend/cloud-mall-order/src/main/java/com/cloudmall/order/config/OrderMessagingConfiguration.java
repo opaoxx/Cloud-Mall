@@ -11,14 +11,31 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class OrderMessagingConfiguration {
+  /** 保存 TIMEOUT_EXCHANGE 的业务状态或配置。 */
   public static final String TIMEOUT_EXCHANGE = "cloudmall.order.timeout.exchange";
+
+  /** 保存 TIMEOUT_QUEUE 的业务状态或配置。 */
   public static final String TIMEOUT_QUEUE = "cloudmall.order.timeout.ttl";
+
+  /** 保存 DLX 的业务状态或配置。 */
   public static final String DLX = "cloudmall.order.timeout.dlx.exchange";
+
+  /** 保存 DLQ 的业务状态或配置。 */
   public static final String DLQ = "cloudmall.order.timeout.dlx";
+
+  /** 保存 TIMEOUT_DLQ 的业务状态或配置。 */
   public static final String TIMEOUT_DLQ = DLQ;
+
+  /** 保存 SECKILL_EXCHANGE 的业务状态或配置。 */
   public static final String SECKILL_EXCHANGE = "cloudmall.seckill.order.exchange";
+
+  /** 保存 SECKILL_QUEUE 的业务状态或配置。 */
   public static final String SECKILL_QUEUE = "cloudmall.seckill.order.queue";
+
+  /** 保存 SECKILL_DLX 的业务状态或配置。 */
   public static final String SECKILL_DLX = "cloudmall.seckill.order.dlx.exchange";
+
+  /** 保存 SECKILL_DLQ 的业务状态或配置。 */
   public static final String SECKILL_DLQ = "cloudmall.seckill.order.dlx";
 
   @Bean

@@ -18,6 +18,7 @@ class PaymentOrderContractTest {
     assertTrue(compact.contains("stock.confirm(orderNo)"));
   }
 
+  /** 执行 compact 相关操作。 */
   private static String compact(String source) {
     return source.replaceAll("\\s+", "");
   }

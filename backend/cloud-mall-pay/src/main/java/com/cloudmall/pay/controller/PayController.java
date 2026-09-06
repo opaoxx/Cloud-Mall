@@ -22,14 +22,24 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/payments")
 public class PayController {
+  /** 保存 orders 的业务状态或配置。 */
   private final OrderClient orders;
+
+  /** 保存 users 的业务状态或配置。 */
   private final UserClient users;
+
+  /** 保存 db 的业务状态或配置。 */
   private final JdbcTemplate db;
 
   @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}")
+  /** 保存 callbackToken 的业务状态或配置。 */
   private String callbackToken;
 
+  /** 创建 PayController 实例。 */
   public PayController(OrderClient orders, UserClient users, JdbcTemplate db) {
+    // 1. 接收并整理 PayController 的业务请求。
+    // 2. 执行 PayController 的核心业务校验与状态处理。
+    // 3. 返回 PayController 的处理结果。
     this.orders = orders;
     this.users = users;
     this.db = db;
@@ -37,8 +47,12 @@ public class PayController {
 
   @Transactional
   @PostMapping
+  /** 执行 create 相关操作。 */
   public synchronized ApiResponse<?> create(
       @RequestHeader("Idempotency-Key") String key, @RequestBody Request req) {
+    // 1. 接收并整理 create 的业务请求。
+    // 2. 执行 create 的核心业务校验与状态处理。
+    // 3. 返回 create 的处理结果。
     long uid = AuthContext.requireUserId();
     if (key == null
         || key.isBlank()
@@ -83,7 +97,11 @@ public class PayController {
   }
 
   @GetMapping("/orders/{orderNo}")
+  /** 执行 get 相关操作。 */
   public ApiResponse<?> get(@PathVariable String orderNo) {
+    // 1. 接收并整理 get 的业务请求。
+    // 2. 执行 get 的核心业务校验与状态处理。
+    // 3. 返回 get 的处理结果。
     long uid = AuthContext.requireUserId();
     List<Pay> records =
         db.query(
@@ -98,7 +116,11 @@ public class PayController {
 
   @Transactional
   @PostMapping("/{payNo}/mock-success")
+  /** 执行 success 相关操作。 */
   public synchronized ApiResponse<?> success(@PathVariable String payNo) {
+    // 1. 接收并整理 success 的业务请求。
+    // 2. 执行 success 的核心业务校验与状态处理。
+    // 3. 返回 success 的处理结果。
     Pay p = ownedForUpdate(payNo);
     if ("SUCCESS".equals(p.status)) return ApiResponse.ok(p);
     if (!"PENDING".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
@@ -114,7 +136,11 @@ public class PayController {
 
   @Transactional
   @PostMapping("/{payNo}/mock-fail")
+  /** 执行 fail 相关操作。 */
   public ApiResponse<?> fail(@PathVariable String payNo) {
+    // 1. 接收并整理 fail 的业务请求。
+    // 2. 执行 fail 的核心业务校验与状态处理。
+    // 3. 返回 fail 的处理结果。
     Pay p = owned(payNo);
     if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
     notifyFailure(p);
@@ -131,9 +157,13 @@ public class PayController {
 
   @Transactional
   @PostMapping("/callback")
+  /** 执行 callback 相关操作。 */
   public synchronized ApiResponse<?> callback(
       @RequestHeader(value = "X-Internal-Callback-Token", required = false) String token,
       @RequestBody Callback c) {
+    // 1. 接收并整理 callback 的业务请求。
+    // 2. 执行 callback 的核心业务校验与状态处理。
+    // 3. 返回 callback 的处理结果。
     if (!Objects.equals(callbackToken, token))
       throw new BizException(ErrorCodes.FORBIDDEN, "回调凭证无效", 403);
     if (c == null || c.payNo == null || c.payNo.isBlank() || c.amount == null || c.userId == null) {
@@ -181,7 +211,11 @@ public class PayController {
     return ApiResponse.ok(find(p.payNo));
   }
 
+  /** 执行 completeSuccess 相关操作。 */
   private void completeSuccess(Pay p) {
+    // 1. 接收并整理 completeSuccess 的业务请求。
+    // 2. 执行 completeSuccess 的核心业务校验与状态处理。
+    // 3. 返回 completeSuccess 的处理结果。
     ApiResponse<UserClient.BalanceView> debit =
         users.debit(p.userId, p.userId, new UserClient.DebitRequest(p.payNo, p.amount));
     if (debit == null || !"0".equals(debit.code))
@@ -191,7 +225,11 @@ public class PayController {
       throw new BizException(ErrorCodes.INTERNAL, "订单支付状态同步失败", 500);
   }
 
+  /** 执行 notifyFailure 相关操作。 */
   private void notifyFailure(Pay p) {
+    // 1. 接收并整理 notifyFailure 的业务请求。
+    // 2. 执行 notifyFailure 的核心业务校验与状态处理。
+    // 3. 返回 notifyFailure 的处理结果。
     try {
       ApiResponse<?> response = orders.cancel(p.orderNo, p.userId);
       if (response == null || !"0".equals(response.code))
@@ -203,18 +241,30 @@ public class PayController {
     }
   }
 
+  /** 执行 order 相关操作。 */
   private OrderClient.OrderView order(String no, long uid) {
+    // 1. 接收并整理 order 的业务请求。
+    // 2. 执行 order 的核心业务校验与状态处理。
+    // 3. 返回 order 的处理结果。
     ApiResponse<OrderClient.OrderView> response = orders.get(no, uid);
     if (response == null || response.data == null)
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     return response.data;
   }
 
+  /** 执行 owned 相关操作。 */
   private Pay owned(String no) {
+    // 1. 接收并整理 owned 的业务请求。
+    // 2. 执行 owned 的核心业务校验与状态处理。
+    // 3. 返回 owned 的处理结果。
     return ownedForUser(no, AuthContext.requireUserId());
   }
 
+  /** 执行 ownedForUpdate 相关操作。 */
   private Pay ownedForUpdate(String no) {
+    // 1. 接收并整理 ownedForUpdate 的业务请求。
+    // 2. 执行 ownedForUpdate 的核心业务校验与状态处理。
+    // 3. 返回 ownedForUpdate 的处理结果。
     List<Pay> records =
         db.query(
             "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where pay_no=?"
@@ -228,20 +278,32 @@ public class PayController {
     return p;
   }
 
+  /** 执行 ownedForUser 相关操作。 */
   private Pay ownedForUser(String no, long userId) {
+    // 1. 接收并整理 ownedForUser 的业务请求。
+    // 2. 执行 ownedForUser 的核心业务校验与状态处理。
+    // 3. 返回 ownedForUser 的处理结果。
     Pay p = find(no);
     if (!Objects.equals(p.userId, userId))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此支付记录", 403);
     return p;
   }
 
+  /** 执行 find 相关操作。 */
   private Pay find(String no) {
+    // 1. 接收并整理 find 的业务请求。
+    // 2. 执行 find 的核心业务校验与状态处理。
+    // 3. 返回 find 的处理结果。
     List<Pay> records = findBy("pay_no", no);
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
     return records.get(0);
   }
 
+  /** 执行 findBy 相关操作。 */
   private List<Pay> findBy(String column, String value) {
+    // 1. 接收并整理 findBy 的业务请求。
+    // 2. 执行 findBy 的核心业务校验与状态处理。
+    // 3. 返回 findBy 的处理结果。
     return db.query(
         "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where "
             + column
@@ -250,7 +312,11 @@ public class PayController {
         value);
   }
 
+  /** 执行 payNoFor 相关操作。 */
   private static String payNoFor(long uid, String key) {
+    // 1. 接收并整理 payNoFor 的业务请求。
+    // 2. 执行 payNoFor 的核心业务校验与状态处理。
+    // 3. 返回 payNoFor 的处理结果。
     try {
       byte[] hash =
           MessageDigest.getInstance("SHA-256")
@@ -263,7 +329,11 @@ public class PayController {
     }
   }
 
+  /** 执行 pay 相关操作。 */
   private static Pay pay(java.sql.ResultSet r) throws java.sql.SQLException {
+    // 1. 接收并整理 pay 的业务请求。
+    // 2. 执行 pay 的核心业务校验与状态处理。
+    // 3. 返回 pay 的处理结果。
     Pay p = new Pay();
     p.payNo = r.getString(1);
     p.orderNo = r.getString(2);
@@ -275,34 +345,63 @@ public class PayController {
     return p;
   }
 
+  /** 执行 now 相关操作。 */
   private static OffsetDateTime now() {
+    // 1. 接收并整理 now 的业务请求。
+    // 2. 执行 now 的核心业务校验与状态处理。
+    // 3. 返回 now 的处理结果。
     return OffsetDateTime.now(ZoneOffset.ofHours(8));
   }
 
+  /** 执行 ts 相关操作。 */
   private static java.sql.Timestamp ts(OffsetDateTime value) {
+    // 1. 接收并整理 ts 的业务请求。
+    // 2. 执行 ts 的核心业务校验与状态处理。
+    // 3. 返回 ts 的处理结果。
     return java.sql.Timestamp.from(value.toInstant());
   }
 
+  /** 执行 id 相关操作。 */
   private static long id() {
+    // 1. 接收并整理 id 的业务请求。
+    // 2. 执行 id 的核心业务校验与状态处理。
+    // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
 
   public static class Request {
+    /** 保存 orderNo 的业务状态或配置。 */
     public String orderNo;
+
+    /** 保存 payAmount 的业务状态或配置。 */
     public BigDecimal payAmount;
   }
 
   public static class Callback {
+    /** 保存 payNo 的业务状态或配置。 */
     public String payNo;
+
+    /** 保存 success 的业务状态或配置。 */
     public boolean success;
+
+    /** 保存 callbackId 的业务状态或配置。 */
     public String callbackId;
+
+    /** 保存 amount 的业务状态或配置。 */
     public BigDecimal amount;
+
+    /** 保存 userId 的业务状态或配置。 */
     public Long userId;
   }
 
   public static class Pay {
+    /** 保存 paidAt 的业务状态或配置。 */
     public String payNo, orderNo, status, paidAt;
+
+    /** 保存 userId 的业务状态或配置。 */
     public Long userId;
+
+    /** 保存 amount 的业务状态或配置。 */
     public BigDecimal amount;
   }
 }

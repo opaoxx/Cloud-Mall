@@ -16,6 +16,7 @@ class CartCleanupContractTest {
     assertTrue(source.contains("订单创建成功但购物车清理失败"));
   }
 
+  /** 执行 compact 相关操作。 */
   private static String compact(String source) {
     return source.replaceAll("\\s+", "");
   }

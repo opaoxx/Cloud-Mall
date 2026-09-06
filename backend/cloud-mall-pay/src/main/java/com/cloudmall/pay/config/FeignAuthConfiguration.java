@@ -8,6 +8,7 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class FeignAuthConfiguration {
   @Bean
+  /** 执行 authHeaders 相关操作。 */
   public RequestInterceptor authHeaders() {
     return template -> {
       if (AuthContext.userId() != null) {

@@ -15,13 +15,16 @@ import reactor.core.publisher.Mono;
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class AuthenticationFilter implements GlobalFilter {
+  /** 保存 redis 的业务状态或配置。 */
   private final ReactiveStringRedisTemplate redis;
 
+  /** 创建 AuthenticationFilter 实例。 */
   public AuthenticationFilter(ReactiveStringRedisTemplate redis) {
     this.redis = redis;
   }
 
   @Override
+  /** 执行 filter 相关操作。 */
   public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
     String path = exchange.getRequest().getURI().getPath();
     if (path.startsWith("/api/stock/")) return unauthorized(exchange);
@@ -56,6 +59,7 @@ public class AuthenticationFilter implements GlobalFilter {
             });
   }
 
+  /** 执行 isPublic 相关操作。 */
   private boolean isPublic(HttpMethod method, String path) {
     if (path.startsWith("/actuator/")) return true;
     if (path.startsWith("/api/auth/")) {
@@ -69,6 +73,7 @@ public class AuthenticationFilter implements GlobalFilter {
             || path.startsWith("/api/categories/"));
   }
 
+  /** 执行 unauthorized 相关操作。 */
   private Mono<Void> unauthorized(ServerWebExchange exchange) {
     exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
     return exchange.getResponse().setComplete();

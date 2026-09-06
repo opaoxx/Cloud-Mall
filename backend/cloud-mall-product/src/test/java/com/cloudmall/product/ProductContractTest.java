@@ -22,6 +22,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 class ProductContractTest {
+  /** 执行 ObjectMapper 相关操作。 */
   private final ObjectMapper mapper = new ObjectMapper();
 
   @Test

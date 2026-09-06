@@ -18,7 +18,9 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/stock")
 public class StockController {
+  /** 保存 PREFIX 的业务状态或配置。 */
   private static final String PREFIX = "stock:available:", RES = "stock:reservation:";
+
   private static final String RESERVE =
       "if redis.call('EXISTS',KEYS[1])==1 then return 2 end; for i=2,#KEYS-1 do if"
           + " tonumber(redis.call('GET',KEYS[i]) or '0') < tonumber(ARGV[(i-2)*2+2]) then return 0"
@@ -42,18 +44,31 @@ public class StockController {
           + " used=tonumber(redis.call('GET',KEYS[2]) or '0'); if used<=1 then"
           + " redis.call('DEL',KEYS[2]) else redis.call('DECR',KEYS[2]) end;"
           + " redis.call('DEL',KEYS[3]); return 1";
+
+  /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
+
+  /** 保存 db 的业务状态或配置。 */
   private final JdbcTemplate db;
+
+  /** 保存 rabbit 的业务状态或配置。 */
   private final RabbitTemplate rabbit;
+
+  /** 保存 mapper 的业务状态或配置。 */
   private final ObjectMapper mapper;
+
   private final DefaultRedisScript<Long>
       reserveScript = new DefaultRedisScript<>(RESERVE, Long.class),
       rollbackScript = new DefaultRedisScript<>(ROLLBACK, Long.class),
       seckillScript = new DefaultRedisScript<>(SECKILL, Long.class),
       seckillRollbackScript = new DefaultRedisScript<>(SECKILL_ROLLBACK, Long.class);
 
+  /** 创建 StockController 实例。 */
   public StockController(
       StringRedisTemplate redis, JdbcTemplate db, RabbitTemplate rabbit, ObjectMapper mapper) {
+    // 1. 接收并整理 StockController 的业务请求。
+    // 2. 执行 StockController 的核心业务校验与状态处理。
+    // 3. 返回 StockController 的处理结果。
     this.redis = redis;
     this.db = db;
     this.rabbit = rabbit;
@@ -61,13 +76,21 @@ public class StockController {
   }
 
   @GetMapping("/skus/{skuId}")
+  /** 执行 get 相关操作。 */
   public ApiResponse<?> get(@PathVariable("skuId") Long skuId) {
+    // 1. 接收并整理 get 的业务请求。
+    // 2. 执行 get 的核心业务校验与状态处理。
+    // 3. 返回 get 的处理结果。
     return ApiResponse.ok(Map.of("skuId", skuId, "availableQuantity", quantity(skuId)));
   }
 
   @Transactional
   @PostMapping("/reservations")
+  /** 执行 reserve 相关操作。 */
   public ApiResponse<?> reserve(@RequestBody Reservation r) {
+    // 1. 接收并整理 reserve 的业务请求。
+    // 2. 执行 reserve 的核心业务校验与状态处理。
+    // 3. 返回 reserve 的处理结果。
     validate(r);
     List<Line> lines = merge(r.items);
     String key = RES + r.orderNo;
@@ -107,7 +130,11 @@ public class StockController {
 
   @Transactional
   @PostMapping("/reservations/{orderNo}/confirm")
+  /** 执行 confirm 相关操作。 */
   public ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo) {
+    // 1. 接收并整理 confirm 的业务请求。
+    // 2. 执行 confirm 的核心业务校验与状态处理。
+    // 3. 返回 confirm 的处理结果。
     Map<Object, Object> lines = redis.opsForHash().entries(RES + orderNo + ":lines");
     try {
       for (Map.Entry<Object, Object> e : lines.entrySet()) {
@@ -139,7 +166,11 @@ public class StockController {
 
   @Transactional
   @PostMapping("/reservations/{orderNo}/rollback")
+  /** 执行 rollback 相关操作。 */
   public ApiResponse<?> rollback(@PathVariable("orderNo") String orderNo) {
+    // 1. 接收并整理 rollback 的业务请求。
+    // 2. 执行 rollback 的核心业务校验与状态处理。
+    // 3. 返回 rollback 的处理结果。
     Map<Object, Object> lines = redis.opsForHash().entries(RES + orderNo + ":lines");
     for (Map.Entry<Object, Object> e : lines.entrySet()) {
       long sku = Long.parseLong(String.valueOf(e.getKey()));
@@ -166,7 +197,11 @@ public class StockController {
   }
 
   @PostMapping("/seckill/reservations")
+  /** 执行 seckill 相关操作。 */
   public ApiResponse<?> seckill(@RequestBody Map<String, Object> b) {
+    // 1. 接收并整理 seckill 的业务请求。
+    // 2. 执行 seckill 的核心业务校验与状态处理。
+    // 3. 返回 seckill 的处理结果。
     long uid = AuthContext.requireUserId();
     String a = String.valueOf(b.get("activityId")),
         sku = String.valueOf(b.get("skuId")),
@@ -247,8 +282,12 @@ public class StockController {
     return accepted(no);
   }
 
+  /** 执行 recordSeckillPending 相关操作。 */
   private void recordSeckillPending(
       long activityId, long skuId, long userId, String idempotencyKey, String orderNo) {
+    // 1. 接收并整理 recordSeckillPending 的业务请求。
+    // 2. 执行 recordSeckillPending 的核心业务校验与状态处理。
+    // 3. 返回 recordSeckillPending 的处理结果。
     OffsetDateTime now = now();
     db.update(
         "insert into"
@@ -265,8 +304,12 @@ public class StockController {
         now);
   }
 
+  /** 执行 markSeckillAccepted 相关操作。 */
   private void markSeckillAccepted(
       long activityId, long skuId, long userId, String idempotencyKey) {
+    // 1. 接收并整理 markSeckillAccepted 的业务请求。
+    // 2. 执行 markSeckillAccepted 的核心业务校验与状态处理。
+    // 3. 返回 markSeckillAccepted 的处理结果。
     db.update(
         "update seckill_reservation set status='ACCEPTED',updated_at=? where activity_id=? and"
             + " sku_id=? and user_id=? and idempotency_key=?",
@@ -277,8 +320,12 @@ public class StockController {
         idempotencyKey);
   }
 
+  /** 执行 markSeckillRejected 相关操作。 */
   private void markSeckillRejected(
       long activityId, long skuId, long userId, String idempotencyKey) {
+    // 1. 接收并整理 markSeckillRejected 的业务请求。
+    // 2. 执行 markSeckillRejected 的核心业务校验与状态处理。
+    // 3. 返回 markSeckillRejected 的处理结果。
     db.update(
         "update seckill_reservation set status='REJECTED',updated_at=? where activity_id=? and"
             + " sku_id=? and user_id=? and idempotency_key=? and status='PENDING'",
@@ -289,16 +336,28 @@ public class StockController {
         idempotencyKey);
   }
 
+  /** 执行 accepted 相关操作。 */
   private ApiResponse<?> accepted(String no) {
+    // 1. 接收并整理 accepted 的业务请求。
+    // 2. 执行 accepted 的核心业务校验与状态处理。
+    // 3. 返回 accepted 的处理结果。
     return ApiResponse.ok(Map.of("accepted", true, "orderNo", no, "status", "PENDING_PAYMENT"));
   }
 
+  /** 执行 existsFlow 相关操作。 */
   private boolean existsFlow(String k) {
+    // 1. 接收并整理 existsFlow 的业务请求。
+    // 2. 执行 existsFlow 的核心业务校验与状态处理。
+    // 3. 返回 existsFlow 的处理结果。
     return !db.query("select id from stock_flow where idempotency_key=?", (r, n) -> r.getLong(1), k)
         .isEmpty();
   }
 
+  /** 执行 flow 相关操作。 */
   private void flow(Line x, String order, String type, String key) {
+    // 1. 接收并整理 flow 的业务请求。
+    // 2. 执行 flow 的核心业务校验与状态处理。
+    // 3. 返回 flow 的处理结果。
     db.update(
         "insert into stock_flow(id,sku_id,order_no,flow_type,quantity,idempotency_key,created_at)"
             + " values(?,?,?,?,?,?,?) on duplicate key update"
@@ -312,13 +371,21 @@ public class StockController {
         now());
   }
 
+  /** 执行 compensateReservation 相关操作。 */
   private void compensateReservation(String key, List<Line> lines) {
+    // 1. 接收并整理 compensateReservation 的业务请求。
+    // 2. 执行 compensateReservation 的核心业务校验与状态处理。
+    // 3. 返回 compensateReservation 的处理结果。
     for (Line x : lines) redis.opsForValue().increment(PREFIX + x.skuId, x.quantity);
     redis.delete(key);
     redis.delete(key + ":lines");
   }
 
+  /** 执行 epoch 相关操作。 */
   private static long epoch(Object value) {
+    // 1. 接收并整理 epoch 的业务请求。
+    // 2. 执行 epoch 的核心业务校验与状态处理。
+    // 3. 返回 epoch 的处理结果。
     try {
       return Instant.parse(String.valueOf(value)).getEpochSecond();
     } catch (Exception e) {
@@ -326,12 +393,20 @@ public class StockController {
     }
   }
 
+  /** 执行 quantity 相关操作。 */
   private int quantity(Long sku) {
+    // 1. 接收并整理 quantity 的业务请求。
+    // 2. 执行 quantity 的核心业务校验与状态处理。
+    // 3. 返回 quantity 的处理结果。
     String v = redis.opsForValue().get(PREFIX + sku);
     return v == null ? 0 : Integer.parseInt(v);
   }
 
+  /** 执行 merge 相关操作。 */
   private static List<Line> merge(List<Line> in) {
+    // 1. 接收并整理 merge 的业务请求。
+    // 2. 执行 merge 的核心业务校验与状态处理。
+    // 3. 返回 merge 的处理结果。
     Map<Long, Integer> m = new LinkedHashMap<>();
     for (Line x : in) {
       if (x == null || x.skuId == null || x.quantity < 1)
@@ -343,7 +418,11 @@ public class StockController {
         .collect(Collectors.toList());
   }
 
+  /** 执行 validate 相关操作。 */
   private static void validate(Reservation r) {
+    // 1. 接收并整理 validate 的业务请求。
+    // 2. 执行 validate 的核心业务校验与状态处理。
+    // 3. 返回 validate 的处理结果。
     if (r == null
         || r.orderNo == null
         || r.orderNo.isBlank()
@@ -351,17 +430,30 @@ public class StockController {
         || r.items.isEmpty()) throw new BizException(ErrorCodes.INVALID, "库存预扣参数不完整", 400);
   }
 
+  /** 执行 now 相关操作。 */
   private static OffsetDateTime now() {
+    // 1. 接收并整理 now 的业务请求。
+    // 2. 执行 now 的核心业务校验与状态处理。
+    // 3. 返回 now 的处理结果。
     return OffsetDateTime.now(ZoneOffset.ofHours(8));
   }
 
+  /** 执行 id 相关操作。 */
   private static long id() {
+    // 1. 接收并整理 id 的业务请求。
+    // 2. 执行 id 的核心业务校验与状态处理。
+    // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
 
   public static class Reservation {
+    /** 保存 orderNo 的业务状态或配置。 */
     public String orderNo;
+
+    /** 执行 业务操作 相关操作。 */
     public List<Line> items = new ArrayList<>();
+
+    /** 保存 scene 的业务状态或配置。 */
     public String scene;
   }
 
