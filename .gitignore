@@ -19,6 +19,7 @@ frontend/*.tsbuildinfo
 # Internal notes, specifications and local progress logs
 *.md
 !/README.md
+/docs/
 .codex/runtime/
 .playwright-cli/
 
