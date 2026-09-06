@@ -1,12 +1,12 @@
 package com.cloudmall.product;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.*;
+
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.service.ProductIndexConsumer;
 import com.cloudmall.product.service.ProductIndexDocumentLoader;
 import com.cloudmall.product.service.ProductIndexWriter;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.*;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.Map;

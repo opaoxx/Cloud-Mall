@@ -1,14 +1,18 @@
 package com.cloudmall.order.controller;
 
+import com.cloudmall.common.api.*;
+import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.common.error.*;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
-import com.cloudmall.common.api.*;
-import com.cloudmall.common.auth.AuthContext;
-import com.cloudmall.common.error.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,32 +20,471 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
-import java.math.BigDecimal;
-import java.time.*;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
 
-@RestController @RequestMapping("/api")
+@RestController
+@RequestMapping("/api")
 public class OrderController {
- private static final DateTimeFormatter MONTH=DateTimeFormatter.ofPattern("yyyyMM");
- private final StockClient stock; private final ProductClient products; private final UserClient users; private final CartClient cart; private final JdbcTemplate db; private final ObjectMapper mapper;
- @Autowired(required=false) private RabbitTemplate rabbit;
- public OrderController(StockClient stock,ProductClient products,UserClient users,CartClient cart,JdbcTemplate db,ObjectMapper mapper){this.stock=stock;this.products=products;this.users=users;this.cart=cart;this.db=db;this.mapper=mapper;}
- @Transactional @PostMapping("/orders") public synchronized ApiResponse<?> create(@RequestHeader("Idempotency-Key") String key,@RequestBody CreateRequest req){long uid=AuthContext.requireUserId();if(key==null||key.isBlank())bad("Idempotency-Key不能为空");List<String> old=db.query("select order_no from order_idempotency where user_id=? and idempotency_key=?",(r,n)->r.getString(1),uid,key);if(!old.isEmpty())return ApiResponse.ok(find(old.get(0)));if(req==null||req.items==null||req.items.isEmpty()||req.addressId==null)bad("订单商品和地址不能为空");OffsetDateTime created=now();String no=created.format(MONTH)+UUID.randomUUID().toString().replace("-","");String table=table(created);List<StockClient.Line> lines=new ArrayList<>();List<ItemRow> rows=new ArrayList<>();BigDecimal total=BigDecimal.ZERO;for(Item i:req.items){if(i==null||i.skuId==null||i.quantity<1)bad("商品数量必须为正数");ApiResponse<ProductClient.SkuView> resp=products.sku(i.skuId);if(resp==null||!"0".equals(resp.code)||resp.data==null)throw new BizException(ErrorCodes.NOT_FOUND,"商品或 SKU 不存在",404);ProductClient.SkuView s=resp.data;BigDecimal line=s.unitPrice().multiply(BigDecimal.valueOf(i.quantity));total=total.add(line);lines.add(new StockClient.Line(i.skuId,i.quantity));rows.add(new ItemRow(s,line,i.quantity));}ApiResponse<?> reserved=stock.reserve(new StockClient.Reservation(no,lines,"NORMAL"));if(reserved==null||!"0".equals(reserved.code))throw new BizException(ErrorCodes.STOCK,"库存不足",409);Map<String,Object> address=findAddress(req.addressId);OffsetDateTime expire=created.plusMinutes(30);db.update("insert into "+table+"(id,order_no,user_id,status,total_amount,pay_amount,address_snapshot,expire_at,created_at,updated_at) values(?,?,?,?,?,?,?, ?,?,?)",id(),no,uid,"PENDING_PAYMENT",total,total,toJson(address),ts(expire),ts(created),ts(created));long oid=db.queryForObject("select id from "+table+" where order_no=?",Long.class,no);String itemTable=table.replace("mall_order_","mall_order_item_");for(ItemRow r:rows)db.update("insert into "+itemTable+"(id,order_id,order_no,product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount,created_at) values(?,?,?,?,?,?,?,?,?,?,?)",id(),oid,no,r.sku.productId(),r.sku.skuId(),r.sku.productName(),toJson(r.sku.skuSnapshot()),r.sku.unitPrice(),r.quantity,r.line,ts(created));db.update("insert into order_idempotency(id,user_id,idempotency_key,order_no,created_at) values(?,?,?,?,?)",id(),uid,key,no,ts(created));for(Item item:req.items){ApiResponse<?> removed=cart.deleteItem(item.skuId,uid);if(removed==null||!"0".equals(removed.code))throw new BizException(ErrorCodes.INTERNAL,"订单创建成功但购物车清理失败",500);}if(rabbit!=null)rabbit.convertAndSend("cloudmall.order.timeout.exchange","",no,m->{m.getMessageProperties().setExpiration("1800000");return m;});return ApiResponse.ok(find(no));}
- @GetMapping("/orders") public ApiResponse<?> list(@RequestParam(required=false)String status,@RequestParam(defaultValue="1")int page,@RequestParam(defaultValue="20")int pageSize,@RequestParam(required=false)String startTime,@RequestParam(required=false)String endTime){long uid=AuthContext.requireUserId();page=Math.max(1,page);pageSize=Math.min(Math.max(1,pageSize),100);OffsetDateTime start=parse(startTime,now().minusMonths(1)),end=parse(endTime,now().plusSeconds(1));if(!start.isBefore(end))throw new BizException(ErrorCodes.INVALID,"时间范围无效",400);List<Order> all=new ArrayList<>();YearMonth m=YearMonth.from(start),last=YearMonth.from(end.minusNanos(1));while(!m.isAfter(last)){String t="mall_order_"+m.format(MONTH);StringBuilder w=new StringBuilder(" where user_id=? and created_at>=? and created_at<?");List<Object>a=new ArrayList<>(List.of(uid,ts(start),ts(end)));if(status!=null){w.append(" and status=?");a.add(status);}try{all.addAll(db.query("select order_no,user_id,status,total_amount,pay_amount,address_snapshot,created_at,expire_at from "+t+w,a.toArray(),(r,n)->view(r)));}catch(DataAccessException ignored){}m=m.plusMonths(1);}all.sort(Comparator.comparing((Order o)->o.createdAt,Comparator.nullsLast(Comparator.reverseOrder())));long total=all.size();int from=Math.min((page-1)*pageSize,all.size()),to=Math.min(from+pageSize,all.size());return ApiResponse.ok(new PageResult<>(all.subList(from,to),page,pageSize,total));}
- @GetMapping("/orders/{orderNo}")public ApiResponse<?> get(@PathVariable("orderNo") String orderNo){return ApiResponse.ok(owned(orderNo));}
- @Transactional @PostMapping("/orders/{orderNo}/cancel")public synchronized ApiResponse<?> cancel(@PathVariable("orderNo") String orderNo,@RequestHeader(value="X-User-Id",required=false)Long headerUser){Order o=find(orderNo);long uid=headerUser==null?AuthContext.requireUserId():headerUser;if(o.userId!=uid)throw new BizException(ErrorCodes.FORBIDDEN,"无权访问此订单",403);if(!"PENDING_PAYMENT".equals(o.status))return ApiResponse.ok(o);setStatus(o,"CANCELLED");stock.rollback(orderNo);return ApiResponse.ok(find(orderNo));}
- @Transactional @PostMapping("/orders/{orderNo}/paid")public synchronized ApiResponse<?> paid(@PathVariable("orderNo") String orderNo){Order o=owned(orderNo);if("PAID".equals(o.status))return ApiResponse.ok(o);if(!"PENDING_PAYMENT".equals(o.status))throw new BizException(ErrorCodes.STATUS,"订单状态不允许支付",409);setStatus(o,"PAID");stock.confirm(orderNo);return ApiResponse.ok(find(orderNo));}
- @PostMapping("/orders/{orderNo}/confirm")public ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo){Order o=owned(orderNo);if(!"PAID".equals(o.status))throw new BizException(ErrorCodes.STATUS,"订单尚未支付",409);setStatus(o,"COMPLETED");return ApiResponse.ok(find(orderNo));}
- @PostMapping("/seckill/orders")public ApiResponse<?> seckill(@RequestHeader("Idempotency-Key")String key,@RequestBody SeckillRequest req){long uid=AuthContext.requireUserId();if(key==null||key.isBlank()||req==null||req.activityId==null||req.skuId==null)bad("秒杀参数不完整");Map<String,Object>b=new HashMap<>();b.put("activityId",req.activityId);b.put("skuId",req.skuId);b.put("userId",uid);b.put("idempotencyKey",key);ApiResponse<?> r=stock.seckill(b);return r==null?ApiResponse.error(ErrorCodes.INTERNAL,"库存服务不可用"):r;}
- @RabbitListener(queues=OrderMessagingConfiguration.SECKILL_QUEUE) @Transactional public void consumeSeckill(Map<String,Object> event){try{String no=String.valueOf(event.get("orderNo")),key=String.valueOf(event.get("idempotencyKey"));long uid=((Number)event.get("userId")).longValue();if(!db.query("select order_no from order_idempotency where user_id=? and idempotency_key=?",(r,n)->r.getString(1),uid,key).isEmpty())return;ProductClient.SkuView s=products.sku(((Number)event.get("skuId")).longValue()).data;if(s==null)throw new IllegalStateException("秒杀商品不存在: "+event.get("skuId"));OffsetDateTime created=now();String t=table(created);db.update("insert into "+t+"(id,order_no,user_id,status,total_amount,pay_amount,address_snapshot,expire_at,created_at,updated_at) values(?,?,?,?,?,?,?, ?,?,?)",id(),no,uid,"PENDING_PAYMENT",s.unitPrice(),s.unitPrice(),"{}",ts(created.plusMinutes(30)),ts(created),ts(created));long oid=db.queryForObject("select id from "+t+" where order_no=?",Long.class,no);String it=t.replace("mall_order_","mall_order_item_");db.update("insert into "+it+"(id,order_id,order_no,product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount,created_at) values(?,?,?,?,?,?,?,?,?,?,?)",id(),oid,no,s.productId(),s.skuId(),s.productName(),toJson(s.skuSnapshot()),s.unitPrice(),1,s.unitPrice(),ts(created));db.update("insert into order_idempotency(id,user_id,idempotency_key,order_no,created_at) values(?,?,?,?,?)",id(),uid,key,no,ts(created));}catch(Exception e){throw new IllegalStateException("秒杀订单消息消费失败，交由 RabbitMQ 重试或死信: "+event,e);}}
- private Order owned(String no){Order o=find(no);if(!o.userId.equals(AuthContext.requireUserId()))throw new BizException(ErrorCodes.FORBIDDEN,"无权访问此订单",403);return o;}
- private Map<String,Object> findAddress(Long id){ApiResponse<List<Map<String,Object>>>r=users.addresses();if(r==null||r.data==null)throw new BizException(ErrorCodes.NOT_FOUND,"地址不存在",404);return r.data.stream().filter(a->a.get("id") instanceof Number&&((Number)a.get("id")).longValue()==id).findFirst().orElseThrow(()->new BizException(ErrorCodes.NOT_FOUND,"地址不存在",404));}
- private Map<String,String> readSnapshot(String value){try{return value==null?Map.of():mapper.readValue(value,Map.class);}catch(Exception e){throw new BizException(ErrorCodes.INTERNAL,"SKU快照读取失败",500);}} private String toJson(Object v){try{return mapper.writeValueAsString(v);}catch(Exception e){throw new BizException(ErrorCodes.INTERNAL,"地址快照生成失败",500);}}
- @RabbitListener(queues=OrderMessagingConfiguration.TIMEOUT_DLQ) @Transactional public void consumeTimeout(String orderNo){if(orderNo!=null&&!orderNo.isBlank()){Order o=find(orderNo);if("PENDING_PAYMENT".equals(o.status)){setStatus(o,"CANCELLED");stock.rollback(orderNo);}}}
- private Order find(String no){String t=tableFromNo(no);List<Order>x=db.query("select order_no,user_id,status,total_amount,pay_amount,address_snapshot,created_at,expire_at from "+t+" where order_no=?",(r,n)->view(r),no);if(x.isEmpty())throw new BizException(ErrorCodes.NOT_FOUND,"订单不存在",404);Order o=x.get(0);o.items=db.query("select product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount from "+t.replace("mall_order_","mall_order_item_")+" where order_no=? order by id",(r,n)->new OrderItem(r.getLong(1),r.getLong(2),r.getString(3),readSnapshot(r.getString(4)),r.getBigDecimal(5),r.getInt(6),r.getBigDecimal(7)),no);return o;}
- private void setStatus(Order o,String st){db.update("update "+tableFromNo(o.orderNo)+" set status=?,updated_at=?,paid_at=case when ?='PAID' then ? else paid_at end,cancelled_at=case when ?='CANCELLED' then ? else cancelled_at end where order_no=? and status=?",st,ts(now()),st,ts(now()),st,ts(now()),o.orderNo,o.status);}
- private static Order view(java.sql.ResultSet r)throws java.sql.SQLException{Order o=new Order();o.orderNo=r.getString(1);o.userId=r.getLong(2);o.status=r.getString(3);o.totalAmount=r.getBigDecimal(4);o.payAmount=r.getBigDecimal(5);o.addressSnapshot=r.getString(6);o.createdAt=r.getTimestamp(7).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();if(r.getTimestamp(8)!=null)o.expireAt=r.getTimestamp(8).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();return o;}
- private static String table(OffsetDateTime d){return "mall_order_"+d.format(MONTH);}private static String tableFromNo(String no){if(no==null||!no.matches("\\d{6}[A-Za-z0-9]+"))throw new BizException(ErrorCodes.NOT_FOUND,"订单不存在",404);try{YearMonth.parse(no.substring(0,6),DateTimeFormatter.ofPattern("yyyyMM"));}catch(Exception e){throw new BizException(ErrorCodes.NOT_FOUND,"订单不存在",404);}return "mall_order_"+no.substring(0,6);}private static OffsetDateTime parse(String s,OffsetDateTime d){try{return s==null?d:OffsetDateTime.parse(s);}catch(Exception e){throw new BizException(ErrorCodes.INVALID,"时间格式错误",400);}}private static java.sql.Timestamp ts(OffsetDateTime d){return java.sql.Timestamp.from(d.toInstant());}private static OffsetDateTime now(){return OffsetDateTime.now(ZoneOffset.ofHours(8));}private static long id(){return Math.abs(UUID.randomUUID().getMostSignificantBits());}private static void bad(String s){throw new BizException(ErrorCodes.INVALID,s,400);}
- public static class CreateRequest{public List<Item>items;public Long addressId;}public static class Item{public Long skuId;public int quantity;}public static class SeckillRequest{public Long activityId,skuId;}private record ItemRow(ProductClient.SkuView sku,BigDecimal line,int quantity){}public static class Order{public String orderNo,status,createdAt,expireAt,addressSnapshot;public Long userId;public BigDecimal totalAmount,payAmount;public List<OrderItem>items=new ArrayList<>();}public record OrderItem(Long productId,Long skuId,String productNameSnapshot,Map<String,String> skuSnapshot,BigDecimal unitPrice,int quantity,BigDecimal lineAmount){}
+  private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
+  private final StockClient stock;
+  private final ProductClient products;
+  private final UserClient users;
+  private final CartClient cart;
+  private final JdbcTemplate db;
+  private final ObjectMapper mapper;
+
+  @Autowired(required = false)
+  private RabbitTemplate rabbit;
+
+  public OrderController(
+      StockClient stock,
+      ProductClient products,
+      UserClient users,
+      CartClient cart,
+      JdbcTemplate db,
+      ObjectMapper mapper) {
+    this.stock = stock;
+    this.products = products;
+    this.users = users;
+    this.cart = cart;
+    this.db = db;
+    this.mapper = mapper;
+  }
+
+  @Transactional
+  @PostMapping("/orders")
+  public synchronized ApiResponse<?> create(
+      @RequestHeader("Idempotency-Key") String key, @RequestBody CreateRequest req) {
+    long uid = AuthContext.requireUserId();
+    if (key == null || key.isBlank()) bad("Idempotency-Key不能为空");
+    List<String> old =
+        db.query(
+            "select order_no from order_idempotency where user_id=? and idempotency_key=?",
+            (r, n) -> r.getString(1),
+            uid,
+            key);
+    if (!old.isEmpty()) return ApiResponse.ok(find(old.get(0)));
+    if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
+      bad("订单商品和地址不能为空");
+    OffsetDateTime created = now();
+    String no = created.format(MONTH) + UUID.randomUUID().toString().replace("-", "");
+    String table = table(created);
+    List<StockClient.Line> lines = new ArrayList<>();
+    List<ItemRow> rows = new ArrayList<>();
+    BigDecimal total = BigDecimal.ZERO;
+    for (Item i : req.items) {
+      if (i == null || i.skuId == null || i.quantity < 1) bad("商品数量必须为正数");
+      ApiResponse<ProductClient.SkuView> resp = products.sku(i.skuId);
+      if (resp == null || !"0".equals(resp.code) || resp.data == null)
+        throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
+      ProductClient.SkuView s = resp.data;
+      BigDecimal line = s.unitPrice().multiply(BigDecimal.valueOf(i.quantity));
+      total = total.add(line);
+      lines.add(new StockClient.Line(i.skuId, i.quantity));
+      rows.add(new ItemRow(s, line, i.quantity));
+    }
+    ApiResponse<?> reserved = stock.reserve(new StockClient.Reservation(no, lines, "NORMAL"));
+    if (reserved == null || !"0".equals(reserved.code))
+      throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
+    Map<String, Object> address = findAddress(req.addressId);
+    OffsetDateTime expire = created.plusMinutes(30);
+    db.update(
+        "insert into "
+            + table
+            + "(id,order_no,user_id,status,total_amount,pay_amount,address_snapshot,expire_at,created_at,updated_at)"
+            + " values(?,?,?,?,?,?,?, ?,?,?)",
+        id(),
+        no,
+        uid,
+        "PENDING_PAYMENT",
+        total,
+        total,
+        toJson(address),
+        ts(expire),
+        ts(created),
+        ts(created));
+    long oid = db.queryForObject("select id from " + table + " where order_no=?", Long.class, no);
+    String itemTable = table.replace("mall_order_", "mall_order_item_");
+    for (ItemRow r : rows)
+      db.update(
+          "insert into "
+              + itemTable
+              + "(id,order_id,order_no,product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount,created_at)"
+              + " values(?,?,?,?,?,?,?,?,?,?,?)",
+          id(),
+          oid,
+          no,
+          r.sku.productId(),
+          r.sku.skuId(),
+          r.sku.productName(),
+          toJson(r.sku.skuSnapshot()),
+          r.sku.unitPrice(),
+          r.quantity,
+          r.line,
+          ts(created));
+    db.update(
+        "insert into order_idempotency(id,user_id,idempotency_key,order_no,created_at)"
+            + " values(?,?,?,?,?)",
+        id(),
+        uid,
+        key,
+        no,
+        ts(created));
+    for (Item item : req.items) {
+      ApiResponse<?> removed = cart.deleteItem(item.skuId, uid);
+      if (removed == null || !"0".equals(removed.code))
+        throw new BizException(ErrorCodes.INTERNAL, "订单创建成功但购物车清理失败", 500);
+    }
+    if (rabbit != null)
+      rabbit.convertAndSend(
+          "cloudmall.order.timeout.exchange",
+          "",
+          no,
+          m -> {
+            m.getMessageProperties().setExpiration("1800000");
+            return m;
+          });
+    return ApiResponse.ok(find(no));
+  }
+
+  @GetMapping("/orders")
+  public ApiResponse<?> list(
+      @RequestParam(required = false) String status,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "20") int pageSize,
+      @RequestParam(required = false) String startTime,
+      @RequestParam(required = false) String endTime) {
+    long uid = AuthContext.requireUserId();
+    page = Math.max(1, page);
+    pageSize = Math.min(Math.max(1, pageSize), 100);
+    OffsetDateTime start = parse(startTime, now().minusMonths(1)),
+        end = parse(endTime, now().plusSeconds(1));
+    if (!start.isBefore(end)) throw new BizException(ErrorCodes.INVALID, "时间范围无效", 400);
+    List<Order> all = new ArrayList<>();
+    YearMonth m = YearMonth.from(start), last = YearMonth.from(end.minusNanos(1));
+    while (!m.isAfter(last)) {
+      String t = "mall_order_" + m.format(MONTH);
+      StringBuilder w = new StringBuilder(" where user_id=? and created_at>=? and created_at<?");
+      List<Object> a = new ArrayList<>(List.of(uid, ts(start), ts(end)));
+      if (status != null) {
+        w.append(" and status=?");
+        a.add(status);
+      }
+      try {
+        all.addAll(
+            db.query(
+                "select"
+                    + " order_no,user_id,status,total_amount,pay_amount,address_snapshot,created_at,expire_at"
+                    + " from "
+                    + t
+                    + w,
+                a.toArray(),
+                (r, n) -> view(r)));
+      } catch (DataAccessException ignored) {
+      }
+      m = m.plusMonths(1);
+    }
+    all.sort(
+        Comparator.comparing(
+            (Order o) -> o.createdAt, Comparator.nullsLast(Comparator.reverseOrder())));
+    long total = all.size();
+    int from = Math.min((page - 1) * pageSize, all.size()),
+        to = Math.min(from + pageSize, all.size());
+    return ApiResponse.ok(new PageResult<>(all.subList(from, to), page, pageSize, total));
+  }
+
+  @GetMapping("/orders/{orderNo}")
+  public ApiResponse<?> get(@PathVariable("orderNo") String orderNo) {
+    return ApiResponse.ok(owned(orderNo));
+  }
+
+  @Transactional
+  @PostMapping("/orders/{orderNo}/cancel")
+  public synchronized ApiResponse<?> cancel(
+      @PathVariable("orderNo") String orderNo,
+      @RequestHeader(value = "X-User-Id", required = false) Long headerUser) {
+    Order o = find(orderNo);
+    long uid = headerUser == null ? AuthContext.requireUserId() : headerUser;
+    if (o.userId != uid) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
+    if (!"PENDING_PAYMENT".equals(o.status)) return ApiResponse.ok(o);
+    setStatus(o, "CANCELLED");
+    stock.rollback(orderNo);
+    return ApiResponse.ok(find(orderNo));
+  }
+
+  @Transactional
+  @PostMapping("/orders/{orderNo}/paid")
+  public synchronized ApiResponse<?> paid(@PathVariable("orderNo") String orderNo) {
+    Order o = owned(orderNo);
+    if ("PAID".equals(o.status)) return ApiResponse.ok(o);
+    if (!"PENDING_PAYMENT".equals(o.status))
+      throw new BizException(ErrorCodes.STATUS, "订单状态不允许支付", 409);
+    setStatus(o, "PAID");
+    stock.confirm(orderNo);
+    return ApiResponse.ok(find(orderNo));
+  }
+
+  @PostMapping("/orders/{orderNo}/confirm")
+  public ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo) {
+    Order o = owned(orderNo);
+    if (!"PAID".equals(o.status)) throw new BizException(ErrorCodes.STATUS, "订单尚未支付", 409);
+    setStatus(o, "COMPLETED");
+    return ApiResponse.ok(find(orderNo));
+  }
+
+  @PostMapping("/seckill/orders")
+  public ApiResponse<?> seckill(
+      @RequestHeader("Idempotency-Key") String key, @RequestBody SeckillRequest req) {
+    long uid = AuthContext.requireUserId();
+    if (key == null || key.isBlank() || req == null || req.activityId == null || req.skuId == null)
+      bad("秒杀参数不完整");
+    Map<String, Object> b = new HashMap<>();
+    b.put("activityId", req.activityId);
+    b.put("skuId", req.skuId);
+    b.put("userId", uid);
+    b.put("idempotencyKey", key);
+    ApiResponse<?> r = stock.seckill(b);
+    return r == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : r;
+  }
+
+  @RabbitListener(queues = OrderMessagingConfiguration.SECKILL_QUEUE)
+  @Transactional
+  public void consumeSeckill(Map<String, Object> event) {
+    try {
+      String no = String.valueOf(event.get("orderNo")),
+          key = String.valueOf(event.get("idempotencyKey"));
+      long uid = ((Number) event.get("userId")).longValue();
+      if (!db.query(
+              "select order_no from order_idempotency where user_id=? and idempotency_key=?",
+              (r, n) -> r.getString(1),
+              uid,
+              key)
+          .isEmpty()) return;
+      ProductClient.SkuView s = products.sku(((Number) event.get("skuId")).longValue()).data;
+      if (s == null) throw new IllegalStateException("秒杀商品不存在: " + event.get("skuId"));
+      OffsetDateTime created = now();
+      String t = table(created);
+      db.update(
+          "insert into "
+              + t
+              + "(id,order_no,user_id,status,total_amount,pay_amount,address_snapshot,expire_at,created_at,updated_at)"
+              + " values(?,?,?,?,?,?,?, ?,?,?)",
+          id(),
+          no,
+          uid,
+          "PENDING_PAYMENT",
+          s.unitPrice(),
+          s.unitPrice(),
+          "{}",
+          ts(created.plusMinutes(30)),
+          ts(created),
+          ts(created));
+      long oid = db.queryForObject("select id from " + t + " where order_no=?", Long.class, no);
+      String it = t.replace("mall_order_", "mall_order_item_");
+      db.update(
+          "insert into "
+              + it
+              + "(id,order_id,order_no,product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount,created_at)"
+              + " values(?,?,?,?,?,?,?,?,?,?,?)",
+          id(),
+          oid,
+          no,
+          s.productId(),
+          s.skuId(),
+          s.productName(),
+          toJson(s.skuSnapshot()),
+          s.unitPrice(),
+          1,
+          s.unitPrice(),
+          ts(created));
+      db.update(
+          "insert into order_idempotency(id,user_id,idempotency_key,order_no,created_at)"
+              + " values(?,?,?,?,?)",
+          id(),
+          uid,
+          key,
+          no,
+          ts(created));
+    } catch (Exception e) {
+      throw new IllegalStateException("秒杀订单消息消费失败，交由 RabbitMQ 重试或死信: " + event, e);
+    }
+  }
+
+  private Order owned(String no) {
+    Order o = find(no);
+    if (!o.userId.equals(AuthContext.requireUserId()))
+      throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
+    return o;
+  }
+
+  private Map<String, Object> findAddress(Long id) {
+    ApiResponse<List<Map<String, Object>>> r = users.addresses();
+    if (r == null || r.data == null) throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
+    return r.data.stream()
+        .filter(a -> a.get("id") instanceof Number && ((Number) a.get("id")).longValue() == id)
+        .findFirst()
+        .orElseThrow(() -> new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404));
+  }
+
+  private Map<String, String> readSnapshot(String value) {
+    try {
+      return value == null ? Map.of() : mapper.readValue(value, Map.class);
+    } catch (Exception e) {
+      throw new BizException(ErrorCodes.INTERNAL, "SKU快照读取失败", 500);
+    }
+  }
+
+  private String toJson(Object v) {
+    try {
+      return mapper.writeValueAsString(v);
+    } catch (Exception e) {
+      throw new BizException(ErrorCodes.INTERNAL, "地址快照生成失败", 500);
+    }
+  }
+
+  @RabbitListener(queues = OrderMessagingConfiguration.TIMEOUT_DLQ)
+  @Transactional
+  public void consumeTimeout(String orderNo) {
+    if (orderNo != null && !orderNo.isBlank()) {
+      Order o = find(orderNo);
+      if ("PENDING_PAYMENT".equals(o.status)) {
+        setStatus(o, "CANCELLED");
+        stock.rollback(orderNo);
+      }
+    }
+  }
+
+  private Order find(String no) {
+    String t = tableFromNo(no);
+    List<Order> x =
+        db.query(
+            "select"
+                + " order_no,user_id,status,total_amount,pay_amount,address_snapshot,created_at,expire_at"
+                + " from "
+                + t
+                + " where order_no=?",
+            (r, n) -> view(r),
+            no);
+    if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
+    Order o = x.get(0);
+    o.items =
+        db.query(
+            "select"
+                + " product_id,sku_id,product_name_snapshot,sku_snapshot,unit_price,quantity,line_amount"
+                + " from "
+                + t.replace("mall_order_", "mall_order_item_")
+                + " where order_no=? order by id",
+            (r, n) ->
+                new OrderItem(
+                    r.getLong(1),
+                    r.getLong(2),
+                    r.getString(3),
+                    readSnapshot(r.getString(4)),
+                    r.getBigDecimal(5),
+                    r.getInt(6),
+                    r.getBigDecimal(7)),
+            no);
+    return o;
+  }
+
+  private void setStatus(Order o, String st) {
+    db.update(
+        "update "
+            + tableFromNo(o.orderNo)
+            + " set status=?,updated_at=?,paid_at=case when ?='PAID' then ? else paid_at"
+            + " end,cancelled_at=case when ?='CANCELLED' then ? else cancelled_at end where"
+            + " order_no=? and status=?",
+        st,
+        ts(now()),
+        st,
+        ts(now()),
+        st,
+        ts(now()),
+        o.orderNo,
+        o.status);
+  }
+
+  private static Order view(java.sql.ResultSet r) throws java.sql.SQLException {
+    Order o = new Order();
+    o.orderNo = r.getString(1);
+    o.userId = r.getLong(2);
+    o.status = r.getString(3);
+    o.totalAmount = r.getBigDecimal(4);
+    o.payAmount = r.getBigDecimal(5);
+    o.addressSnapshot = r.getString(6);
+    o.createdAt = r.getTimestamp(7).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
+    if (r.getTimestamp(8) != null)
+      o.expireAt = r.getTimestamp(8).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
+    return o;
+  }
+
+  private static String table(OffsetDateTime d) {
+    return "mall_order_" + d.format(MONTH);
+  }
+
+  private static String tableFromNo(String no) {
+    if (no == null || !no.matches("\\d{6}[A-Za-z0-9]+"))
+      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
+    try {
+      YearMonth.parse(no.substring(0, 6), DateTimeFormatter.ofPattern("yyyyMM"));
+    } catch (Exception e) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
+    }
+    return "mall_order_" + no.substring(0, 6);
+  }
+
+  private static OffsetDateTime parse(String s, OffsetDateTime d) {
+    try {
+      return s == null ? d : OffsetDateTime.parse(s);
+    } catch (Exception e) {
+      throw new BizException(ErrorCodes.INVALID, "时间格式错误", 400);
+    }
+  }
+
+  private static java.sql.Timestamp ts(OffsetDateTime d) {
+    return java.sql.Timestamp.from(d.toInstant());
+  }
+
+  private static OffsetDateTime now() {
+    return OffsetDateTime.now(ZoneOffset.ofHours(8));
+  }
+
+  private static long id() {
+    return Math.abs(UUID.randomUUID().getMostSignificantBits());
+  }
+
+  private static void bad(String s) {
+    throw new BizException(ErrorCodes.INVALID, s, 400);
+  }
+
+  public static class CreateRequest {
+    public List<Item> items;
+    public Long addressId;
+  }
+
+  public static class Item {
+    public Long skuId;
+    public int quantity;
+  }
+
+  public static class SeckillRequest {
+    public Long activityId, skuId;
+  }
+
+  private record ItemRow(ProductClient.SkuView sku, BigDecimal line, int quantity) {}
+
+  public static class Order {
+    public String orderNo, status, createdAt, expireAt, addressSnapshot;
+    public Long userId;
+    public BigDecimal totalAmount, payAmount;
+    public List<OrderItem> items = new ArrayList<>();
+  }
+
+  public record OrderItem(
+      Long productId,
+      Long skuId,
+      String productNameSnapshot,
+      Map<String, String> skuSnapshot,
+      BigDecimal unitPrice,
+      int quantity,
+      BigDecimal lineAmount) {}
 }

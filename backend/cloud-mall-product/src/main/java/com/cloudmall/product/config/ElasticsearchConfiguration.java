@@ -9,8 +9,9 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class ElasticsearchConfiguration {
-    @Bean(destroyMethod = "close")
-    RestHighLevelClient restHighLevelClient(@Value("${cloudmall.product.elasticsearch.url:http://localhost:9200}") String url) {
-        return new RestHighLevelClient(RestClient.builder(HttpHost.create(url)));
-    }
+  @Bean(destroyMethod = "close")
+  RestHighLevelClient restHighLevelClient(
+      @Value("${cloudmall.product.elasticsearch.url:http://localhost:9200}") String url) {
+    return new RestHighLevelClient(RestClient.builder(HttpHost.create(url)));
+  }
 }

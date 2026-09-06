@@ -6,8 +6,8 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class StockMessagingConfiguration {
-    @Bean
-    Jackson2JsonMessageConverter rabbitJsonMessageConverter() {
-        return new Jackson2JsonMessageConverter();
-    }
+  @Bean
+  Jackson2JsonMessageConverter rabbitJsonMessageConverter() {
+    return new Jackson2JsonMessageConverter();
+  }
 }

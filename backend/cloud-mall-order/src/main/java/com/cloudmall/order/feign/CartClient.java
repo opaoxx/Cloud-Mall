@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 
 @FeignClient(name = "cloud-mall-cart")
 public interface CartClient {
-    @DeleteMapping("/api/cart/items/{skuId}")
-    ApiResponse<?> deleteItem(@PathVariable("skuId") Long skuId, @RequestHeader("X-User-Id") Long userId);
+  @DeleteMapping("/api/cart/items/{skuId}")
+  ApiResponse<?> deleteItem(
+      @PathVariable("skuId") Long skuId, @RequestHeader("X-User-Id") Long userId);
 }
