@@ -1,11 +1,11 @@
 package com.cloudmall.order.config;
 
+import com.cloudmall.order.mapper.OrderSqlMapper;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /** Prepares the rolling physical tables used by the application's monthly order routing. */
@@ -18,11 +18,11 @@ public class OrderTableInitializer {
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
 
   /** 保存 db 的业务状态或配置。 */
-  private final JdbcTemplate db;
+  private final OrderSqlMapper orderSqlMapper;
 
   /** 创建 OrderTableInitializer 实例。 */
-  public OrderTableInitializer(JdbcTemplate db) {
-    this.db = db;
+  public OrderTableInitializer(OrderSqlMapper orderSqlMapper) {
+    this.orderSqlMapper = orderSqlMapper;
   }
 
   @PostConstruct
@@ -47,6 +47,6 @@ public class OrderTableInitializer {
 
   /** 执行 createLike 相关操作。 */
   private void createLike(String table, String template) {
-    db.execute("CREATE TABLE IF NOT EXISTS " + table + " LIKE " + template);
+    orderSqlMapper.execute("CREATE TABLE IF NOT EXISTS " + table + " LIKE " + template);
   }
 }

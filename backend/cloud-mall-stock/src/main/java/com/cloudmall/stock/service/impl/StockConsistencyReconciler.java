@@ -1,5 +1,6 @@
 package com.cloudmall.stock.service.impl;
 
+import com.cloudmall.stock.mapper.StockSqlMapper;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -12,7 +13,6 @@ import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -44,15 +44,15 @@ public class StockConsistencyReconciler {
   private final StringRedisTemplate redis;
 
   /** 保存 db 的业务状态或配置。 */
-  private final JdbcTemplate db;
+  private final StockSqlMapper stockSqlMapper;
 
   /** 创建 StockConsistencyReconciler 实例。 */
-  public StockConsistencyReconciler(StringRedisTemplate redis, JdbcTemplate db) {
+  public StockConsistencyReconciler(StringRedisTemplate redis, StockSqlMapper stockSqlMapper) {
     // 1. 接收并整理 StockConsistencyReconciler 的业务请求。
     // 2. 执行 StockConsistencyReconciler 的核心业务校验与状态处理。
     // 3. 返回 StockConsistencyReconciler 的处理结果。
     this.redis = redis;
-    this.db = db;
+    this.stockSqlMapper = stockSqlMapper;
   }
 
   @PostConstruct
@@ -92,7 +92,7 @@ public class StockConsistencyReconciler {
     // 1. 接收并整理 ensureSeckillLedgerTable 的业务请求。
     // 2. 执行 ensureSeckillLedgerTable 的核心业务校验与状态处理。
     // 3. 返回 ensureSeckillLedgerTable 的处理结果。
-    db.execute(
+    stockSqlMapper.execute(
         "CREATE TABLE IF NOT EXISTS seckill_reservation (id BIGINT PRIMARY KEY, activity_id BIGINT"
             + " NOT NULL, sku_id BIGINT NOT NULL, user_id BIGINT NOT NULL, order_no VARCHAR(64) NOT"
             + " NULL, idempotency_key VARCHAR(128) NOT NULL, status VARCHAR(16) NOT NULL,"
@@ -107,7 +107,7 @@ public class StockConsistencyReconciler {
     // 2. 执行 recoverNormalReservations 的核心业务校验与状态处理。
     // 3. 返回 recoverNormalReservations 的处理结果。
     List<Map<String, Object>> rows =
-        db.queryForList(
+        stockSqlMapper.queryForList(
             "select order_no,sku_id,sum(case when flow_type='RESERVE' then quantity "
                 + "when flow_type in ('CONFIRM','ROLLBACK') then -quantity else 0 end) quantity "
                 + "from stock_flow group by order_no,sku_id having quantity>0");
@@ -148,7 +148,7 @@ public class StockConsistencyReconciler {
       String orderNo = redis.opsForValue().get(key);
       if (orderNo == null || orderNo.isBlank()) continue;
       OffsetDateTime now = now();
-      db.update(
+      stockSqlMapper.update(
           "insert ignore into seckill_reservation"
               + " (id,activity_id,sku_id,user_id,order_no,idempotency_key,status,created_at,updated_at)"
               + " values(?,?,?,?,?,?, 'ACCEPTED',?,?)",
@@ -169,7 +169,7 @@ public class StockConsistencyReconciler {
     // 2. 执行 auditNormalStock 的核心业务校验与状态处理。
     // 3. 返回 auditNormalStock 的处理结果。
     for (Map<String, Object> row :
-        db.queryForList("select sku_id,available_quantity from stock_sku")) {
+        stockSqlMapper.queryForList("select sku_id,available_quantity from stock_sku")) {
       Number skuId = (Number) row.get("sku_id");
       Number mysql = (Number) row.get("available_quantity");
       if (skuId == null || mysql == null) continue;
@@ -195,7 +195,7 @@ public class StockConsistencyReconciler {
       if (limitValue == null) continue;
       int stockLimit = Integer.parseInt(String.valueOf(limitValue));
       Long accepted =
-          db.queryForObject(
+          stockSqlMapper.queryForObject(
               "select count(*) from seckill_reservation "
                   + "where activity_id=? and sku_id=? and status='ACCEPTED'",
               Long.class,

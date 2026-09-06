@@ -10,7 +10,8 @@ class BalancePaymentContractTest {
   @Test
   void successfulPaymentDebitsBalanceBeforeSynchronizingOrder() throws Exception {
     String source =
-        Files.readString(Path.of("src/main/java/com/cloudmall/pay/controller/PayController.java"));
+        Files.readString(
+            Path.of("src/main/java/com/cloudmall/pay/service/impl/PayServiceImpl.java"));
     String compact = compact(source);
     assertTrue(source.contains("users.debit"));
     assertTrue(compact.contains("newUserClient.DebitRequest(p.payNo,p.amount)"));

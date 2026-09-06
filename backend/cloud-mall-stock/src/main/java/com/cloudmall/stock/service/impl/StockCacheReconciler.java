@@ -1,12 +1,12 @@
 package com.cloudmall.stock.service.impl;
 
+import com.cloudmall.stock.mapper.StockSqlMapper;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /** Rebuilds the normal stock cache from the durable stock table after Redis data loss or drift. */
@@ -22,15 +22,15 @@ public class StockCacheReconciler {
   private final StringRedisTemplate redis;
 
   /** 保存 db 的业务状态或配置。 */
-  private final JdbcTemplate db;
+  private final StockSqlMapper stockSqlMapper;
 
   /** 创建 StockCacheReconciler 实例。 */
-  public StockCacheReconciler(StringRedisTemplate redis, JdbcTemplate db) {
+  public StockCacheReconciler(StringRedisTemplate redis, StockSqlMapper stockSqlMapper) {
     // 1. 接收并整理 StockCacheReconciler 的业务请求。
     // 2. 执行 StockCacheReconciler 的核心业务校验与状态处理。
     // 3. 返回 StockCacheReconciler 的处理结果。
     this.redis = redis;
-    this.db = db;
+    this.stockSqlMapper = stockSqlMapper;
   }
 
   @PostConstruct
@@ -40,7 +40,7 @@ public class StockCacheReconciler {
     // 2. 执行 rebuildFromDatabase 的核心业务校验与状态处理。
     // 3. 返回 rebuildFromDatabase 的处理结果。
     List<Map<String, Object>> stocks =
-        db.queryForList("select sku_id, available_quantity from stock_sku");
+        stockSqlMapper.queryForList("select sku_id, available_quantity from stock_sku");
     for (Map<String, Object> stock : stocks) {
       Number skuId = (Number) stock.get("sku_id");
       Number available = (Number) stock.get("available_quantity");

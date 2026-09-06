@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 import com.cloudmall.product.controller.ProductController;
+import com.cloudmall.product.mapper.ProductSqlMapper;
+import com.cloudmall.product.service.impl.ProductServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
@@ -18,7 +20,6 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 class ProductContractTest {
@@ -99,31 +100,31 @@ class ProductContractTest {
   @Test
   void everyProductEventPublishingWriteEndpointIsTransactional() throws Exception {
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("create", ProductController.Product.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("update", Long.class, ProductController.Product.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("publish", Long.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("unpublish", Long.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("addCategory", ProductController.Category.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("updateCategory", Long.class, ProductController.Category.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductController.class
+        ProductServiceImpl.class
             .getDeclaredMethod("deleteCategory", Long.class)
             .isAnnotationPresent(Transactional.class));
   }
@@ -137,10 +138,10 @@ class ProductContractTest {
             org.mockito.ArgumentMatchers.anyString(),
             org.mockito.ArgumentMatchers.anyString(),
             (Object) org.mockito.ArgumentMatchers.any());
-    ProductController controller =
-        new ProductController(
-            mock(JdbcTemplate.class), rabbit, mock(StringRedisTemplate.class), mapper);
-    Method event = ProductController.class.getDeclaredMethod("event", String.class, long.class);
+    ProductServiceImpl controller =
+        new ProductServiceImpl(
+            mock(ProductSqlMapper.class), rabbit, mock(StringRedisTemplate.class), mapper);
+    Method event = ProductServiceImpl.class.getDeclaredMethod("event", String.class, long.class);
     event.setAccessible(true);
 
     InvocationTargetException thrown =

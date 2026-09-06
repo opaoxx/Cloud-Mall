@@ -18,7 +18,7 @@ import org.yaml.snakeyaml.Yaml;
 class BackendP1RulesTest {
   @Test
   void stockChecksDatabaseWritesAndCompensatesRedis() throws Exception {
-    String source = source("cloud-mall-stock", "StockController.java");
+    String source = source("cloud-mall-stock", "StockServiceImpl.java");
     String compact = compact(source);
     assertTrue(compact.contains("if(changed!=1)"));
     assertTrue(source.contains("compensateReservation"));
@@ -30,7 +30,7 @@ class BackendP1RulesTest {
 
   @Test
   void productPersistsAndReadsParameters() throws Exception {
-    String source = source("cloud-mall-product", "ProductController.java");
+    String source = source("cloud-mall-product", "ProductServiceImpl.java");
     String compact = compact(source);
     assertTrue(source.contains("product_parameter"));
     assertTrue(source.contains("parameters"));
@@ -40,7 +40,7 @@ class BackendP1RulesTest {
 
   @Test
   void productMapsDatabaseSnakeCaseToApiDtos() throws Exception {
-    String source = source("cloud-mall-product", "ProductController.java");
+    String source = source("cloud-mall-product", "ProductServiceImpl.java");
     String compact = compact(source);
     assertTrue(compact.contains("toActivityResponse(activityRecord(id))"));
     assertTrue(source.contains("new HotStatResponse"));
@@ -52,8 +52,8 @@ class BackendP1RulesTest {
 
   @Test
   void paymentAndOrderBindIdempotencyAndPathVariables() throws Exception {
-    String payment = source("cloud-mall-pay", "PayController.java");
-    String order = source("cloud-mall-order", "OrderController.java");
+    String payment = source("cloud-mall-pay", "PayServiceImpl.java");
+    String order = source("cloud-mall-order", "OrderServiceImpl.java");
     assertTrue(payment.contains("payNoFor"));
     assertTrue(payment.contains("Idempotency-Key"));
     assertTrue(order.contains("@PathVariable(\"orderNo\")"));
@@ -63,7 +63,7 @@ class BackendP1RulesTest {
 
   @Test
   void seckillConsumerRejectsFailuresAndQueueHasDeadLetterRetrySemantics() throws Exception {
-    String order = source("cloud-mall-order", "OrderController.java");
+    String order = source("cloud-mall-order", "OrderServiceImpl.java");
     String compact = compact(order);
     String messaging = source("cloud-mall-order", "OrderMessagingConfiguration.java");
     String config =
@@ -80,8 +80,8 @@ class BackendP1RulesTest {
 
   @Test
   void productEventFailureIsLogged() throws Exception {
-    String product = source("cloud-mall-product", "ProductController.java");
-    assertTrue(product.contains("LoggerFactory.getLogger(ProductController.class)"));
+    String product = source("cloud-mall-product", "ProductServiceImpl.java");
+    assertTrue(product.contains("LoggerFactory.getLogger(ProductServiceImpl.class)"));
     assertTrue(product.contains("log.error(\"商品事件发送失败"));
     assertTrue(!product.contains("catch(Exception ignored){}"));
   }
@@ -297,7 +297,7 @@ class BackendP1RulesTest {
                     "web",
                     "GlobalExceptionHandler.java")
                 .normalize());
-    String order = source("cloud-mall-order", "OrderController.java");
+    String order = source("cloud-mall-order", "OrderServiceImpl.java");
     assertTrue(handler.contains("MissingRequestHeaderException"));
     assertTrue(handler.contains("COMMON_INVALID_ARGUMENT"));
     assertTrue(order.contains("@RequestHeader(\"Idempotency-Key\")"));

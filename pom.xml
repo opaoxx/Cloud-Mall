@@ -7,7 +7,7 @@
   <properties>
     <java.version>17</java.version><spring-cloud.version>2021.0.5</spring-cloud.version>
     <spring-cloud-alibaba.version>2021.0.5.0</spring-cloud-alibaba.version>
-    <sharding.version>4.1.1</sharding.version><mysql.version>8.0.33</mysql.version>
+    <sharding.version>4.1.1</sharding.version><mysql.version>8.0.33</mysql.version><mybatis-plus.version>3.5.5</mybatis-plus.version>
   </properties>
   <modules>
     <module>backend/cloud-mall-common</module>
