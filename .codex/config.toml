@@ -3,8 +3,6 @@
 
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
-model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
 
 [agents]
 enabled = true
