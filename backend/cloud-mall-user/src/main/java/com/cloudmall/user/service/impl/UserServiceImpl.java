@@ -6,8 +6,14 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.cloudmall.user.domain.dto.AddressRequestDTO;
+import com.cloudmall.user.domain.dto.CredentialsDTO;
+import com.cloudmall.user.domain.dto.DebitRequestDTO;
+import com.cloudmall.user.domain.dto.ProfileDTO;
 import com.cloudmall.user.domain.po.UserAddressPO;
 import com.cloudmall.user.domain.po.UserPO;
+import com.cloudmall.user.domain.vo.UserAddressVO;
+import com.cloudmall.user.domain.vo.UserVO;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.service.UserService;
@@ -20,7 +26,6 @@ import java.util.Objects;
 import java.util.UUID;
 import javax.annotation.PostConstruct;
 import javax.validation.Valid;
-import javax.validation.constraints.NotBlank;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -69,7 +74,7 @@ public class UserServiceImpl implements UserService {
 
   /** 注册用户并返回用户标识。 */
   @PostMapping("/auth/register")
-  public ApiResponse<?> register(@Valid @RequestBody Credentials credentials) {
+  public ApiResponse<?> register(@Valid @RequestBody CredentialsDTO credentials) {
     // 1. 校验用户名是否已被占用。
     // 2. 保存密码摘要、角色和初始余额。
     // 3. 返回新用户的公开信息。
@@ -94,7 +99,7 @@ public class UserServiceImpl implements UserService {
 
   /** 校验凭据并创建 Redis 登录态。 */
   @PostMapping("/auth/login")
-  public ApiResponse<?> login(@Valid @RequestBody Credentials credentials) {
+  public ApiResponse<?> login(@Valid @RequestBody CredentialsDTO credentials) {
     // 1. 按用户名读取用户事实数据。
     // 2. 校验账号状态和密码摘要。
     // 3. 写入两小时 Redis Token 并返回用户信息。
@@ -107,7 +112,7 @@ public class UserServiceImpl implements UserService {
     }
     String token = UUID.randomUUID().toString();
     redis.opsForValue().set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
-    return ApiResponse.ok(Map.of("token", token, "user", userView(user)));
+    return ApiResponse.ok(Map.of("token", token, "user", UserVO.from(user)));
   }
 
   /** 使当前登录 Token 失效。 */
@@ -129,7 +134,7 @@ public class UserServiceImpl implements UserService {
     // 1. 从认证上下文获取当前用户。
     // 2. 通过 Mapper 读取用户事实数据。
     // 3. 转换为公开用户视图。
-    return ApiResponse.ok(userView(currentUser()));
+    return ApiResponse.ok(UserVO.from(currentUser()));
   }
 
   /** 按幂等支付键扣减用户余额。 */
@@ -137,7 +142,7 @@ public class UserServiceImpl implements UserService {
   public synchronized ApiResponse<?> debit(
       @PathVariable Long userId,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId,
-      @Valid @RequestBody DebitRequest request) {
+      @Valid @RequestBody DebitRequestDTO request) {
     // 1. 校验内部调用者身份、支付幂等键和扣款金额。
     // 2. 通过 Mapper 的条件更新原子扣减余额。
     // 3. 缓存扣款结果并返回最新余额。
@@ -168,7 +173,7 @@ public class UserServiceImpl implements UserService {
 
   /** 更新当前用户允许修改的资料。 */
   @PutMapping("/users/me")
-  public ApiResponse<?> update(@RequestBody Profile profile) {
+  public ApiResponse<?> update(@RequestBody ProfileDTO profile) {
     // 1. 获取当前用户并整理可修改字段。
     // 2. 通过 Mapper 更新用户资料和审计时间。
     // 3. 重新读取并返回更新后的资料。
@@ -195,12 +200,12 @@ public class UserServiceImpl implements UserService {
                 .eq("user_id", AuthContext.requireUserId())
                 .orderByDesc("is_default")
                 .orderByDesc("id"));
-    return ApiResponse.ok(addresses.stream().map(UserAddressView::from).toList());
+    return ApiResponse.ok(addresses.stream().map(UserAddressVO::from).toList());
   }
 
   /** 新增当前用户收货地址。 */
   @PostMapping("/users/me/addresses")
-  public ApiResponse<?> addAddress(@RequestBody AddressRequest request) {
+  public ApiResponse<?> addAddress(@RequestBody AddressRequestDTO request) {
     // 1. 获取当前用户并准备地址主键。
     // 2. 必要时清除原默认地址。
     // 3. 保存新地址并返回地址视图。
@@ -210,12 +215,13 @@ public class UserServiceImpl implements UserService {
     }
     UserAddressPO address = toAddress(null, userId, request);
     userAddressMapper.insert(address);
-    return ApiResponse.ok(UserAddressView.from(address));
+    return ApiResponse.ok(UserAddressVO.from(address));
   }
 
   /** 更新当前用户收货地址。 */
   @PutMapping("/users/me/addresses/{id}")
-  public ApiResponse<?> updateAddress(@PathVariable Long id, @RequestBody AddressRequest request) {
+  public ApiResponse<?> updateAddress(
+      @PathVariable Long id, @RequestBody AddressRequestDTO request) {
     // 1. 校验地址属于当前用户。
     // 2. 更新地址字段和默认标志。
     // 3. 返回更新后的地址视图。
@@ -227,7 +233,7 @@ public class UserServiceImpl implements UserService {
     if (request.isDefault) {
       clearDefaultAddress(userId, id);
     }
-    return ApiResponse.ok(UserAddressView.from(address));
+    return ApiResponse.ok(UserAddressVO.from(address));
   }
 
   /** 删除当前用户收货地址。 */
@@ -267,7 +273,7 @@ public class UserServiceImpl implements UserService {
   }
 
   /** 将请求对象转换为地址持久化对象。 */
-  private UserAddressPO toAddress(Long addressId, Long userId, AddressRequest request) {
+  private UserAddressPO toAddress(Long addressId, Long userId, AddressRequestDTO request) {
     UserAddressPO address = new UserAddressPO();
     address.id = addressId == null ? System.currentTimeMillis() : addressId;
     address.userId = userId;
@@ -278,85 +284,5 @@ public class UserServiceImpl implements UserService {
     address.updatedAt = LocalDateTime.now();
     address.createdAt = address.updatedAt;
     return address;
-  }
-
-  /** 用户注册和登录请求。 */
-  public static class Credentials {
-    /** 登录用户名。 */
-    @NotBlank public String username;
-
-    /** 登录密码。 */
-    @NotBlank public String password;
-  }
-
-  /** 用户资料更新请求。 */
-  public static class Profile {
-    /** 用户昵称。 */
-    public String nickname;
-
-    /** 联系电话。 */
-    public String phone;
-
-    /** 头像地址。 */
-    public String avatarUrl;
-  }
-
-  /** 余额扣减请求。 */
-  public static class DebitRequest {
-    /** 支付幂等键。 */
-    @NotBlank public String paymentKey;
-
-    /** 扣减金额。 */
-    public BigDecimal amount;
-  }
-
-  /** 收货地址请求。 */
-  public static class AddressRequest {
-    /** 收货人姓名。 */
-    public String receiver;
-
-    /** 收货电话。 */
-    public String phone;
-
-    /** 地区及详细地址。 */
-    public String detailAddress;
-
-    /** 是否设为默认地址。 */
-    public boolean isDefault;
-  }
-
-  /** 将用户持久化对象转换为既有用户响应字段。 */
-  private static Map<String, Object> userView(UserPO user) {
-    return Map.of(
-        "userId",
-        user.id,
-        "username",
-        user.username,
-        "role",
-        user.role,
-        "roles",
-        List.of(user.role),
-        "nickname",
-        user.nickname == null ? "" : user.nickname,
-        "phone",
-        user.phone == null ? "" : user.phone,
-        "avatarUrl",
-        user.avatarUrl == null ? "" : user.avatarUrl,
-        "balance",
-        user.balance.toPlainString());
-  }
-
-  /** 地址响应视图。 */
-  private record UserAddressView(
-      Long id, String receiver, String phone, String detailAddress, boolean isDefault) {
-    /** 从地址持久化对象构造公开视图。 */
-    private static UserAddressView from(UserAddressPO address) {
-      return new UserAddressView(
-          address.id,
-          address.receiverName,
-          address.receiverPhone,
-          address.regionDetail,
-          Boolean.TRUE.equals(address.defaultAddress));
-    }
   }
 }

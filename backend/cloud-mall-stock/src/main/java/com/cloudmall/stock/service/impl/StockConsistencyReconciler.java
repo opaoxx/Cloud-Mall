@@ -92,13 +92,7 @@ public class StockConsistencyReconciler {
     // 1. 接收并整理 ensureSeckillLedgerTable 的业务请求。
     // 2. 执行 ensureSeckillLedgerTable 的核心业务校验与状态处理。
     // 3. 返回 ensureSeckillLedgerTable 的处理结果。
-    stockSqlMapper.execute(
-        "CREATE TABLE IF NOT EXISTS seckill_reservation (id BIGINT PRIMARY KEY, activity_id BIGINT"
-            + " NOT NULL, sku_id BIGINT NOT NULL, user_id BIGINT NOT NULL, order_no VARCHAR(64) NOT"
-            + " NULL, idempotency_key VARCHAR(128) NOT NULL, status VARCHAR(16) NOT NULL,"
-            + " created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, UNIQUE KEY"
-            + " uk_seckill_request(activity_id,user_id,idempotency_key), UNIQUE KEY"
-            + " uk_seckill_order(order_no), KEY idx_seckill_stock(activity_id,sku_id,status))");
+    stockSqlMapper.ensureSeckillLedgerTable();
   }
 
   /** 执行 recoverNormalReservations 相关操作。 */
@@ -106,11 +100,7 @@ public class StockConsistencyReconciler {
     // 1. 接收并整理 recoverNormalReservations 的业务请求。
     // 2. 执行 recoverNormalReservations 的核心业务校验与状态处理。
     // 3. 返回 recoverNormalReservations 的处理结果。
-    List<Map<String, Object>> rows =
-        stockSqlMapper.queryForList(
-            "select order_no,sku_id,sum(case when flow_type='RESERVE' then quantity "
-                + "when flow_type in ('CONFIRM','ROLLBACK') then -quantity else 0 end) quantity "
-                + "from stock_flow group by order_no,sku_id having quantity>0");
+    List<Map<String, Object>> rows = stockSqlMapper.findOpenReservations();
     Map<String, Map<Long, Integer>> reservations = new LinkedHashMap<>();
     for (Map<String, Object> row : rows) {
       Number skuId = (Number) row.get("sku_id");
@@ -148,17 +138,12 @@ public class StockConsistencyReconciler {
       String orderNo = redis.opsForValue().get(key);
       if (orderNo == null || orderNo.isBlank()) continue;
       OffsetDateTime now = now();
-      stockSqlMapper.update(
-          "insert ignore into seckill_reservation"
-              + " (id,activity_id,sku_id,user_id,order_no,idempotency_key,status,created_at,updated_at)"
-              + " values(?,?,?,?,?,?, 'ACCEPTED',?,?)",
-          id(),
+      stockSqlMapper.insertAcceptedReservation(
           Long.parseLong(parts[0]),
           Long.parseLong(parts[1]),
           Long.parseLong(parts[2]),
           orderNo,
           parts[3],
-          now,
           now);
     }
   }
@@ -168,8 +153,7 @@ public class StockConsistencyReconciler {
     // 1. 接收并整理 auditNormalStock 的业务请求。
     // 2. 执行 auditNormalStock 的核心业务校验与状态处理。
     // 3. 返回 auditNormalStock 的处理结果。
-    for (Map<String, Object> row :
-        stockSqlMapper.queryForList("select sku_id,available_quantity from stock_sku")) {
+    for (Map<String, Object> row : stockSqlMapper.findAvailableStock()) {
       Number skuId = (Number) row.get("sku_id");
       Number mysql = (Number) row.get("available_quantity");
       if (skuId == null || mysql == null) continue;
@@ -195,12 +179,8 @@ public class StockConsistencyReconciler {
       if (limitValue == null) continue;
       int stockLimit = Integer.parseInt(String.valueOf(limitValue));
       Long accepted =
-          stockSqlMapper.queryForObject(
-              "select count(*) from seckill_reservation "
-                  + "where activity_id=? and sku_id=? and status='ACCEPTED'",
-              Long.class,
-              Long.parseLong(activitySku[0]),
-              Long.parseLong(activitySku[1]));
+          stockSqlMapper.countAcceptedReservations(
+              Long.parseLong(activitySku[0]), Long.parseLong(activitySku[1]));
       long expected = Math.max(0, stockLimit - (accepted == null ? 0 : accepted));
       String stockKey = SECKILL_STOCK_PREFIX + suffix;
       String actual = redis.opsForValue().get(stockKey);

@@ -4,11 +4,16 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.cloudmall.pay.domain.dto.PayCallbackDTO;
+import com.cloudmall.pay.domain.dto.PayCreateDTO;
+import com.cloudmall.pay.domain.po.PayCallbackLogPO;
+import com.cloudmall.pay.domain.po.PayRecordPO;
+import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
-import com.cloudmall.pay.mapper.PaySqlMapper;
+import com.cloudmall.pay.mapper.PayCallbackLogMapper;
+import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayService;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.OffsetDateTime;
@@ -30,7 +35,10 @@ public class PayServiceImpl implements PayService {
   @Autowired private UserClient users;
 
   /** 保存 db 的业务状态或配置。 */
-  @Autowired private PaySqlMapper paySqlMapper;
+  @Autowired private PayRecordMapper payRecordMapper;
+
+  /** 支付回调日志 Mapper。 */
+  @Autowired private PayCallbackLogMapper payCallbackLogMapper;
 
   @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}")
   /** 保存 callbackToken 的业务状态或配置。 */
@@ -40,20 +48,25 @@ public class PayServiceImpl implements PayService {
   public PayServiceImpl() {}
 
   /** 创建 PayServiceImpl 实例。 */
-  public PayServiceImpl(OrderClient orders, UserClient users, PaySqlMapper paySqlMapper) {
+  public PayServiceImpl(
+      OrderClient orders,
+      UserClient users,
+      PayRecordMapper payRecordMapper,
+      PayCallbackLogMapper payCallbackLogMapper) {
     // 1. 接收并整理 PayController 的业务请求。
     // 2. 执行 PayController 的核心业务校验与状态处理。
     // 3. 返回 PayController 的处理结果。
     this.orders = orders;
     this.users = users;
-    this.paySqlMapper = paySqlMapper;
+    this.payRecordMapper = payRecordMapper;
+    this.payCallbackLogMapper = payCallbackLogMapper;
   }
 
   @Transactional
   @PostMapping
   /** 执行 create 相关操作。 */
   public synchronized ApiResponse<?> create(
-      @RequestHeader("Idempotency-Key") String key, @RequestBody Request req) {
+      @RequestHeader("Idempotency-Key") String key, @RequestBody PayCreateDTO req) {
     // 1. 接收并整理 create 的业务请求。
     // 2. 执行 create 的核心业务校验与状态处理。
     // 3. 返回 create 的处理结果。
@@ -74,9 +87,9 @@ public class PayServiceImpl implements PayService {
     if (req.payAmount.compareTo(order.payAmount()) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "支付金额与订单应付金额不一致", 409);
     String payNo = payNoFor(userId, key);
-    List<Pay> keyed = findBy("pay_no", payNo);
+    List<PayVO> keyed = findBy("pay_no", payNo);
     if (!keyed.isEmpty()) {
-      Pay p = keyed.get(0);
+      PayVO p = keyed.get(0);
       if (!Objects.equals(p.orderNo, req.orderNo)
           || !Objects.equals(p.userId, userId)
           || p.amount.compareTo(req.payAmount) != 0) {
@@ -84,19 +97,19 @@ public class PayServiceImpl implements PayService {
       }
       return ApiResponse.ok(p);
     }
-    List<Pay> old = findBy("order_no", req.orderNo);
+    List<PayVO> old = findBy("order_no", req.orderNo);
     if (!old.isEmpty()) return ApiResponse.ok(old.get(0));
     OffsetDateTime now = now();
-    paySqlMapper.update(
-        "insert into pay_record(id,pay_no,order_no,user_id,amount,status,created_at,updated_at)"
-            + " values(?,?,?,?,?,'PENDING',?,?)",
-        id(),
-        payNo,
-        req.orderNo,
-        userId,
-        req.payAmount,
-        ts(now),
-        ts(now));
+    PayRecordPO paymentRecord = new PayRecordPO();
+    paymentRecord.id = id();
+    paymentRecord.payNo = payNo;
+    paymentRecord.orderNo = req.orderNo;
+    paymentRecord.userId = userId;
+    paymentRecord.amount = req.payAmount;
+    paymentRecord.status = "PENDING";
+    paymentRecord.createdAt = now.toLocalDateTime();
+    paymentRecord.updatedAt = now.toLocalDateTime();
+    payRecordMapper.insert(paymentRecord);
     return ApiResponse.ok(find(payNo));
   }
 
@@ -107,13 +120,10 @@ public class PayServiceImpl implements PayService {
     // 2. 执行 get 的核心业务校验与状态处理。
     // 3. 返回 get 的处理结果。
     long userId = AuthContext.requireUserId();
-    List<Pay> records =
-        paySqlMapper.query(
-            "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where order_no=?"
-                + " and user_id=?",
-            (row, rowNumber) -> pay(row),
-            orderNo,
-            userId);
+    List<PayVO> records =
+        payRecordMapper.selectByOrderNoAndUserId(orderNo, userId).stream()
+            .map(PayServiceImpl::toView)
+            .toList();
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
     return ApiResponse.ok(records.get(0));
   }
@@ -125,16 +135,12 @@ public class PayServiceImpl implements PayService {
     // 1. 接收并整理 success 的业务请求。
     // 2. 执行 success 的核心业务校验与状态处理。
     // 3. 返回 success 的处理结果。
-    Pay p = ownedForUpdate(payNo);
+    PayVO p = ownedForUpdate(payNo);
     if ("SUCCESS".equals(p.status)) return ApiResponse.ok(p);
     if (!"PENDING".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
     completeSuccess(p);
-    paySqlMapper.update(
-        "update pay_record set status='SUCCESS',paid_at=?,updated_at=? where pay_no=? and"
-            + " status='PENDING'",
-        ts(now()),
-        ts(now()),
-        payNo);
+    payRecordMapper.markSuccess(
+        payNo, java.time.LocalDateTime.now(), java.time.LocalDateTime.now());
     return ApiResponse.ok(find(payNo));
   }
 
@@ -145,15 +151,10 @@ public class PayServiceImpl implements PayService {
     // 1. 接收并整理 fail 的业务请求。
     // 2. 执行 fail 的核心业务校验与状态处理。
     // 3. 返回 fail 的处理结果。
-    Pay p = owned(payNo);
+    PayVO p = owned(payNo);
     if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
     notifyFailure(p);
-    if (paySqlMapper.update(
-            "update pay_record set status='FAILED',updated_at=? where pay_no=? and"
-                + " status='PENDING'",
-            ts(now()),
-            payNo)
-        != 1) {
+    if (payRecordMapper.markFailed(payNo, java.time.LocalDateTime.now()) != 1) {
       throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
     }
     return ApiResponse.ok(find(payNo));
@@ -164,60 +165,58 @@ public class PayServiceImpl implements PayService {
   /** 执行 callback 相关操作。 */
   public synchronized ApiResponse<?> callback(
       @RequestHeader(value = "X-Internal-Callback-Token", required = false) String token,
-      @RequestBody Callback c) {
+      @RequestBody PayCallbackDTO callback) {
     // 1. 接收并整理 callback 的业务请求。
     // 2. 执行 callback 的核心业务校验与状态处理。
     // 3. 返回 callback 的处理结果。
     if (!Objects.equals(callbackToken, token))
       throw new BizException(ErrorCodes.FORBIDDEN, "回调凭证无效", 403);
-    if (c == null || c.payNo == null || c.payNo.isBlank() || c.amount == null || c.userId == null) {
+    if (callback == null
+        || callback.payNo == null
+        || callback.payNo.isBlank()
+        || callback.amount == null
+        || callback.userId == null) {
       throw new BizException(ErrorCodes.INVALID, "回调参数不完整", 400);
     }
-    String callbackId = c.callbackId == null || c.callbackId.isBlank() ? c.payNo : c.callbackId;
-    if (!paySqlMapper
-        .query(
-            "select pay_no from pay_callback_log where callback_id=?",
-            (row, rowNumber) -> row.getString(1),
-            callbackId)
-        .isEmpty()) {
-      return ApiResponse.ok(find(c.payNo));
+    String callbackId =
+        callback.callbackId == null || callback.callbackId.isBlank()
+            ? callback.payNo
+            : callback.callbackId;
+    if (!payCallbackLogMapper.selectByCallbackId(callbackId).isEmpty()) {
+      return ApiResponse.ok(find(callback.payNo));
     }
-    Pay p = ownedForUser(c.payNo, c.userId);
-    if (p.amount.compareTo(c.amount) != 0)
+    PayVO p = ownedForUser(callback.payNo, callback.userId);
+    if (p.amount.compareTo(callback.amount) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
     if ("PENDING".equals(p.status)) {
-      if (c.success) completeSuccess(p);
+      if (callback.success) completeSuccess(p);
       else notifyFailure(p);
-      if (paySqlMapper.update(
-              "update pay_record set status=?,paid_at=case when ? then ? else paid_at"
-                  + " end,updated_at=? where pay_no=? and status='PENDING'",
-              c.success ? "SUCCESS" : "FAILED",
-              c.success,
-              ts(now()),
-              ts(now()),
-              p.payNo)
+      if (payRecordMapper.markCallback(
+              p.payNo,
+              callback.success ? "SUCCESS" : "FAILED",
+              callback.success,
+              java.time.LocalDateTime.now(),
+              java.time.LocalDateTime.now())
           != 1) {
         throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
       }
-    } else if ("SUCCESS".equals(p.status) && !c.success) {
+    } else if ("SUCCESS".equals(p.status) && !callback.success) {
       throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
     }
-    paySqlMapper.update(
-        "insert into"
-            + " pay_callback_log(id,pay_no,callback_id,callback_status,payload,processed_at,created_at)"
-            + " values(?,?,?,?,?,?,?)",
-        id(),
-        p.payNo,
-        callbackId,
-        c.success ? "SUCCESS" : "FAILED",
-        "{}",
-        ts(now()),
-        ts(now()));
+    PayCallbackLogPO callbackLog = new PayCallbackLogPO();
+    callbackLog.id = id();
+    callbackLog.payNo = p.payNo;
+    callbackLog.callbackId = callbackId;
+    callbackLog.callbackStatus = callback.success ? "SUCCESS" : "FAILED";
+    callbackLog.payload = "{}";
+    callbackLog.processedAt = java.time.LocalDateTime.now();
+    callbackLog.createdAt = callbackLog.processedAt;
+    payCallbackLogMapper.insert(callbackLog);
     return ApiResponse.ok(find(p.payNo));
   }
 
   /** 执行 completeSuccess 相关操作。 */
-  private void completeSuccess(Pay p) {
+  private void completeSuccess(PayVO p) {
     // 1. 接收并整理 completeSuccess 的业务请求。
     // 2. 执行 completeSuccess 的核心业务校验与状态处理。
     // 3. 返回 completeSuccess 的处理结果。
@@ -231,7 +230,7 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 执行 notifyFailure 相关操作。 */
-  private void notifyFailure(Pay p) {
+  private void notifyFailure(PayVO p) {
     // 1. 接收并整理 notifyFailure 的业务请求。
     // 2. 执行 notifyFailure 的核心业务校验与状态处理。
     // 3. 返回 notifyFailure 的处理结果。
@@ -258,7 +257,7 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 执行 owned 相关操作。 */
-  private Pay owned(String orderNo) {
+  private PayVO owned(String orderNo) {
     // 1. 接收并整理 owned 的业务请求。
     // 2. 执行 owned 的核心业务校验与状态处理。
     // 3. 返回 owned 的处理结果。
@@ -266,55 +265,52 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 执行 ownedForUpdate 相关操作。 */
-  private Pay ownedForUpdate(String orderNo) {
+  private PayVO ownedForUpdate(String orderNo) {
     // 1. 接收并整理 ownedForUpdate 的业务请求。
     // 2. 执行 ownedForUpdate 的核心业务校验与状态处理。
     // 3. 返回 ownedForUpdate 的处理结果。
-    List<Pay> records =
-        paySqlMapper.query(
-            "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where pay_no=?"
-                + " for update",
-            (row, rowNumber) -> pay(row),
-            orderNo);
+    List<PayVO> records =
+        payRecordMapper.selectForUpdate(orderNo).stream().map(PayServiceImpl::toView).toList();
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
-    Pay p = records.get(0);
+    PayVO p = records.get(0);
     if (!Objects.equals(p.userId, AuthContext.requireUserId()))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此支付记录", 403);
     return p;
   }
 
   /** 执行 ownedForUser 相关操作。 */
-  private Pay ownedForUser(String orderNo, long userId) {
+  private PayVO ownedForUser(String orderNo, long userId) {
     // 1. 接收并整理 ownedForUser 的业务请求。
     // 2. 执行 ownedForUser 的核心业务校验与状态处理。
     // 3. 返回 ownedForUser 的处理结果。
-    Pay p = find(orderNo);
+    PayVO p = find(orderNo);
     if (!Objects.equals(p.userId, userId))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此支付记录", 403);
     return p;
   }
 
   /** 执行 find 相关操作。 */
-  private Pay find(String orderNo) {
+  private PayVO find(String orderNo) {
     // 1. 接收并整理 find 的业务请求。
     // 2. 执行 find 的核心业务校验与状态处理。
     // 3. 返回 find 的处理结果。
-    List<Pay> records = findBy("pay_no", orderNo);
+    List<PayVO> records = findBy("pay_no", orderNo);
     if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
     return records.get(0);
   }
 
   /** 执行 findBy 相关操作。 */
-  private List<Pay> findBy(String column, String value) {
+  private List<PayVO> findBy(String column, String value) {
     // 1. 接收并整理 findBy 的业务请求。
     // 2. 执行 findBy 的核心业务校验与状态处理。
     // 3. 返回 findBy 的处理结果。
-    return paySqlMapper.query(
-        "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where "
-            + column
-            + "=?",
-        (row, rowNumber) -> pay(row),
-        value);
+    if ("pay_no".equals(column)) {
+      return payRecordMapper.selectByPayNo(value).stream().map(PayServiceImpl::toView).toList();
+    }
+    if ("order_no".equals(column)) {
+      return payRecordMapper.selectByOrderNo(value).stream().map(PayServiceImpl::toView).toList();
+    }
+    throw new IllegalArgumentException("Unsupported payment lookup column: " + column);
   }
 
   /** 执行 payNoFor 相关操作。 */
@@ -334,20 +330,18 @@ public class PayServiceImpl implements PayService {
     }
   }
 
-  /** 执行 pay 相关操作。 */
-  private static Pay pay(java.sql.ResultSet row) throws java.sql.SQLException {
-    // 1. 接收并整理 pay 的业务请求。
-    // 2. 执行 pay 的核心业务校验与状态处理。
-    // 3. 返回 pay 的处理结果。
-    Pay p = new Pay();
-    p.payNo = row.getString(1);
-    p.orderNo = row.getString(2);
-    p.userId = row.getLong(3);
-    p.amount = row.getBigDecimal(4);
-    p.status = row.getString(5);
-    if (row.getTimestamp(6) != null)
-      p.paidAt = row.getTimestamp(6).toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
-    return p;
+  /** 将支付记录持久化对象转换为响应视图。 */
+  private static PayVO toView(PayRecordPO paymentRecord) {
+    PayVO payment = new PayVO();
+    payment.payNo = paymentRecord.payNo;
+    payment.orderNo = paymentRecord.orderNo;
+    payment.userId = paymentRecord.userId;
+    payment.amount = paymentRecord.amount;
+    payment.status = paymentRecord.status;
+    if (paymentRecord.paidAt != null) {
+      payment.paidAt = paymentRecord.paidAt.atOffset(ZoneOffset.ofHours(8)).toString();
+    }
+    return payment;
   }
 
   /** 执行 now 相关操作。 */
@@ -358,55 +352,11 @@ public class PayServiceImpl implements PayService {
     return OffsetDateTime.now(ZoneOffset.ofHours(8));
   }
 
-  /** 执行 ts 相关操作。 */
-  private static java.sql.Timestamp ts(OffsetDateTime value) {
-    // 1. 接收并整理 ts 的业务请求。
-    // 2. 执行 ts 的核心业务校验与状态处理。
-    // 3. 返回 ts 的处理结果。
-    return java.sql.Timestamp.from(value.toInstant());
-  }
-
   /** 执行 id 相关操作。 */
   private static long id() {
     // 1. 接收并整理 id 的业务请求。
     // 2. 执行 id 的核心业务校验与状态处理。
     // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
-  }
-
-  public static class Request {
-    /** 保存 orderNo 的业务状态或配置。 */
-    public String orderNo;
-
-    /** 保存 payAmount 的业务状态或配置。 */
-    public BigDecimal payAmount;
-  }
-
-  public static class Callback {
-    /** 保存 payNo 的业务状态或配置。 */
-    public String payNo;
-
-    /** 保存 success 的业务状态或配置。 */
-    public boolean success;
-
-    /** 保存 callbackId 的业务状态或配置。 */
-    public String callbackId;
-
-    /** 保存 amount 的业务状态或配置。 */
-    public BigDecimal amount;
-
-    /** 保存 userId 的业务状态或配置。 */
-    public Long userId;
-  }
-
-  public static class Pay {
-    /** 保存 paidAt 的业务状态或配置。 */
-    public String payNo, orderNo, status, paidAt;
-
-    /** 保存 userId 的业务状态或配置。 */
-    public Long userId;
-
-    /** 保存 amount 的业务状态或配置。 */
-    public BigDecimal amount;
   }
 }

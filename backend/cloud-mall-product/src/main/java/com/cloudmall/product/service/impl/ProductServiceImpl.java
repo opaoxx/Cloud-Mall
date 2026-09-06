@@ -5,21 +5,25 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.cloudmall.product.domain.dto.ActivityDTO;
+import com.cloudmall.product.domain.dto.CategoryDTO;
+import com.cloudmall.product.domain.dto.ProductDTO;
+import com.cloudmall.product.domain.dto.ProductParameterDTO;
+import com.cloudmall.product.domain.dto.SkuDTO;
+import com.cloudmall.product.domain.vo.ActivityVO;
+import com.cloudmall.product.domain.vo.HotStatVO;
 import com.cloudmall.product.mapper.ProductSqlMapper;
 import com.cloudmall.product.service.ProductService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.annotation.JsonSerialize;
-import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
 import javax.validation.Valid;
-import javax.validation.constraints.NotBlank;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -72,51 +76,23 @@ public class ProductServiceImpl implements ProductService {
     // 1. 接收并整理 categories 的业务请求。
     // 2. 执行 categories 的核心业务校验与状态处理。
     // 3. 返回 categories 的处理结果。
-    StringBuilder s =
-        new StringBuilder(
-            "select id,parent_id,name,sort_no,status from product_category where 1=1");
-    List<Object> a = new ArrayList<>();
-    if (parentId != null) {
-      s.append(" and parent_id=?");
-      a.add(parentId);
-    }
-    if (status != null) {
-      s.append(" and status=?");
-      a.add(status);
-    }
-    s.append(" order by sort_no,id");
     return ApiResponse.ok(
-        productSqlMapper.query(
-            s.toString(),
-            a.toArray(),
-            (row, rowNumber) ->
-                new Category(
-                    row.getLong("id"),
-                    row.getLong("parent_id"),
-                    row.getString("name"),
-                    row.getInt("sort_no"),
-                    row.getInt("status"))));
+        productSqlMapper.findCategories(parentId, status).stream()
+            .map(this::categoryView)
+            .toList());
   }
 
   @Transactional
   @PostMapping("/categories")
   /** 执行 addCategory 相关操作。 */
-  public ApiResponse<?> addCategory(@RequestBody Category c) {
+  public ApiResponse<?> addCategory(@RequestBody CategoryDTO c) {
     // 1. 接收并整理 addCategory 的业务请求。
     // 2. 执行 addCategory 的核心业务校验与状态处理。
     // 3. 返回 addCategory 的处理结果。
     AuthContext.requireAdmin();
     validateCategory(c);
     long id = id();
-    productSqlMapper.update(
-        "insert into product_category(id,parent_id,name,sort_no,status,created_at,updated_at)"
-            + " values(?,?,?,?,1,?,?)",
-        id,
-        c.parentId,
-        c.name,
-        c.sortNo,
-        now(),
-        now());
+    productSqlMapper.insertCategory(id, c, now());
     c.id = id;
     c.status = 1;
     event("CATEGORY_CHANGED", id);
@@ -126,20 +102,14 @@ public class ProductServiceImpl implements ProductService {
   @Transactional
   @PutMapping("/categories/{id}")
   /** 执行 updateCategory 相关操作。 */
-  public ApiResponse<?> updateCategory(@PathVariable Long id, @RequestBody Category c) {
+  public ApiResponse<?> updateCategory(@PathVariable Long id, @RequestBody CategoryDTO c) {
     // 1. 接收并整理 updateCategory 的业务请求。
     // 2. 执行 updateCategory 的核心业务校验与状态处理。
     // 3. 返回 updateCategory 的处理结果。
     AuthContext.requireAdmin();
     validateCategory(c);
     requireCategory(id);
-    productSqlMapper.update(
-        "update product_category set parent_id=?,name=?,sort_no=?,updated_at=? where id=?",
-        c.parentId,
-        c.name,
-        c.sortNo,
-        now(),
-        id);
+    productSqlMapper.updateCategory(id, c, now());
     c.id = id;
     c.status = 1;
     event("CATEGORY_CHANGED", id);
@@ -155,8 +125,7 @@ public class ProductServiceImpl implements ProductService {
     // 3. 返回 deleteCategory 的处理结果。
     AuthContext.requireAdmin();
     requireCategory(id);
-    productSqlMapper.update(
-        "update product_category set status=0,updated_at=? where id=?", now(), id);
+    productSqlMapper.disableCategory(id, now());
     event("CATEGORY_CHANGED", id);
     return ApiResponse.ok(null);
   }
@@ -175,41 +144,13 @@ public class ProductServiceImpl implements ProductService {
     // 3. 返回 products 的处理结果。
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
-    StringBuilder w = new StringBuilder(" where 1=1");
-    List<Object> a = new ArrayList<>();
-    if (keyword != null && !keyword.isBlank()) {
-      w.append(" and name like ?");
-      a.add("%" + keyword + "%");
-    }
-    if (categoryId != null) {
-      w.append(" and category_id=?");
-      a.add(categoryId);
-    }
-    if (status != null) {
-      w.append(" and status=?");
-      a.add(status);
-    }
-    long total =
-        productSqlMapper.queryForObject(
-            "select count(*) from product" + w, a.toArray(), Long.class);
-    List<Object> pa = new ArrayList<>(a);
-    pa.add((page - 1) * pageSize);
-    pa.add(pageSize);
-    List<Product> items =
-        productSqlMapper.query(
-            "select id,category_id,name,main_image,description,price,status from product"
-                + w
-                + " order by updated_at desc,id desc limit ?,?",
-            pa.toArray(),
-            (row, rowNumber) ->
-                read(
-                    row.getLong("id"),
-                    row.getLong("category_id"),
-                    row.getString("name"),
-                    row.getString("main_image"),
-                    row.getString("description"),
-                    row.getBigDecimal("price"),
-                    row.getInt("status")));
+    long total = productSqlMapper.countProducts(keyword, categoryId, status);
+    List<ProductDTO> items =
+        productSqlMapper
+            .findProducts(keyword, categoryId, status, (page - 1) * pageSize, pageSize)
+            .stream()
+            .map(this::productView)
+            .toList();
     return ApiResponse.ok(new PageResult<>(items, page, pageSize, total));
   }
 
@@ -228,13 +169,7 @@ public class ProductServiceImpl implements ProductService {
     // 1. 接收并整理 sku 的业务请求。
     // 2. 执行 sku 的核心业务校验与状态处理。
     // 3. 返回 sku 的处理结果。
-    List<Map<String, Object>> x =
-        productSqlMapper.queryForList(
-            "select s.id"
-                + " sku_id,s.product_id,s.sku_code,s.spec_json,s.price,s.status,p.name,p.status"
-                + " product_status from product_sku s join product p on p.id=s.product_id where"
-                + " s.id=?",
-            skuId);
+    List<Map<String, Object>> x = productSqlMapper.findSku(skuId);
     if (x.isEmpty()) throw new BizException("PRODUCT_SKU_NOT_FOUND", "SKU不存在", 404);
     Map<String, Object> row = x.get(0);
     if (((Number) row.get("product_status")).intValue() != 1
@@ -263,26 +198,14 @@ public class ProductServiceImpl implements ProductService {
     // 2. 执行 hot 的核心业务校验与状态处理。
     // 3. 返回 hot 的处理结果。
     requireProduct(id);
-    List<HotStatResponse> x =
-        productSqlMapper.query(
-            "select product_id,view_count,search_count,hot_score from product_hot_stat where"
-                + " product_id=?",
-            (row, rowNumber) ->
-                new HotStatResponse(
-                    row.getLong("product_id"),
-                    row.getLong("view_count"),
-                    row.getLong("search_count"),
-                    row.getBigDecimal("hot_score") == null
-                        ? "0.000000"
-                        : row.getBigDecimal("hot_score").toPlainString()),
-            id);
-    return ApiResponse.ok(x.isEmpty() ? new HotStatResponse(id, 0, 0, "0.000000") : x.get(0));
+    List<HotStatVO> x = productSqlMapper.findHotStat(id).stream().map(this::hotView).toList();
+    return ApiResponse.ok(x.isEmpty() ? new HotStatVO(id, 0, 0, "0.000000") : x.get(0));
   }
 
   @Transactional
   @PostMapping("/products")
   /** 执行 create 相关操作。 */
-  public ApiResponse<?> create(@Valid @RequestBody Product p) {
+  public ApiResponse<?> create(@Valid @RequestBody ProductDTO p) {
     // 1. 接收并整理 create 的业务请求。
     // 2. 执行 create 的核心业务校验与状态处理。
     // 3. 返回 create 的处理结果。
@@ -300,26 +223,17 @@ public class ProductServiceImpl implements ProductService {
   @Transactional
   @PutMapping("/products/{id}")
   /** 执行 update 相关操作。 */
-  public ApiResponse<?> update(@PathVariable Long id, @RequestBody Product p) {
+  public ApiResponse<?> update(@PathVariable Long id, @RequestBody ProductDTO p) {
     // 1. 接收并整理 update 的业务请求。
     // 2. 执行 update 的核心业务校验与状态处理。
     // 3. 返回 update 的处理结果。
     AuthContext.requireAdmin();
     validateProduct(p);
     requireProduct(id);
-    productSqlMapper.update(
-        "update product set category_id=?,name=?,main_image=?,description=?,price=?,updated_at=?"
-            + " where id=?",
-        p.categoryId,
-        p.name,
-        p.mainImage,
-        p.description,
-        money(p.price),
-        now(),
-        id);
+    productSqlMapper.updateProduct(id, p, money(p.price), now());
     if (p.skus != null) replaceSkus(id, p.skus);
     if (p.parameters != null) replaceParameters(id, p.parameters);
-    Product saved = requireProduct(id);
+    ProductDTO saved = requireProduct(id);
     event("PRODUCT_CHANGED", id);
     return ApiResponse.ok(saved);
   }
@@ -357,48 +271,27 @@ public class ProductServiceImpl implements ProductService {
 
   @PostMapping("/seckill/activities")
   /** 执行 createActivity 相关操作。 */
-  public ApiResponse<?> createActivity(@RequestBody Activity a) {
+  public ApiResponse<?> createActivity(@RequestBody ActivityDTO a) {
     // 1. 接收并整理 createActivity 的业务请求。
     // 2. 执行 createActivity 的核心业务校验与状态处理。
     // 3. 返回 createActivity 的处理结果。
     AuthContext.requireAdmin();
     validateActivity(a);
     long id = id();
-    productSqlMapper.update(
-        "insert into"
-            + " seckill_activity(id,sku_id,start_at,end_at,stock_limit,per_user_limit,status,created_at,updated_at)"
-            + " values(?,?,?,?,?,?, 'DRAFT',?,?)",
-        id,
-        a.skuId,
-        ts(a.startAt),
-        ts(a.endAt),
-        a.stockLimit,
-        a.perUserLimit,
-        ts(now()),
-        ts(now()));
+    productSqlMapper.insertActivity(id, a, ts(now()));
     return activity(id);
   }
 
   @PutMapping("/seckill/activities/{id}")
   /** 执行 updateActivity 相关操作。 */
-  public ApiResponse<?> updateActivity(@PathVariable Long id, @RequestBody Activity a) {
+  public ApiResponse<?> updateActivity(@PathVariable Long id, @RequestBody ActivityDTO a) {
     // 1. 接收并整理 updateActivity 的业务请求。
     // 2. 执行 updateActivity 的核心业务校验与状态处理。
     // 3. 返回 updateActivity 的处理结果。
     AuthContext.requireAdmin();
     validateActivity(a);
     activity(id);
-    productSqlMapper.update(
-        "update seckill_activity set"
-            + " sku_id=?,start_at=?,end_at=?,stock_limit=?,per_user_limit=?,updated_at=? where"
-            + " id=?",
-        a.skuId,
-        ts(a.startAt),
-        ts(a.endAt),
-        a.stockLimit,
-        a.perUserLimit,
-        ts(now()),
-        id);
+    productSqlMapper.updateActivity(id, a, ts(now()));
     return activity(id);
   }
 
@@ -410,8 +303,7 @@ public class ProductServiceImpl implements ProductService {
     // 3. 返回 publishActivity 的处理结果。
     AuthContext.requireAdmin();
     ActivityRecord a = activityRecord(id);
-    productSqlMapper.update(
-        "update seckill_activity set status='PUBLISHED',updated_at=? where id=?", ts(now()), id);
+    productSqlMapper.updateActivityStatus(id, "PUBLISHED", ts(now()));
     String suffix = id + ":" + a.skuId;
     Duration ttl = Duration.ofSeconds(Math.max(1, secondsUntil(a.endAt)));
     redis.opsForValue().set("seckill:stock:" + suffix, String.valueOf(a.stockLimit), ttl);
@@ -440,8 +332,7 @@ public class ProductServiceImpl implements ProductService {
     // 3. 返回 startActivity 的处理结果。
     AuthContext.requireAdmin();
     activityRecord(id);
-    productSqlMapper.update(
-        "update seckill_activity set status='STARTED',updated_at=? where id=?", ts(now()), id);
+    productSqlMapper.updateActivityStatus(id, "STARTED", ts(now()));
     return activity(id);
   }
 
@@ -450,8 +341,8 @@ public class ProductServiceImpl implements ProductService {
     // 1. 接收并整理 change 的业务请求。
     // 2. 执行 change 的核心业务校验与状态处理。
     // 3. 返回 change 的处理结果。
-    Product p = requireProduct(id);
-    productSqlMapper.update("update product set status=?,updated_at=? where id=?", st, now(), id);
+    ProductDTO p = requireProduct(id);
+    productSqlMapper.updateProductStatus(id, st, now());
     p.status = st;
     p.published = st == 1;
     event("PRODUCT_CHANGED", id);
@@ -459,24 +350,11 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** 执行 requireProduct 相关操作。 */
-  private Product requireProduct(Long id) {
+  private ProductDTO requireProduct(Long id) {
     // 1. 接收并整理 requireProduct 的业务请求。
     // 2. 执行 requireProduct 的核心业务校验与状态处理。
     // 3. 返回 requireProduct 的处理结果。
-    List<Product> x =
-        productSqlMapper.query(
-            "select id,category_id,name,main_image,description,price,status from product where"
-                + " id=?",
-            (row, rowNumber) ->
-                read(
-                    row.getLong("id"),
-                    row.getLong("category_id"),
-                    row.getString("name"),
-                    row.getString("main_image"),
-                    row.getString("description"),
-                    row.getBigDecimal("price"),
-                    row.getInt("status")),
-            id);
+    List<ProductDTO> x = productSqlMapper.findProduct(id).stream().map(this::productView).toList();
     if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "商品不存在", 404);
     return x.get(0);
   }
@@ -486,18 +364,70 @@ public class ProductServiceImpl implements ProductService {
     // 1. 接收并整理 requireCategory 的业务请求。
     // 2. 执行 requireCategory 的核心业务校验与状态处理。
     // 3. 返回 requireCategory 的处理结果。
-    if (productSqlMapper.queryForObject(
-            "select count(*) from product_category where id=?", Long.class, id)
-        == 0) throw new BizException(ErrorCodes.NOT_FOUND, "分类不存在", 404);
+    if (productSqlMapper.countCategory(id) == 0)
+      throw new BizException(ErrorCodes.NOT_FOUND, "分类不存在", 404);
+  }
+
+  /** 将分类数据库行转换为分类传输对象。 */
+  private CategoryDTO categoryView(Map<String, Object> row) {
+    return new CategoryDTO(
+        ((Number) row.get("id")).longValue(),
+        ((Number) row.get("parent_id")).longValue(),
+        String.valueOf(row.get("name")),
+        ((Number) row.get("sort_no")).intValue(),
+        ((Number) row.get("status")).intValue());
+  }
+
+  /** 将商品数据库行转换为商品传输对象并加载附属数据。 */
+  private ProductDTO productView(Map<String, Object> row) {
+    return read(
+        ((Number) row.get("id")).longValue(),
+        ((Number) row.get("category_id")).longValue(),
+        String.valueOf(row.get("name")),
+        (String) row.get("main_image"),
+        (String) row.get("description"),
+        (BigDecimal) row.get("price"),
+        ((Number) row.get("status")).intValue());
+  }
+
+  /** 将 SKU 数据库行转换为 SKU 传输对象。 */
+  private SkuDTO skuView(Map<String, Object> row) {
+    return new SkuDTO(
+        ((Number) row.get("id")).longValue(),
+        ((Number) row.get("product_id")).longValue(),
+        String.valueOf(row.get("sku_code")),
+        readSpecJson(row.get("spec_json")),
+        money((BigDecimal) row.get("price")),
+        ((Number) row.get("status")).intValue() == 1);
+  }
+
+  /** 将商品参数数据库行转换为参数传输对象。 */
+  private ProductParameterDTO parameterView(Map<String, Object> row) {
+    return new ProductParameterDTO(
+        ((Number) row.get("id")).longValue(),
+        ((Number) row.get("product_id")).longValue(),
+        String.valueOf(row.get("param_name")),
+        String.valueOf(row.get("param_value")),
+        ((Number) row.get("sort_no")).intValue());
+  }
+
+  /** 将热度数据库行转换为热度响应视图。 */
+  private HotStatVO hotView(Map<String, Object> row) {
+    BigDecimal hotScore = (BigDecimal) row.get("hot_score");
+    return new HotStatVO(
+        ((Number) row.get("product_id")).longValue(),
+        ((Number) row.get("view_count")).longValue(),
+        ((Number) row.get("search_count")).longValue(),
+        hotScore == null ? "0.000000" : hotScore.toPlainString());
   }
 
   /** 执行 read 相关操作。 */
-  private Product read(
+  private ProductDTO read(
       long id, long cat, String rowNumber, String image, String desc, BigDecimal price, int st) {
     // 1. 接收并整理 read 的业务请求。
     // 2. 执行 read 的核心业务校验与状态处理。
     // 3. 返回 read 的处理结果。
-    Product p = new Product();
+    ProductDTO p = new ProductDTO();
     p.id = id;
     p.categoryId = cat;
     p.name = rowNumber;
@@ -506,100 +436,44 @@ public class ProductServiceImpl implements ProductService {
     p.price = money(price);
     p.status = st;
     p.published = st == 1;
-    p.skus =
-        productSqlMapper.query(
-            "select id,product_id,sku_code,spec_json,price,status from product_sku where"
-                + " product_id=? order by id",
-            (row, z) ->
-                new Sku(
-                    row.getLong("id"),
-                    row.getLong("product_id"),
-                    row.getString("sku_code"),
-                    readSpecJson(row.getString("spec_json")),
-                    money(row.getBigDecimal("price")),
-                    row.getInt("status") == 1),
-            id);
-    p.parameters =
-        productSqlMapper.query(
-            "select id,product_id,param_name,param_value,sort_no from product_parameter where"
-                + " product_id=? order by sort_no,id",
-            (row, z) ->
-                new ProductParameter(
-                    row.getLong("id"),
-                    row.getLong("product_id"),
-                    row.getString("param_name"),
-                    row.getString("param_value"),
-                    row.getInt("sort_no")),
-            id);
+    p.skus = productSqlMapper.findSkus(id).stream().map(this::skuView).toList();
+    p.parameters = productSqlMapper.findParameters(id).stream().map(this::parameterView).toList();
     return p;
   }
 
   /** 执行 save 相关操作。 */
-  private void save(long id, Product p) {
+  private void save(long id, ProductDTO p) {
     // 1. 接收并整理 save 的业务请求。
     // 2. 执行 save 的核心业务校验与状态处理。
     // 3. 返回 save 的处理结果。
-    productSqlMapper.update(
-        "insert into"
-            + " product(id,category_id,name,main_image,description,price,status,version,created_at,updated_at)"
-            + " values(?,?,?,?,?,?,0,0,?,?)",
-        id,
-        p.categoryId,
-        p.name,
-        p.mainImage,
-        p.description,
-        money(p.price),
-        now(),
-        now());
+    productSqlMapper.insertProduct(id, p, money(p.price), now());
     replaceSkus(id, p.skus == null ? List.of() : p.skus);
     replaceParameters(id, p.parameters == null ? List.of() : p.parameters);
   }
 
   /** 执行 replaceSkus 相关操作。 */
-  private void replaceSkus(long pid, List<Sku> ss) {
+  private void replaceSkus(long pid, List<SkuDTO> ss) {
     // 1. 接收并整理 replaceSkus 的业务请求。
     // 2. 执行 replaceSkus 的核心业务校验与状态处理。
     // 3. 返回 replaceSkus 的处理结果。
-    for (Sku s : ss) {
+    for (SkuDTO s : ss) {
       if (s == null) throw new BizException(ErrorCodes.INVALID, "SKU参数无效", 400);
       if (s.id == null) s.id = id();
-      productSqlMapper.update(
-          "insert into"
-              + " product_sku(id,product_id,sku_code,spec_json,price,status,created_at,updated_at)"
-              + " values(?,?,?,?,?,1,?,?) on duplicate key update"
-              + " price=values(price),spec_json=values(spec_json),status=values(status),updated_at=values(updated_at)",
-          s.id,
-          pid,
-          s.skuCode,
-          writeSpecJson(s.specJson),
-          money(s.price),
-          now(),
-          now());
+      productSqlMapper.saveSku(pid, s, writeSpecJson(s.specJson), now());
     }
   }
 
   /** 执行 replaceParameters 相关操作。 */
-  private void replaceParameters(long pid, List<ProductParameter> ps) {
+  private void replaceParameters(long pid, List<ProductParameterDTO> ps) {
     // 1. 接收并整理 replaceParameters 的业务请求。
     // 2. 执行 replaceParameters 的核心业务校验与状态处理。
     // 3. 返回 replaceParameters 的处理结果。
-    for (ProductParameter p : ps) {
+    for (ProductParameterDTO p : ps) {
       if (p == null || p.name == null || p.name.isBlank() || p.value == null)
         throw new BizException(ErrorCodes.INVALID, "商品参数无效", 400);
     }
-    productSqlMapper.update("delete from product_parameter where product_id=?", pid);
-    for (ProductParameter p : ps)
-      productSqlMapper.update(
-          "insert into"
-              + " product_parameter(id,product_id,param_name,param_value,sort_no,created_at,updated_at)"
-              + " values(?,?,?,?,?,?,?)",
-          id(),
-          pid,
-          p.name,
-          p.value,
-          p.sortNo,
-          now(),
-          now());
+    productSqlMapper.deleteParameters(pid);
+    for (ProductParameterDTO p : ps) productSqlMapper.insertParameter(pid, p, now());
   }
 
   /** 执行 readStatus 相关操作。 */
@@ -761,30 +635,29 @@ public class ProductServiceImpl implements ProductService {
     // 2. 执行 activityRecord 的核心业务校验与状态处理。
     // 3. 返回 activityRecord 的处理结果。
     List<ActivityRecord> x =
-        productSqlMapper.query(
-            "select id,sku_id,start_at,end_at,stock_limit,per_user_limit,status from"
-                + " seckill_activity where id=?",
-            (row, rowNumber) ->
-                new ActivityRecord(
-                    row.getLong("id"),
-                    row.getLong("sku_id"),
-                    row.getTimestamp("start_at"),
-                    row.getTimestamp("end_at"),
-                    row.getInt("stock_limit"),
-                    row.getInt("per_user_limit"),
-                    row.getString("status")),
-            id);
+        productSqlMapper.findActivity(id).stream()
+            .map(
+                row ->
+                    new ActivityRecord(
+                        ((Number) row.get("id")).longValue(),
+                        ((Number) row.get("sku_id")).longValue(),
+                        (java.sql.Timestamp) row.get("start_at"),
+                        (java.sql.Timestamp) row.get("end_at"),
+                        ((Number) row.get("stock_limit")).intValue(),
+                        ((Number) row.get("per_user_limit")).intValue(),
+                        String.valueOf(row.get("status"))))
+            .toList();
     if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "秒杀活动不存在", 404);
     return x.get(0);
   }
 
   /** 执行 toActivityResponse 相关操作。 */
-  private ActivityResponse toActivityResponse(ActivityRecord a) {
+  private ActivityVO toActivityResponse(ActivityRecord a) {
     // 1. 接收并整理 toActivityResponse 的业务请求。
     // 2. 执行 toActivityResponse 的核心业务校验与状态处理。
     // 3. 返回 toActivityResponse 的处理结果。
     String stock = redis.opsForValue().get("seckill:stock:" + a.id + ":" + a.skuId);
-    return new ActivityResponse(
+    return new ActivityVO(
         a.id,
         a.skuId,
         toOffset(a.startAt),
@@ -817,7 +690,7 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** 执行 validateCategory 相关操作。 */
-  private static void validateCategory(Category c) {
+  private static void validateCategory(CategoryDTO c) {
     // 1. 接收并整理 validateCategory 的业务请求。
     // 2. 执行 validateCategory 的核心业务校验与状态处理。
     // 3. 返回 validateCategory 的处理结果。
@@ -827,7 +700,7 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** 执行 validateProduct 相关操作。 */
-  private static void validateProduct(Product p) {
+  private static void validateProduct(ProductDTO p) {
     // 1. 接收并整理 validateProduct 的业务请求。
     // 2. 执行 validateProduct 的核心业务校验与状态处理。
     // 3. 返回 validateProduct 的处理结果。
@@ -838,7 +711,7 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** 执行 validateActivity 相关操作。 */
-  private static void validateActivity(Activity a) {
+  private static void validateActivity(ActivityDTO a) {
     // 1. 接收并整理 validateActivity 的业务请求。
     // 2. 执行 validateActivity 的核心业务校验与状态处理。
     // 3. 返回 validateActivity 的处理结果。
@@ -851,127 +724,6 @@ public class ProductServiceImpl implements ProductService {
         || a.perUserLimit < 1) throw new BizException(ErrorCodes.INVALID, "秒杀活动参数无效", 400);
   }
 
-  public static class Product {
-    @JsonSerialize(using = ToStringSerializer.class)
-    /** 保存 id 的业务状态或配置。 */
-    public Long id;
-
-    /** 保存 categoryId 的业务状态或配置。 */
-    public Long categoryId = 0L;
-
-    @NotBlank public String name;
-
-    /** 保存 price 的业务状态或配置。 */
-    public String mainImage, description, price;
-
-    /** 保存 published 的业务状态或配置。 */
-    public boolean published;
-
-    /** 保存 status 的业务状态或配置。 */
-    public int status;
-
-    /** 执行 业务操作 相关操作。 */
-    public List<Sku> skus = new ArrayList<>();
-
-    /** 保存 parameters 的业务状态或配置。 */
-    public List<ProductParameter> parameters;
-  }
-
-  public static class Sku {
-    /** 保存 id 的业务状态或配置。 */
-    public Long id;
-
-    @JsonSerialize(using = ToStringSerializer.class)
-    /** 保存 productId 的业务状态或配置。 */
-    public Long productId;
-
-    /** 保存 price 的业务状态或配置。 */
-    public String skuCode, price;
-
-    /** 执行 业务操作 相关操作。 */
-    public Map<String, String> specJson = new LinkedHashMap<>();
-
-    /** 保存 status 的业务状态或配置。 */
-    public boolean status;
-
-    /** 执行 Sku 相关操作。 */
-    public Sku() {}
-
-    // 1. 接收并整理 Sku 的业务请求。
-    // 2. 执行 Sku 的核心业务校验与状态处理。
-    // 3. 返回 Sku 的处理结果。
-
-    Sku(Long i, Long p, String c, Map<String, String> j, String v, boolean s) {
-      id = i;
-      productId = p;
-      skuCode = c;
-      specJson = j;
-      price = v;
-      status = s;
-    }
-  }
-
-  public static class ProductParameter {
-    /** 保存 id 的业务状态或配置。 */
-    public Long id;
-
-    @JsonSerialize(using = ToStringSerializer.class)
-    /** 保存 productId 的业务状态或配置。 */
-    public Long productId;
-
-    /** 保存 value 的业务状态或配置。 */
-    public String name, value;
-
-    /** 保存 sortNo 的业务状态或配置。 */
-    public int sortNo;
-
-    /** 执行 ProductParameter 相关操作。 */
-    public ProductParameter() {}
-
-    // 1. 接收并整理 ProductParameter 的业务请求。
-    // 2. 执行 ProductParameter 的核心业务校验与状态处理。
-    // 3. 返回 ProductParameter 的处理结果。
-
-    ProductParameter(Long i, Long p, String rowNumber, String v, int s) {
-      id = i;
-      productId = p;
-      name = rowNumber;
-      value = v;
-      sortNo = s;
-    }
-  }
-
-  public static class Category {
-    /** 保存 parentId 的业务状态或配置。 */
-    public Long id, parentId = 0L;
-
-    @NotBlank public String name;
-
-    /** 保存 status 的业务状态或配置。 */
-    public int sortNo, status;
-
-    Category() {}
-
-    Category(long i, long p, String rowNumber, int s, int st) {
-      id = i;
-      parentId = p;
-      name = rowNumber;
-      sortNo = s;
-      status = st;
-    }
-  }
-
-  public static class Activity {
-    /** 保存 skuId 的业务状态或配置。 */
-    public Long skuId;
-
-    /** 保存 endAt 的业务状态或配置。 */
-    public OffsetDateTime startAt, endAt;
-
-    /** 保存 perUserLimit 的业务状态或配置。 */
-    public int stockLimit, perUserLimit;
-  }
-
   private record ActivityRecord(
       long id,
       long skuId,
@@ -980,44 +732,4 @@ public class ProductServiceImpl implements ProductService {
       int stockLimit,
       int perUserLimit,
       String status) {}
-
-  public static class ActivityResponse {
-    /** 保存 skuId 的业务状态或配置。 */
-    public final long activityId, skuId;
-
-    /** 保存 endAt 的业务状态或配置。 */
-    public final OffsetDateTime startAt, endAt;
-
-    /** 保存 perUserLimit 的业务状态或配置。 */
-    public final int remainingStock, perUserLimit;
-
-    /** 保存 status 的业务状态或配置。 */
-    public final String status;
-
-    ActivityResponse(
-        long a, long s, OffsetDateTime st, OffsetDateTime e, int row, int p, String v) {
-      activityId = a;
-      skuId = s;
-      startAt = st;
-      endAt = e;
-      remainingStock = row;
-      perUserLimit = p;
-      status = v;
-    }
-  }
-
-  public static class HotStatResponse {
-    /** 保存 searchCount 的业务状态或配置。 */
-    public final long productId, viewCount, searchCount;
-
-    /** 保存 hotScore 的业务状态或配置。 */
-    public final String hotScore;
-
-    HotStatResponse(long p, long v, long s, String h) {
-      productId = p;
-      viewCount = v;
-      searchCount = s;
-      hotScore = h;
-    }
-  }
 }

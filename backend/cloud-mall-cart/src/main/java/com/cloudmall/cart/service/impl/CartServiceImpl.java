@@ -1,5 +1,8 @@
 package com.cloudmall.cart.service.impl;
 
+import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.po.CartItemPO;
+import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.CartService;
 import com.cloudmall.common.api.ApiResponse;
@@ -45,27 +48,27 @@ public class CartServiceImpl implements CartService {
     // 1. 接收并整理 all 的业务请求。
     // 2. 执行 all 的核心业务校验与状态处理。
     // 3. 返回 all 的处理结果。
-    return ApiResponse.ok(refreshItems());
+    return ApiResponse.ok(refreshItems().stream().map(CartItemVO::from).toList());
   }
 
   @PostMapping("/items")
   /** 执行 add 相关操作。 */
-  public ApiResponse<?> add(@RequestBody Item request) {
+  public ApiResponse<?> add(@RequestBody CartItemDTO request) {
     // 1. 接收并整理 add 的业务请求。
     // 2. 执行 add 的核心业务校验与状态处理。
     // 3. 返回 add 的处理结果。
     if (request.skuId == null || request.quantity < 1)
       throw new BizException(ErrorCodes.INVALID, "购物车数量必须为正数", 400);
     ProductClient.SkuView current = currentSku(request.skuId);
-    Map<String, Item> items = readMap();
-    Item item = items.get(String.valueOf(request.skuId));
+    Map<String, CartItemPO> items = readMap();
+    CartItemPO item = items.get(String.valueOf(request.skuId));
     if (item == null) {
-      request.productId = current.productId();
+      item = toPersistence(request);
+      item.productId = current.productId();
       request.productName = current.productName();
       request.unitPrice = current.unitPrice();
       request.checked = true;
       request.addedAt = OffsetDateTime.now().toString();
-      item = request;
     } else {
       item.quantity += request.quantity;
       item.productId = current.productId();
@@ -73,22 +76,22 @@ public class CartServiceImpl implements CartService {
       item.unitPrice = current.unitPrice();
     }
     write(item);
-    return ApiResponse.ok(item);
+    return ApiResponse.ok(CartItemVO.from(item));
   }
 
   @PutMapping("/items/{skuId}")
   /** 执行 update 相关操作。 */
-  public ApiResponse<?> update(@PathVariable Long skuId, @RequestBody Item request) {
+  public ApiResponse<?> update(@PathVariable Long skuId, @RequestBody CartItemDTO request) {
     // 1. 接收并整理 update 的业务请求。
     // 2. 执行 update 的核心业务校验与状态处理。
     // 3. 返回 update 的处理结果。
     if (request.quantity < 1) throw new BizException(ErrorCodes.INVALID, "数量必须为正数", 400);
-    Item item = readMap().get(String.valueOf(skuId));
+    CartItemPO item = readMap().get(String.valueOf(skuId));
     if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
     item.quantity = request.quantity;
     if (request.checked != null) item.checked = request.checked;
     write(item);
-    return ApiResponse.ok(item);
+    return ApiResponse.ok(CartItemVO.from(item));
   }
 
   @DeleteMapping("/items/{skuId}")
@@ -107,11 +110,11 @@ public class CartServiceImpl implements CartService {
     // 1. 接收并整理 checked 的业务请求。
     // 2. 执行 checked 的核心业务校验与状态处理。
     // 3. 返回 checked 的处理结果。
-    Item item = readMap().get(String.valueOf(skuId));
+    CartItemPO item = readMap().get(String.valueOf(skuId));
     if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
     item.checked = Boolean.TRUE.equals(body.get("checked"));
     write(item);
-    return ApiResponse.ok(item);
+    return ApiResponse.ok(CartItemVO.from(item));
   }
 
   @DeleteMapping("/checked-items")
@@ -133,7 +136,7 @@ public class CartServiceImpl implements CartService {
     // 2. 执行 preview 的核心业务校验与状态处理。
     // 3. 返回 preview 的处理结果。
     Set<Long> selected = new HashSet<>(body.getOrDefault("skuIds", List.of()));
-    List<Item> items =
+    List<CartItemPO> items =
         readItems().stream()
             .filter(
                 i ->
@@ -143,7 +146,7 @@ public class CartServiceImpl implements CartService {
             .collect(Collectors.toList());
     List<Map<String, Object>> invalid = new ArrayList<>();
     BigDecimal total = BigDecimal.ZERO;
-    for (Item item : items) {
+    for (CartItemPO item : items) {
       try {
         ProductClient.SkuView current = currentSku(item.skuId);
         item.productId = current.productId();
@@ -160,7 +163,7 @@ public class CartServiceImpl implements CartService {
     return ApiResponse.ok(
         Map.of(
             "items",
-            items,
+            items.stream().map(CartItemVO::from).toList(),
             "invalidItems",
             invalid,
             "totalAmount",
@@ -178,11 +181,11 @@ public class CartServiceImpl implements CartService {
   }
 
   /** 执行 readMap 相关操作。 */
-  private Map<String, Item> readMap() {
+  private Map<String, CartItemPO> readMap() {
     // 1. 接收并整理 readMap 的业务请求。
     // 2. 执行 readMap 的核心业务校验与状态处理。
     // 3. 返回 readMap 的处理结果。
-    Map<String, Item> result = new LinkedHashMap<>();
+    Map<String, CartItemPO> result = new LinkedHashMap<>();
     redis
         .opsForHash()
         .entries(key())
@@ -190,7 +193,8 @@ public class CartServiceImpl implements CartService {
             (field, value) -> {
               try {
                 result.put(
-                    String.valueOf(field), mapper.readValue(String.valueOf(value), Item.class));
+                    String.valueOf(field),
+                    mapper.readValue(String.valueOf(value), CartItemPO.class));
               } catch (Exception e) {
                 throw new BizException(ErrorCodes.INTERNAL, "购物车数据损坏", 500);
               }
@@ -199,7 +203,7 @@ public class CartServiceImpl implements CartService {
   }
 
   /** 执行 readItems 相关操作。 */
-  private List<Item> readItems() {
+  private List<CartItemPO> readItems() {
     // 1. 接收并整理 readItems 的业务请求。
     // 2. 执行 readItems 的核心业务校验与状态处理。
     // 3. 返回 readItems 的处理结果。
@@ -207,12 +211,12 @@ public class CartServiceImpl implements CartService {
   }
 
   /** 执行 refreshItems 相关操作。 */
-  private List<Item> refreshItems() {
+  private List<CartItemPO> refreshItems() {
     // 1. 接收并整理 refreshItems 的业务请求。
     // 2. 执行 refreshItems 的核心业务校验与状态处理。
     // 3. 返回 refreshItems 的处理结果。
-    List<Item> items = readItems();
-    for (Item item : items) {
+    List<CartItemPO> items = readItems();
+    for (CartItemPO item : items) {
       try {
         ProductClient.SkuView current = currentSku(item.skuId);
         item.productId = current.productId();
@@ -227,7 +231,7 @@ public class CartServiceImpl implements CartService {
   }
 
   /** 执行 write 相关操作。 */
-  private void write(Item item) {
+  private void write(CartItemPO item) {
     // 1. 接收并整理 write 的业务请求。
     // 2. 执行 write 的核心业务校验与状态处理。
     // 3. 返回 write 的处理结果。
@@ -250,26 +254,16 @@ public class CartServiceImpl implements CartService {
     return response.data;
   }
 
-  public static class Item {
-    /** 保存 skuId 的业务状态或配置。 */
-    public Long skuId;
-
-    /** 保存 productId 的业务状态或配置。 */
-    public Long productId;
-
-    /** 保存 productName 的业务状态或配置。 */
-    public String productName = "CloudMall 商品";
-
-    /** 保存 unitPrice 的业务状态或配置。 */
-    public String unitPrice = "0.00";
-
-    /** 保存 quantity 的业务状态或配置。 */
-    public int quantity = 1;
-
-    /** 保存 checked 的业务状态或配置。 */
-    public Boolean checked = true;
-
-    /** 保存 addedAt 的业务状态或配置。 */
-    public String addedAt;
+  /** 将购物车请求转换为 Redis 持久化对象。 */
+  private CartItemPO toPersistence(CartItemDTO request) {
+    CartItemPO item = new CartItemPO();
+    item.skuId = request.skuId;
+    item.productId = request.productId;
+    item.productName = request.productName;
+    item.unitPrice = request.unitPrice;
+    item.quantity = request.quantity;
+    item.checked = request.checked;
+    item.addedAt = request.addedAt;
+    return item;
   }
 }

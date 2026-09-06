@@ -39,8 +39,7 @@ public class StockCacheReconciler {
     // 1. 接收并整理 rebuildFromDatabase 的业务请求。
     // 2. 执行 rebuildFromDatabase 的核心业务校验与状态处理。
     // 3. 返回 rebuildFromDatabase 的处理结果。
-    List<Map<String, Object>> stocks =
-        stockSqlMapper.queryForList("select sku_id, available_quantity from stock_sku");
+    List<Map<String, Object>> stocks = stockSqlMapper.findAvailableStock();
     for (Map<String, Object> stock : stocks) {
       Number skuId = (Number) stock.get("sku_id");
       Number available = (Number) stock.get("available_quantity");

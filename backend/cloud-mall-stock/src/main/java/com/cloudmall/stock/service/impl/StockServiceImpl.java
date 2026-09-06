@@ -3,6 +3,10 @@ package com.cloudmall.stock.service.impl;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
+import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
+import com.cloudmall.stock.domain.dto.StockLineDTO;
+import com.cloudmall.stock.domain.dto.StockReservationDTO;
+import com.cloudmall.stock.domain.vo.StockQuantityVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -88,24 +92,24 @@ public class StockServiceImpl implements StockService {
     // 1. 接收并整理 get 的业务请求。
     // 2. 执行 get 的核心业务校验与状态处理。
     // 3. 返回 get 的处理结果。
-    return ApiResponse.ok(Map.of("skuId", skuId, "availableQuantity", quantity(skuId)));
+    return ApiResponse.ok(new StockQuantityVO(skuId, quantity(skuId)));
   }
 
   @Transactional
   @PostMapping("/reservations")
   /** 执行 reserve 相关操作。 */
-  public ApiResponse<?> reserve(@RequestBody Reservation r) {
+  public ApiResponse<?> reserve(@RequestBody StockReservationDTO request) {
     // 1. 接收并整理 reserve 的业务请求。
     // 2. 执行 reserve 的核心业务校验与状态处理。
     // 3. 返回 reserve 的处理结果。
-    validate(r);
-    List<Line> lines = merge(r.items);
-    String key = RES + r.orderNo;
+    validate(request);
+    List<StockLineDTO> lines = merge(request.items);
+    String key = RES + request.orderNo;
     List<String> keys = new ArrayList<>(List.of(key));
     keys.addAll(lines.stream().map(x -> PREFIX + x.skuId).toList());
     keys.add(key + ":lines");
     List<String> args = new ArrayList<>();
-    for (Line x : lines) {
+    for (StockLineDTO x : lines) {
       args.add(String.valueOf(x.skuId));
       args.add(String.valueOf(x.quantity));
     }
@@ -114,19 +118,10 @@ public class StockServiceImpl implements StockService {
     if (Objects.equals(result, 2L))
       return ApiResponse.ok(Map.of("reserved", true, "idempotent", true));
     try {
-      for (Line x : lines) {
-        int changed =
-            stockSqlMapper.update(
-                "update stock_sku set"
-                    + " available_quantity=available_quantity-?,reserved_quantity=reserved_quantity+?,version=version+1,updated_at=?"
-                    + " where sku_id=? and available_quantity>=?",
-                x.quantity,
-                x.quantity,
-                now(),
-                x.skuId,
-                x.quantity);
+      for (StockLineDTO x : lines) {
+        int changed = stockSqlMapper.reserveQuantity(x.skuId, x.quantity, now());
         if (changed != 1) throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
-        flow(x, r.orderNo, "RESERVE", r.orderNo + ":RESERVE:" + x.skuId);
+        flow(x, request.orderNo, "RESERVE", request.orderNo + ":RESERVE:" + x.skuId);
       }
     } catch (RuntimeException e) {
       compensateReservation(key, lines);
@@ -149,18 +144,9 @@ public class StockServiceImpl implements StockService {
         int q = Integer.parseInt(String.valueOf(e.getValue()));
         String k = orderNo + ":CONFIRM:" + sku;
         if (!existsFlow(k)) {
-          int changed =
-              stockSqlMapper.update(
-                  "update stock_sku set"
-                      + " reserved_quantity=reserved_quantity-?,sold_quantity=sold_quantity+?,version=version+1,updated_at=?"
-                      + " where sku_id=? and reserved_quantity>=?",
-                  q,
-                  q,
-                  now(),
-                  sku,
-                  q);
+          int changed = stockSqlMapper.confirmQuantity(sku, q, now());
           if (changed != 1) throw new BizException(ErrorCodes.STOCK, "预扣库存不存在或不足", 409);
-          flow(new Line(sku, q), orderNo, "CONFIRM", k);
+          flow(new StockLineDTO(sku, q), orderNo, "CONFIRM", k);
         }
       }
     } catch (RuntimeException e) {
@@ -184,18 +170,9 @@ public class StockServiceImpl implements StockService {
       int q = Integer.parseInt(String.valueOf(e.getValue()));
       String k = orderNo + ":ROLLBACK:" + sku;
       if (!existsFlow(k)) {
-        int changed =
-            stockSqlMapper.update(
-                "update stock_sku set"
-                    + " reserved_quantity=reserved_quantity-?,available_quantity=available_quantity+?,version=version+1,updated_at=?"
-                    + " where sku_id=? and reserved_quantity>=?",
-                q,
-                q,
-                now(),
-                sku,
-                q);
+        int changed = stockSqlMapper.rollbackQuantity(sku, q, now());
         if (changed != 1) throw new BizException(ErrorCodes.STOCK, "预扣库存不存在或不足", 409);
-        flow(new Line(sku, q), orderNo, "ROLLBACK", k);
+        flow(new StockLineDTO(sku, q), orderNo, "ROLLBACK", k);
       }
     }
     redis.delete(RES + orderNo);
@@ -205,30 +182,47 @@ public class StockServiceImpl implements StockService {
 
   @PostMapping("/seckill/reservations")
   /** 执行 seckill 相关操作。 */
-  public ApiResponse<?> seckill(@RequestBody Map<String, Object> b) {
+  public ApiResponse<?> seckill(@RequestBody SeckillReservationDTO request) {
     // 1. 接收并整理 seckill 的业务请求。
     // 2. 执行 seckill 的核心业务校验与状态处理。
     // 3. 返回 seckill 的处理结果。
-    long uid = AuthContext.requireUserId();
-    String a = String.valueOf(b.get("activityId")),
-        sku = String.valueOf(b.get("skuId")),
-        user = String.valueOf(b.get("userId")),
-        idem = String.valueOf(b.get("idempotencyKey"));
-    if ("null".equals(a) || "null".equals(sku) || "null".equals(user) || "null".equals(idem))
+    long userId = AuthContext.requireUserId();
+    String activityId = String.valueOf(request == null ? null : request.activityId),
+        skuId = String.valueOf(request == null ? null : request.skuId),
+        requestUserId = String.valueOf(request == null ? null : request.userId),
+        idempotencyKey = String.valueOf(request == null ? null : request.idempotencyKey);
+    if ("null".equals(activityId)
+        || "null".equals(skuId)
+        || "null".equals(requestUserId)
+        || "null".equals(idempotencyKey))
       throw new BizException(ErrorCodes.INVALID, "秒杀参数不完整", 400);
-    if (!String.valueOf(uid).equals(user))
+    if (!String.valueOf(userId).equals(requestUserId))
       throw new BizException(ErrorCodes.FORBIDDEN, "秒杀用户归属校验失败", 403);
-    Map<Object, Object> meta = redis.opsForHash().entries("seckill:meta:" + a + ":" + sku);
+    Map<Object, Object> meta =
+        redis.opsForHash().entries("seckill:meta:" + activityId + ":" + skuId);
     long start = epoch(meta.get("startAt")), end = epoch(meta.get("endAt"));
     int limit = Integer.parseInt(String.valueOf(meta.getOrDefault("perUserLimit", "1")));
     long ttl = Math.max(1, (end - System.currentTimeMillis() / 1000));
-    String orderKey = "seckill:accepted:" + a + ":" + sku + ":" + user + ":" + idem,
+    String
+        orderKey =
+            "seckill:accepted:"
+                + activityId
+                + ":"
+                + skuId
+                + ":"
+                + requestUserId
+                + ":"
+                + idempotencyKey,
         orderNo =
             now().format(DateTimeFormatter.ofPattern("yyyyMM"))
                 + UUID.randomUUID().toString().replace("-", "");
-    recordSeckillPending(Long.parseLong(a), Long.parseLong(sku), uid, idem, orderNo);
+    recordSeckillPending(
+        Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey, orderNo);
     List<String> keys =
-        List.of("seckill:stock:" + a + ":" + sku, "seckill:user:" + a + ":" + user, orderKey);
+        List.of(
+            "seckill:stock:" + activityId + ":" + skuId,
+            "seckill:user:" + activityId + ":" + requestUserId,
+            orderKey);
     Long result =
         redis.execute(
             seckillScript,
@@ -241,23 +235,28 @@ public class StockServiceImpl implements StockService {
             String.valueOf(ttl));
     if (Objects.equals(result, 3L)) {
       String existing = redis.opsForValue().get(orderKey);
-      markSeckillAccepted(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+      markSeckillAccepted(
+          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       return accepted(existing);
     }
     if (Objects.equals(result, 2L)) {
-      markSeckillRejected(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+      markSeckillRejected(
+          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       throw new BizException(ErrorCodes.DUPLICATE, "超过用户限购", 429);
     }
     if (Objects.equals(result, 4L)) {
-      markSeckillRejected(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+      markSeckillRejected(
+          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       throw new BizException("SECKILL_NOT_STARTED", "秒杀未开始", 409);
     }
     if (Objects.equals(result, 5L)) {
-      markSeckillRejected(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+      markSeckillRejected(
+          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       throw new BizException("SECKILL_ENDED", "秒杀已结束", 409);
     }
     if (Objects.equals(result, 0L)) {
-      markSeckillRejected(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+      markSeckillRejected(
+          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       throw new BizException("SECKILL_SOLD_OUT", "秒杀库存耗尽", 409);
     }
     String no = redis.opsForValue().get(orderKey);
@@ -271,21 +270,22 @@ public class StockServiceImpl implements StockService {
               "orderNo",
               no,
               "activityId",
-              Long.valueOf(a),
+              Long.valueOf(activityId),
               "skuId",
-              Long.valueOf(sku),
+              Long.valueOf(skuId),
               "userId",
-              uid,
+              userId,
               "idempotencyKey",
-              idem,
+              idempotencyKey,
               "occurredAt",
               now().toString()));
     } catch (Exception e) {
       redis.execute(seckillRollbackScript, keys);
-      markSeckillRejected(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+      markSeckillRejected(
+          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       throw new BizException(ErrorCodes.INTERNAL, "秒杀订单入队失败", 500);
     }
-    markSeckillAccepted(Long.parseLong(a), Long.parseLong(sku), uid, idem);
+    markSeckillAccepted(Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
     return accepted(no);
   }
 
@@ -296,19 +296,7 @@ public class StockServiceImpl implements StockService {
     // 2. 执行 recordSeckillPending 的核心业务校验与状态处理。
     // 3. 返回 recordSeckillPending 的处理结果。
     OffsetDateTime now = now();
-    stockSqlMapper.update(
-        "insert into"
-            + " seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,created_at,updated_at)"
-            + " values(?,?,?,?,?,?,'PENDING',?,?) on duplicate key update"
-            + " order_no=if(status='ACCEPTED',order_no,values(order_no)),status=if(status='ACCEPTED','ACCEPTED','PENDING'),updated_at=values(updated_at)",
-        id(),
-        activityId,
-        skuId,
-        userId,
-        orderNo,
-        idempotencyKey,
-        now,
-        now);
+    stockSqlMapper.saveSeckillPending(activityId, skuId, userId, orderNo, idempotencyKey, now);
   }
 
   /** 执行 markSeckillAccepted 相关操作。 */
@@ -317,14 +305,7 @@ public class StockServiceImpl implements StockService {
     // 1. 接收并整理 markSeckillAccepted 的业务请求。
     // 2. 执行 markSeckillAccepted 的核心业务校验与状态处理。
     // 3. 返回 markSeckillAccepted 的处理结果。
-    stockSqlMapper.update(
-        "update seckill_reservation set status='ACCEPTED',updated_at=? where activity_id=? and"
-            + " sku_id=? and user_id=? and idempotency_key=?",
-        now(),
-        activityId,
-        skuId,
-        userId,
-        idempotencyKey);
+    stockSqlMapper.markSeckillAccepted(activityId, skuId, userId, idempotencyKey, now());
   }
 
   /** 执行 markSeckillRejected 相关操作。 */
@@ -333,14 +314,7 @@ public class StockServiceImpl implements StockService {
     // 1. 接收并整理 markSeckillRejected 的业务请求。
     // 2. 执行 markSeckillRejected 的核心业务校验与状态处理。
     // 3. 返回 markSeckillRejected 的处理结果。
-    stockSqlMapper.update(
-        "update seckill_reservation set status='REJECTED',updated_at=? where activity_id=? and"
-            + " sku_id=? and user_id=? and idempotency_key=? and status='PENDING'",
-        now(),
-        activityId,
-        skuId,
-        userId,
-        idempotencyKey);
+    stockSqlMapper.markSeckillRejected(activityId, skuId, userId, idempotencyKey, now());
   }
 
   /** 执行 accepted 相关操作。 */
@@ -356,35 +330,23 @@ public class StockServiceImpl implements StockService {
     // 1. 接收并整理 existsFlow 的业务请求。
     // 2. 执行 existsFlow 的核心业务校验与状态处理。
     // 3. 返回 existsFlow 的处理结果。
-    return !stockSqlMapper
-        .query("select id from stock_flow where idempotency_key=?", (r, n) -> r.getLong(1), k)
-        .isEmpty();
+    return stockSqlMapper.flowExists(k);
   }
 
   /** 执行 flow 相关操作。 */
-  private void flow(Line x, String order, String type, String key) {
+  private void flow(StockLineDTO x, String order, String type, String key) {
     // 1. 接收并整理 flow 的业务请求。
     // 2. 执行 flow 的核心业务校验与状态处理。
     // 3. 返回 flow 的处理结果。
-    stockSqlMapper.update(
-        "insert into stock_flow(id,sku_id,order_no,flow_type,quantity,idempotency_key,created_at)"
-            + " values(?,?,?,?,?,?,?) on duplicate key update"
-            + " idempotency_key=values(idempotency_key)",
-        id(),
-        x.skuId,
-        order,
-        type,
-        x.quantity,
-        key,
-        now());
+    stockSqlMapper.insertFlow(x.skuId, order, type, x.quantity, key, now());
   }
 
   /** 执行 compensateReservation 相关操作。 */
-  private void compensateReservation(String key, List<Line> lines) {
+  private void compensateReservation(String key, List<StockLineDTO> lines) {
     // 1. 接收并整理 compensateReservation 的业务请求。
     // 2. 执行 compensateReservation 的核心业务校验与状态处理。
     // 3. 返回 compensateReservation 的处理结果。
-    for (Line x : lines) redis.opsForValue().increment(PREFIX + x.skuId, x.quantity);
+    for (StockLineDTO x : lines) redis.opsForValue().increment(PREFIX + x.skuId, x.quantity);
     redis.delete(key);
     redis.delete(key + ":lines");
   }
@@ -411,23 +373,23 @@ public class StockServiceImpl implements StockService {
   }
 
   /** 执行 merge 相关操作。 */
-  private static List<Line> merge(List<Line> in) {
+  private static List<StockLineDTO> merge(List<StockLineDTO> in) {
     // 1. 接收并整理 merge 的业务请求。
     // 2. 执行 merge 的核心业务校验与状态处理。
     // 3. 返回 merge 的处理结果。
     Map<Long, Integer> m = new LinkedHashMap<>();
-    for (Line x : in) {
+    for (StockLineDTO x : in) {
       if (x == null || x.skuId == null || x.quantity < 1)
         throw new BizException(ErrorCodes.INVALID, "库存数量必须为正数", 400);
       m.merge(x.skuId, x.quantity, Math::addExact);
     }
     return m.entrySet().stream()
-        .map(e -> new Line(e.getKey(), e.getValue()))
+        .map(e -> new StockLineDTO(e.getKey(), e.getValue()))
         .collect(Collectors.toList());
   }
 
   /** 执行 validate 相关操作。 */
-  private static void validate(Reservation r) {
+  private static void validate(StockReservationDTO r) {
     // 1. 接收并整理 validate 的业务请求。
     // 2. 执行 validate 的核心业务校验与状态处理。
     // 3. 返回 validate 的处理结果。
@@ -453,17 +415,4 @@ public class StockServiceImpl implements StockService {
     // 3. 返回 id 的处理结果。
     return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
-
-  public static class Reservation {
-    /** 保存 orderNo 的业务状态或配置。 */
-    public String orderNo;
-
-    /** 执行 业务操作 相关操作。 */
-    public List<Line> items = new ArrayList<>();
-
-    /** 保存 scene 的业务状态或配置。 */
-    public String scene;
-  }
-
-  public record Line(Long skuId, int quantity) {}
 }

@@ -6,7 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-import com.cloudmall.product.controller.ProductController;
+import com.cloudmall.product.domain.dto.CategoryDTO;
+import com.cloudmall.product.domain.dto.ProductDTO;
+import com.cloudmall.product.domain.dto.ProductParameterDTO;
+import com.cloudmall.product.domain.dto.SkuDTO;
 import com.cloudmall.product.mapper.ProductSqlMapper;
 import com.cloudmall.product.service.impl.ProductServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,9 +31,8 @@ class ProductContractTest {
 
   @Test
   void productParameterUsesNameAndValue() throws Exception {
-    ProductController.ProductParameter parameter =
-        mapper.readValue(
-            "{\"name\":\"颜色\",\"value\":\"黑色\"}", ProductController.ProductParameter.class);
+    ProductParameterDTO parameter =
+        mapper.readValue("{\"name\":\"颜色\",\"value\":\"黑色\"}", ProductParameterDTO.class);
 
     assertEquals("颜色", parameter.name);
     assertEquals("黑色", parameter.value);
@@ -43,10 +45,10 @@ class ProductContractTest {
 
   @Test
   void skuSpecJsonIsAnObjectOfStrings() throws Exception {
-    ProductController.Sku sku =
+    SkuDTO sku =
         mapper.readValue(
             "{\"skuCode\":\"BLACK-64\",\"specJson\":{\"颜色\":\"黑色\",\"容量\":\"64GB\"}}",
-            ProductController.Sku.class);
+            SkuDTO.class);
 
     assertEquals(Map.of("颜色", "黑色", "容量", "64GB"), sku.specJson);
     JsonNode json = mapper.readTree(mapper.writeValueAsString(sku));
@@ -101,11 +103,11 @@ class ProductContractTest {
   void everyProductEventPublishingWriteEndpointIsTransactional() throws Exception {
     assertTrue(
         ProductServiceImpl.class
-            .getDeclaredMethod("create", ProductController.Product.class)
+            .getDeclaredMethod("create", ProductDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
         ProductServiceImpl.class
-            .getDeclaredMethod("update", Long.class, ProductController.Product.class)
+            .getDeclaredMethod("update", Long.class, ProductDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
         ProductServiceImpl.class
@@ -117,11 +119,11 @@ class ProductContractTest {
             .isAnnotationPresent(Transactional.class));
     assertTrue(
         ProductServiceImpl.class
-            .getDeclaredMethod("addCategory", ProductController.Category.class)
+            .getDeclaredMethod("addCategory", CategoryDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
         ProductServiceImpl.class
-            .getDeclaredMethod("updateCategory", Long.class, ProductController.Category.class)
+            .getDeclaredMethod("updateCategory", Long.class, CategoryDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
         ProductServiceImpl.class

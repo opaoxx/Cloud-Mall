@@ -19,11 +19,13 @@ class BackendP1RulesTest {
   @Test
   void stockChecksDatabaseWritesAndCompensatesRedis() throws Exception {
     String source = source("cloud-mall-stock", "StockServiceImpl.java");
+    String mapper = source("cloud-mall-stock", "StockSqlMapper.java");
     String compact = compact(source);
     assertTrue(compact.contains("if(changed!=1)"));
     assertTrue(source.contains("compensateReservation"));
-    assertTrue(compact.contains("onduplicatekeyupdate"));
-    assertTrue(compact.contains("idempotency_key=values(idempotency_key)"));
+    assertTrue(compact.contains("stockSqlMapper.insertFlow"));
+    assertTrue(mapper.contains("on duplicate key update"));
+    assertTrue(mapper.contains("idempotency_key=values(idempotency_key)"));
     assertTrue(source.contains("SECKILL_ROLLBACK"));
     assertTrue(compact.contains("redis.execute(seckillRollbackScript,keys)"));
   }
@@ -32,24 +34,25 @@ class BackendP1RulesTest {
   void productPersistsAndReadsParameters() throws Exception {
     String source = source("cloud-mall-product", "ProductServiceImpl.java");
     String compact = compact(source);
-    assertTrue(source.contains("product_parameter"));
     assertTrue(source.contains("parameters"));
     assertTrue(source.contains("replaceParameters"));
-    assertTrue(
-        compact.contains(
-            "productSqlMapper.update(\"deletefromproduct_parameterwhereproduct_id=?\""));
+    String mapper = source("cloud-mall-product", "ProductSqlMapper.java");
+    assertTrue(mapper.contains("product_parameter"));
+    assertTrue(mapper.contains("delete from product_parameter where product_id=?"));
   }
 
   @Test
   void productMapsDatabaseSnakeCaseToApiDtos() throws Exception {
     String source = source("cloud-mall-product", "ProductServiceImpl.java");
     String compact = compact(source);
+    String activity = source("cloud-mall-product", "ActivityVO.java");
+    String hot = source("cloud-mall-product", "HotStatVO.java");
     assertTrue(compact.contains("toActivityResponse(activityRecord(id))"));
-    assertTrue(source.contains("new HotStatResponse"));
-    assertTrue(compact.contains("publicfinallongactivityId,skuId"));
-    assertTrue(compact.contains("publicfinalintremainingStock,perUserLimit"));
-    assertTrue(compact.contains("publicfinallongproductId,viewCount,searchCount"));
-    assertTrue(compact.contains("publicfinalStringhotScore"));
+    assertTrue(compact.contains("newHotStatVO"));
+    assertTrue(activity.contains("activityId"));
+    assertTrue(activity.contains("remainingStock"));
+    assertTrue(hot.contains("productId"));
+    assertTrue(hot.contains("hotScore"));
   }
 
   @Test
