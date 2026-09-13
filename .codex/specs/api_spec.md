@@ -166,7 +166,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 | 方法 | 路径 | 请求 | 响应/说明 |
 | --- | --- | --- | --- |
-| GET | `/api/seckill/activities/{activityId}` | 无 | 活动状态、商品摘要、剩余展示库存 |
+| GET | `/api/seckill/activities/{activityId}` | 无 | 活动状态、SKU 标识和剩余展示库存；商品摘要通过 `/api/products/skus/{skuId}` 读取 |
 | POST | `/api/seckill/activities` | `{skuId,startAt,endAt,stockLimit,perUserLimit}` | 管理员创建；时间为 ISO-8601 `+08:00` |
 | PUT | `/api/seckill/activities/{activityId}` | 可变活动字段 | 管理员修改 |
 | POST | `/api/seckill/activities/{activityId}/publish` | 无 | 预热 Redis 并发布 |
