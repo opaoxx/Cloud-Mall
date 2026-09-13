@@ -67,6 +67,16 @@ npm run dev
 
 本地练习环境默认中间件账号约定为 `root/root`，仅用于本地开发，不应直接用于生产环境。
 
+### 扩充本地商品目录
+
+需要使用 `F:\hmall\sql\hm-item.sql` 的完整商品数据时，在 MySQL 容器启动后执行：
+
+```powershell
+.\backend\database\import_hmall_catalog.ps1
+```
+
+脚本会先导入 hmall 商品源表，再将每条商品转换为 CloudMall 商品、SKU、库存、分类和热度数据，并校验迁移行数。它只重建商品和库存演示目录，不迁移 hmall 的订单、支付或购物车数据；执行前应保留数据库备份。
+
 ## 验证命令
 
 ```bash
