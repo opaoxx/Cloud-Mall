@@ -147,7 +147,7 @@ public class ProductServiceImpl implements ProductService {
     long total = productSqlMapper.countProducts(keyword, categoryId, status);
     List<ProductDTO> items =
         productSqlMapper
-            .findProducts(keyword, categoryId, status, (page - 1) * pageSize, pageSize)
+            .findProducts(keyword, categoryId, status, (page - 1) * pageSize, pageSize, sort)
             .stream()
             .map(this::productView)
             .toList();

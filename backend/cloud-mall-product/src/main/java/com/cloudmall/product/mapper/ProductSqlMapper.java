@@ -110,17 +110,32 @@ public class ProductSqlMapper {
 
   /** 分页查询商品。 */
   public List<Map<String, Object>> findProducts(
-      String keyword, Long categoryId, Integer status, int offset, int pageSize) {
+      String keyword, Long categoryId, Integer status, int offset, int pageSize, String sort) {
     StringBuilder condition = new StringBuilder(" where 1=1");
     List<Object> arguments = new java.util.ArrayList<>();
     appendProductConditions(condition, arguments, keyword, categoryId, status);
     arguments.add(offset);
     arguments.add(pageSize);
+    String orderBy = productOrderBy(sort);
     return queryForList(
-        "select id,category_id,name,main_image,description,price,status from product"
+        "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status"
+            + " from product p left join product_hot_stat hot on hot.product_id=p.id"
             + condition
-            + " order by updated_at desc,id desc limit ?,?",
+            + " order by "
+            + orderBy
+            + " limit ?,?",
         arguments.toArray());
+  }
+
+  /** 将公开排序参数映射为固定 SQL 片段，避免把请求参数拼入 SQL。 */
+  private static String productOrderBy(String sort) {
+    return switch (sort == null ? "" : sort) {
+      case "price_asc" -> "p.price asc,p.id desc";
+      case "price_desc" -> "p.price desc,p.id desc";
+      case "latest" -> "p.updated_at desc,p.id desc";
+      case "hot" -> "coalesce(hot.hot_score,0) desc,p.updated_at desc,p.id desc";
+      default -> "p.updated_at desc,p.id desc";
+    };
   }
 
   /** 查询 SKU 及其商品状态。 */
