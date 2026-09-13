@@ -641,8 +641,8 @@ public class ProductServiceImpl implements ProductService {
                     new ActivityRecord(
                         ((Number) row.get("id")).longValue(),
                         ((Number) row.get("sku_id")).longValue(),
-                        (java.sql.Timestamp) row.get("start_at"),
-                        (java.sql.Timestamp) row.get("end_at"),
+                        toTimestamp(row.get("start_at")),
+                        toTimestamp(row.get("end_at")),
                         ((Number) row.get("stock_limit")).intValue(),
                         ((Number) row.get("per_user_limit")).intValue(),
                         String.valueOf(row.get("status"))))
@@ -687,6 +687,14 @@ public class ProductServiceImpl implements ProductService {
     // 2. 执行 toOffset 的核心业务校验与状态处理。
     // 3. 返回 toOffset 的处理结果。
     return value.toInstant().atOffset(ZoneOffset.ofHours(8));
+  }
+
+  /** 将 JDBC 时间值统一转换为 Timestamp，兼容 MySQL 驱动返回的 LocalDateTime。 */
+  private static java.sql.Timestamp toTimestamp(Object value) {
+    if (value instanceof java.sql.Timestamp timestamp) return timestamp;
+    if (value instanceof java.time.LocalDateTime localDateTime)
+      return java.sql.Timestamp.valueOf(localDateTime);
+    return java.sql.Timestamp.valueOf(String.valueOf(value).replace('T', ' '));
   }
 
   /** 执行 validateCategory 相关操作。 */
