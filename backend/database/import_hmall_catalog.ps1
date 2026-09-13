@@ -1,6 +1,7 @@
 param(
   [string]$SourceSql = 'F:\hmall\sql\hm-item.sql',
-  [string]$Container = 'cloud-mall-mysql'
+  [string]$Container = 'cloud-mall-mysql',
+  [string]$RedisContainer = 'cloud-mall-redis'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,4 +47,20 @@ if ($values.Count -lt 5 -or $values[0] -ne $values[1] -or $values[0] -ne $values
   throw "商品 ETL 数量不一致：$counts"
 }
 Write-Host "源商品 $($values[0]) 条，分类 $($values[4]) 个。"
+
+docker inspect $RedisContainer *> $null
+if ($LASTEXITCODE -ne 0) {
+  throw "Redis 容器不存在：$RedisContainer，无法清理与旧商品关联的购物车"
+}
+Write-Host '清理旧商品对应的 Redis 购物车...'
+$cartKeys = docker exec $RedisContainer redis-cli -a root --no-auth-warning --scan --pattern 'cart:*'
+if ($LASTEXITCODE -ne 0) {
+  throw 'Redis 购物车扫描失败'
+}
+foreach ($cartKey in ($cartKeys -split '\r?\n' | Where-Object { $_ -ne '' })) {
+  docker exec $RedisContainer redis-cli -a root --no-auth-warning DEL $cartKey *> $null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Redis 购物车清理失败：$cartKey"
+  }
+}
 Write-Host '商品数据迁移完成。'

@@ -27,7 +27,7 @@
 - SKU `sku_code` 为 `HM-<item.id>`，`product_sku.status` 与商品状态一致。
 - 商品热度初始化为源 `sold` 的可比计数（`view_count=sold`、`search_count=comment_count`、`hot_score=sold`），不改变 API 字段。
 
-ETL 先在临时源库完成导入，再在事务/分批语句中清理 CloudMall 商品、SKU、参数、热度和库存旧种子，保留用户、地址、订单和支付事实；重复执行不产生重复行。迁移脚本记录源库依赖和校验查询，禁止把 hmall 的密码明文写入 CloudMall。
+ETL 先在临时源库完成导入，再在事务/分批语句中清理 CloudMall 商品、SKU、参数、热度和库存旧种子，保留用户、地址、订单和支付事实；由于购物车以 SKU 为键且源 SKU 已替换，迁移完成后清理旧的 `cart:*` Redis 缓存，避免失效 SKU 导致购物车接口报错。重复执行不产生重复行。迁移脚本记录源库依赖和校验查询，禁止把 hmall 的密码明文写入 CloudMall。
 
 ## 手机号校验契约
 
