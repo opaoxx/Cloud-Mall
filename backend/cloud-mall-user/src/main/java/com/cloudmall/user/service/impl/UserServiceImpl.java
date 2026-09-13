@@ -205,7 +205,7 @@ public class UserServiceImpl implements UserService {
 
   /** 新增当前用户收货地址。 */
   @PostMapping("/users/me/addresses")
-  public ApiResponse<?> addAddress(@RequestBody AddressRequestDTO request) {
+  public ApiResponse<?> addAddress(@Valid @RequestBody AddressRequestDTO request) {
     // 1. 获取当前用户并准备地址主键。
     // 2. 必要时清除原默认地址。
     // 3. 保存新地址并返回地址视图。
@@ -221,7 +221,7 @@ public class UserServiceImpl implements UserService {
   /** 更新当前用户收货地址。 */
   @PutMapping("/users/me/addresses/{id}")
   public ApiResponse<?> updateAddress(
-      @PathVariable Long id, @RequestBody AddressRequestDTO request) {
+      @PathVariable Long id, @Valid @RequestBody AddressRequestDTO request) {
     // 1. 校验地址属于当前用户。
     // 2. 更新地址字段和默认标志。
     // 3. 返回更新后的地址视图。

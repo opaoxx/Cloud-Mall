@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, auth, newIdempotencyKey, registerAndLogin } from './api'
 import { formatAddressSnapshot, productDetailToForm, productFormToRequest, resolveImageUrl } from './App'
+import { isValidPhone, normalizePhone } from './validation'
 
 describe('CloudMall request conventions', () => {
   beforeEach(() => { localStorage.clear(); vi.restoreAllMocks() })
@@ -8,6 +9,13 @@ describe('CloudMall request conventions', () => {
   it('creates unique idempotency keys', () => {
     const a = newIdempotencyKey(); const b = newIdempotencyKey()
     expect(a).not.toBe(b); expect(a).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('validates and normalizes mainland mobile numbers', () => {
+    expect(isValidPhone('13800138000')).toBe(true)
+    expect(isValidPhone('1380013800a')).toBe(false)
+    expect(isValidPhone('1380013800')).toBe(false)
+    expect(normalizePhone('138a00138000x')).toBe('13800138000')
   })
 
   it('adds Bearer and idempotency headers to order creation', async () => {
