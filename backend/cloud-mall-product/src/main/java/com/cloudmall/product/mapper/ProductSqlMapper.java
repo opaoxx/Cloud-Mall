@@ -133,6 +133,7 @@ public class ProductSqlMapper {
       case "price_asc" -> "p.price asc,p.id desc";
       case "price_desc" -> "p.price desc,p.id desc";
       case "latest" -> "p.updated_at desc,p.id desc";
+      case "sales" -> "coalesce(hot.view_count,0) desc,p.updated_at desc,p.id desc";
       case "hot" -> "coalesce(hot.hot_score,0) desc,p.updated_at desc,p.id desc";
       default -> "p.updated_at desc,p.id desc";
     };

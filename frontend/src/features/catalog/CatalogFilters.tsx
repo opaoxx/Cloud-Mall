@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from 'react'
+import { type FormEvent, useEffect, useState } from 'react'
 import type { Category } from '../../api'
 
 export type CatalogFilterValues = {
@@ -16,6 +16,7 @@ export type CatalogFiltersProps = {
 export function CatalogFilters({ categories = [], value, onChange, loading = false }: CatalogFiltersProps) {
   const [keyword, setKeyword] = useState(value?.keyword || '')
   const selectedCategory = value?.categoryId
+  useEffect(() => { setKeyword(value?.keyword || '') }, [value?.keyword])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()

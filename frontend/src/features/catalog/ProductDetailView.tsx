@@ -30,12 +30,13 @@ export function ProductDetailView({ product, onAddToCart, addingToCart = false, 
       <div>
         <p className="eyebrow">PRODUCT DETAIL</p>
         <h2>{productName}</h2>
+        {product.parameters?.find(parameter => parameter.name.includes('品牌')) ? <div className="detail-brand"><span>品牌</span><strong>{product.parameters.find(parameter => parameter.name.includes('品牌'))?.value}</strong></div> : null}
         <div className="price">¥{Number(displayPrice || 0).toFixed(2)}</div>
         {product.description ? <p>{product.description}</p> : null}
         {activeSkus.length > 0 ? (
           <>
             <h4>选择规格</h4>
-            <div className="chips" aria-label="商品规格">
+            <div className="sku-options" aria-label="商品规格">
               {activeSkus.map(sku => (
                 <button
                   type="button"
@@ -43,15 +44,15 @@ export function ProductDetailView({ product, onAddToCart, addingToCart = false, 
                   className={selectedSkuId === String(sku.id) ? 'selected' : ''}
                   onClick={() => setSelectedSkuId(String(sku.id))}
                 >
-                  {Object.values(sku.specJson || {}).join(' / ') || sku.skuCode}
+                  {formatSpec(sku.specJson) || sku.skuCode}
                 </button>
               ))}
             </div>
           </>
         ) : null}
         {product.parameters?.length ? (
-          <dl>
-            {product.parameters.map(parameter => <div key={parameter.name}><dt>{parameter.name}</dt><dd>{parameter.value}</dd></div>)}
+          <dl className="detail-parameters">
+            {product.parameters.filter(parameter => !parameter.name.includes('品牌')).map(parameter => <div key={parameter.name}><dt>{parameter.name}</dt><dd>{formatParameter(parameter.value)}</dd></div>)}
           </dl>
         ) : null}
         <label>
@@ -65,4 +66,16 @@ export function ProductDetailView({ product, onAddToCart, addingToCart = false, 
       </div>
     </article>
   )
+}
+
+function formatSpec(spec: Record<string, string>) {
+  return Object.entries(spec || {}).map(([name, value]) => `${name}：${value}`).join(' / ')
+}
+
+function formatParameter(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return Object.entries(parsed).map(([name, item]) => `${name}：${String(item)}`).join(' · ')
+  } catch { /* 保留原始参数文本。 */ }
+  return value
 }
