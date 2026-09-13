@@ -134,6 +134,33 @@ SELECT
   NOW(3)
 FROM `hm-item`.item AS item;
 
+-- 为首页提供一个真实可下单的限时秒杀活动；活动价沿用该 SKU 的真实销售价，避免前端虚构金额。
+SET @featured_item_id := (
+  SELECT id
+  FROM `hm-item`.item
+  WHERE status = 1 AND price >= 1000
+  ORDER BY price ASC, id ASC
+  LIMIT 1
+);
+SET @featured_item_id := COALESCE(
+  @featured_item_id,
+  (SELECT id FROM `hm-item`.item WHERE status = 1 AND price > 0 ORDER BY price ASC, id ASC LIMIT 1)
+);
+INSERT INTO cloudmall_product.seckill_activity
+    (id, sku_id, start_at, end_at, stock_limit, per_user_limit, status, created_at, updated_at)
+SELECT
+  910000000001,
+  700000000000 + @featured_item_id,
+  NOW(3),
+  DATE_ADD(NOW(3), INTERVAL 7 DAY),
+  LEAST(item.stock, 500),
+  1,
+  'PUBLISHED',
+  NOW(3),
+  NOW(3)
+FROM `hm-item`.item AS item
+WHERE item.id = @featured_item_id;
+
 -- 迁移验收：源 item、商品、SKU、库存必须一一对应。
 SET @source_item_count := (SELECT COUNT(*) FROM `hm-item`.item);
 SET @product_count := (SELECT COUNT(*) FROM cloudmall_product.product);

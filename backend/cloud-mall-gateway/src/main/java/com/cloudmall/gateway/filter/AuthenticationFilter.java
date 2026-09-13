@@ -70,7 +70,8 @@ public class AuthenticationFilter implements GlobalFilter {
         && (path.equals("/api/products")
             || path.startsWith("/api/products/")
             || path.equals("/api/categories")
-            || path.startsWith("/api/categories/"));
+            || path.startsWith("/api/categories/")
+            || path.startsWith("/api/seckill/activities/"));
   }
 
   /** 执行 unauthorized 相关操作。 */

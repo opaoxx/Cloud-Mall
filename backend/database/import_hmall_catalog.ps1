@@ -52,6 +52,48 @@ docker inspect $RedisContainer *> $null
 if ($LASTEXITCODE -ne 0) {
   throw "Redis 容器不存在：$RedisContainer，无法清理与旧商品关联的购物车"
 }
+
+Write-Host '初始化首页秒杀活动 Redis 状态...'
+$activityInfo = docker exec $Container mysql -uroot -proot --batch --skip-column-names -e @'
+SELECT sku_id, UNIX_TIMESTAMP(start_at), UNIX_TIMESTAMP(end_at), stock_limit
+FROM cloudmall_product.seckill_activity
+WHERE id = 910000000001;
+'@
+if ($LASTEXITCODE -ne 0) {
+  throw '秒杀活动查询失败'
+}
+$activityValues = ($activityInfo -split '\s+') | Where-Object { $_ -ne '' }
+if ($activityValues.Count -lt 4) {
+  throw "秒杀活动未生成：$activityInfo"
+}
+$activitySkuId = $activityValues[0]
+$activityStartEpoch = [long]$activityValues[1]
+$activityEndEpoch = [long]$activityValues[2]
+$activityStockLimit = $activityValues[3]
+$activityTtl = [Math]::Max(1, $activityEndEpoch - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+$activityStartIso = [DateTimeOffset]::FromUnixTimeSeconds($activityStartEpoch).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+$activityEndIso = [DateTimeOffset]::FromUnixTimeSeconds($activityEndEpoch).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+foreach ($pattern in @('seckill:stock:*', 'seckill:meta:*', 'seckill:product:*', 'seckill:user:*', 'seckill:accepted:*')) {
+  $keys = docker exec $RedisContainer redis-cli -a root --no-auth-warning --scan --pattern $pattern
+  if ($LASTEXITCODE -ne 0) {
+    throw "Redis 秒杀缓存扫描失败：$pattern"
+  }
+  foreach ($key in ($keys -split '\r?\n' | Where-Object { $_ -ne '' })) {
+    docker exec $RedisContainer redis-cli -a root --no-auth-warning DEL $key *> $null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Redis 秒杀缓存清理失败：$key"
+    }
+  }
+}
+$activitySuffix = "910000000001:$activitySkuId"
+docker exec $RedisContainer redis-cli -a root --no-auth-warning SET "seckill:stock:$activitySuffix" $activityStockLimit EX $activityTtl *> $null
+docker exec $RedisContainer redis-cli -a root --no-auth-warning HSET "seckill:meta:$activitySuffix" perUserLimit 1 stockLimit $activityStockLimit startAt $activityStartIso endAt $activityEndIso *> $null
+docker exec $RedisContainer redis-cli -a root --no-auth-warning EXPIRE "seckill:meta:$activitySuffix" $activityTtl *> $null
+if ($LASTEXITCODE -ne 0) {
+  throw '首页秒杀活动 Redis 状态初始化失败'
+}
+
 Write-Host '清理旧商品对应的 Redis 购物车...'
 $cartKeys = docker exec $RedisContainer redis-cli -a root --no-auth-warning --scan --pattern 'cart:*'
 if ($LASTEXITCODE -ne 0) {
