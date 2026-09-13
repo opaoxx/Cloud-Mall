@@ -130,7 +130,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | GET | `/api/orders/{orderNo}` | 无 | 订单详情和明细快照 |
 | POST | `/api/orders/{orderNo}/cancel` | `{reason}` 可选 | 仅待支付订单可取消 |
 | POST | `/api/orders/{orderNo}/confirm` | 无 | 收货确认/完成；具体业务范围待确认 |
-| POST | `/api/seckill/orders` | `{activityId,skuId}`；Header 必须有 `Idempotency-Key` | 秒杀异步下单结果/订单状态 |
+| POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 秒杀异步下单结果/订单状态；地址快照随消息写入订单 |
 
 订单创建时服务端重新读取商品价格、上下架、库存和地址；禁止信任前端金额。订单状态：`PENDING_PAYMENT`、`PAID`、`CANCELLED`、`COMPLETED`。
 

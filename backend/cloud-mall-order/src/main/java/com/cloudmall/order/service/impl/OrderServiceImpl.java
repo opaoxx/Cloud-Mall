@@ -271,13 +271,20 @@ public class OrderServiceImpl implements OrderService {
     // 2. 执行 seckill 的核心业务校验与状态处理。
     // 3. 返回 seckill 的处理结果。
     long userId = AuthContext.requireUserId();
-    if (key == null || key.isBlank() || req == null || req.activityId == null || req.skuId == null)
+    if (key == null
+        || key.isBlank()
+        || req == null
+        || req.activityId == null
+        || req.skuId == null
+        || req.addressId == null)
       bad("秒杀参数不完整");
+    Map<String, Object> address = findAddress(req.addressId);
     Map<String, Object> b = new HashMap<>();
     b.put("activityId", req.activityId);
     b.put("skuId", req.skuId);
     b.put("userId", userId);
     b.put("idempotencyKey", key);
+    b.put("addressSnapshot", toJson(address));
     ApiResponse<?> row = stock.seckill(b);
     return row == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : row;
   }
@@ -305,7 +312,7 @@ public class OrderServiceImpl implements OrderService {
       order.status = "PENDING_PAYMENT";
       order.totalAmount = s.unitPrice();
       order.payAmount = s.unitPrice();
-      order.addressSnapshot = "{}";
+      order.addressSnapshot = String.valueOf(event.getOrDefault("addressSnapshot", "{}"));
       order.expireAt = created.plusMinutes(30).toLocalDateTime();
       order.createdAt = created.toLocalDateTime();
       order.updatedAt = created.toLocalDateTime();

@@ -13,4 +13,7 @@ public class SeckillReservationDTO {
 
   /** 请求幂等键。 */
   public String idempotencyKey;
+
+  /** 秒杀订单收货地址快照，随消息传递给订单服务。 */
+  public String addressSnapshot;
 }

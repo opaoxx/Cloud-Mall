@@ -88,7 +88,7 @@ describe('CloudMall request conventions', () => {
 
   it('keeps the seckill order number from the accepted async response', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: 'OK', data: { accepted: true, orderNo: '202608ABC', status: 'PENDING_PAYMENT' } }), { status: 200 }))
-    await expect(api.seckillOrder({ activityId: 9, skuId: 7 })).resolves.toMatchObject({ accepted: true, orderNo: '202608ABC' })
+    await expect(api.seckillOrder({ activityId: 9, skuId: 7, addressId: 3 })).resolves.toMatchObject({ accepted: true, orderNo: '202608ABC' })
     expect(fetchMock.mock.calls[0][0]).toContain('/seckill/orders')
   })
 

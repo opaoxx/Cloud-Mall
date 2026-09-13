@@ -277,6 +277,8 @@ public class StockServiceImpl implements StockService {
               userId,
               "idempotencyKey",
               idempotencyKey,
+              "addressSnapshot",
+              request.addressSnapshot,
               "occurredAt",
               now().toString()));
     } catch (Exception e) {

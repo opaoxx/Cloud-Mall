@@ -7,4 +7,7 @@ public class SeckillOrderDTO {
 
   /** SKU 主键。 */
   public Long skuId;
+
+  /** 秒杀订单使用的收货地址主键。 */
+  public Long addressId;
 }
