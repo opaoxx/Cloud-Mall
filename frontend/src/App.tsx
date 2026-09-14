@@ -28,7 +28,18 @@ export const formatAddressSnapshot = (snapshot: AddressSnapshot) => {
     return [parsed.receiver, parsed.phone, parsed.detailAddress].filter(Boolean).join(' · ') || snapshot
   } catch { return snapshot }
 }
-const errorText = (e: unknown) => e instanceof ApiError ? `${e.message}（${e.code}）` : '网关暂不可用'
+const errorText = (e: unknown) => {
+  if (!(e instanceof ApiError)) return '网关暂不可用，请稍后重试'
+  const friendlyMessages: Record<string, string> = {
+    SECKILL_LIMIT_REACHED: '你已参加过本场秒杀，每位用户限购 1 件',
+    SECKILL_LIMIT_EXCEEDED: '你已参加过本场秒杀，每位用户限购 1 件',
+    ORDER_DUPLICATE_REQUEST: '你已参加过本场秒杀，每位用户限购 1 件',
+    SECKILL_NOT_AVAILABLE: '本场秒杀暂不可参加，请稍后再试',
+    GATEWAY_SERVICE_UNAVAILABLE: '服务暂时不可用，请稍后重试',
+    COMMON_INTERNAL_ERROR: '服务暂时开小差了，请稍后重试',
+  }
+  return friendlyMessages[e.code] || e.message || '请求失败，请稍后重试'
+}
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const emptyProductForm = (): ProductRequest => ({name:'',price:'0.00',categoryId:0,mainImage:'',description:'',parameters:[],skus:[]})
 export const productDetailToForm = (product: ProductDetail): ProductRequest => ({

@@ -197,7 +197,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `PAYMENT_FAILED` | 模拟支付失败 | 409 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |
-| `SECKILL_LIMIT_EXCEEDED` | 超过用户限购 | 429 |
+| `SECKILL_LIMIT_REACHED` | 超过用户限购 | 429 |
 | `SECKILL_SOLD_OUT` | 秒杀库存耗尽 | 409 |
 | `GATEWAY_RATE_LIMITED` | 网关/Sentinel 限流 | 429 |
 | `GATEWAY_SERVICE_UNAVAILABLE` | 服务熔断/降级 | 500 |

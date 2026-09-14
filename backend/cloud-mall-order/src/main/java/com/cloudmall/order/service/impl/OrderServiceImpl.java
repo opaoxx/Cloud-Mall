@@ -21,7 +21,6 @@ import com.cloudmall.order.service.OrderService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
-import feign.FeignException;
 import java.math.BigDecimal;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -288,16 +287,8 @@ public class OrderServiceImpl implements OrderService {
     b.put("idempotencyKey", key);
     b.put("addressSnapshot", toJson(address));
     try {
-    try {
       ApiResponse<?> row = stock.seckill(b);
       return row == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : row;
-    } catch (FeignException exception) {
-      if (exception.status() == 429)
-        throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
-      if (exception.status() == 409)
-        throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
-      throw new BizException(ErrorCodes.INTERNAL, "秒杀服务暂时不可用，请稍后再试", 503);
-    }
     } catch (FeignException exception) {
       if (exception.status() == 429)
         throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
