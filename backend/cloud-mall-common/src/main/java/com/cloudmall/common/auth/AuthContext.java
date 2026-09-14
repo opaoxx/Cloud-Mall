@@ -37,7 +37,7 @@ public final class AuthContext {
   }
 
   /** 获取当前用户 ID，未认证时抛出业务异常。 */
-  public static Long requireUserId() {
+  public static Long  requireUserId() {
     if (USER.get() == null) {
       throw new com.cloudmall.common.error.BizException(
           com.cloudmall.common.error.ErrorCodes.UNAUTHORIZED, "请先登录", 401);
