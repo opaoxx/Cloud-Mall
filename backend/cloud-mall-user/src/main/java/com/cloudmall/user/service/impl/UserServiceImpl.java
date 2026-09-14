@@ -54,7 +54,7 @@ public class UserServiceImpl implements UserService {
   public void ensureLocalAdmin() {
     // 1. 查询本地管理员是否已存在。
     // 2. 缺失时创建默认管理员账号和初始余额。
-    // 3. 保持初始化操作幂等。
+    // 3. 仅将旧的默认密码迁移到新的默认密码，保持初始化操作幂等。
     long administratorCount =
         userMapper.selectCount(new QueryWrapper<UserPO>().eq("username", "admin"));
     if (administratorCount == 0) {
@@ -62,13 +62,21 @@ public class UserServiceImpl implements UserService {
       UserPO administrator = new UserPO();
       administrator.id = System.currentTimeMillis();
       administrator.username = "admin";
-      administrator.passwordHash = ENCODER.encode("admin");
+      administrator.passwordHash = ENCODER.encode("admin123");
       administrator.role = "ADMIN";
       administrator.balance = new BigDecimal("10000.00");
       administrator.status = 1;
       administrator.createdAt = currentTime;
       administrator.updatedAt = currentTime;
       userMapper.insert(administrator);
+      return;
+    }
+    UserPO administrator =
+        userMapper.selectOne(new QueryWrapper<UserPO>().eq("username", "admin"));
+    if (administrator != null && ENCODER.matches("admin", administrator.passwordHash)) {
+      administrator.passwordHash = ENCODER.encode("admin123");
+      administrator.updatedAt = LocalDateTime.now();
+      userMapper.updateById(administrator);
     }
   }
 

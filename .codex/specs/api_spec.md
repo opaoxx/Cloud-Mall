@@ -86,7 +86,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | PUT | `/api/users/me/addresses/{id}` | 可修改地址字段 | 地址对象 |
 | DELETE | `/api/users/me/addresses/{id}` | 无 | `data=null` |
 
-本期不提供管理员用户管理和密码找回接口；本地练习允许预置 `admin/admin`，普通注册用户默认 `USER`，管理接口要求 `ADMIN`。
+本期不提供管理员用户管理和密码找回接口；本地练习允许预置 `admin/admin123`，普通注册用户默认 `USER`，管理接口要求 `ADMIN`。
 
 ## 5. 商品服务接口
 
