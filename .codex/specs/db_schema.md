@@ -126,7 +126,7 @@
 | `user_id` | BIGINT NOT NULL | 下单用户 |
 | `idempotency_key` | VARCHAR(128) NOT NULL | 用户请求幂等键；与 `user_id` 组成唯一约束 |
 | `items_snapshot` | JSON NOT NULL | 服务端校验后的 SKU/数量快照 |
-| `status` | VARCHAR(32) NOT NULL | `INIT`/`RESERVED`/`COMMITTED`/`RELEASED` |
+| `status` | VARCHAR(32) NOT NULL | `INIT`/`RESERVE_UNKNOWN`/`RESERVED`/`COMMITTED`/`RELEASED` |
 | `last_error` | VARCHAR(512) | 最近一次补偿错误 |
 | `next_retry_at` | DATETIME(3) | 下次恢复时间 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的审计时间 |
@@ -163,15 +163,75 @@
 
 `id BIGINT PK`、`sku_id BIGINT NOT NULL`、`order_no VARCHAR(64) NOT NULL`、`flow_type VARCHAR(32) NOT NULL`（RESERVE/CONFIRM/ROLLBACK/SECKILL_RESERVE）、`quantity INT NOT NULL`、`idempotency_key VARCHAR(128) UNIQUE NOT NULL`、`created_at DATETIME(3) NOT NULL`。索引：`idx_sku_created(sku_id, created_at)`、`idx_order_no(order_no)`。
 
+### 6.3 `stock_cache_repair`
+
+正常库存的 MySQL 状态是事实源，Redis 只保存可售数量投影。每次成功改变 `stock_sku` 的本地事务必须同时写入一条待执行的缓存修复记录，覆盖数据库提交后进程退出、Redis 连接失败和回补结果未知等窗口。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 修复记录 ID |
+| `sku_id` | BIGINT NOT NULL | SKU |
+| `target_available` | INT NOT NULL | 本次数据库提交后的可用库存 |
+| `source_version` | INT NOT NULL | 对应 `stock_sku.version`，每次库存变更递增 |
+| `status` | VARCHAR(16) NOT NULL | `PENDING`/`APPLIED`/`STALE` |
+| `attempts` | INT NOT NULL DEFAULT 0 | 修复尝试次数 |
+| `next_retry_at` | DATETIME(3) NOT NULL | 下次重试时间 |
+| `lease_owner` | VARCHAR(128) | 当前修复任务实例标识 |
+| `lease_until` | DATETIME(3) | 数据库租约到期时间；为空或已过期才可重新认领 |
+| `last_error` | VARCHAR(512) | 最近错误 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
+
+索引：`uk_stock_cache_version(sku_id,source_version)`、`idx_stock_cache_retry(status,next_retry_at,lease_until)`。修复器通过 `lease_owner/lease_until` 在 MySQL 中按条件认领记录；租约只是避免多个修复实例同时处理同一记录，不是库存正确性的依据。Redis 不使用分布式锁承担一致性。Redis Key `stock:available:{skuId}` 使用 hash 字段 `quantity`、`version`。修复 Lua 只在 Redis 当前版本小于等于 `source_version` 时原子写入数量和版本；发现更高版本则将旧记录标记 `STALE`。启动校准读取 MySQL 当前版本并写入一次全量投影。
+
 ## 7. 支付域表
 
 ### 7.1 `pay_record`
 
-`id BIGINT PK`、`pay_no VARCHAR(64) UNIQUE NOT NULL`、`order_no VARCHAR(64) UNIQUE NOT NULL`、`user_id BIGINT NOT NULL`、`amount DECIMAL(18,2) NOT NULL`、`status VARCHAR(32) NOT NULL`（PENDING/SUCCESS/FAILED/CLOSED）、`paid_at DATETIME(3)`、`created_at DATETIME(3)`、`updated_at DATETIME(3)`。订单号唯一保证同一订单只有一个有效支付记录，重复支付/回调按幂等规则安全返回。
+`id BIGINT PK`、`pay_no VARCHAR(64) UNIQUE NOT NULL`、`order_no VARCHAR(64) UNIQUE NOT NULL`、`user_id BIGINT NOT NULL`、`amount DECIMAL(18,2) NOT NULL`、`status VARCHAR(32) NOT NULL`（PENDING/ORDER_SYNC_UNKNOWN/SUCCESS/REFUND_PENDING/REFUNDED/FAILED/CLOSED）、`paid_at DATETIME(3)`、`created_at DATETIME(3)`、`updated_at DATETIME(3)`。订单号唯一保证同一订单只有一个有效支付记录，重复支付/回调按幂等规则安全返回。
 
 ### 7.2 `pay_callback_log`
 
 `id BIGINT PK`、`pay_no VARCHAR(64) NOT NULL`、`callback_id VARCHAR(128) UNIQUE NOT NULL`、`callback_status VARCHAR(32) NOT NULL`、`payload JSON`、`processed_at DATETIME(3)`、`created_at DATETIME(3) NOT NULL`。用于模拟回调幂等和审计；不得保存真实支付敏感数据。
+
+### 7.3 `balance_ledger`（用户库）
+
+余额扣款与退款必须和账本写入同一本地事务；Redis 只可作为重复请求的加速缓存，不能作为余额事实或退款依据。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 账本 ID |
+| `user_id` | BIGINT NOT NULL | 用户 |
+| `operation_key` | VARCHAR(128) UNIQUE NOT NULL | 扣款或退款操作键 |
+| `operation_type` | VARCHAR(16) NOT NULL | `DEBIT`/`REFUND` |
+| `original_operation_key` | VARCHAR(128) | 退款对应的原扣款键 |
+| `pay_no` / `order_no` | VARCHAR(64) NOT NULL | 支付和订单关联键 |
+| `amount` | DECIMAL(18,2) NOT NULL | 正数金额 |
+| `state` | VARCHAR(16) NOT NULL | `APPLIED`/`REJECTED` |
+| `balance_before` / `balance_after` | DECIMAL(18,2) NOT NULL | 审计快照 |
+| `created_at` | DATETIME(3) NOT NULL | 创建时间 |
+
+索引：`uk_balance_operation(operation_key)`、`idx_balance_order(order_no,created_at)`、`idx_balance_original(original_operation_key)`。退款操作必须以 `original_operation_key` 唯一对应已应用扣款，且退款总额不得超过原扣款；扣款与 `mall_user.balance` 条件更新在同一事务中完成。
+
+### 7.4 `pay_debit_intent`
+
+支付服务在调用用户余额服务前，必须先在支付库独立提交扣款意图。该表覆盖进程在用户扣款提交后、`pay_record` 更新前退出的窗口；恢复任务扫描该表，而不能只扫描支付记录状态。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 意图 ID |
+| `pay_no` | VARCHAR(64) UNIQUE NOT NULL | 支付号，也是用户账本扣款操作键 |
+| `order_no` | VARCHAR(64) UNIQUE NOT NULL | 订单号 |
+| `user_id` | BIGINT NOT NULL | 用户 |
+| `amount` | DECIMAL(18,2) NOT NULL | 扣款金额 |
+| `status` | VARCHAR(32) NOT NULL | `INIT`/`DEBITED`/`ORDER_SYNC_UNKNOWN`/`SUCCESS`/`REFUND_PENDING`/`REFUNDED`/`FAILED` |
+| `attempts` | INT NOT NULL DEFAULT 0 | 恢复尝试次数 |
+| `next_retry_at` | DATETIME(3) NOT NULL | 下次恢复时间 |
+| `lease_owner` | VARCHAR(128) | 当前恢复任务实例标识 |
+| `lease_until` | DATETIME(3) | 恢复租约到期时间 |
+| `last_error` | VARCHAR(512) | 最近错误 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
+
+索引：`uk_pay_debit_intent_pay(pay_no)`、`idx_pay_debit_recovery(status,next_retry_at,lease_until)`、`idx_pay_debit_order(order_no)`。创建意图与支付请求幂等键绑定，并在调用 user 前独立提交。恢复任务先查询用户账本操作：不存在则用同一 `payNo` 重试扣款；存在已应用扣款则进入订单状态查询；存在拒绝记录则进入 `FAILED`。恢复任务使用数据库租约和退避字段，超过阈值进入告警状态并继续可重入扫描，不能因扫描不到 `ORDER_SYNC_UNKNOWN` 的 `pay_record` 而遗漏已扣余额。
 
 ## 8. 购物车 Redis 逻辑结构
 

@@ -143,14 +143,15 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | 方法 | 路径 | 请求 | 响应/说明 |
 | --- | --- | --- | --- |
 | GET | `/api/stock/skus/{skuId}` | 内部请求 | 可售库存摘要；不经 Gateway 向前端公开 |
-| POST | `/api/stock/reservations` | `{orderNo,items,scene}` | 预扣结果，失败返回库存不足 |
+| POST | `/api/stock/reservations` | `{orderNo,items,scene}` | 预扣结果，失败返回库存不足；同一 `orderNo` 返回同一结果 |
+| GET | `/api/stock/reservations/{orderNo}` | 无 | 查询预扣最终状态和明细，不改变库存 |
 | POST | `/api/stock/reservations/{orderNo}/confirm` | 幂等请求 | 确认扣减 |
 | POST | `/api/stock/reservations/{orderNo}/rollback` | 幂等请求 | 回滚预扣 |
 | POST | `/api/stock/seckill/reservations` | `{activityId,skuId,userId}` | Redis 预扣/异步入队结果 |
 
 接口必须带订单号或幂等键，所有数量为正整数；库存服务不得返回负库存。
 
-普通预扣接口对同一 `orderNo` 必须返回同一业务结果。库存服务必须记录 `RESERVE`、`CONFIRM`、`ROLLBACK` 的唯一幂等键；回滚/确认请求在找不到未完成预扣时返回幂等已处理结果或明确的状态冲突，不能按新请求再次改变数量。Redis 预扣记录丢失或 Feign 超时不等于未执行：库存服务必须能依据 `orderNo` 从 `stock_flow` 重建待处理明细，回滚 RPC 失败由订单端预扣意图恢复任务重试，直到得到幂等结果或进入可观测告警。
+普通预扣接口对同一 `orderNo` 必须返回同一业务结果。库存服务必须记录 `RESERVE`、`CONFIRM`、`ROLLBACK` 的唯一幂等键；回滚/确认请求在找不到未完成预扣时返回幂等已处理结果或明确的状态冲突，不能按新请求再次改变数量。`POST` 的 Feign 超时不得自动换订单号重试；调用方将结果标记为未知，使用原订单号调用本查询接口，再决定回滚/确认。Redis 记录丢失不等于未执行，查询必须以 `stock_flow` 和库存状态为准。正常库存以 MySQL 提交结果为事实，Redis 只是带版本的可售投影；提交后缓存更新失败由持久化修复任务重试。
 
 ## 9. 支付服务接口
 
@@ -162,7 +163,23 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | POST | `/api/payments/{payNo}/mock-fail` | `{reason}` 可选 | 模拟失败 |
 | POST | `/api/payments/callback` | 模拟回调载荷 | 内部回调，幂等处理 |
 
-支付金额必须与订单应付金额一致；支付成功后状态不可重复逆转。真实第三方支付、退款和售后不在本期范围。
+支付金额必须与订单应付金额一致。支付成功流程必须先以 `payNo` 作为唯一操作键完成用户余额扣款，再同步订单；扣款已完成而订单同步结果未知时，支付记录进入 `ORDER_SYNC_UNKNOWN`，由查询/重试/对账任务继续处理。只有确认订单处于 `CANCELLED` 且没有 `PAID` 成功事实时，才允许发起退款。不得因为一次 Feign 超时直接退款；若订单状态仍未知，必须保持扣款并继续对账。真实第三方支付和售后不在本期范围，但模拟余额退款属于本批一致性闭环。
+
+支付服务与用户服务之间的内部接口契约：
+
+| 方法 | 路径 | 请求/响应 | 说明 |
+| --- | --- | --- | --- |
+| POST | `/api/internal/users/{userId}/balance/debits` | `{operationKey,payNo,orderNo,amount}` → `{operationKey,state,balance}` | `operationKey=payNo`；同键只允许一次扣款，重复请求返回同一结果 |
+| GET | `/api/internal/users/{userId}/balance/operations/{operationKey}` | → `{operationKey,type,state,amount,refundOperationKey}` | 查询扣款/退款持久化结果，供支付恢复任务判断最终结果 |
+| POST | `/api/internal/users/{userId}/balance/refunds` | `{refundOperationKey,originalOperationKey,payNo,orderNo,amount}` → `{refundOperationKey,state,balance}` | 仅对已应用的原扣款退款；退款键幂等且不得超过原扣款金额 |
+
+订单服务提供支付恢复查询接口：
+
+| 方法 | 路径 | 响应 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/internal/orders/{orderNo}/payment-state` | `{orderNo,status,payAmount,userId}` | 只读查询订单最终支付状态；订单服务不持有 `payNo`，支付服务使用自身 `pay_record` 将订单号映射到支付操作键；对超时/断连只能查询或重试，不得换订单号 |
+
+支付状态新增 `ORDER_SYNC_UNKNOWN`、`REFUND_PENDING`、`REFUNDED`。`SUCCESS` 只表示扣款已持久化且订单已确认 `PAID`；`ORDER_SYNC_UNKNOWN` 表示扣款事实存在但订单结果未确认。支付恢复任务按 `orderNo` 查询订单：确认 `PAID` 后推进支付成功并确认库存；确认 `CANCELLED`/未支付终态后创建唯一退款操作；仍未知则保留扣款并重试，进入告警而不退款。所有状态迁移和余额操作都必须带当前状态/操作键条件。
 
 ## 10. 管理与秒杀接口
 
@@ -199,6 +216,10 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `PAY_AMOUNT_MISMATCH` | 支付金额不一致 | 409 |
 | `PAY_ALREADY_PROCESSED` | 支付已处理 | 409 |
 | `PAYMENT_FAILED` | 模拟支付失败 | 409 |
+| `PAY_ORDER_SYNC_UNKNOWN` | 扣款已持久化，订单支付结果未知 | 202 |
+| `PAY_REFUND_PENDING` | 已确认需要退款，退款处理中 | 202 |
+| `ORDER_RESERVATION_UNKNOWN` | 库存预扣结果未知，等待按原订单号查询 | 202 |
+| `STOCK_CACHE_REPAIRING` | 库存事实已提交，缓存修复处理中 | 202 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |
 | `SECKILL_LIMIT_REACHED` | 超过用户限购 | 429 |

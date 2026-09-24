@@ -48,7 +48,7 @@ CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一�
 
 ### 4.2 支付成功
 
-`pay` 校验模拟支付请求并记录支付结果，向 order 发起回调/消息；order 幂等更新为已支付，并协作 stock 确认库存。回调重复、消息重复或服务重试不得重复确认库存。
+`pay` 校验模拟支付请求并记录支付结果，以 `payNo` 作为唯一操作键调用 user 的余额扣款；扣款和 `balance_ledger` 在 user 本地事务内完成。扣款成功后向 order 发起幂等支付同步。同步返回明确 `PAID` 时支付进入 `SUCCESS` 并确认库存；同步超时/断连时进入 `ORDER_SYNC_UNKNOWN`，由恢复任务用同一 `orderNo` 查询订单状态并重试。只有查询明确得到 `CANCELLED`/未支付终态才创建唯一退款操作；未知期间不得退款，避免订单其实已 `PAID` 时发生钱和货双重结算。回调、扣款、退款、库存确认均按操作键幂等。
 
 ### 4.3 超时关单
 
@@ -57,6 +57,16 @@ order 创建待支付订单时，在保存订单的同一本地事务中写入 t
 ### 4.4 秒杀
 
 Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 RabbitMQ 异步削峰到 order/stock；持久化订单和库存最终通过既定事务与补偿规则收敛。不得把 Redis 预扣结果直接当作最终支付成功。
+
+### 4.5 普通库存缓存一致性
+
+普通库存写路径以 MySQL 为唯一事实源：在一个本地事务内完成 `stock_sku` 条件更新、`stock_flow` 幂等流水和 `stock_cache_repair` 记录，并递增 `stock_sku.version`；事务提交后才异步更新 Redis。Redis 更新失败、进程在提交后退出或结果未知时，修复器扫描持久化记录重试。Redis 数量必须携带数据库版本，Lua 以版本条件原子覆盖，旧修复任务不能覆盖新库存。预扣/确认/回滚请求都先按订单号和流水幂等，再执行数据库条件更新；Redis 不可用只影响投影，不允许用购物车库存或旧缓存作交易结论。
+
+这项调整明确替代普通库存的“先 Lua 扣 Redis、再写 MySQL、失败时盲目回补”路径。若保留兼容旧 Redis 预扣数据，必须先把该 SKU 标记为 `REPAIR_BLOCKED`，等待对应 `stock_flow` 完成或超时裁决后再以 MySQL 版本重建，禁止直接 `MSET/SET` 覆盖。
+
+### 4.6 Feign 写请求结果未知
+
+库存预扣通过 `orderNo` 固定成幂等操作。Feign `POST /reservations` 读取超时、连接断开或返回解析失败时，订单服务必须保留 `order_reservation_intent=RESERVE_UNKNOWN`，不得生成新订单号或把未知当作失败。恢复任务先调用 `GET /reservations/{orderNo}`；状态为 `RESERVED` 才能依据订单状态确认或回滚，状态为 `REJECTED` 才能释放意图，持续未知则重试并告警。商品读取超时只能有限重试幂等 GET；最终仍不可用时返回服务暂不可用，订单不能使用购物车缓存价格或库存继续创建。
 
 ## 5. 数据与缓存边界
 
