@@ -63,7 +63,7 @@ public class OrderReservationIntentMapper {
   /** 查询需要尝试恢复的陈旧预扣意图。 */
   public List<OrderReservationIntentPO> findRecoverable(LocalDateTime staleBefore, LocalDateTime now, int limit) {
     return jdbcTemplate.query(
-        "SELECT * FROM order_reservation_intent WHERE status IN ('INIT','RESERVED')"
+        "SELECT * FROM order_reservation_intent WHERE status IN ('INIT','RESERVE_UNKNOWN','RESERVED')"
             + " AND created_at<? AND (next_retry_at IS NULL OR next_retry_at<=?)"
             + " ORDER BY created_at,id LIMIT ?",
         ROW_MAPPER,
@@ -76,7 +76,7 @@ public class OrderReservationIntentMapper {
   public int claimRecovery(String orderNo, LocalDateTime now, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET next_retry_at=?,updated_at=?"
-            + " WHERE order_no=? AND status IN ('INIT','RESERVED')"
+            + " WHERE order_no=? AND status IN ('INIT','RESERVE_UNKNOWN','RESERVED')"
             + " AND (next_retry_at IS NULL OR next_retry_at<=?)",
         nextRetryAt,
         now,
@@ -100,7 +100,7 @@ public class OrderReservationIntentMapper {
   public int recordFailure(String orderNo, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET last_error=?,next_retry_at=?,updated_at=?"
-            + " WHERE order_no=? AND status IN ('INIT','RESERVED')",
+            + " WHERE order_no=? AND status IN ('INIT','RESERVE_UNKNOWN','RESERVED')",
         error == null ? null : error.substring(0, Math.min(512, error.length())),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
@@ -112,11 +112,24 @@ public class OrderReservationIntentMapper {
     return updateStatus(orderNo, "RESERVED", "COMMITTED", updatedAt);
   }
 
+  /** 标记远程预扣响应未知，保持原订单号和快照供恢复任务查询。 */
+  public int markReserveUnknown(
+      String orderNo, String error, LocalDateTime nextRetryAt) {
+    return jdbcTemplate.update(
+        "UPDATE order_reservation_intent SET status='RESERVE_UNKNOWN',last_error=?,"
+            + "next_retry_at=?,updated_at=? WHERE order_no=? AND status='INIT'",
+        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        nextRetryAt,
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
+        orderNo);
+  }
+
   /** 将已确认回滚的意图标记为已释放。 */
   public int markReleased(String orderNo, LocalDateTime updatedAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET status='RELEASED',last_error=NULL,"
-            + "next_retry_at=NULL,updated_at=? WHERE order_no=? AND status IN ('INIT','RESERVED')",
+            + "next_retry_at=NULL,updated_at=? WHERE order_no=?"
+            + " AND status IN ('INIT','RESERVE_UNKNOWN','RESERVED')",
         updatedAt,
         orderNo);
   }
@@ -125,7 +138,8 @@ public class OrderReservationIntentMapper {
   public int forceCommitted(String orderNo, LocalDateTime updatedAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET status='COMMITTED',last_error=NULL,"
-            + "next_retry_at=NULL,updated_at=? WHERE order_no=? AND status IN ('INIT','RESERVED')",
+            + "next_retry_at=NULL,updated_at=? WHERE order_no=?"
+            + " AND status IN ('INIT','RESERVE_UNKNOWN','RESERVED')",
         updatedAt,
         orderNo);
   }

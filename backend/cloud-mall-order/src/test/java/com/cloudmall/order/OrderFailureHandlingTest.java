@@ -1,5 +1,6 @@
 package com.cloudmall.order;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -28,6 +29,8 @@ import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import feign.Request;
+import feign.RetryableException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -103,14 +106,49 @@ class OrderFailureHandlingTest {
             ReflectionTestUtils.getField(orderService, "reservationIntentService");
 
     AuthContext.set(8L, "USER");
-    assertThrows(RuntimeException.class, () -> orderService.create("unknown-result", orderRequest()));
+    BizException unknown =
+        assertThrows(BizException.class, () -> orderService.create("unknown-result", orderRequest()));
 
+    assertEquals(202, unknown.getHttpStatus());
     ArgumentCaptor<com.cloudmall.order.domain.po.OrderReservationIntentPO> intentCaptor =
         ArgumentCaptor.forClass(com.cloudmall.order.domain.po.OrderReservationIntentPO.class);
     verify(intentService).createIntent(intentCaptor.capture());
-    verify(intentService).recordFailure(eq(intentCaptor.getValue().orderNo), anyString());
+    verify(intentService).markReserveUnknown(eq(intentCaptor.getValue().orderNo), anyString());
     verify(intentService, never()).markReleased(anyString());
     verify(stockClient, never()).rollback(anyString());
+  }
+
+  @Test
+  void productReadTimeoutFailsClosedBeforeAnyReservationIntent() {
+    StockClient stockClient = mock(StockClient.class);
+    ProductClient productClient = mock(ProductClient.class);
+    UserClient userClient = mock(UserClient.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    when(orderSqlMapper.findIdempotentOrderNos(8L, "product-timeout")).thenReturn(List.of());
+    when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+    Request productRequest =
+        Request.create(
+            Request.HttpMethod.GET,
+            "http://cloud-mall-product/api/products/skus/7",
+            Map.of(),
+            null,
+            StandardCharsets.UTF_8);
+    RetryableException remoteTimeout =
+        new RetryableException(
+            -1, "product read timeout", Request.HttpMethod.GET, (java.util.Date) null, productRequest);
+    when(productClient.sku(7L)).thenThrow(remoteTimeout);
+    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderReservationIntentService intentService =
+        (OrderReservationIntentService)
+            ReflectionTestUtils.getField(orderService, "reservationIntentService");
+
+    AuthContext.set(8L, "USER");
+    BizException failure =
+        assertThrows(BizException.class, () -> orderService.create("product-timeout", orderRequest()));
+
+    assertEquals(503, failure.getHttpStatus());
+    verifyNoInteractions(stockClient);
+    verify(intentService, never()).createIntent(any());
   }
 
   @Test
@@ -164,6 +202,26 @@ class OrderFailureHandlingTest {
     verify(orderSqlMapper, org.mockito.Mockito.times(2))
         .updateStatus(anyString(), eq(orderNo), eq("CANCELLED"), eq("PENDING_PAYMENT"), any());
     verifyNoInteractions(stockClient);
+  }
+
+  @Test
+  void paymentStateIsReadOnlyAndScopedToTheOrderOwner() {
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    String orderNo = "202609paymentstate";
+    pendingOrder(orderSqlMapper, orderNo);
+    OrderServiceImpl orderService =
+        service(
+            mock(StockClient.class),
+            mock(ProductClient.class),
+            mock(UserClient.class),
+            orderSqlMapper);
+
+    ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
+
+    assertEquals("PENDING_PAYMENT", ((Map<?, ?>) response.data).get("status"));
+    assertEquals(new BigDecimal("12.30"), ((Map<?, ?>) response.data).get("payAmount"));
+    assertThrows(BizException.class, () -> orderService.paymentState(orderNo, 9L));
+    verify(orderSqlMapper, never()).updateStatus(anyString(), anyString(), anyString(), anyString(), any());
   }
 
   private static Message message(String payload) {

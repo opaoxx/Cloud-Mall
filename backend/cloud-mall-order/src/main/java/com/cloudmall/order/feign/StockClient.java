@@ -1,15 +1,21 @@
 package com.cloudmall.order.feign;
 
 import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import java.util.List;
 import java.util.Map;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 
 @FeignClient(name = "cloud-mall-stock")
 public interface StockClient {
+  /** 按原订单号读取库存预扣的持久化结果，不改变数量。 */
+  @GetMapping("/api/stock/reservations/{orderNo}")
+  ApiResponse<StockReservationStatusVO> reservation(@PathVariable("orderNo") String orderNo);
+
   @PostMapping("/api/stock/reservations")
   ApiResponse<?> reserve(@RequestBody Reservation request);
 

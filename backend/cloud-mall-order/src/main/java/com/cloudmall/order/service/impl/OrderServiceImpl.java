@@ -115,7 +115,15 @@ public class OrderServiceImpl implements OrderService {
     BigDecimal total = BigDecimal.ZERO;
     for (OrderItemDTO item : req.items) {
       if (item == null || item.skuId == null || item.quantity < 1) bad("商品数量必须为正数");
-      ApiResponse<ProductClient.SkuView> resp = products.sku(item.skuId);
+      ApiResponse<ProductClient.SkuView> resp;
+      try {
+        resp = products.sku(item.skuId);
+      } catch (FeignException productFailure) {
+        if (productFailure.status() == 404)
+          throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
+        throw new BizException(
+            "GATEWAY_SERVICE_UNAVAILABLE", "商品服务暂不可用，请稍后重试", 503);
+      }
       if (resp == null || !"0".equals(resp.code) || resp.data == null)
         throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
       ProductClient.SkuView skuView = resp.data;
@@ -144,9 +152,23 @@ public class OrderServiceImpl implements OrderService {
     boolean definiteRejection = false;
     try {
       // 1. 预扣请求始终使用已提交意图中的原订单号，网络结果未知时也可安全恢复。
-      ApiResponse<?> reserved = stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL"));
+      ApiResponse<?> reserved;
+      try {
+        reserved = stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL"));
+      } catch (RuntimeException remoteFailure) {
+        if (remoteFailure instanceof FeignException feignFailure
+            && feignFailure.status() == 409) {
+          definiteRejection = true;
+          reservationIntentService.markReleased(orderNo);
+          throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
+        }
+        BizException unknown =
+            new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
+        unknown.addSuppressed(remoteFailure);
+        throw unknown;
+      }
       if (reserved == null)
-        throw new BizException(ErrorCodes.INTERNAL, "库存预扣结果待确认", 503);
+        throw new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
       if (!"0".equals(reserved.code)) {
         definiteRejection = true;
         reservationIntentService.markReleased(orderNo);
@@ -209,7 +231,8 @@ public class OrderServiceImpl implements OrderService {
         compensateFailedCreate(orderNo, creationFailure);
       } else if (!definiteRejection) {
         try {
-          reservationIntentService.recordFailure(orderNo, "预扣结果待确认: " + creationFailure);
+          reservationIntentService.markReserveUnknown(
+              orderNo, "预扣结果待确认: " + creationFailure);
         } catch (RuntimeException recordFailure) {
           creationFailure.addSuppressed(recordFailure);
         }
@@ -264,6 +287,26 @@ public class OrderServiceImpl implements OrderService {
     // 2. 执行 get 的核心业务校验与状态处理。
     // 3. 返回 get 的处理结果。
     return ApiResponse.ok(owned(orderNo));
+  }
+
+  /** 为支付恢复提供只读订单状态，不暴露支付服务持有的 payNo。 */
+  @GetMapping("/internal/orders/{orderNo}/payment-state")
+  public ApiResponse<?> paymentState(
+      @PathVariable("orderNo") String orderNo,
+      @RequestHeader(value = "X-User-Id", required = false) Long callerUserId) {
+    // 1. 读取订单事实及内部调用者用户 ID。
+    OrderVO order = find(orderNo);
+    long userId = callerUserId == null ? AuthContext.requireUserId() : callerUserId;
+    // 2. 校验订单归属，禁止跨用户探测支付状态。
+    if (!Objects.equals(order.userId, userId))
+      throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
+    // 3. 只返回支付恢复所需的稳定字段。
+    return ApiResponse.ok(
+        Map.of(
+            "orderNo", order.orderNo,
+            "status", order.status,
+            "payAmount", order.payAmount,
+            "userId", order.userId));
   }
 
   @Transactional

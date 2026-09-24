@@ -1,8 +1,8 @@
 package com.cloudmall.order.service.impl;
 
 import com.cloudmall.common.api.ApiResponse;
-import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
@@ -40,7 +40,7 @@ public class OrderReservationRecovery {
   /** 订单事实查询持久层。 */
   private final OrderSqlMapper orderSqlMapper;
 
-  /** 持久化明细快照的 JSON 映射器。 */
+  /** 读取已持久化的原始 SKU/数量快照。 */
   private final ObjectMapper objectMapper;
 
   /** 创建普通订单预扣恢复任务。 */
@@ -80,27 +80,31 @@ public class OrderReservationRecovery {
         reservationIntentMapper.forceCommitted(intent.orderNo, LocalDateTime.now(BUSINESS_ZONE));
         return;
       }
-      // 2. 使用原订单号和服务端快照重试，辨认响应丢失后的已预扣结果。
-      List<StockClient.Line> lines =
-          objectMapper.readValue(
-              intent.itemsSnapshot, new TypeReference<List<StockClient.Line>>() {});
-      if (lines.isEmpty()) throw new IllegalStateException("预扣意图没有 SKU 明细");
-      try {
-        ApiResponse<?> reservationResult =
-            stockClient.reserve(new StockClient.Reservation(intent.orderNo, lines, "NORMAL"));
-        if (reservationResult == null) throw new IllegalStateException("库存预扣结果未知");
-        if (!"0".equals(reservationResult.code)
-            && !ErrorCodes.STOCK.equals(reservationResult.code)
-            && !ErrorCodes.DUPLICATE.equals(reservationResult.code))
-          throw new IllegalStateException("库存预扣重试失败: " + reservationResult.code);
-      } catch (FeignException conflict) {
-        // 已确认或已回滚的持久流水会拒绝重新预扣；继续按原订单号幂等回滚即可。
-        if (conflict.status() != 409) throw conflict;
+      // 2. Feign 写请求的未知结果只用原订单号查询，不重新生成或盲目重发预扣。
+      String status = reservationStatus(intent.orderNo);
+      if ("NOT_FOUND".equals(status) || "INIT".equals(status)) {
+        // 3. 未观察到最终事实时，仅重试原订单号和原快照；不可直接假定未执行。
+        List<StockClient.Line> originalLines =
+            objectMapper.readValue(
+                intent.itemsSnapshot, new TypeReference<List<StockClient.Line>>() {});
+        if (originalLines.isEmpty()) throw new IllegalStateException("预扣意图明细为空");
+        try {
+          stockClient.reserve(
+              new StockClient.Reservation(intent.orderNo, originalLines, "NORMAL"));
+        } catch (FeignException explicitRejection) {
+          if (explicitRejection.status() != 409) throw explicitRejection;
+        }
+        status = reservationStatus(intent.orderNo);
       }
-      // 3. 不论该重试是否因库存不足而被拒绝，按订单号完成幂等回滚。
-      ApiResponse<?> rollbackResult = stockClient.rollback(intent.orderNo);
-      if (rollbackResult == null || !"0".equals(rollbackResult.code))
-        throw new IllegalStateException("库存回滚结果未确认");
+      if ("RESERVED".equals(status) || "ALREADY_RESERVED".equals(status)) {
+        // 4. 已确认预扣才调用幂等回滚，随后结束意图。
+        ApiResponse<?> rollbackResult = stockClient.rollback(intent.orderNo);
+        if (rollbackResult == null || !"0".equals(rollbackResult.code))
+          throw new IllegalStateException("库存回滚结果未确认");
+      } else if (!"REJECTED".equals(status)
+          && !"ROLLED_BACK".equals(status)) {
+        throw new IllegalStateException("库存预扣状态需要人工核对: " + status);
+      }
       reservationIntentMapper.markReleased(intent.orderNo, LocalDateTime.now(BUSINESS_ZONE));
     } catch (Exception recoveryFailure) {
       LocalDateTime retryAt = LocalDateTime.now(BUSINESS_ZONE).plusMinutes(1);
@@ -108,6 +112,14 @@ public class OrderReservationRecovery {
           intent.orderNo, recoveryFailure.toString(), retryAt);
       log.warn("普通订单预扣恢复失败，稍后重试，orderNo={}", intent.orderNo, recoveryFailure);
     }
+  }
+
+  /** 按原订单号读取库存端的当前或终态事实。 */
+  private String reservationStatus(String orderNo) {
+    ApiResponse<StockReservationStatusVO> response = stockClient.reservation(orderNo);
+    if (response == null || !"0".equals(response.code) || response.data == null)
+      throw new IllegalStateException("库存预扣查询结果未知");
+    return response.data.status;
   }
 
   /** 从受控订单号生成物理月表名，避免把外部输入直接拼入 SQL。 */

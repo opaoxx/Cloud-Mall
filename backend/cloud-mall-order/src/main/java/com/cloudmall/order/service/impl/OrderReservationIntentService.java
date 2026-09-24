@@ -62,6 +62,13 @@ public class OrderReservationIntentService {
     reservationIntentMapper.recordFailure(orderNo, error, now().plusSeconds(30));
   }
 
+  /** 将未收到响应的预扣独立持久化为结果未知，等待原订单号查询。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public void markReserveUnknown(String orderNo, String error) {
+    // 1. 只有尚未确认库存结果的 INIT 意图可进入未知状态。
+    reservationIntentMapper.markReserveUnknown(orderNo, error, now().plusSeconds(30));
+  }
+
   /** 返回当前 Asia/Shanghai 本地时间。 */
   private static LocalDateTime now() {
     return LocalDateTime.now(BUSINESS_ZONE);

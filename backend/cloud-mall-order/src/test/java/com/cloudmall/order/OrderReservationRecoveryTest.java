@@ -11,8 +11,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.cloudmall.common.api.ApiResponse;
-import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
@@ -20,13 +20,11 @@ import com.cloudmall.order.service.impl.OrderReservationRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 class OrderReservationRecoveryTest {
   @Test
-  void replaysTheOriginalReservationThenRollsItBackWhenNoOrderCommitted() {
+  void queriesTheOriginalReservationThenRollsItBackWhenNoOrderCommitted() {
     StockClient stockClient = mock(StockClient.class);
     OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
@@ -34,18 +32,19 @@ class OrderReservationRecoveryTest {
     when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(intent));
     when(intentMapper.claimRecovery(eq(intent.orderNo), any(), any())).thenReturn(1);
     when(orderSqlMapper.orderExists("mall_order_202609", intent.orderNo)).thenReturn(false);
-    doReturn(ApiResponse.ok(Map.of("reserved", true))).when(stockClient).reserve(any());
-    doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stockClient).rollback(intent.orderNo);
+    doReturn(ApiResponse.ok(stockStatus(intent.orderNo, "RESERVED")))
+        .when(stockClient)
+        .reservation(intent.orderNo);
+    doReturn(ApiResponse.ok(java.util.Map.of("rolledBack", true)))
+        .when(stockClient)
+        .rollback(intent.orderNo);
     OrderReservationRecovery recovery =
         new OrderReservationRecovery(stockClient, intentMapper, orderSqlMapper, new ObjectMapper());
 
     recovery.recoverStaleReservations();
 
-    ArgumentCaptor<StockClient.Reservation> reservationCaptor =
-        ArgumentCaptor.forClass(StockClient.Reservation.class);
-    verify(stockClient).reserve(reservationCaptor.capture());
-    org.junit.jupiter.api.Assertions.assertEquals(intent.orderNo, reservationCaptor.getValue().orderNo());
-    org.junit.jupiter.api.Assertions.assertEquals(7L, reservationCaptor.getValue().items().get(0).skuId());
+    verify(stockClient).reservation(intent.orderNo);
+    verify(stockClient, never()).reserve(any());
     verify(stockClient).rollback(intent.orderNo);
     verify(intentMapper).markReleased(eq(intent.orderNo), any(LocalDateTime.class));
   }
@@ -77,17 +76,51 @@ class OrderReservationRecoveryTest {
     OrderReservationIntentPO intent = intent("202609recover3");
     when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(intent));
     when(intentMapper.claimRecovery(eq(intent.orderNo), any(), any())).thenReturn(1);
-    doReturn(ApiResponse.error(ErrorCodes.DUPLICATE, "预扣已经回滚"))
+    doReturn(ApiResponse.ok(stockStatus(intent.orderNo, "ROLLED_BACK")))
         .when(stockClient)
-        .reserve(any());
-    doReturn(ApiResponse.ok(Map.of("idempotent", true))).when(stockClient).rollback(intent.orderNo);
+        .reservation(intent.orderNo);
     OrderReservationRecovery recovery =
         new OrderReservationRecovery(stockClient, intentMapper, orderSqlMapper, new ObjectMapper());
 
     recovery.recoverStaleReservations();
 
-    verify(stockClient).rollback(intent.orderNo);
+    verify(stockClient, never()).rollback(anyString());
     verify(intentMapper).markReleased(eq(intent.orderNo), any(LocalDateTime.class));
+  }
+
+  @Test
+  void unseenReservationRetriesOnlyTheOriginalOrderAndSnapshot() {
+    StockClient stockClient = mock(StockClient.class);
+    OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    OrderReservationIntentPO intent = intent("202609recover4");
+    when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(intent));
+    when(intentMapper.claimRecovery(eq(intent.orderNo), any(), any())).thenReturn(1);
+    doReturn(
+            ApiResponse.ok(stockStatus(intent.orderNo, "NOT_FOUND")),
+            ApiResponse.ok(stockStatus(intent.orderNo, "REJECTED")))
+        .when(stockClient)
+        .reservation(intent.orderNo);
+    OrderReservationRecovery recovery =
+        new OrderReservationRecovery(stockClient, intentMapper, orderSqlMapper, new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+
+    org.mockito.ArgumentCaptor<StockClient.Reservation> replay =
+        org.mockito.ArgumentCaptor.forClass(StockClient.Reservation.class);
+    verify(stockClient).reserve(replay.capture());
+    org.junit.jupiter.api.Assertions.assertEquals(intent.orderNo, replay.getValue().orderNo());
+    org.junit.jupiter.api.Assertions.assertEquals(7L, replay.getValue().items().get(0).skuId());
+    verify(stockClient, never()).rollback(anyString());
+    verify(intentMapper).markReleased(eq(intent.orderNo), any(LocalDateTime.class));
+  }
+
+  private static StockReservationStatusVO stockStatus(String orderNo, String status) {
+    StockReservationStatusVO reservation = new StockReservationStatusVO();
+    reservation.orderNo = orderNo;
+    reservation.status = status;
+    reservation.items = List.of();
+    return reservation;
   }
 
   private static OrderReservationIntentPO intent(String orderNo) {
