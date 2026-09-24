@@ -6,7 +6,7 @@ spring:
   rabbitmq: {host: localhost, port: 15673, username: root, password: root}
   jackson.time-zone: Asia/Shanghai
 management.endpoints.web.exposure.include: health,info,prometheus
-spring.cloud.nacos.discovery.server-addr: localhost:8848
+spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 cloudmall:

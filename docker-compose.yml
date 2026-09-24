@@ -76,9 +76,11 @@ services:
       NACOS_AUTH_IDENTITY_VALUE: root
       NACOS_AUTH_TOKEN: Y2xvdWRtYWxsLW5hY29zLWxvY2FsLXRva2VuLXNlY3JldA==
     ports:
-      - "8848:8848"
-      - "9848:9848"
-      - "9849:9849"
+      # Keep the Nacos client gRPC host port at HTTP host port + 1000.
+      # This Windows host currently excludes 9848-9849.
+      - "18848:8848"
+      - "19848:9848"
+      - "19849:9849"
     volumes:
       - cloud_mall_nacos_data:/home/nacos/data
       - cloud_mall_nacos_logs:/home/nacos/logs

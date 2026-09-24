@@ -5,7 +5,7 @@ spring:
   jackson.time-zone: Asia/Shanghai
 management.endpoints.web.exposure.include: health,info,prometheus
 cloudmall.cart.ttl: 30d
-spring.cloud.nacos.discovery.server-addr: localhost:8848
+spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 spring.cloud.openfeign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}

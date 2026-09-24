@@ -15,7 +15,7 @@ spring:
         - {id: pay, uri: lb://cloud-mall-pay, predicates: ["Path=/api/payments/**"]}
 management.endpoints.web.exposure.include: health,info,prometheus
 cloudmall.gateway.auth.enabled: true
-spring.cloud.nacos.discovery.server-addr: localhost:8848
+spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
-spring.cloud.nacos.config.server-addr: localhost:8848
+spring.cloud.nacos.config.server-addr: localhost:18848
