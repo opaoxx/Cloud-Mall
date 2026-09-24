@@ -19,6 +19,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api/stock")
@@ -35,6 +37,10 @@ public class StockServiceImpl implements StockService {
   private static final String ROLLBACK =
       "if redis.call('EXISTS',KEYS[1])==0 then return 0 end; for i=2,#KEYS do"
           + " redis.call('INCRBY',KEYS[i],ARGV[i-1]) end; redis.call('DEL',KEYS[1]); return 1";
+  /** 回滚流水提交后使用的 Redis 幂等可用量回补脚本。 */
+  private static final String RELEASE_AVAILABLE =
+      "if redis.call('SETNX',KEYS[2],'1')==1 then redis.call('EXPIRE',KEYS[2],86400);"
+          + " redis.call('INCRBY',KEYS[1],ARGV[1]); return 1 end; return 0";
   private static final String SECKILL =
       "if redis.call('EXISTS',KEYS[3])==1 then return 3 end; local now=tonumber(ARGV[3]); local"
           + " start=tonumber(ARGV[4]); local finish=tonumber(ARGV[5]); if now<start then return 4"
@@ -65,6 +71,7 @@ public class StockServiceImpl implements StockService {
   private final DefaultRedisScript<Long>
       reserveScript = new DefaultRedisScript<>(RESERVE, Long.class),
       rollbackScript = new DefaultRedisScript<>(ROLLBACK, Long.class),
+      releaseAvailableScript = new DefaultRedisScript<>(RELEASE_AVAILABLE, Long.class),
       seckillScript = new DefaultRedisScript<>(SECKILL, Long.class),
       seckillRollbackScript = new DefaultRedisScript<>(SECKILL_ROLLBACK, Long.class);
 
@@ -104,6 +111,19 @@ public class StockServiceImpl implements StockService {
     // 3. 返回 reserve 的处理结果。
     validate(request);
     List<StockLineDTO> lines = merge(request.items);
+    Map<Long, int[]> durableSnapshot = stockSnapshot(request.orderNo);
+    if (!durableSnapshot.isEmpty()) {
+      for (StockLineDTO line : lines) {
+        int[] snapshot = durableSnapshot.get(line.skuId);
+        if (snapshot == null || snapshot[0] != line.quantity || snapshot[1] != 0) {
+          throw new BizException(ErrorCodes.DUPLICATE, "同一订单库存明细不一致", 409);
+        }
+      }
+      if (durableSnapshot.size() != lines.size()) {
+        throw new BizException(ErrorCodes.DUPLICATE, "同一订单库存明细不一致", 409);
+      }
+      return ApiResponse.ok(Map.of("reserved", true, "idempotent", true));
+    }
     String key = RES + request.orderNo;
     List<String> keys = new ArrayList<>(List.of(key));
     keys.addAll(lines.stream().map(x -> PREFIX + x.skuId).toList());
@@ -137,20 +157,15 @@ public class StockServiceImpl implements StockService {
     // 1. 接收并整理 confirm 的业务请求。
     // 2. 执行 confirm 的核心业务校验与状态处理。
     // 3. 返回 confirm 的处理结果。
-    Map<Object, Object> lines = redis.opsForHash().entries(RES + orderNo + ":lines");
-    try {
-      for (Map.Entry<Object, Object> e : lines.entrySet()) {
-        long sku = Long.parseLong(String.valueOf(e.getKey()));
-        int q = Integer.parseInt(String.valueOf(e.getValue()));
-        String k = orderNo + ":CONFIRM:" + sku;
-        if (!existsFlow(k)) {
-          int changed = stockSqlMapper.confirmQuantity(sku, q, now());
-          if (changed != 1) throw new BizException(ErrorCodes.STOCK, "预扣库存不存在或不足", 409);
-          flow(new StockLineDTO(sku, q), orderNo, "CONFIRM", k);
-        }
-      }
-    } catch (RuntimeException e) {
-      throw e;
+    Map<Object, Object> lines = reservationLines(orderNo);
+    for (Map.Entry<Object, Object> lineEntry : lines.entrySet()) {
+      long skuId = Long.parseLong(String.valueOf(lineEntry.getKey()));
+      int quantity = Integer.parseInt(String.valueOf(lineEntry.getValue()));
+      String flowKey = orderNo + ":CONFIRM:" + skuId;
+      int settled =
+          stockSqlMapper.settleQuantity(
+              skuId, orderNo, "CONFIRM", quantity, flowKey, now());
+      if (settled < 0) throw new BizException(ErrorCodes.STOCK, "预扣库存不存在或不足", 409);
     }
     redis.delete(RES + orderNo);
     redis.delete(RES + orderNo + ":lines");
@@ -164,15 +179,17 @@ public class StockServiceImpl implements StockService {
     // 1. 接收并整理 rollback 的业务请求。
     // 2. 执行 rollback 的核心业务校验与状态处理。
     // 3. 返回 rollback 的处理结果。
-    Map<Object, Object> lines = redis.opsForHash().entries(RES + orderNo + ":lines");
-    for (Map.Entry<Object, Object> e : lines.entrySet()) {
-      long sku = Long.parseLong(String.valueOf(e.getKey()));
-      int q = Integer.parseInt(String.valueOf(e.getValue()));
-      String k = orderNo + ":ROLLBACK:" + sku;
-      if (!existsFlow(k)) {
-        int changed = stockSqlMapper.rollbackQuantity(sku, q, now());
-        if (changed != 1) throw new BizException(ErrorCodes.STOCK, "预扣库存不存在或不足", 409);
-        flow(new StockLineDTO(sku, q), orderNo, "ROLLBACK", k);
+    Map<Object, Object> lines = reservationLines(orderNo);
+    for (Map.Entry<Object, Object> lineEntry : lines.entrySet()) {
+      long skuId = Long.parseLong(String.valueOf(lineEntry.getKey()));
+      int quantity = Integer.parseInt(String.valueOf(lineEntry.getValue()));
+      String flowKey = orderNo + ":ROLLBACK:" + skuId;
+      int settled =
+          stockSqlMapper.settleQuantity(
+              skuId, orderNo, "ROLLBACK", quantity, flowKey, now());
+      if (settled < 0) throw new BizException(ErrorCodes.STOCK, "预扣库存不存在或不足", 409);
+      if (settled == 1) {
+        releaseAvailableAfterCommit(orderNo, skuId, quantity);
       }
     }
     redis.delete(RES + orderNo);
@@ -333,6 +350,58 @@ public class StockServiceImpl implements StockService {
     // 2. 执行 existsFlow 的核心业务校验与状态处理。
     // 3. 返回 existsFlow 的处理结果。
     return stockSqlMapper.flowExists(k);
+  }
+
+  /** 从 Redis 或 durable stock_flow 恢复指定订单的未完成预扣明细。 */
+  private Map<Object, Object> reservationLines(String orderNo) {
+    Map<Object, Object> recovered = new LinkedHashMap<>();
+    List<Map<String, Object>> durableLines = stockSqlMapper.findOpenReservations(orderNo);
+    if (durableLines == null) return recovered;
+    for (Map<String, Object> row : durableLines) {
+      Object skuId = row.get("sku_id");
+      Object quantity = row.get("quantity");
+      if (skuId != null && quantity instanceof Number number && number.intValue() > 0) {
+        recovered.put(skuId, number.intValue());
+      }
+    }
+    return recovered;
+  }
+
+  /** 读取 durable stock_flow 中指定订单的预扣快照，阻止 Redis 标记丢失后的重复预扣。 */
+  private Map<Long, int[]> stockSnapshot(String orderNo) {
+    Map<Long, int[]> snapshot = new LinkedHashMap<>();
+    List<Map<String, Object>> durableSnapshot = stockSqlMapper.findReservationSnapshot(orderNo);
+    if (durableSnapshot == null) return snapshot;
+    for (Map<String, Object> row : durableSnapshot) {
+      Object skuId = row.get("sku_id");
+      Object reserved = row.get("reserved_quantity");
+      Object settled = row.get("settled_quantity");
+      if (skuId instanceof Number sku && reserved instanceof Number reserve && settled instanceof Number done) {
+        snapshot.put(sku.longValue(), new int[] {reserve.intValue(), done.intValue()});
+      }
+    }
+    return snapshot;
+  }
+
+  /** 在数据库回滚事务提交后回补 Redis，避免多 SKU 事务中途失败造成可用库存高估。 */
+  private void releaseAvailableAfterCommit(String orderNo, long sku, int quantity) {
+    Runnable release =
+        () ->
+            redis.execute(
+                releaseAvailableScript,
+                List.of(PREFIX + sku, "stock:rollback:released:" + orderNo + ":" + sku),
+                String.valueOf(quantity));
+    if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+      release.run();
+      return;
+    }
+    TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            release.run();
+          }
+        });
   }
 
   /** 执行 flow 相关操作。 */

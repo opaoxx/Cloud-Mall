@@ -8,6 +8,8 @@ spring:
     port: 15673
     username: root
     password: root
+    publisher-confirm-type: correlated
+    publisher-returns: true
     listener:
       simple:
         default-requeue-rejected: false
@@ -19,10 +21,18 @@ spring:
           max-interval: 10000ms
   cloud.openfeign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
   cloud.alibaba.seata.tx-service-group: cloudmall_tx_group
+  task.scheduling.pool.size: 2
 management.endpoints.web.exposure.include: health,info,prometheus
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
+cloudmall:
+  order:
+    outbox:
+      dispatch-interval-ms: 1000
+      batch-size: 50
+      confirm-timeout-ms: 5000
+      retry-delay-seconds: 10
 seata:
   enabled: true
   client:

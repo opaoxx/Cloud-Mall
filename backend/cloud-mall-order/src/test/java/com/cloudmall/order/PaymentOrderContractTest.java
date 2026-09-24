@@ -13,8 +13,8 @@ class PaymentOrderContractTest {
         Files.readString(
             Path.of("src/main/java/com/cloudmall/order/service/impl/OrderServiceImpl.java"));
     String compact = compact(source);
-    assertTrue(compact.contains("if(\"PAID\".equals(o.status))returnApiResponse.ok(o);"));
-    assertTrue(compact.contains("setStatus(o,\"PAID\")"));
+    assertTrue(compact.contains("if(\"PAID\".equals(order.status))returnApiResponse.ok(order);"));
+    assertTrue(compact.contains("setStatus(order,\"PAID\")"));
     assertTrue(compact.contains("stock.confirm(orderNo)"));
   }
 

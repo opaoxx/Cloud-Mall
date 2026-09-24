@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS order_status_log_202608 (id BIGINT PRIMARY KEY, order
 CREATE TABLE IF NOT EXISTS mall_order_item_template LIKE mall_order_item_202608;
 CREATE TABLE IF NOT EXISTS order_status_log_template LIKE order_status_log_202608;
 CREATE TABLE IF NOT EXISTS order_idempotency (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, idempotency_key VARCHAR(128) NOT NULL, order_no VARCHAR(64) NOT NULL, created_at DATETIME(3) NOT NULL, UNIQUE KEY uk_order_idempotency(user_id,idempotency_key));
+CREATE TABLE IF NOT EXISTS order_reservation_intent (id BIGINT PRIMARY KEY, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, idempotency_key VARCHAR(128) NOT NULL, items_snapshot JSON NOT NULL, status VARCHAR(32) NOT NULL, last_error VARCHAR(512), next_retry_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, UNIQUE KEY uk_intent_user_key(user_id,idempotency_key), KEY idx_intent_status_retry(status,next_retry_at), KEY idx_intent_user(user_id,created_at));
+CREATE TABLE IF NOT EXISTS order_outbox (id BIGINT PRIMARY KEY, event_id VARCHAR(128) NOT NULL UNIQUE, event_type VARCHAR(64) NOT NULL, order_no VARCHAR(64) NOT NULL, payload JSON NOT NULL, status VARCHAR(32) NOT NULL, attempts INT NOT NULL DEFAULT 0, next_retry_at DATETIME(3) NOT NULL, last_error VARCHAR(512), published_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_outbox_status_retry(status,next_retry_at), KEY idx_outbox_order(order_no));
 
 -- Small, repeatable local catalog. The source data was selected from the product
 -- examples in F:\hmall\sql and adapted to CloudMall's product/SKU model.

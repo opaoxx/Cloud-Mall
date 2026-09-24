@@ -1,0 +1,103 @@
+package com.cloudmall.order.mapper;
+
+import com.cloudmall.order.domain.po.OrderOutboxPO;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.util.List;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+
+/** 订单超时 outbox 的唯一数据库访问入口。 */
+@Repository
+public class OrderOutboxMapper {
+  /** Spring JDBC 执行器。 */
+  private final JdbcTemplate jdbcTemplate;
+
+  /** 创建订单 outbox Mapper。 */
+  public OrderOutboxMapper(JdbcTemplate jdbcTemplate) {
+    this.jdbcTemplate = jdbcTemplate;
+  }
+
+  /** 为已有本地数据库补建 outbox 表。 */
+  public void ensureTable() {
+    jdbcTemplate.execute(
+        "CREATE TABLE IF NOT EXISTS order_outbox ("
+            + "id BIGINT PRIMARY KEY,event_id VARCHAR(128) NOT NULL UNIQUE,"
+            + "event_type VARCHAR(64) NOT NULL,order_no VARCHAR(64) NOT NULL,"
+            + "payload JSON NOT NULL,status VARCHAR(32) NOT NULL,"
+            + "attempts INT NOT NULL DEFAULT 0,next_retry_at DATETIME(3) NOT NULL,"
+            + "last_error VARCHAR(512),published_at DATETIME(3),"
+            + "created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,"
+            + "KEY idx_outbox_status_retry(status,next_retry_at),"
+            + "KEY idx_outbox_order(order_no))");
+  }
+
+  /** 在订单本地事务中写入待发布的超时事件。 */
+  public int insert(OrderOutboxPO outbox) {
+    return jdbcTemplate.update(
+        "INSERT INTO order_outbox(id,event_id,event_type,order_no,payload,status,attempts,"
+            + "next_retry_at,last_error,published_at,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        outbox.id,
+        outbox.eventId,
+        outbox.eventType,
+        outbox.orderNo,
+        outbox.payload,
+        outbox.status,
+        outbox.attempts,
+        outbox.nextRetryAt,
+        outbox.lastError,
+        outbox.publishedAt,
+        outbox.createdAt,
+        outbox.updatedAt);
+  }
+
+  /** 查询已经提交并到达重试时间的待发布事件。 */
+  public List<OrderOutboxPO> findPendingOutbox(int limit) {
+    return jdbcTemplate.query(
+        "SELECT id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,"
+            + "last_error,published_at,created_at,updated_at FROM order_outbox"
+            + " WHERE status='PENDING' AND next_retry_at<=?"
+            + " ORDER BY next_retry_at,id LIMIT ?",
+        (resultSet, rowNumber) -> {
+          OrderOutboxPO outbox = new OrderOutboxPO();
+          outbox.id = resultSet.getLong("id");
+          outbox.eventId = resultSet.getString("event_id");
+          outbox.eventType = resultSet.getString("event_type");
+          outbox.orderNo = resultSet.getString("order_no");
+          outbox.payload = resultSet.getString("payload");
+          outbox.status = resultSet.getString("status");
+          outbox.attempts = resultSet.getInt("attempts");
+          outbox.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
+          outbox.lastError = resultSet.getString("last_error");
+          Timestamp publishedAt = resultSet.getTimestamp("published_at");
+          outbox.publishedAt = publishedAt == null ? null : publishedAt.toLocalDateTime();
+          outbox.createdAt = resultSet.getTimestamp("created_at").toLocalDateTime();
+          outbox.updatedAt = resultSet.getTimestamp("updated_at").toLocalDateTime();
+          return outbox;
+        },
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
+        Math.max(1, limit));
+  }
+
+  /** 仅在 publisher confirm 成功后标记事件已发布。 */
+  public int markOutboxPublished(String eventId, LocalDateTime publishedAt) {
+    return jdbcTemplate.update(
+        "UPDATE order_outbox SET status='PUBLISHED',published_at=?,updated_at=?,last_error=NULL"
+            + " WHERE event_id=? AND status='PENDING'",
+        publishedAt,
+        publishedAt,
+        eventId);
+  }
+
+  /** 记录发布失败并推迟下一次重试，保持原 eventId。 */
+  public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
+    return jdbcTemplate.update(
+        "UPDATE order_outbox SET attempts=attempts+1,last_error=?,next_retry_at=?,updated_at=?"
+            + " WHERE event_id=? AND status='PENDING'",
+        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        nextRetryAt,
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
+        eventId);
+  }
+}

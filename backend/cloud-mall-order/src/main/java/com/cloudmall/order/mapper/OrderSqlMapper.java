@@ -83,6 +83,12 @@ public class OrderSqlMapper {
     return queryForObject("select id from " + tableName + " where order_no=?", Long.class, orderNo);
   }
 
+  /** 判断指定月表中是否存在已提交订单。 */
+  public boolean orderExists(String tableName, String orderNo) {
+    Long count = queryForObject("select count(*) from " + tableName + " where order_no=?", Long.class, orderNo);
+    return count != null && count > 0;
+  }
+
   /** 保存订单明细快照。 */
   public int insertOrderItem(String tableName, OrderItemPO item) {
     return update(

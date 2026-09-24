@@ -9,24 +9,30 @@ import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.domain.dto.SeckillOrderDTO;
 import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.domain.po.OrderItemPO;
+import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.domain.po.OrderPO;
+import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.domain.vo.OrderItemVO;
 import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
+import com.cloudmall.order.mapper.OrderOutboxMapper;
+import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.OrderService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import org.slf4j.MDC;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.transaction.annotation.Transactional;
@@ -55,9 +61,14 @@ public class OrderServiceImpl implements OrderService {
   /** 保存 mapper 的业务状态或配置。 */
   @Autowired private ObjectMapper mapper;
 
-  @Autowired(required = false)
-  /** 保存 rabbit 的业务状态或配置。 */
-  private RabbitTemplate rabbit;
+  /** 在独立事务中保存普通订单预扣意图。 */
+  @Autowired private OrderReservationIntentService reservationIntentService;
+
+  /** 保存订单超时事件的 outbox Mapper。 */
+  @Autowired private OrderOutboxMapper orderOutboxMapper;
+
+  /** 在订单事务中更新意图状态的 Mapper。 */
+  @Autowired private OrderReservationIntentMapper reservationIntentMapper;
 
   /** 创建由 Spring 字段注入依赖的订单服务实例。 */
   public OrderServiceImpl() {}
@@ -95,79 +106,116 @@ public class OrderServiceImpl implements OrderService {
     if (!old.isEmpty()) return ApiResponse.ok(find(old.get(0)));
     if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
       bad("订单商品和地址不能为空");
+    Map<String, Object> address = findAddress(req.addressId);
     OffsetDateTime created = now();
     String orderNo = created.format(MONTH) + UUID.randomUUID().toString().replace("-", "");
     String table = table(created);
     List<StockClient.Line> lines = new ArrayList<>();
     List<ItemRow> rows = new ArrayList<>();
     BigDecimal total = BigDecimal.ZERO;
-    for (OrderItemDTO i : req.items) {
-      if (i == null || i.skuId == null || i.quantity < 1) bad("商品数量必须为正数");
-      ApiResponse<ProductClient.SkuView> resp = products.sku(i.skuId);
+    for (OrderItemDTO item : req.items) {
+      if (item == null || item.skuId == null || item.quantity < 1) bad("商品数量必须为正数");
+      ApiResponse<ProductClient.SkuView> resp = products.sku(item.skuId);
       if (resp == null || !"0".equals(resp.code) || resp.data == null)
         throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
-      ProductClient.SkuView s = resp.data;
-      BigDecimal line = s.unitPrice().multiply(BigDecimal.valueOf(i.quantity));
+      ProductClient.SkuView skuView = resp.data;
+      BigDecimal line = skuView.unitPrice().multiply(BigDecimal.valueOf(item.quantity));
       total = total.add(line);
-      lines.add(new StockClient.Line(i.skuId, i.quantity));
-      rows.add(new ItemRow(s, line, i.quantity));
+      lines.add(new StockClient.Line(item.skuId, item.quantity));
+      rows.add(new ItemRow(skuView, line, item.quantity));
     }
-    ApiResponse<?> reserved = stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL"));
-    if (reserved == null || !"0".equals(reserved.code))
-      throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
-    Map<String, Object> address = findAddress(req.addressId);
-    OffsetDateTime expire = created.plusMinutes(30);
-    OrderPO order = new OrderPO();
-    order.id = id();
-    order.orderNo = orderNo;
-    order.userId = userId;
-    order.status = "PENDING_PAYMENT";
-    order.totalAmount = total;
-    order.payAmount = total;
-    order.addressSnapshot = toJson(address);
-    order.expireAt = expire.toLocalDateTime();
-    order.createdAt = created.toLocalDateTime();
-    order.updatedAt = created.toLocalDateTime();
-    orderSqlMapper.insertOrder(table, order);
-    long orderId = orderSqlMapper.findOrderId(table, orderNo);
-    String itemTable = table.replace("mall_order_", "mall_order_item_");
-    for (ItemRow row : rows) {
-      OrderItemPO orderItem = new OrderItemPO();
-      orderItem.id = id();
-      orderItem.orderId = orderId;
-      orderItem.orderNo = orderNo;
-      orderItem.productId = row.sku.productId();
-      orderItem.skuId = row.sku.skuId();
-      orderItem.productNameSnapshot = row.sku.productName();
-      orderItem.skuSnapshot = toJson(row.sku.skuSnapshot());
-      orderItem.unitPrice = row.sku.unitPrice();
-      orderItem.quantity = row.quantity;
-      orderItem.lineAmount = row.line;
-      orderItem.createdAt = created.toLocalDateTime();
-      orderSqlMapper.insertOrderItem(itemTable, orderItem);
+    OrderReservationIntentPO intent = new OrderReservationIntentPO();
+    intent.id = id();
+    intent.orderNo = orderNo;
+    intent.userId = userId;
+    intent.idempotencyKey = key;
+    intent.itemsSnapshot = toJson(lines);
+    intent.status = "INIT";
+    intent.createdAt = created.toLocalDateTime();
+    intent.updatedAt = intent.createdAt;
+    if (!reservationIntentService.createIntent(intent)) {
+      List<OrderReservationIntentPO> existing = reservationIntentService.findByUserAndKey(userId, key);
+      if (!existing.isEmpty() && "COMMITTED".equals(existing.get(0).status))
+        return ApiResponse.ok(find(existing.get(0).orderNo));
+      throw new BizException(ErrorCodes.DUPLICATE, "同一幂等请求仍在处理中或已失败", 409);
     }
-    OrderIdempotencyPO idempotency = new OrderIdempotencyPO();
-    idempotency.id = id();
-    idempotency.userId = userId;
-    idempotency.idempotencyKey = key;
-    idempotency.orderNo = orderNo;
-    idempotency.createdAt = created.toLocalDateTime();
-    orderSqlMapper.insertIdempotency(idempotency);
-    for (OrderItemDTO item : req.items) {
-      ApiResponse<?> removed = cart.deleteItem(item.skuId, userId);
-      if (removed == null || !"0".equals(removed.code))
-        throw new BizException(ErrorCodes.INTERNAL, "订单创建成功但购物车清理失败", 500);
+
+    boolean reservationConfirmed = false;
+    boolean definiteRejection = false;
+    try {
+      // 1. 预扣请求始终使用已提交意图中的原订单号，网络结果未知时也可安全恢复。
+      ApiResponse<?> reserved = stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL"));
+      if (reserved == null)
+        throw new BizException(ErrorCodes.INTERNAL, "库存预扣结果待确认", 503);
+      if (!"0".equals(reserved.code)) {
+        definiteRejection = true;
+        reservationIntentService.markReleased(orderNo);
+        throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
+      }
+      reservationConfirmed = true;
+      reservationIntentService.markReserved(orderNo);
+
+      // 2. 订单、明细、幂等记录、超时 outbox 和 COMMITTED 意图同事务落库。
+      OffsetDateTime expire = created.plusMinutes(30);
+      OrderPO order = new OrderPO();
+      order.id = id();
+      order.orderNo = orderNo;
+      order.userId = userId;
+      order.status = "PENDING_PAYMENT";
+      order.totalAmount = total;
+      order.payAmount = total;
+      order.addressSnapshot = toJson(address);
+      order.expireAt = expire.toLocalDateTime();
+      order.createdAt = created.toLocalDateTime();
+      order.updatedAt = created.toLocalDateTime();
+      orderSqlMapper.insertOrder(table, order);
+      long orderId = orderSqlMapper.findOrderId(table, orderNo);
+      String itemTable = table.replace("mall_order_", "mall_order_item_");
+      for (ItemRow row : rows) {
+        OrderItemPO orderItem = new OrderItemPO();
+        orderItem.id = id();
+        orderItem.orderId = orderId;
+        orderItem.orderNo = orderNo;
+        orderItem.productId = row.sku.productId();
+        orderItem.skuId = row.sku.skuId();
+        orderItem.productNameSnapshot = row.sku.productName();
+        orderItem.skuSnapshot = toJson(row.sku.skuSnapshot());
+        orderItem.unitPrice = row.sku.unitPrice();
+        orderItem.quantity = row.quantity;
+        orderItem.lineAmount = row.line;
+        orderItem.createdAt = created.toLocalDateTime();
+        orderSqlMapper.insertOrderItem(itemTable, orderItem);
+      }
+      OrderIdempotencyPO idempotency = new OrderIdempotencyPO();
+      idempotency.id = id();
+      idempotency.userId = userId;
+      idempotency.idempotencyKey = key;
+      idempotency.orderNo = orderNo;
+      idempotency.createdAt = created.toLocalDateTime();
+      orderSqlMapper.insertIdempotency(idempotency);
+      orderOutboxMapper.insert(timeoutOutbox(orderNo, created, expire));
+      for (OrderItemDTO item : req.items) {
+        ApiResponse<?> removed = cart.deleteItem(item.skuId, userId);
+        if (removed == null || !"0".equals(removed.code))
+          throw new BizException(ErrorCodes.INTERNAL, "订单创建成功但购物车清理失败", 500);
+      }
+      OrderVO createdOrder = find(orderNo);
+      if (reservationIntentMapper.markCommitted(orderNo, now().toLocalDateTime()) != 1)
+        throw new BizException(ErrorCodes.CONFLICT, "库存预扣意图未能提交", 409);
+      return ApiResponse.ok(createdOrder);
+    } catch (RuntimeException creationFailure) {
+      // 3. 只有成功响应才能同步回滚并结束意图；响应丢失须保留 INIT 等待恢复。
+      if (reservationConfirmed) {
+        compensateFailedCreate(orderNo, creationFailure);
+      } else if (!definiteRejection) {
+        try {
+          reservationIntentService.recordFailure(orderNo, "预扣结果待确认: " + creationFailure);
+        } catch (RuntimeException recordFailure) {
+          creationFailure.addSuppressed(recordFailure);
+        }
+      }
+      throw creationFailure;
     }
-    if (rabbit != null)
-      rabbit.convertAndSend(
-          "cloudmall.order.timeout.exchange",
-          "",
-          orderNo,
-          m -> {
-            m.getMessageProperties().setExpiration("1800000");
-            return m;
-          });
-    return ApiResponse.ok(find(orderNo));
   }
 
   @GetMapping("/orders")
@@ -227,11 +275,13 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 cancel 的业务请求。
     // 2. 执行 cancel 的核心业务校验与状态处理。
     // 3. 返回 cancel 的处理结果。
-    OrderVO o = find(orderNo);
+    OrderVO order = find(orderNo);
     long userId = headerUser == null ? AuthContext.requireUserId() : headerUser;
-    if (o.userId != userId) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
-    if (!"PENDING_PAYMENT".equals(o.status)) return ApiResponse.ok(o);
-    setStatus(o, "CANCELLED");
+    if (order.userId != userId) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
+    if ("CANCELLED".equals(order.status)) return ApiResponse.ok(order);
+    if (!"PENDING_PAYMENT".equals(order.status))
+      throw new BizException(ErrorCodes.STATUS, "订单状态不允许取消", 409);
+    if (!setStatus(order, "CANCELLED")) return completedOrConflict(orderNo, "CANCELLED");
     stock.rollback(orderNo);
     return ApiResponse.ok(find(orderNo));
   }
@@ -243,11 +293,11 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 paid 的业务请求。
     // 2. 执行 paid 的核心业务校验与状态处理。
     // 3. 返回 paid 的处理结果。
-    OrderVO o = owned(orderNo);
-    if ("PAID".equals(o.status)) return ApiResponse.ok(o);
-    if (!"PENDING_PAYMENT".equals(o.status))
+    OrderVO order = owned(orderNo);
+    if ("PAID".equals(order.status)) return ApiResponse.ok(order);
+    if (!"PENDING_PAYMENT".equals(order.status))
       throw new BizException(ErrorCodes.STATUS, "订单状态不允许支付", 409);
-    setStatus(o, "PAID");
+    if (!setStatus(order, "PAID")) return completedOrConflict(orderNo, "PAID");
     stock.confirm(orderNo);
     return ApiResponse.ok(find(orderNo));
   }
@@ -258,9 +308,10 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 confirm 的业务请求。
     // 2. 执行 confirm 的核心业务校验与状态处理。
     // 3. 返回 confirm 的处理结果。
-    OrderVO o = owned(orderNo);
-    if (!"PAID".equals(o.status)) throw new BizException(ErrorCodes.STATUS, "订单尚未支付", 409);
-    setStatus(o, "COMPLETED");
+    OrderVO order = owned(orderNo);
+    if ("COMPLETED".equals(order.status)) return ApiResponse.ok(order);
+    if (!"PAID".equals(order.status)) throw new BizException(ErrorCodes.STATUS, "订单尚未支付", 409);
+    if (!setStatus(order, "COMPLETED")) return completedOrConflict(orderNo, "COMPLETED");
     return ApiResponse.ok(find(orderNo));
   }
 
@@ -405,18 +456,39 @@ public class OrderServiceImpl implements OrderService {
 
   @RabbitListener(queues = OrderMessagingConfiguration.TIMEOUT_DLQ)
   @Transactional
-  /** 执行 consumeTimeout 相关操作。 */
-  public void consumeTimeout(String orderNo) {
-    // 1. 接收并整理 consumeTimeout 的业务请求。
-    // 2. 执行 consumeTimeout 的核心业务校验与状态处理。
-    // 3. 返回 consumeTimeout 的处理结果。
-    if (orderNo != null && !orderNo.isBlank()) {
-      OrderVO o = find(orderNo);
-      if ("PENDING_PAYMENT".equals(o.status)) {
-        setStatus(o, "CANCELLED");
-        stock.rollback(orderNo);
+  /** 消费新 JSON envelope 或存量 String 订单号超时消息。 */
+  public void consumeTimeout(Message message) {
+    // 1. 将两种消息表示统一为订单号；新消息必须携带稳定事件号和类型。
+    String rawPayload = new String(message.getBody(), StandardCharsets.UTF_8);
+    String orderNo;
+    try {
+      com.fasterxml.jackson.databind.JsonNode event = mapper.readTree(rawPayload);
+      if (event.isTextual()) {
+        orderNo = event.asText();
+      } else if (event.isObject()
+          && "ORDER_TIMEOUT".equals(event.path("eventType").asText())
+          && !event.path("eventId").asText().isBlank()
+          && !event.path("expireAt").asText().isBlank()) {
+        orderNo = event.path("orderNo").asText();
+      } else {
+        throw new IllegalArgumentException("订单超时事件格式无效");
       }
+    } catch (com.fasterxml.jackson.core.JsonProcessingException malformedLegacyMessage) {
+      orderNo = rawPayload.trim();
     }
+    // 2. 统一读取订单事实并通过 CAS 决定是否执行库存回滚。
+    consumeTimeout(orderNo);
+  }
+
+  /** 按订单号处理旧版超时消息并供恢复测试复用。 */
+  public void consumeTimeout(String orderNo) {
+    if (orderNo == null || orderNo.isBlank()) return;
+    OrderVO order = find(orderNo);
+    if (!"PENDING_PAYMENT".equals(order.status)) return;
+    if (order.expireAt != null && now().isBefore(OffsetDateTime.parse(order.expireAt))) {
+      throw new BizException(ErrorCodes.STATUS, "订单尚未到超时关单时间", 409);
+    }
+    if (setStatus(order, "CANCELLED")) stock.rollback(orderNo);
   }
 
   /** 执行 find 相关操作。 */
@@ -437,12 +509,62 @@ public class OrderServiceImpl implements OrderService {
     return o;
   }
 
-  /** 执行 setStatus 相关操作。 */
-  private void setStatus(OrderVO o, String st) {
+  /** 按旧状态执行 CAS 迁移，仅影响一行时返回成功。 */
+  private boolean setStatus(OrderVO order, String targetStatus) {
     // 1. 接收并整理 setStatus 的业务请求。
     // 2. 执行 setStatus 的核心业务校验与状态处理。
     // 3. 返回 setStatus 的处理结果。
-    orderSqlMapper.updateStatus(tableFromNo(o.orderNo), o.orderNo, st, o.status, ts(now()));
+    return orderSqlMapper.updateStatus(
+            tableFromNo(order.orderNo), order.orderNo, targetStatus, order.status, ts(now()))
+        == 1;
+  }
+
+  /** 重新读取 CAS 竞争结果，仅目标状态视为幂等成功。 */
+  private ApiResponse<?> completedOrConflict(String orderNo, String targetStatus) {
+    OrderVO currentOrder = find(orderNo);
+    if (targetStatus.equals(currentOrder.status)) return ApiResponse.ok(currentOrder);
+    throw new BizException(ErrorCodes.STATUS, "订单状态已被其他操作更新", 409);
+  }
+
+  /** 构造与订单同事务保存的超时 outbox 事件。 */
+  private OrderOutboxPO timeoutOutbox(
+      String orderNo, OffsetDateTime createdAt, OffsetDateTime expireAt) {
+    OrderOutboxPO outbox = new OrderOutboxPO();
+    outbox.id = id();
+    outbox.eventId = "order-timeout:" + orderNo;
+    outbox.eventType = "ORDER_TIMEOUT";
+    outbox.orderNo = orderNo;
+    Map<String, Object> payload = new LinkedHashMap<>();
+    payload.put("eventId", outbox.eventId);
+    payload.put("eventType", outbox.eventType);
+    payload.put("orderNo", orderNo);
+    payload.put("expireAt", expireAt.toString());
+    payload.put("occurredAt", createdAt.toString());
+    payload.put("traceId", MDC.get("traceId"));
+    outbox.payload = toJson(payload);
+    outbox.status = "PENDING";
+    outbox.attempts = 0;
+    outbox.nextRetryAt = createdAt.toLocalDateTime();
+    outbox.createdAt = createdAt.toLocalDateTime();
+    outbox.updatedAt = outbox.createdAt;
+    return outbox;
+  }
+
+  /** 尝试同步回滚失败订单的远端库存，保留原失败供调用方处理。 */
+  private void compensateFailedCreate(String orderNo, RuntimeException creationFailure) {
+    try {
+      ApiResponse<?> rollbackResult = stock.rollback(orderNo);
+      if (rollbackResult == null || !"0".equals(rollbackResult.code))
+        throw new BizException(ErrorCodes.INTERNAL, "订单失败后的库存回滚未确认", 500);
+      reservationIntentService.markReleased(orderNo);
+    } catch (RuntimeException compensationFailure) {
+      try {
+        reservationIntentService.recordFailure(orderNo, compensationFailure.toString());
+      } catch (RuntimeException recordFailure) {
+        compensationFailure.addSuppressed(recordFailure);
+      }
+      creationFailure.addSuppressed(compensationFailure);
+    }
   }
 
   /** 将订单数据库行转换为订单响应视图。 */

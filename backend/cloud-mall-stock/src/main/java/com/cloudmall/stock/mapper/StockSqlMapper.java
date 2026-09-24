@@ -161,6 +161,50 @@ public class StockSqlMapper {
         createdAt);
   }
 
+  /**
+   * Atomically claims a settlement flow and applies its stock mutation.
+   *
+   * <p>The flow row is inserted first with its unique idempotency key. A duplicate claim is
+   * treated as an already completed operation. Both statements run in the caller's transaction,
+   * so a failed stock update rolls the flow claim back as well.
+   */
+  public int settleQuantity(
+      Long skuId,
+      String orderNo,
+      String flowType,
+      int quantity,
+      String idempotencyKey,
+      OffsetDateTime updatedAt) {
+    int inserted =
+        update(
+            "insert ignore into stock_flow(id,sku_id,order_no,flow_type,quantity,idempotency_key,created_at)"
+                + " values(?,?,?,?,?,?,?)",
+            Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
+            skuId,
+            orderNo,
+            flowType,
+            quantity,
+            idempotencyKey,
+            updatedAt);
+    if (inserted == 0) return 0;
+    String quantityUpdate =
+        "CONFIRM".equals(flowType)
+            ? "reserved_quantity=reserved_quantity-?,sold_quantity=sold_quantity+?"
+            : "reserved_quantity=reserved_quantity-?,available_quantity=available_quantity+?";
+    int changed =
+        update(
+            "update stock_sku set "
+                + quantityUpdate
+                + ",version=version+1,updated_at=? where sku_id=? and reserved_quantity>=?",
+            quantity,
+            quantity,
+            updatedAt,
+            skuId,
+            quantity);
+    if (changed != 1) return -1;
+    return 1;
+  }
+
   /** 创建秒杀恢复所需的台账表。 */
   public void ensureSeckillLedgerTable() {
     execute(
@@ -177,7 +221,25 @@ public class StockSqlMapper {
     return queryForList(
         "select order_no,sku_id,sum(case when flow_type='RESERVE' then quantity when flow_type in"
             + " ('CONFIRM','ROLLBACK') then -quantity else 0 end) quantity from stock_flow group by"
-            + " order_no,sku_id having quantity>0");
+        + " order_no,sku_id having quantity>0");
+  }
+
+  /** 查询指定订单仍处于预扣状态的普通库存流水。 */
+  public List<Map<String, Object>> findOpenReservations(String orderNo) {
+    return queryForList(
+        "select sku_id,sum(case when flow_type='RESERVE' then quantity when flow_type in"
+            + " ('CONFIRM','ROLLBACK') then -quantity else 0 end) quantity from stock_flow"
+            + " where order_no=? group by order_no,sku_id having quantity>0",
+        orderNo);
+  }
+
+  /** 查询指定订单的普通库存预扣快照，供预扣重放做请求一致性校验。 */
+  public List<Map<String, Object>> findReservationSnapshot(String orderNo) {
+    return queryForList(
+        "select sku_id,sum(case when flow_type='RESERVE' then quantity else 0 end) reserved_quantity,"
+            + "sum(case when flow_type in ('CONFIRM','ROLLBACK') then quantity else 0 end) settled_quantity"
+            + " from stock_flow where order_no=? group by order_no,sku_id",
+        orderNo);
   }
 
   /** 将已接受的秒杀记录写回持久化台账。 */
