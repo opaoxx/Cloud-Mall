@@ -7,11 +7,13 @@ import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.po.PayCallbackLogPO;
+import com.cloudmall.pay.domain.po.PayDebitIntentPO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
+import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayService;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +41,12 @@ public class PayServiceImpl implements PayService {
 
   /** 支付回调日志 Mapper。 */
   @Autowired private PayCallbackLogMapper payCallbackLogMapper;
+
+  /** 跨用户账本和订单服务的持久支付恢复编排。 */
+  @Autowired private PayConsistencyService payConsistencyService;
+
+  /** 判断失败回调能否安全取消订单的持久意图 Mapper。 */
+  @Autowired private PayDebitIntentMapper payDebitIntentMapper;
 
   @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}")
   /** 保存 callbackToken 的业务状态或配置。 */
@@ -76,8 +84,19 @@ public class PayServiceImpl implements PayService {
         || req == null
         || req.orderNo == null
         || req.payAmount == null
-        || req.payAmount.signum() < 0) {
+        || req.payAmount.signum() <= 0) {
       throw new BizException(ErrorCodes.INVALID, "支付参数不完整", 400);
+    }
+    String payNo = payNoFor(userId, key);
+    List<PayVO> keyed = findBy("pay_no", payNo);
+    if (!keyed.isEmpty()) {
+      PayVO payment = keyed.get(0);
+      if (!Objects.equals(payment.orderNo, req.orderNo)
+          || !Objects.equals(payment.userId, userId)
+          || payment.amount.compareTo(req.payAmount) != 0) {
+        throw new BizException(ErrorCodes.DUPLICATE, "Idempotency-Key已用于其他支付请求", 409);
+      }
+      return ApiResponse.ok(payment);
     }
     OrderClient.OrderView order = order(req.orderNo, userId);
     if (!Objects.equals(userId, order.userId()))
@@ -86,17 +105,6 @@ public class PayServiceImpl implements PayService {
       throw new BizException(ErrorCodes.PAY_DONE, "订单不处于待支付状态", 409);
     if (req.payAmount.compareTo(order.payAmount()) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "支付金额与订单应付金额不一致", 409);
-    String payNo = payNoFor(userId, key);
-    List<PayVO> keyed = findBy("pay_no", payNo);
-    if (!keyed.isEmpty()) {
-      PayVO p = keyed.get(0);
-      if (!Objects.equals(p.orderNo, req.orderNo)
-          || !Objects.equals(p.userId, userId)
-          || p.amount.compareTo(req.payAmount) != 0) {
-        throw new BizException(ErrorCodes.DUPLICATE, "Idempotency-Key已用于其他支付请求", 409);
-      }
-      return ApiResponse.ok(p);
-    }
     List<PayVO> old = findBy("order_no", req.orderNo);
     if (!old.isEmpty()) return ApiResponse.ok(old.get(0));
     OffsetDateTime now = now();
@@ -128,20 +136,18 @@ public class PayServiceImpl implements PayService {
     return ApiResponse.ok(records.get(0));
   }
 
-  @Transactional
   @PostMapping("/{payNo}/mock-success")
   /** 执行 success 相关操作。 */
   public synchronized ApiResponse<?> success(@PathVariable String payNo) {
     // 1. 接收并整理 success 的业务请求。
     // 2. 执行 success 的核心业务校验与状态处理。
     // 3. 返回 success 的处理结果。
-    PayVO p = ownedForUpdate(payNo);
-    if ("SUCCESS".equals(p.status)) return ApiResponse.ok(p);
-    if (!"PENDING".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
-    completeSuccess(p);
-    payRecordMapper.markSuccess(
-        payNo, java.time.LocalDateTime.now(), java.time.LocalDateTime.now());
-    return ApiResponse.ok(find(payNo));
+    PayVO payment = owned(payNo);
+    if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
+    if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
+      throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
+    String outcome = payConsistencyService.initiate(payment);
+    return responseForOutcome(payNo, outcome);
   }
 
   @Transactional
@@ -153,6 +159,9 @@ public class PayServiceImpl implements PayService {
     // 3. 返回 fail 的处理结果。
     PayVO p = owned(payNo);
     if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
+    PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payNo);
+    if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
+      throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "支付结果正在确认，不能取消订单", 202);
     notifyFailure(p);
     if (payRecordMapper.markFailed(payNo, java.time.LocalDateTime.now()) != 1) {
       throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
@@ -160,7 +169,6 @@ public class PayServiceImpl implements PayService {
     return ApiResponse.ok(find(payNo));
   }
 
-  @Transactional
   @PostMapping("/callback")
   /** 执行 callback 相关操作。 */
   public synchronized ApiResponse<?> callback(
@@ -185,48 +193,53 @@ public class PayServiceImpl implements PayService {
     if (!payCallbackLogMapper.selectByCallbackId(callbackId).isEmpty()) {
       return ApiResponse.ok(find(callback.payNo));
     }
-    PayVO p = ownedForUser(callback.payNo, callback.userId);
-    if (p.amount.compareTo(callback.amount) != 0)
+    PayVO payment = ownedForUser(callback.payNo, callback.userId);
+    if (payment.amount.compareTo(callback.amount) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
-    if ("PENDING".equals(p.status)) {
-      if (callback.success) completeSuccess(p);
-      else notifyFailure(p);
-      if (payRecordMapper.markCallback(
-              p.payNo,
-              callback.success ? "SUCCESS" : "FAILED",
-              callback.success,
-              java.time.LocalDateTime.now(),
-              java.time.LocalDateTime.now())
-          != 1) {
-        throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
+    if (callback.success) {
+      if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
+        throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
+      if (!"SUCCESS".equals(payment.status)) {
+        String outcome = payConsistencyService.initiate(payment);
+        if (!"SUCCESS".equals(outcome)) return responseForOutcome(payment.payNo, outcome);
       }
-    } else if ("SUCCESS".equals(p.status) && !callback.success) {
-      throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
+    } else {
+      if ("SUCCESS".equals(payment.status))
+        throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
+      PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payment.payNo);
+      if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
+        throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "支付结果正在确认，不能取消订单", 202);
+      if ("PENDING".equals(payment.status)) {
+        notifyFailure(payment);
+        if (payRecordMapper.markCallback(
+                payment.payNo,
+                "FAILED",
+                false,
+                java.time.LocalDateTime.now(),
+                java.time.LocalDateTime.now())
+            != 1) throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
+      }
     }
     PayCallbackLogPO callbackLog = new PayCallbackLogPO();
     callbackLog.id = id();
-    callbackLog.payNo = p.payNo;
+    callbackLog.payNo = payment.payNo;
     callbackLog.callbackId = callbackId;
     callbackLog.callbackStatus = callback.success ? "SUCCESS" : "FAILED";
     callbackLog.payload = "{}";
     callbackLog.processedAt = java.time.LocalDateTime.now();
     callbackLog.createdAt = callbackLog.processedAt;
     payCallbackLogMapper.insert(callbackLog);
-    return ApiResponse.ok(find(p.payNo));
+    return ApiResponse.ok(find(payment.payNo));
   }
 
-  /** 执行 completeSuccess 相关操作。 */
-  private void completeSuccess(PayVO p) {
-    // 1. 接收并整理 completeSuccess 的业务请求。
-    // 2. 执行 completeSuccess 的核心业务校验与状态处理。
-    // 3. 返回 completeSuccess 的处理结果。
-    ApiResponse<UserClient.BalanceView> debit =
-        users.debit(p.userId, p.userId, new UserClient.DebitRequest(p.payNo, p.amount));
-    if (debit == null || !"0".equals(debit.code))
-      throw new BizException("PAYMENT_FAILED", "余额不足", 409);
-    ApiResponse<OrderClient.OrderView> paid = orders.paid(p.orderNo, p.userId);
-    if (paid == null || !"0".equals(paid.code))
-      throw new BizException(ErrorCodes.INTERNAL, "订单支付状态同步失败", 500);
+  /** 将可恢复中的支付结果映射为明确的 HTTP 业务状态。 */
+  private ApiResponse<?> responseForOutcome(String payNo, String outcome) {
+    if ("SUCCESS".equals(outcome)) return ApiResponse.ok(find(payNo));
+    if ("REFUNDED".equals(outcome) || "FAILED".equals(outcome))
+      throw new BizException("PAYMENT_FAILED", "订单未完成支付，余额已按账本处理", 409);
+    if ("REFUND_PENDING".equals(outcome))
+      throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
+    throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "扣款或订单结果待确认", 202);
   }
 
   /** 执行 notifyFailure 相关操作。 */

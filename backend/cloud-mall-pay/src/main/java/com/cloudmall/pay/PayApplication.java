@@ -4,9 +4,11 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cloud.openfeign.EnableFeignClients;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication(scanBasePackages = {"com.cloudmall.pay", "com.cloudmall.common"})
 @EnableFeignClients
+@EnableScheduling
 @MapperScan("com.cloudmall.pay.mapper")
 public class PayApplication {
   /** 启动当前 Spring Boot 服务。 */

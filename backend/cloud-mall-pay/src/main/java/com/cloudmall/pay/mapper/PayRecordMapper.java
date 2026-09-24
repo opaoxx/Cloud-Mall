@@ -38,7 +38,7 @@ public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
   /** 将待支付记录更新为成功。 */
   @Update(
       "update pay_record set status='SUCCESS',paid_at=#{paidAt},updated_at=#{updatedAt} where"
-          + " pay_no=#{payNo} and status='PENDING'")
+          + " pay_no=#{payNo} and status in ('PENDING','ORDER_SYNC_UNKNOWN')")
   int markSuccess(
       @Param("payNo") String payNo,
       @Param("paidAt") java.time.LocalDateTime paidAt,
@@ -47,8 +47,30 @@ public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
   /** 将待支付记录更新为失败。 */
   @Update(
       "update pay_record set status='FAILED',updated_at=#{updatedAt} where pay_no=#{payNo} and"
-          + " status='PENDING'")
+          + " status in ('PENDING','ORDER_SYNC_UNKNOWN')")
   int markFailed(
+      @Param("payNo") String payNo, @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
+  /** 扣款事实已存在但订单同步未确认时保留可恢复状态。 */
+  @Update(
+      "update pay_record set status='ORDER_SYNC_UNKNOWN',updated_at=#{updatedAt}"
+          + " where pay_no=#{payNo} and status in ('PENDING','ORDER_SYNC_UNKNOWN')")
+  int markOrderUnknown(
+      @Param("payNo") String payNo, @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
+  /** 只在订单明确取消后进入等待退款状态。 */
+  @Update(
+      "update pay_record set status='REFUND_PENDING',updated_at=#{updatedAt}"
+          + " where pay_no=#{payNo}"
+          + " and status in ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')")
+  int markRefundPending(
+      @Param("payNo") String payNo, @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
+  /** 用户账本确认退款后才把支付记录标记为已退。 */
+  @Update(
+      "update pay_record set status='REFUNDED',updated_at=#{updatedAt}"
+          + " where pay_no=#{payNo} and status in ('REFUND_PENDING','ORDER_SYNC_UNKNOWN')")
+  int markRefunded(
       @Param("payNo") String payNo, @Param("updatedAt") java.time.LocalDateTime updatedAt);
 
   /** 按回调结果更新支付状态。 */
