@@ -9,11 +9,18 @@ import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.user.domain.dto.AddressRequestDTO;
 import com.cloudmall.user.domain.dto.CredentialsDTO;
 import com.cloudmall.user.domain.dto.DebitRequestDTO;
+import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
+import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
+import com.cloudmall.user.domain.po.BalanceLedgerPO;
 import com.cloudmall.user.domain.dto.ProfileDTO;
 import com.cloudmall.user.domain.po.UserAddressPO;
 import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.domain.vo.UserAddressVO;
 import com.cloudmall.user.domain.vo.UserVO;
+import com.cloudmall.user.domain.vo.BalanceDebitVO;
+import com.cloudmall.user.domain.vo.BalanceOperationVO;
+import com.cloudmall.user.domain.vo.BalanceRefundVO;
+import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.service.UserService;
@@ -27,18 +34,27 @@ import java.util.UUID;
 import javax.annotation.PostConstruct;
 import javax.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
 
 /** 用户领域业务实现，负责用户、地址、登录态和余额业务。 */
 @RequestMapping("/api")
 public class UserServiceImpl implements UserService {
+  /** 记录可选 Redis 加速缓存的写入失败。 */
+  private static final Logger log = LoggerFactory.getLogger(UserServiceImpl.class);
+
   /** 密码摘要编码器。 */
   private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder();
 
   /** 用户事实数据 Mapper。 */
   @Autowired private UserMapper userMapper;
+
+  /** 用户余额账本 Mapper。 */
+  @Autowired private BalanceLedgerMapper balanceLedgerMapper;
 
   /** 用户地址数据 Mapper。 */
   @Autowired private UserAddressMapper userAddressMapper;
@@ -147,7 +163,8 @@ public class UserServiceImpl implements UserService {
 
   /** 按幂等支付键扣减用户余额。 */
   @PostMapping("/internal/users/{userId}/balance/debit")
-  public synchronized ApiResponse<?> debit(
+  @Transactional(noRollbackFor = BizException.class)
+  public ApiResponse<?> debit(
       @PathVariable Long userId,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId,
       @Valid @RequestBody DebitRequestDTO request) {
@@ -164,19 +181,204 @@ public class UserServiceImpl implements UserService {
         || request.amount.signum() <= 0) {
       throw new BizException(ErrorCodes.INVALID, "扣款参数不完整", 400);
     }
-    String resultKey = "balance:debit:" + userId + ":" + request.paymentKey;
-    String previousBalance = redis.opsForValue().get(resultKey);
-    if (previousBalance != null) {
-      return ApiResponse.ok(Map.of("balance", previousBalance));
+    BalanceDebitRequestDTO internalRequest = new BalanceDebitRequestDTO();
+    internalRequest.operationKey = request.paymentKey;
+    internalRequest.payNo = request.paymentKey;
+    internalRequest.orderNo = request.paymentKey;
+    internalRequest.amount = request.amount;
+    return debitFromLedger(userId, callerId, internalRequest);
+  }
+
+  /** 按持久化操作键执行余额扣款。 */
+  @PostMapping("/internal/users/{userId}/balance/debits")
+  @Transactional(noRollbackFor = BizException.class)
+  public ApiResponse<?> debitInternal(
+      @PathVariable Long userId,
+      @RequestHeader(value = "X-User-Id", required = false) Long callerId,
+      @Valid @RequestBody BalanceDebitRequestDTO request) {
+    return debitFromLedger(userId, callerId, request);
+  }
+
+  /** 查询持久化余额操作，供支付恢复任务判断扣款事实。 */
+  @GetMapping("/internal/users/{userId}/balance/operations/{operationKey}")
+  public ApiResponse<?> balanceOperation(
+      @PathVariable Long userId,
+      @PathVariable String operationKey,
+      @RequestHeader(value = "X-User-Id", required = false) Long callerId) {
+    assertInternalCaller(userId, callerId);
+    BalanceLedgerPO ledger = balanceLedgerMapper.selectByOperationKey(operationKey);
+    if (ledger == null || !Objects.equals(userId, ledger.userId)) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "余额操作不存在", 404);
     }
-    int changedRows = userMapper.debitBalance(userId, request.amount, LocalDateTime.now());
-    if (changedRows != 1) {
+    String refundOperationKey =
+        "DEBIT".equals(ledger.operationType)
+            ? balanceLedgerMapper.selectFirstRefundOperationKey(ledger.operationKey)
+            : null;
+    return ApiResponse.ok(BalanceOperationVO.from(ledger, refundOperationKey));
+  }
+
+  /** 按唯一退款键恢复已应用扣款。 */
+  @PostMapping("/internal/users/{userId}/balance/refunds")
+  @Transactional(noRollbackFor = BizException.class)
+  public ApiResponse<?> refundInternal(
+      @PathVariable Long userId,
+      @RequestHeader(value = "X-User-Id", required = false) Long callerId,
+      @Valid @RequestBody BalanceRefundRequestDTO request) {
+    assertInternalCaller(userId, callerId);
+    validateMoney(request.amount, "退款金额不合法");
+    UserPO user = userMapper.selectActiveForUpdate(userId);
+    if (user == null) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
+    }
+    BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
+    if (existing != null) {
+      ensureRefundMatches(existing, userId, request);
+      return ApiResponse.ok(
+          BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));
+    }
+    BalanceLedgerPO original =
+        balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+    if (original == null
+        || !Objects.equals(userId, original.userId)
+        || !"APPLIED".equals(original.state)
+        || !Objects.equals(request.payNo, original.payNo)
+        || !Objects.equals(request.orderNo, original.orderNo)) {
+      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+    }
+    BigDecimal refundedAmount =
+        balanceLedgerMapper.sumAppliedRefunds(request.originalOperationKey);
+    if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
+      throw new BizException("BALANCE_REFUND_EXCEEDED", "退款金额超过原扣款", 409);
+    }
+    LocalDateTime currentTime = LocalDateTime.now();
+    BigDecimal balanceBefore = user.balance;
+    if (userMapper.creditBalance(userId, request.amount, currentTime) != 1) {
+      throw new BizException("BALANCE_REFUND_FAILED", "余额退款失败", 409);
+    }
+    BalanceLedgerPO refund = new BalanceLedgerPO();
+    refund.id = Math.abs(UUID.randomUUID().getMostSignificantBits());
+    refund.userId = userId;
+    refund.operationKey = request.refundOperationKey;
+    refund.operationType = "REFUND";
+    refund.originalOperationKey = request.originalOperationKey;
+    refund.payNo = request.payNo;
+    refund.orderNo = request.orderNo;
+    refund.amount = request.amount;
+    refund.state = "APPLIED";
+    refund.balanceBefore = balanceBefore;
+    refund.balanceAfter = balanceBefore.add(request.amount);
+    refund.createdAt = currentTime;
+    balanceLedgerMapper.insert(refund);
+    return ApiResponse.ok(
+        BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** 在用户行锁保护下执行扣款及账本写入。 */
+  private ApiResponse<?> debitFromLedger(
+      Long userId, Long callerId, BalanceDebitRequestDTO request) {
+    assertInternalCaller(userId, callerId);
+    if (request == null
+        || request.operationKey == null
+        || request.operationKey.isBlank()
+        || request.payNo == null
+        || request.orderNo == null) {
+      throw new BizException(ErrorCodes.INVALID, "扣款参数不完整", 400);
+    }
+    validateMoney(request.amount, "扣款金额不合法");
+    UserPO user = userMapper.selectActiveForUpdate(userId);
+    if (user == null) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
+    }
+    BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.operationKey);
+    if (existing != null) {
+      ensureDebitMatches(existing, userId, request);
+      if ("REJECTED".equals(existing.state)) {
+        throw new BizException("PAYMENT_FAILED", "余额不足", 409);
+      }
+      cacheDebitResult(userId, existing);
+      return ApiResponse.ok(
+          BalanceDebitVO.from(existing.operationKey, existing.state, existing.balanceAfter));
+    }
+    LocalDateTime currentTime = LocalDateTime.now();
+    BigDecimal balanceBefore = user.balance;
+    BalanceLedgerPO debit = new BalanceLedgerPO();
+    debit.id = Math.abs(UUID.randomUUID().getMostSignificantBits());
+    debit.userId = userId;
+    debit.operationKey = request.operationKey;
+    debit.operationType = "DEBIT";
+    debit.payNo = request.payNo;
+    debit.orderNo = request.orderNo;
+    debit.amount = request.amount;
+    debit.balanceBefore = balanceBefore;
+    debit.createdAt = currentTime;
+    if (balanceBefore.compareTo(request.amount) < 0) {
+      debit.state = "REJECTED";
+      debit.balanceAfter = balanceBefore;
+      balanceLedgerMapper.insert(debit);
       throw new BizException("PAYMENT_FAILED", "余额不足", 409);
     }
-    UserPO user = userMapper.selectById(userId);
-    String balance = user.balance.toPlainString();
-    redis.opsForValue().set(resultKey, balance, Duration.ofDays(30));
-    return ApiResponse.ok(Map.of("balance", balance));
+    if (userMapper.debitBalance(userId, request.amount, currentTime) != 1) {
+      throw new BizException("PAYMENT_FAILED", "余额不足", 409);
+    }
+    debit.state = "APPLIED";
+    debit.balanceAfter = balanceBefore.subtract(request.amount);
+    balanceLedgerMapper.insert(debit);
+    cacheDebitResult(userId, debit);
+    return ApiResponse.ok(
+        BalanceDebitVO.from(debit.operationKey, debit.state, debit.balanceAfter));
+  }
+
+  /** 校验内部调用者身份。 */
+  private void assertInternalCaller(Long userId, Long callerId) {
+    if (!Objects.equals(userId, callerId)) {
+      throw new BizException(ErrorCodes.FORBIDDEN, "内部用户身份无效", 403);
+    }
+  }
+
+  /** 校验正金额，避免余额操作产生负数或零金额流水。 */
+  private void validateMoney(BigDecimal amount, String message) {
+    if (amount == null || amount.signum() <= 0) {
+      throw new BizException(ErrorCodes.INVALID, message, 400);
+    }
+  }
+
+  /** 校验重复扣款的请求载荷完全一致。 */
+  private void ensureDebitMatches(
+      BalanceLedgerPO existing, Long userId, BalanceDebitRequestDTO request) {
+    if (!Objects.equals(existing.userId, userId)
+        || !"DEBIT".equals(existing.operationType)
+        || !Objects.equals(existing.payNo, request.payNo)
+        || !Objects.equals(existing.orderNo, request.orderNo)
+        || existing.amount.compareTo(request.amount) != 0) {
+      throw new BizException("IDEMPOTENCY_CONFLICT", "扣款操作键对应的请求不一致", 409);
+    }
+  }
+
+  /** 校验重复退款的请求载荷完全一致。 */
+  private void ensureRefundMatches(
+      BalanceLedgerPO existing, Long userId, BalanceRefundRequestDTO request) {
+    if (!Objects.equals(existing.userId, userId)
+        || !"REFUND".equals(existing.operationType)
+        || !Objects.equals(existing.originalOperationKey, request.originalOperationKey)
+        || !Objects.equals(existing.payNo, request.payNo)
+        || !Objects.equals(existing.orderNo, request.orderNo)
+        || existing.amount.compareTo(request.amount) != 0) {
+      throw new BizException("IDEMPOTENCY_CONFLICT", "退款操作键对应的请求不一致", 409);
+    }
+  }
+
+  /** 将已提交账本结果写入 Redis，仅用于加速后续读取。 */
+  private void cacheDebitResult(Long userId, BalanceLedgerPO ledger) {
+    try {
+      redis
+          .opsForValue()
+          .set(
+              "balance:debit:" + userId + ":" + ledger.operationKey,
+              ledger.balanceAfter.toPlainString(),
+              Duration.ofDays(30));
+    } catch (RuntimeException cacheFailure) {
+      log.warn("余额账本已处理，Redis 加速缓存更新失败，operationKey={}", ledger.operationKey, cacheFailure);
+    }
   }
 
   /** 更新当前用户允许修改的资料。 */
