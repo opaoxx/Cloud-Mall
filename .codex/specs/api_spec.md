@@ -144,14 +144,14 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | --- | --- | --- | --- |
 | GET | `/api/stock/skus/{skuId}` | 内部请求 | 可售库存摘要；不经 Gateway 向前端公开 |
 | POST | `/api/stock/reservations` | `{orderNo,items,scene}` | 预扣结果，失败返回库存不足；同一 `orderNo` 返回同一结果 |
-| GET | `/api/stock/reservations/{orderNo}` | 无 | 查询预扣最终状态和明细，不改变库存 |
+| GET | `/api/stock/reservations/{orderNo}` | 无 | 查询预扣最终状态和明细，不改变库存；返回 `NOT_FOUND` 仅表示尚无持久化请求认领 |
 | POST | `/api/stock/reservations/{orderNo}/confirm` | 幂等请求 | 确认扣减 |
 | POST | `/api/stock/reservations/{orderNo}/rollback` | 幂等请求 | 回滚预扣 |
 | POST | `/api/stock/seckill/reservations` | `{activityId,skuId,userId}` | Redis 预扣/异步入队结果 |
 
 接口必须带订单号或幂等键，所有数量为正整数；库存服务不得返回负库存。
 
-普通预扣接口对同一 `orderNo` 必须返回同一业务结果。库存服务必须记录 `RESERVE`、`CONFIRM`、`ROLLBACK` 的唯一幂等键；回滚/确认请求在找不到未完成预扣时返回幂等已处理结果或明确的状态冲突，不能按新请求再次改变数量。`POST` 的 Feign 超时不得自动换订单号重试；调用方将结果标记为未知，使用原订单号调用本查询接口，再决定回滚/确认。Redis 记录丢失不等于未执行，查询必须以 `stock_flow` 和库存状态为准。正常库存以 MySQL 提交结果为事实，Redis 只是带版本的可售投影；提交后缓存更新失败由持久化修复任务重试。
+普通预扣接口对同一 `orderNo` 必须返回同一业务结果，并以规范化 `items_hash` 绑定请求内容。库存服务必须先持久化 `stock_reservation_request`，再在同一事务中处理整笔 SKU 集合；不能只按 SKU 查询 `stock_flow` 判断订单是否已经预扣。库存服务必须记录 `RESERVE`、`CONFIRM`、`ROLLBACK` 的唯一幂等键；回滚/确认请求在找不到未完成预扣时返回幂等已处理结果或明确的状态冲突，不能按新请求再次改变数量。`POST` 的 Feign 超时不得自动换订单号重试；调用方将结果标记为未知，使用原订单号调用本查询接口，再决定回滚/确认。`GET` 返回 `NOT_FOUND` 时只表示没有观察到持久化请求认领，不能据此直接回滚或生成新订单；恢复任务可在保护等待后用相同订单号和相同快照重试原 POST。`REJECTED` 必须持久化，不能用 `NOT_FOUND` 代替库存不足或参数冲突。Redis 记录丢失不等于未执行，查询必须以请求台账、`stock_flow` 和库存状态为准。正常库存以 MySQL 提交结果为事实，Redis 只是带版本的可售投影；提交后缓存更新失败由持久化修复任务重试。
 
 ## 9. 支付服务接口
 
@@ -219,6 +219,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `PAY_ORDER_SYNC_UNKNOWN` | 扣款已持久化，订单支付结果未知 | 202 |
 | `PAY_REFUND_PENDING` | 已确认需要退款，退款处理中 | 202 |
 | `ORDER_RESERVATION_UNKNOWN` | 库存预扣结果未知，等待按原订单号查询 | 202 |
+| `ORDER_RESERVATION_KEY_REUSED` | 同一订单号携带了不同的库存快照 | 409 |
+| `ORDER_STOCK_RESERVATION_REJECTED` | 库存预扣已持久化拒绝 | 409 |
 | `STOCK_CACHE_REPAIRING` | 库存事实已提交，缓存修复处理中 | 202 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |

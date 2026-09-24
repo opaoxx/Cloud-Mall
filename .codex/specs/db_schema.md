@@ -163,6 +163,24 @@
 
 `id BIGINT PK`、`sku_id BIGINT NOT NULL`、`order_no VARCHAR(64) NOT NULL`、`flow_type VARCHAR(32) NOT NULL`（RESERVE/CONFIRM/ROLLBACK/SECKILL_RESERVE）、`quantity INT NOT NULL`、`idempotency_key VARCHAR(128) UNIQUE NOT NULL`、`created_at DATETIME(3) NOT NULL`。索引：`idx_sku_created(sku_id, created_at)`、`idx_order_no(order_no)`。
 
+### 6.2.1 `stock_reservation_request`
+
+普通预扣必须先以订单号建立全局请求认领，不能只依赖按 SKU 拆分的 `stock_flow.idempotency_key`。该表防止同一 `orderNo` 携带不同 SKU 集合时分别通过“未见流水”检查并占用不同库存。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 请求 ID |
+| `order_no` | VARCHAR(64) UNIQUE NOT NULL | 全局预扣请求键 |
+| `scene` | VARCHAR(32) NOT NULL | `NORMAL` 等场景 |
+| `items_snapshot` | JSON NOT NULL | 按 `skuId` 升序规范化后的 SKU/数量集合 |
+| `items_hash` | CHAR(64) NOT NULL | 规范化快照 SHA-256；同一订单号必须完全匹配 |
+| `status` | VARCHAR(32) NOT NULL | `INIT`/`RESERVED`/`REJECTED`/`CONFIRMED`/`ROLLED_BACK` |
+| `result_code` | VARCHAR(64) | 库存不足、参数冲突等最终结果 |
+| `last_error` | VARCHAR(512) | 最近恢复错误 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
+
+索引：`uk_stock_request_order(order_no)`、`idx_stock_request_status(status,updated_at)`。创建请求认领、所有 SKU 的 MySQL 条件更新、`stock_flow` 写入必须在同一事务内完成；任何 SKU 不足时整笔事务回滚，但必须在独立结果事务中持久化 `REJECTED`，之后同一 `orderNo` 和相同哈希重复请求返回同一拒绝结果。相同 `orderNo` 携带不同 `items_hash` 返回 `ORDER_RESERVATION_KEY_REUSED`，不得改变库存。确认/回滚先按请求状态 CAS，再按其快照处理，重复调用不得重复改变数量。
+
 ### 6.3 `stock_cache_repair`
 
 正常库存的 MySQL 状态是事实源，Redis 只保存可售数量投影。每次成功改变 `stock_sku` 的本地事务必须同时写入一条待执行的缓存修复记录，覆盖数据库提交后进程退出、Redis 连接失败和回补结果未知等窗口。

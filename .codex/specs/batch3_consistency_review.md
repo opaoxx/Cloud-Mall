@@ -31,7 +31,7 @@
 
 ## CM-20260924-06：普通库存事实源与缓存修复
 
-普通库存路径改为 MySQL 先行：在库存本地事务内按 `sku_id + version` 条件更新 `available_quantity/reserved_quantity`，写入唯一 `stock_flow`，递增 `stock_sku.version`，同时写入 `stock_cache_repair(PENDING, target_available, source_version)`；提交成功后才异步更新 Redis。Redis 不再承担普通库存交易裁决，Redis Lua 只用于带版本的投影更新。秒杀 Redis 原子预扣仍按原异步链路执行，并由其持久化受理台账收敛。
+普通库存路径改为 MySQL 先行：先以 `stock_reservation_request.order_no` 唯一认领按 `skuId` 升序规范化后的快照和 SHA-256，再在库存本地事务内按 `sku_id + version` 条件更新全部 `available_quantity/reserved_quantity`，写入唯一 `stock_flow`，递增 `stock_sku.version`，同时写入 `stock_cache_repair(PENDING, target_available, source_version)`；提交成功后才异步更新 Redis。相同订单号相同哈希返回原结果，不同哈希返回 `ORDER_RESERVATION_KEY_REUSED`。Redis 不再承担普通库存交易裁决，Redis Lua 只用于带版本的投影更新。秒杀 Redis 原子预扣仍按原异步链路执行，并由其持久化受理台账收敛。
 
 Redis Key `stock:available:{skuId}` 为 hash：`quantity`、`version`。修复 Lua 的原子规则为：当前 Redis 版本小于等于来源版本时写入数量和来源版本；当前版本高于来源版本时拒绝写入并把旧修复记录标记 `STALE`。修复器通过 `stock_cache_repair.lease_owner/lease_until` 在 MySQL 中按条件认领记录，按 SKU 串行处理；该租约只防止多个实例重复处理，Redis 锁不承担一致性保证。提交后崩溃、Redis 断连、Lua 返回未知均由同一 `PENDING` 记录重试。启动校准读取 MySQL 当前 `version`，只生成/应用当前版本投影。
 
@@ -55,6 +55,9 @@ Redis Key `stock:available:{skuId}` 为 hash：`quantity`、`version`。修复 L
 
 ### 普通库存
 
+- 并发提交同一 `orderNo` 的两个不同 SKU 集合：只有一个请求能建立 `stock_reservation_request`，另一个返回 `ORDER_RESERVATION_KEY_REUSED`，不得分别占用两组库存。
+- 同一 `orderNo`、同一规范化快照并发重试：所有响应一致，只产生一组 `stock_flow`，确认/回滚各最多一次。
+- 让某个 SKU 不足：所有 SKU 的数据库数量不变，`stock_reservation_request=REJECTED` 持久存在；后续 GET 返回 `REJECTED`，不能返回 `NOT_FOUND`。
 - 在 MySQL 提交后、Redis Lua 前终止进程：重启修复器最终写入正确数量和同一 `source_version`。
 - 在 Redis Lua 执行结果未知后重试：同版本只得到同一投影，不发生二次扣减或回补。
 - 并发新库存事务产生更高版本时，旧修复记录不能覆盖新数量，必须转 `STALE` 并由新版本记录收敛。
@@ -63,7 +66,8 @@ Redis Key `stock:available:{skuId}` 为 hash：`quantity`、`version`。修复 L
 ### Feign 结果未知
 
 - 让 stock 已提交预扣后丢弃 HTTP 响应：order 保持同一 `orderNo`，查询到 `RESERVED` 后只回滚一次。
-- 让 stock 未执行但响应同样丢失：查询返回 `REJECTED`/无预扣，订单不生成新订单号、不产生回滚流水。
+- 让 stock 未执行但响应同样丢失：若请求认领已提交，查询返回持久化 `REJECTED`；若认领事务尚未提交，查询可返回 `NOT_FOUND`，订单按保护等待后重试原请求，不生成新订单号、不产生回滚流水。
+- GET 返回 `NOT_FOUND` 时，只能说明尚未观察到请求认领；恢复任务在保护等待后以相同订单号和相同快照重试原 POST，不能直接按“未执行”发起回滚。
 - 对同一超时请求重启 order 恢复任务：不会重复预扣；恢复任务最终进入 `RELEASED` 或 `COMMITTED`，未知状态进入可观测告警。
 - 让 product GET 超时：结算拒绝创建订单，不读取购物车金额作为替代价格。
 
