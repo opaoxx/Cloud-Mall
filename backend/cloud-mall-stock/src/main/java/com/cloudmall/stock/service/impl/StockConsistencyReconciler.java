@@ -13,6 +13,7 @@ import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.connection.DataType;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -62,9 +63,13 @@ public class StockConsistencyReconciler {
     // 2. 执行 initialize 的核心业务校验与状态处理。
     // 3. 返回 initialize 的处理结果。
     ensureSeckillLedgerTable();
-    recoverNormalReservations();
-    recoverAcceptedSeckillLedger();
-    reconcileSeckillStock();
+    // 普通库存预扣事实已经由 stock_flow 和 stock_cache_repair 恢复；启动时不再重建旧 Redis 标记。
+    try {
+      recoverAcceptedSeckillLedger();
+      reconcileSeckillStock();
+    } catch (RuntimeException unavailableRedis) {
+      log.warn("Redis 暂不可用，秒杀台账恢复将在定时对账时重试；普通库存仍以 MySQL 为准", unavailableRedis);
+    }
   }
 
   @Scheduled(fixedDelayString = "${cloudmall.stock.consistency-interval-ms:30000}")
@@ -157,8 +162,13 @@ public class StockConsistencyReconciler {
       Number skuId = (Number) row.get("sku_id");
       Number mysql = (Number) row.get("available_quantity");
       if (skuId == null || mysql == null) continue;
-      String redisValue = redis.opsForValue().get(NORMAL_PREFIX + skuId.longValue());
-      if (redisValue == null || !String.valueOf(Math.max(0, mysql.intValue())).equals(redisValue)) {
+      String stockKey = NORMAL_PREFIX + skuId.longValue();
+      if (redis.type(stockKey) == DataType.STRING) {
+        log.warn("普通库存仍使用旧字符串缓存，等待版本投影迁移，skuId={}", skuId);
+        continue;
+      }
+      Object redisValue = redis.opsForHash().get(stockKey, "quantity");
+      if (redisValue == null || !String.valueOf(Math.max(0, mysql.intValue())).equals(String.valueOf(redisValue))) {
         log.warn("普通库存缓存与数据库不一致，skuId={}，redis={}，mysql={}", skuId, redisValue, mysql);
       }
     }

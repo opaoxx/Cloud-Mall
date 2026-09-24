@@ -1,5 +1,7 @@
 package com.cloudmall.stock;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -7,112 +9,116 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
+import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.service.impl.StockReservationRequestService;
 import com.cloudmall.stock.service.impl.StockServiceImpl;
-import com.cloudmall.common.error.BizException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.test.util.ReflectionTestUtils;
 
+/** 回归旧库存流水与新版 MySQL 事实路径的兼容语义。 */
 class StockServiceRecoveryTest {
   @Test
-  void reserveReplayUsesDurableSnapshotWhenRedisMarkerIsMissing() {
+  void legacyReservationReplayDoesNotReserveStockAgain() {
+    StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    StockSqlMapper mapper = mock(StockSqlMapper.class);
-    when(mapper.findReservationSnapshot("order-1"))
+    when(stockSqlMapper.findReservationRequest("old-order-1")).thenReturn(null);
+    when(stockSqlMapper.findReservationSnapshot("old-order-1"))
         .thenReturn(List.of(Map.of("sku_id", 7L, "reserved_quantity", 2L, "settled_quantity", 0L)));
-    StockServiceImpl service = service(redis, mapper);
-
-    StockReservationDTO request = new StockReservationDTO();
-    request.orderNo = "order-1";
-    request.items = List.of(new StockLineDTO(7L, 2));
-
-    ApiResponse<?> response = service.reserve(request);
-
-    verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
-    verify(mapper, never()).reserveQuantity(any(), any(Integer.class), any());
-    org.junit.jupiter.api.Assertions.assertEquals(Boolean.TRUE, ((Map<?, ?>) response.data).get("idempotent"));
-  }
-
-  @Test
-  void rollbackRecoveryReleasesRedisOnlyOnceForRepeatedCalls() {
-    StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    StockSqlMapper mapper = mock(StockSqlMapper.class);
-    when(mapper.findOpenReservations("order-2"))
+    when(stockSqlMapper.findReservationFlows("old-order-1"))
         .thenReturn(
-            List.of(Map.of("sku_id", 7L, "quantity", 2L)),
-            List.of());
-    when(mapper.settleQuantity(any(), eq("order-2"), eq("ROLLBACK"), eq(2), anyString(), any()))
-        .thenReturn(1, 0);
-    StockServiceImpl service = service(redis, mapper);
+            List.of(
+                Map.of(
+                    "sku_id", 7L,
+                    "reserved_quantity", 2L,
+                    "confirmed_quantity", 0L,
+                    "rolled_back_quantity", 0L)));
+    StockServiceImpl stockService = service(redis, stockSqlMapper);
 
-    service.rollback("order-2");
-    service.rollback("order-2");
+    ApiResponse<?> response = stockService.reserve(request("old-order-1", 7L, 2));
 
-    verify(mapper).settleQuantity(any(), eq("order-2"), eq("ROLLBACK"), eq(2), anyString(), any());
-    verify(redis).execute(any(DefaultRedisScript.class), eq(List.of("stock:available:7", "stock:rollback:released:order-2:7")), eq("2"));
+    assertEquals("ALREADY_RESERVED", ((StockReservationVO) response.data).status);
+    verify(stockSqlMapper, never()).updateAvailableWithVersion(any(), any(Integer.class), any(Integer.class), any());
+    verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
   }
 
   @Test
-  void confirmCannotFollowACompletedRollbackFromStaleRedisState() {
-    StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    StockSqlMapper mapper = mock(StockSqlMapper.class);
-    when(mapper.findOpenReservations("order-3")).thenReturn(List.of());
-    StockServiceImpl service = service(redis, mapper);
-
-    service.confirm("order-3");
-
-    verify(mapper, never()).settleQuantity(any(), eq("order-3"), eq("CONFIRM"), any(Integer.class), anyString(), any());
-    verify(redis).delete("stock:reservation:order-3");
-  }
-
-  @Test
-  void reserveReplayAfterSettlementReturnsConflict() {
-    StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    StockSqlMapper mapper = mock(StockSqlMapper.class);
-    when(mapper.findReservationSnapshot("order-4"))
+  void legacyReservationCannotBeReopenedAfterSettlement() {
+    StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
+    when(stockSqlMapper.findReservationRequest("old-order-2")).thenReturn(null);
+    when(stockSqlMapper.findReservationSnapshot("old-order-2"))
         .thenReturn(List.of(Map.of("sku_id", 7L, "reserved_quantity", 2L, "settled_quantity", 2L)));
-    StockServiceImpl service = service(redis, mapper);
+    StockServiceImpl stockService = service(mock(StringRedisTemplate.class), stockSqlMapper);
 
-    StockReservationDTO request = new StockReservationDTO();
-    request.orderNo = "order-4";
-    request.items = List.of(new StockLineDTO(7L, 2));
+    assertThrows(BizException.class, () -> stockService.reserve(request("old-order-2", 7L, 2)));
 
-    assertThrows(BizException.class, () -> service.reserve(request));
-    verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
+    verify(stockSqlMapper, never()).updateAvailableWithVersion(any(), any(Integer.class), any(Integer.class), any());
   }
 
   @Test
-  void rollbackDoesNotReleaseRedisWhenTransactionDoesNotCommit() {
+  void confirmCannotReverseAnAlreadyRolledBackRequest() {
+    StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
+    when(stockSqlMapper.findReservationRequestForUpdate("order-3"))
+        .thenReturn(Map.of("status", "ROLLED_BACK"));
+    StockServiceImpl stockService = service(mock(StringRedisTemplate.class), stockSqlMapper);
+
+    assertThrows(BizException.class, () -> stockService.confirm("order-3"));
+
+    verify(stockSqlMapper, never())
+        .updateSettlementWithVersion(any(), anyString(), any(Integer.class), any(Integer.class), any());
+  }
+
+  @Test
+  void rollbackWritesMysqlAndDurableProjectionWithoutRedisQuantityMutation() {
+    StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    StockSqlMapper mapper = mock(StockSqlMapper.class);
-    when(mapper.findOpenReservations("order-5"))
+    when(stockSqlMapper.findReservationRequestForUpdate("order-4"))
+        .thenReturn(Map.of("status", "RESERVED"));
+    when(stockSqlMapper.findOpenReservations("order-4"))
         .thenReturn(List.of(Map.of("sku_id", 7L, "quantity", 2L)));
-    when(mapper.settleQuantity(any(), eq("order-5"), eq("ROLLBACK"), eq(2), anyString(), any()))
+    when(stockSqlMapper.findStockForUpdate(7L))
+        .thenReturn(Map.of("available_quantity", 8, "reserved_quantity", 2, "version", 4));
+    when(stockSqlMapper.updateSettlementWithVersion(eq(7L), eq("ROLLBACK"), eq(2), eq(4), any()))
         .thenReturn(1);
-    StockServiceImpl service = service(redis, mapper);
+    when(stockSqlMapper.updateReservationRequestStatus(
+            eq("order-4"), eq("RESERVED"), eq("ROLLED_BACK"), eq(null), any()))
+        .thenReturn(1);
+    StockServiceImpl stockService = service(redis, stockSqlMapper);
 
-    TransactionSynchronizationManager.initSynchronization();
-    try {
-      service.rollback("order-5");
-    } finally {
-      TransactionSynchronizationManager.clearSynchronization();
-    }
+    ApiResponse<?> response = stockService.rollback("order-4");
 
+    assertEquals(Boolean.TRUE, ((Map<?, ?>) response.data).get("rolledBack"));
+    verify(stockSqlMapper).insertCacheRepair(eq(7L), eq(10), eq(5), any(OffsetDateTime.class));
     verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
   }
 
-  private static StockServiceImpl service(StringRedisTemplate redis, StockSqlMapper mapper) {
-    return new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+  private static StockReservationDTO request(String orderNo, long skuId, int quantity) {
+    StockReservationDTO request = new StockReservationDTO();
+    request.orderNo = orderNo;
+    request.scene = "NORMAL";
+    request.items = List.of(new StockLineDTO(skuId, quantity));
+    return request;
+  }
+
+  private static StockServiceImpl service(StringRedisTemplate redis, StockSqlMapper stockSqlMapper) {
+    StockServiceImpl stockService =
+        new StockServiceImpl(redis, stockSqlMapper, mock(RabbitTemplate.class), new ObjectMapper());
+    ReflectionTestUtils.setField(
+        stockService,
+        "reservationRequestService",
+        mock(StockReservationRequestService.class));
+    return stockService;
   }
 }

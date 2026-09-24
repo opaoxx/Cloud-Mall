@@ -17,15 +17,9 @@ import org.yaml.snakeyaml.Yaml;
 /** Regression guards for the frozen backend contracts touched in the P1 pass. */
 class BackendP1RulesTest {
   @Test
-  void stockChecksDatabaseWritesAndCompensatesRedis() throws Exception {
+  void seckillPublishFailureStillHasRedisRollback() throws Exception {
     String source = source("cloud-mall-stock", "StockServiceImpl.java");
-    String mapper = source("cloud-mall-stock", "StockSqlMapper.java");
     String compact = compact(source);
-    assertTrue(compact.contains("if(changed!=1)"));
-    assertTrue(source.contains("compensateReservation"));
-    assertTrue(compact.contains("stockSqlMapper.insertFlow"));
-    assertTrue(mapper.contains("on duplicate key update"));
-    assertTrue(mapper.contains("idempotency_key=values(idempotency_key)"));
     assertTrue(source.contains("SECKILL_ROLLBACK"));
     assertTrue(compact.contains("redis.execute(seckillRollbackScript,keys)"));
   }
