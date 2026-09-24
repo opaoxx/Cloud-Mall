@@ -60,7 +60,7 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 Rabbi
 
 ### 4.5 普通库存缓存一致性
 
-普通库存写路径以 MySQL 为唯一事实源：先以 `stock_reservation_request.order_no` 唯一认领规范化 SKU 快照，再在一个本地事务内完成所有 `stock_sku` 条件更新、`stock_flow` 幂等流水和 `stock_cache_repair` 记录，并递增 `stock_sku.version`；事务提交后才异步更新 Redis。库存不足时整笔库存更新回滚，但必须持久化 `REJECTED` 结果。Redis 更新失败、进程在提交后退出或结果未知时，修复器扫描持久化记录重试。Redis 数量必须携带数据库版本，Lua 以版本条件原子覆盖，旧修复任务不能覆盖新库存。预扣/确认/回滚请求都先按订单号、快照哈希和流水幂等，再执行数据库条件更新；Redis 不可用只影响投影，不允许用购物车库存或旧缓存作交易结论。
+普通库存写路径以 MySQL 为唯一事实源：先在独立事务中提交 `stock_reservation_request(order_no,items_hash)=INIT` 的不可变认领，再在第二个库存事务中锁定该请求行，完成所有 SKU 的条件更新、`stock_flow` 幂等流水和 `stock_cache_repair` 记录，并递增 `stock_sku.version`，最后标记 `RESERVED`；事务提交后才异步更新 Redis。库存不足时第二个事务整体回滚，随后由独立事务在同一请求行上持锁标记 `REJECTED`，保留原哈希，不能让不同快照重新占用同一订单号。Redis 更新失败、进程在提交后退出或结果未知时，修复器扫描持久化记录重试。Redis 数量必须携带数据库版本，Lua 以版本条件原子覆盖，旧修复任务不能覆盖新库存。预扣/确认/回滚请求都先按订单号、快照哈希和流水幂等，再执行数据库条件更新；Redis 不可用只影响投影，不允许用购物车库存或旧缓存作交易结论。
 
 这项调整明确替代普通库存的“先 Lua 扣 Redis、再写 MySQL、失败时盲目回补”路径。若保留兼容旧 Redis 预扣数据，必须先把该 SKU 标记为 `REPAIR_BLOCKED`，等待对应 `stock_flow` 完成或超时裁决后再以 MySQL 版本重建，禁止直接 `MSET/SET` 覆盖。
 

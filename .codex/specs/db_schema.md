@@ -177,9 +177,12 @@
 | `status` | VARCHAR(32) NOT NULL | `INIT`/`RESERVED`/`REJECTED`/`CONFIRMED`/`ROLLED_BACK` |
 | `result_code` | VARCHAR(64) | 库存不足、参数冲突等最终结果 |
 | `last_error` | VARCHAR(512) | 最近恢复错误 |
+| `next_retry_at` | DATETIME(3) | INIT 恢复任务的下次尝试时间 |
+| `lease_owner` | VARCHAR(128) | 当前库存事务/恢复任务实例标识 |
+| `lease_until` | DATETIME(3) | 租约到期时间；用于恢复陈旧 INIT |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
 
-索引：`uk_stock_request_order(order_no)`、`idx_stock_request_status(status,updated_at)`。创建请求认领、所有 SKU 的 MySQL 条件更新、`stock_flow` 写入必须在同一事务内完成；任何 SKU 不足时整笔事务回滚，但必须在独立结果事务中持久化 `REJECTED`，之后同一 `orderNo` 和相同哈希重复请求返回同一拒绝结果。相同 `orderNo` 携带不同 `items_hash` 返回 `ORDER_RESERVATION_KEY_REUSED`，不得改变库存。确认/回滚先按请求状态 CAS，再按其快照处理，重复调用不得重复改变数量。
+索引：`uk_stock_request_order(order_no)`、`idx_stock_request_status(status,next_retry_at,lease_until)`。预扣分两阶段执行：第一阶段在独立本地事务中插入并提交 `INIT` 请求认领，固定 `order_no`、`scene`、`items_snapshot` 和 `items_hash`；第二阶段在库存事务中按订单号锁定该行，确认仍为 `INIT` 后获取租约，更新全部 SKU、写入 `stock_flow`/`stock_cache_repair`，最后将请求标记 `RESERVED` 并提交。任何 SKU 不足时第二阶段事务整体回滚，随后在独立事务中锁定同一 `INIT` 行并标记 `REJECTED`，保留原哈希；因此拒绝结果不会释放订单号让不同快照重新认领。相同 `orderNo` 携带不同 `items_hash` 返回 `ORDER_RESERVATION_KEY_REUSED`，不得改变库存。确认/回滚先按请求状态 CAS，再按其快照处理，重复调用不得重复改变数量。进程在第二阶段提交前退出时，恢复任务等待 `lease_until` 到期后锁定 `INIT` 行重试；若事务实际已提交，行状态为 `RESERVED`，恢复任务不得再次预扣。只有确认租约到期且请求仍为 `INIT`、不存在已提交预扣流水时，恢复任务才可将其标记 `REJECTED`。
 
 ### 6.3 `stock_cache_repair`
 
