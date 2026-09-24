@@ -132,7 +132,9 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | POST | `/api/orders/{orderNo}/confirm` | 无 | 收货确认/完成；具体业务范围待确认 |
 | POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 秒杀异步下单结果/订单状态；地址快照随消息写入订单 |
 
-订单创建时服务端重新读取商品价格、上下架、库存和地址；禁止信任前端金额。订单状态：`PENDING_PAYMENT`、`PAID`、`CANCELLED`、`COMPLETED`。
+订单创建时服务端重新读取商品价格、上下架、库存和地址；禁止信任前端金额。顺序固定为：鉴权与 `Idempotency-Key` 绑定 → 校验地址归属及商品快照 → 在独立已提交本地事务中创建 `INIT` 预扣意图 → 调用库存预扣 → 在独立本地事务中标记 `RESERVED` → 在本地事务中保存订单、超时 outbox 并标记 `COMMITTED`。地址校验失败不得调用库存。若库存调用成功但进程在写入 `RESERVED` 前崩溃，恢复任务使用原 `orderNo` 重试同一预扣请求取得幂等结果，再回滚；若订单已提交则只推进/确认 `COMMITTED`。库存已预扣但订单保存失败时，接口必须按原 `orderNo` 发起回滚，并由预扣意图恢复任务兜底。订单状态：`PENDING_PAYMENT`、`PAID`、`CANCELLED`、`COMPLETED`。
+
+订单状态写操作必须返回并检查条件更新影响行数。支付成功、手工取消和超时关单只有在自身 CAS 成功时才能调用库存确认/回滚；CAS 失败必须读取当前状态，已达到目标状态时作为幂等成功返回，处于其他终态时返回 `ORDER_STATUS_INVALID`，不得再次操作库存。
 
 ## 8. 库存服务接口
 
@@ -147,6 +149,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | POST | `/api/stock/seckill/reservations` | `{activityId,skuId,userId}` | Redis 预扣/异步入队结果 |
 
 接口必须带订单号或幂等键，所有数量为正整数；库存服务不得返回负库存。
+
+普通预扣接口对同一 `orderNo` 必须返回同一业务结果。库存服务必须记录 `RESERVE`、`CONFIRM`、`ROLLBACK` 的唯一幂等键；回滚/确认请求在找不到未完成预扣时返回幂等已处理结果或明确的状态冲突，不能按新请求再次改变数量。Redis 预扣记录丢失或 Feign 超时不等于未执行：库存服务必须能依据 `orderNo` 从 `stock_flow` 重建待处理明细，回滚 RPC 失败由订单端预扣意图恢复任务重试，直到得到幂等结果或进入可观测告警。
 
 ## 9. 支付服务接口
 
@@ -207,7 +211,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 ## 12. 跨服务事件契约（逻辑）
 
-RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认、支付成功/失败、商品浏览统计和商品索引同步。每条消息应具备 `eventId`、`eventType`、`occurredAt`、`orderNo`/业务主键、`traceId` 和 `payload`；超时关单使用 TTL + DLX，消费失败按有限重试后进入死信队列。消费者必须幂等，Trace ID 由 Micrometer Tracing 透传。
+RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认、支付成功/失败、商品浏览统计和商品索引同步。新超时消息使用 JSON envelope，至少包含 `eventId`、`eventType=ORDER_TIMEOUT`、`occurredAt`、`orderNo`、`expireAt`、`traceId` 和 `payload`；超时关单使用 TTL + DLX，消费失败按有限重试后进入死信队列。消费者兼容存量 String `orderNo` 消息，并将其规范化为 `legacy-timeout:{orderNo}`，按订单读取的 `expireAt` 走同一 CAS 关单路径。订单超时消息必须先落 order outbox，再由提交后 dispatcher 使用 publisher confirm 投递；confirm 成功但 outbox 状态更新失败时，必须重试同一 `eventId`，重复投递由消费者 CAS 幂等。必须支持未确认记录重试、消费者按事件号/订单状态幂等和死信告警。Trace ID 由 Micrometer Tracing 透传。
 
 ## 13. 契约冻结说明
 
