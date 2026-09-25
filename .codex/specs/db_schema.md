@@ -130,7 +130,28 @@
 | `event_id` | VARCHAR(128) | 首次消费事件 ID |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
 
-约束：`uk_seckill_dedup_user_key(user_id,idempotency_key)`。消费者在同一订单本地事务内原子插入/锁定该记录并写订单；同键同哈希的并发重复消息读取 `COMMITTED` 后确认消费，不重建订单；同键不同哈希进入 `seckill_message_recovery.CONFLICT` 并确认消息，不进入 RabbitMQ 重试/死信。迁移前必须审计存量 `(user_id,idempotency_key)` 重复行：保留最早的原 `order_no` 作为事实，冲突行不得静默合并，标记为人工待处理；新增唯一约束前不得接受新的同键请求。
+约束：`uk_seckill_dedup_user_key(user_id,idempotency_key)`、`uk_seckill_dedup_order(order_no)`，并建立 `idx_seckill_dedup_event(event_id)`。消费者在同一订单本地事务内原子插入/锁定该记录并写订单；同键同哈希的并发重复消息读取 `COMMITTED` 后确认消费，不重建订单；同键不同哈希进入独立 `seckill_order_dedup_conflict` 并确认消息，不进入 RabbitMQ 重试/死信。迁移前必须审计存量 `(user_id,idempotency_key)` 重复行：保留最早的原 `order_no` 作为事实，冲突行不得静默合并，标记为人工待处理；新增唯一约束前不得接受新的同键请求。
+
+### 5.3.2 `seckill_order_dedup_conflict`
+
+主队列消费发现同一用户幂等键对应不同载荷、orderNo 不一致或事件哈希非法时，写入独立冲突表后确认消息；不得改写原 `seckill_order_dedup`，也不得把正常主队列冲突误记为死信恢复记录。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 冲突记录 ID |
+| `event_id` | VARCHAR(128) UNIQUE NOT NULL | 触发冲突的事件 ID |
+| `user_id` | BIGINT NOT NULL | 用户 |
+| `idempotency_key` | VARCHAR(128) NOT NULL | 冲突幂等键 |
+| `order_no` | VARCHAR(64) | 冲突消息携带的订单号 |
+| `existing_order_no` | VARCHAR(64) | 原幂等记录订单号 |
+| `request_hash` | CHAR(64) NOT NULL | 冲突消息哈希；非法结构也保存原始规范化字节的 SHA-256 |
+| `existing_request_hash` | CHAR(64) | 原幂等记录哈希 |
+| `conflict_type` | VARCHAR(32) NOT NULL | `HASH_MISMATCH`/`ORDER_NO_MISMATCH`/`INVALID_PAYLOAD` |
+| `payload` | JSON NOT NULL | 原始冲突消息 |
+| `status` | VARCHAR(16) NOT NULL | `RECORDED`/`REVIEWED`/`RESOLVED` |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+唯一约束：`uk_seckill_conflict_event(event_id)`、`uk_seckill_conflict_fingerprint(user_id,idempotency_key,request_hash,conflict_type)`。重复冲突消息按唯一键幂等记录；`RECORDED` 表示消息已确认且不重试，`REVIEWED/RESOLVED` 只由人工对账流程推进。该表与 `seckill_message_recovery` 分工明确：前者记录主队列即时冲突，后者记录 DLQ 的可重放/隔离状态。
 
 ### 5.4 `order_reservation_intent`
 
@@ -273,7 +294,7 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 | `idempotency_key` | VARCHAR(128) NOT NULL | 客户端幂等键；同一用户跨活动全局唯一 |
 | `request_payload` | JSON NOT NULL | Lua 扣减前持久化的完整规范化请求，必须包含 addressSnapshot |
 | `request_hash` | CHAR(64) NOT NULL | 规范化请求哈希 |
-| `status` | VARCHAR(32) NOT NULL | `PENDING`/`ACCEPTED`/`REJECTED`/`ORDER_CREATED`/`CONFLICT` |
+| `status` | VARCHAR(32) NOT NULL | `PENDING`/`UNKNOWN`/`ACCEPTED`/`REJECTED`/`ORDER_CREATED`/`CONFLICT`；`UNKNOWN` 必须持续核验原 Redis marker 和 outbox，不能停止恢复 |
 | `last_error` | VARCHAR(512) | 最近错误 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 

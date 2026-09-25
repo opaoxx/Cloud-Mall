@@ -12,7 +12,9 @@
 
 ### 入口状态
 
-秒杀请求先按 `(userId,idempotencyKey)` 跨活动全局认领不可变 `seckill_reservation`，在执行 Redis Lua 前提交完整规范化 `request_payload`（必须包含 `addressSnapshot`）和 `requestHash`；订单服务另用独立 `seckill_order_dedup` 表，不修改普通订单共享幂等表。Redis Lua 成功后，在库存库持久化 `ACCEPTED` 与 `seckill_order_outbox(PENDING)`；两者缺一不可。Redis 预扣成功但数据库写入失败时，按原请求键和已保存载荷执行补偿 Lua，保留可观测错误记录；不能直接返回 `accepted=true`。进程在 Lua 前后任一窗口退出时，恢复任务都能使用 `request_payload` 重建同一事件，不依赖请求线程内存或 Redis 临时键。
+秒杀请求先按 `(userId,idempotencyKey)` 跨活动全局认领不可变 `seckill_reservation`，在执行 Redis Lua 前提交完整规范化 `request_payload`（必须包含 `addressSnapshot`）和 `requestHash`；订单服务另用独立 `seckill_order_dedup` 表，不修改普通订单共享幂等表。Redis Lua 成功后，在库存库持久化 `ACCEPTED` 与 `seckill_order_outbox(PENDING)`；两者缺一不可。Redis 预扣成功但数据库写入失败时，必须先按原全局键、原 `orderNo` 查询 `seckill_reservation` 与 `seckill_order_outbox` 再决定补偿；不能直接回补或返回 `accepted=true`。进程在 Lua 前后任一窗口退出时，恢复任务都能使用 `request_payload` 重建同一事件，不依赖请求线程内存或 Redis 临时键。
+
+`acceptAfterLua` 的异常处理必须先核验再补偿：当 acceptance 持久化抛异常、影响行数异常或响应未知时，按全局 `(userId,idempotencyKey)` 和原 `orderNo` 查询 `seckill_reservation` 与 `seckill_order_outbox`。若看到 `ACCEPTED`、`PUBLISHED`、`ORDER_CREATED` 或已存在对应 outbox，视为原请求已提交，返回原结果并禁止 Redis 回补；不能因为当前线程看到状态变化或写入异常就释放库存。若数据库查询超时、连接断开或结果未知，保留 Redis 预扣，尽可能将受理记录标为 `UNKNOWN`/恢复 marker，持续重试核验，绝不盲目回补。只有数据库在可确认的一致读/锁定范围内明确返回“无受理、无 outbox”，且当前请求持有唯一的待补偿资格时，才允许执行一次带补偿幂等键的 Redis 回补；任何并发状态变化或资格不明都转为持续恢复，不执行回补。
 
 入口只有在 Redis 预扣和 outbox 已提交后返回 `accepted=true`。这表示请求可恢复，不表示订单已经写入。响应包含 `orderNo`、`eventId`、`reservationStatus`。库存对账直接读取 stock 自身的受理台账和 outbox Mapper；订单 DLQ recovery 直接使用持久化原消息和订单库幂等记录，不新增跨服务受理查询接口。前端继续使用秒杀入口响应和已有订单查询观察结果。
 
@@ -50,7 +52,7 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 订单消费者必须在创建订单的同一本地事务中插入/锁定独立的 `seckill_order_dedup`，再写订单和明细，最后提交 `COMMITTED`。唯一键冲突不得统一抛异常：
 
 - 同一 `(userId,idempotencyKey)`、同一 `requestHash`：读取已提交订单并确认消息；若首个事务仍持锁，等待其提交后重新读取，不创建第二个订单。
-- 同一用户跨活动同键不同 `requestHash`：记录冲突事件，返回 `SECKILL_IDEMPOTENCY_CONFLICT` 并确认消息，不进入 RabbitMQ 重试/死信，不改原订单号。库存受理台账同样以全局 `(userId,idempotencyKey)` 拒绝不同哈希，不能重复扣 Redis。
+- 同一用户跨活动同键不同 `requestHash`：写入独立 `seckill_order_dedup_conflict`，保存原事件、双方哈希和原 orderNo，返回 `SECKILL_IDEMPOTENCY_CONFLICT` 并确认消息，不进入 RabbitMQ 重试/死信，不污染原 `seckill_order_dedup`。库存受理台账同样以全局 `(userId,idempotencyKey)` 拒绝不同哈希，不能重复扣 Redis。
 - 首次消费事务失败：事务回滚，消息进入 RabbitMQ 重试；达到死信后走 `seckill_message_recovery`，仍使用原事件和哈希，并持续退避重放，告警阈值不等于停止恢复。
 
 同一事件重复投递与同一幂等键重复投递都必须满足：最多一条有效订单、最多一笔秒杀预扣、同一订单号保持不变。订单状态与库存受理状态查询以 MySQL 为准，Redis 只作为秒杀热点预扣执行介质。
@@ -85,12 +87,13 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 6. 导入现存 8 条无 `eventId` DLQ 消息：每条生成稳定 legacy eventId，重复导入不新增记录；可解析记录自动重放，无法形成稳定载荷的记录进入 `CONFLICT`。
 7. 秒杀消息成功消费后模拟订单事务提交：同一事务可见订单、`seckill_order_dedup=COMMITTED` 和 `order_outbox(ORDER_TIMEOUT)`；故障注入删除/遗漏 outbox 时，恢复任务按原订单号补建超时事件，不创建第二个订单。
 8. 对现存 8 条旧 DLQ 消息执行 stock reservation 验真：无 `seckill_reservation` 的消息全部进入 `QUARANTINED`，不创建订单、不丢消息；后续核验发现 `ACCEPTED/PUBLISHED/ORDER_CREATED` 后才允许使用原 eventId 重放。
+9. 在 Redis Lua 成功后注入 acceptance 写入异常并并发提交同一全局键：若另一请求已提交 `ACCEPTED+outbox`，异常请求查询到原结果且不回补 Redis；若数据库查询结果未知，记录保持 `UNKNOWN`/恢复状态且库存不回补；只有明确无受理且具备唯一补偿资格时才回补一次。
 
 ### 幂等和冲突
 
 1. 两个消费者并发处理同一事件：最多一个事务创建订单，另一个读取同一 `COMMITTED` 记录并确认消息。
 2. 同一用户/幂等键相同载荷重复：返回原订单号，只有一个订单。
-3. 同一用户/幂等键不同活动、SKU、地址或数量：库存和订单两侧都返回 `SECKILL_IDEMPOTENCY_CONFLICT`，不重试、不创建订单、不二次扣 Redis，并保留冲突记录；原订单号保持不变。
+3. 同一用户/幂等键不同活动、SKU、地址或数量：库存和订单两侧都返回 `SECKILL_IDEMPOTENCY_CONFLICT`，主队列订单侧写入 `seckill_order_dedup_conflict`，不重试、不创建订单、不二次扣 Redis，并保留冲突记录；原订单号保持不变。
 4. 首个消费事务回滚后重新投递：允许重试并最终只创建一条订单。
 
 ### 对账锁
