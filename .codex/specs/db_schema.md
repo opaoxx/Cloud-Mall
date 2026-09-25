@@ -105,7 +105,7 @@
 | `cancelled_at` | DATETIME(3) | 取消时间 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的分片路由及审计时间 |
 
-约束：金额非负；状态只能按状态机迁移；订单号 `yyyyMM + UUID` 全局唯一且可定位月份。索引：`idx_user_created(user_id, created_at)`、`idx_status_expire(status, expire_at)`、`idx_created_at(created_at)`。订单、明细和状态日志均按 `created_at` 月度分表；跨月用户订单列表按时间范围路由并聚合分页结果。
+约束：金额非负；状态只能按状态机迁移；订单号 `yyyyMM + UUID` 全局唯一且可定位月份。索引：`idx_user_created(user_id, created_at)`、`idx_status_expire(status, expire_at)`、`idx_created_at(created_at)`。现有 `idx_user_created` 能支持用户和时间范围的主要过滤，但没有覆盖稳定排序的 `order_no`，也未证明能覆盖带 `status` 条件的全部查询；实现必须显式使用 `created_at DESC, order_no DESC`，先以 `EXPLAIN` 和实际分页耗时验证，当前不凭推测新增索引或改表。若后续证据表明深分页计划退化，再单独评审复合索引及迁移窗口。订单、明细和状态日志均按 `created_at` 月度分表；跨月用户订单列表按时间范围路由并聚合分页结果。
 
 ### 5.2 `mall_order_item_${yyyyMM}`
 
@@ -387,8 +387,8 @@ MySQL 不保存购物车主数据。逻辑结构：`cart:{userId}` → Hash，fi
 - 分片方式：按 `created_at` 的年月路由到 `_${yyyyMM}` 物理表；订单明细和状态日志跟随订单月份，避免跨月关联失配。
 - 分片键：订单主表使用 `created_at`；`order_no` 的 `yyyyMM` 前缀用于无时间条件的精确查询定位月份。
 - 路由要求：列表查询必须提供时间范围；无时间范围的全量查询禁止作为常规接口。
-- 建表策略：开发阶段预建当前月份及测试需要的物理表，不能在本文档中生成初始化 SQL。
-- 跨分片列表按时间范围聚合、排序和分页；业务接口必须避免依赖跨分片强一致聚合。
+- 建表策略：启动时只校验既有物理表；定时任务预建当前月份之后的配置窗口内月份表，覆盖长运行跨月场景。读路径不得为了补齐缺失的历史表而隐式建表；命中月份缺表时列表请求整体失败并返回明确的分片不可用错误。
+- 跨分片列表按时间范围聚合、排序和分页。先逐月 `COUNT`，再按月份倒序使用计数跳过完整月份，仅对承载目标页的月份执行有界 `LIMIT/OFFSET` 批次；月度时间区间严格不重叠时，该顺序与全局 `created_at DESC, order_no DESC` 的 k 路归并等价，内存只随目标页和当前批次增长。页码偏移用 `long` 计算并检查乘法溢出；发现订单落在错误月份时作为数据异常告警并失败，不通过全量扫描默默兜底。任一月份读取失败时丢弃本次聚合并整体失败，不返回部分结果。
 
 ## 11. 统一状态约束
 

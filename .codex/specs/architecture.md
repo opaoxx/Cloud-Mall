@@ -70,6 +70,14 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存；库存服务先
 
 库存预扣通过 `orderNo` 固定成幂等操作。Feign `POST /reservations` 读取超时、连接断开或返回解析失败时，订单服务必须保留 `order_reservation_intent=RESERVE_UNKNOWN`，不得生成新订单号或把未知当作失败。恢复任务先调用 `GET /reservations/{orderNo}`；状态为 `RESERVED` 才能依据订单状态确认或回滚，状态为 `REJECTED` 才能释放意图，持续未知则重试并告警。商品读取超时只能有限重试幂等 GET；最终仍不可用时返回服务暂不可用，订单不能使用购物车缓存价格或库存继续创建。
 
+### 4.7 跨月订单列表与长运行建表
+
+`GET /api/orders` 由 order 服务根据时间窗口枚举命中的 `mall_order_${yyyyMM}` 物理表。请求时间先按 same instant 规范为 `Asia/Shanghai`（`+08:00`），再计算月表范围，并用左闭右开 `[start,end)` 条件；不能直接从原始请求 offset 计算 `YearMonth`。列表查询在单个只读 `REPEATABLE_READ` 本地事务中完成逐月 `COUNT` 和目标页读取，使 `total` 与 `items` 对同一 InnoDB 快照计算；事务只覆盖本次读取，不跨请求保持。由于不同物理月份的 `created_at` 区间按分片不变量严格不重叠，服务按月份倒序遍历，依据每月计数跳过完整月份，仅对承载目标页的月份执行有界 `LIMIT/OFFSET` 批次，并在批次内按 `created_at DESC, order_no DESC` 稳定排序。页码偏移用 `long` 计算并检查溢出，内存只保留目标页和当前批次。
+
+表枚举、计数、批量读取任一步骤发现缺物理表、数据库异常或结果不完整，都返回 `ORDER_QUERY_SHARD_UNAVAILABLE`（HTTP 503），丢弃已读数据，不返回部分页。列表读路径不执行建表，也不通过捕获 `DataAccessException` 后继续返回成功来掩盖缺页。`OrderTableInitializer` 及定时任务只负责按配置窗口预建未来月份，并在建表失败时记录可告警状态；历史缺表由运维/迁移流程补齐后再重试查询。发现订单落在错误月份时作为数据异常告警并失败，不通过全量扫描默默兜底。
+
+现有 `idx_user_created(user_id, created_at)` 作为第一阶段过滤索引保留。实测 `mall_order_202609` 的用户和时间范围查询命中该索引，但在 `ORDER BY created_at DESC, order_no DESC` 下出现 `Using filesort`；当前表仅 17 行，排序开销不足以支持立即迁移。增加 `(user_id, created_at, order_no)` 可能减少 tie-break 排序，但会增加每月表的索引存储、写入和历史分表迁移成本，且带 `status` 条件的查询收益尚未由执行计划证明。因此本轮不新增索引；后续以接近生产规模的 `EXPLAIN ANALYZE`、深分页延迟和写入成本为依据另行评审。
+
 ## 5. 数据与缓存边界
 
 - MySQL 是用户、商品、订单、库存、支付等事实数据的持久化来源。
