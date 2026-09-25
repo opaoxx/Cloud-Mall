@@ -121,22 +121,57 @@ public class OrderSqlMapper {
         idempotency.createdAt);
   }
 
-  /** 按用户、时间和状态查询订单摘要。 */
-  public List<Map<String, Object>> findOrders(
+  /** 统计单个月表中符合用户、半开时间范围和状态的订单。 */
+  public long countOrders(
       String tableName, long userId, Object startTime, Object endTime, String status) {
+    requireMonthlyOrderTable(tableName);
     String condition = " where user_id=? and created_at>=? and created_at<?";
     List<Object> arguments = new java.util.ArrayList<>(List.of(userId, startTime, endTime));
     if (status != null) {
       condition += " and status=?";
       arguments.add(status);
     }
+    Long count = queryForObject(
+        "select count(*) from " + tableName + condition,
+        Long.class,
+        arguments.toArray());
+    if (count == null) throw new IllegalStateException("订单月表计数结果为空: " + tableName);
+    return count;
+  }
+
+  /** 仅从一个月表读取目标页所需的有界订单摘要。 */
+  public List<Map<String, Object>> findOrderPage(
+      String tableName,
+      long userId,
+      Object startTime,
+      Object endTime,
+      String status,
+      long offset,
+      int limit) {
+    requireMonthlyOrderTable(tableName);
+    if (offset < 0 || limit <= 0) throw new IllegalArgumentException("订单分页参数无效");
+    String condition = " where user_id=? and created_at>=? and created_at<?";
+    List<Object> arguments = new java.util.ArrayList<>(List.of(userId, startTime, endTime));
+    if (status != null) {
+      condition += " and status=?";
+      arguments.add(status);
+    }
+    arguments.add(limit);
+    arguments.add(offset);
     return queryForList(
         "select"
             + " order_no,user_id,status,total_amount,pay_amount,address_snapshot,created_at,expire_at"
             + " from "
             + tableName
-            + condition,
+            + condition
+            + " order by created_at desc,order_no desc limit ? offset ?",
         arguments.toArray());
+  }
+
+  /** 动态表名只能由服务端生成的 yyyyMM 月份组成。 */
+  private static void requireMonthlyOrderTable(String tableName) {
+    if (tableName == null || !tableName.matches("mall_order_\\d{6}"))
+      throw new IllegalArgumentException("订单月表名无效");
   }
 
   /** 按订单号查询订单主表。 */

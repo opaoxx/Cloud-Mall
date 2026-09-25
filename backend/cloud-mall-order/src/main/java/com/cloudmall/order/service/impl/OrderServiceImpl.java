@@ -34,16 +34,22 @@ import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class OrderServiceImpl implements OrderService {
+  /** 跨月订单查询失败及错月数据的诊断日志。 */
+  private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
+
   /** 执行 ofPattern 相关操作。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
 
@@ -254,43 +260,104 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
+  /** 按上海时间路由月表，在同一数据库快照内计数和读取有界结果页。 */
   @GetMapping("/orders")
-  /** 执行 list 相关操作。 */
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public ApiResponse<?> list(
       @RequestParam(required = false) String status,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "20") int pageSize,
       @RequestParam(required = false) String startTime,
       @RequestParam(required = false) String endTime) {
-    // 1. 接收并整理 list 的业务请求。
-    // 2. 执行 list 的核心业务校验与状态处理。
-    // 3. 返回 list 的处理结果。
+    // 1. 规范化请求时间和分页参数，避免其他 offset 的月初时间路由错表。
     long userId = AuthContext.requireUserId();
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
-    OffsetDateTime start = parse(startTime, now().minusMonths(1)),
-        end = parse(endTime, now().plusSeconds(1));
+    OffsetDateTime start =
+            parse(startTime, now().minusMonths(1)).withOffsetSameInstant(ZoneOffset.ofHours(8)),
+        end = parse(endTime, now().plusSeconds(1)).withOffsetSameInstant(ZoneOffset.ofHours(8));
     if (!start.isBefore(end)) throw new BizException(ErrorCodes.INVALID, "时间范围无效", 400);
-    List<OrderVO> all = new ArrayList<>();
-    YearMonth m = YearMonth.from(start), last = YearMonth.from(end.minusNanos(1));
-    while (!m.isAfter(last)) {
-      String tableName = "mall_order_" + m.format(MONTH);
-      try {
-        all.addAll(
-            orderSqlMapper.findOrders(tableName, userId, ts(start), ts(end), status).stream()
-                .map(this::view)
-                .toList());
-      } catch (DataAccessException ignored) {
-      }
-      m = m.plusMonths(1);
+    long offset;
+    try {
+      offset = Math.multiplyExact((long) page - 1L, (long) pageSize);
+    } catch (ArithmeticException invalidPage) {
+      throw new BizException(ErrorCodes.INVALID, "页码超出支持范围", 400);
     }
-    all.sort(
-        Comparator.comparing(
-            (OrderVO o) -> o.createdAt, Comparator.nullsLast(Comparator.reverseOrder())));
-    long total = all.size();
-    int from = Math.min((page - 1) * pageSize, all.size()),
-        to = Math.min(from + pageSize, all.size());
-    return ApiResponse.ok(new PageResult<>(all.subList(from, to), page, pageSize, total));
+    java.sql.Timestamp rangeStart = ts(start);
+    java.sql.Timestamp rangeEnd = ts(end);
+    YearMonth firstMonth = YearMonth.from(start);
+    YearMonth lastMonth = YearMonth.from(end.minusNanos(1));
+
+    // 2. 逐月计数；任何一个月的读取失败都会让整次查询失败，不返回部分结果。
+    Map<YearMonth, Long> monthlyCounts = new LinkedHashMap<>();
+    long total = 0;
+    for (YearMonth month = lastMonth; !month.isBefore(firstMonth); month = month.minusMonths(1)) {
+      String tableName = "mall_order_" + month.format(MONTH);
+      try {
+        long monthCount =
+            orderSqlMapper.countOrders(tableName, userId, rangeStart, rangeEnd, status);
+        monthlyCounts.put(month, monthCount);
+        total = Math.addExact(total, monthCount);
+      } catch (DataAccessException | ArithmeticException countFailure) {
+        throw unavailableOrderMonth(month, countFailure);
+      }
+    }
+
+    // 3. 按月倒序跳过整月，只从目标页涉及的月表读取有界 LIMIT/OFFSET。
+    List<OrderVO> items = new ArrayList<>(pageSize);
+    if (offset < total) {
+      long remainingOffset = offset;
+      for (Map.Entry<YearMonth, Long> monthCount : monthlyCounts.entrySet()) {
+        if (remainingOffset >= monthCount.getValue()) {
+          remainingOffset -= monthCount.getValue();
+          continue;
+        }
+        YearMonth month = monthCount.getKey();
+        String tableName = "mall_order_" + month.format(MONTH);
+        int limit = (int) Math.min(
+            (long) pageSize - items.size(), monthCount.getValue() - remainingOffset);
+        List<Map<String, Object>> rows;
+        try {
+          rows =
+              orderSqlMapper.findOrderPage(
+                  tableName, userId, rangeStart, rangeEnd, status, remainingOffset, limit);
+        } catch (DataAccessException pageFailure) {
+          throw unavailableOrderMonth(month, pageFailure);
+        }
+        if (rows.size() != limit) {
+          throw unavailableOrderMonth(
+              month,
+              new IllegalStateException(
+                  "月表页结果数量与同一快照内的 COUNT 不一致: " + rows.size() + "/" + limit));
+        }
+        for (Map<String, Object> row : rows) {
+          requireCorrectOrderMonth(row, month);
+          items.add(view(row));
+        }
+        remainingOffset = 0;
+        if (items.size() == pageSize) break;
+      }
+    }
+    return ApiResponse.ok(new PageResult<>(items, page, pageSize, total));
+  }
+
+  /** 月表缺失、查询失败或分片数据异常时只返回明确失败。 */
+  private static BizException unavailableOrderMonth(YearMonth month, RuntimeException failure) {
+    log.error("订单月表查询失败，month={}", month, failure);
+    return new BizException("ORDER_QUERY_SHARD_UNAVAILABLE", "订单列表暂不可用，请稍后重试", 503);
+  }
+
+  /** 发现目标页中的错月订单时拒绝按月份拼接出错误顺序。 */
+  private static void requireCorrectOrderMonth(Map<String, Object> row, YearMonth month) {
+    Object createdAt = row.get("created_at");
+    LocalDateTime createdLocal =
+        createdAt instanceof java.sql.Timestamp timestamp
+            ? timestamp.toLocalDateTime()
+            : createdAt instanceof LocalDateTime localDateTime ? localDateTime : null;
+    if (createdLocal == null || !YearMonth.from(createdLocal).equals(month)) {
+      throw unavailableOrderMonth(
+          month, new IllegalStateException("订单行的 created_at 不属于所在月表"));
+    }
   }
 
   @GetMapping("/orders/{orderNo}")
