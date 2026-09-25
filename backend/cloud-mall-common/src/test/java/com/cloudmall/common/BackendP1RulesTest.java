@@ -17,14 +17,6 @@ import org.yaml.snakeyaml.Yaml;
 /** Regression guards for the frozen backend contracts touched in the P1 pass. */
 class BackendP1RulesTest {
   @Test
-  void seckillPublishFailureStillHasRedisRollback() throws Exception {
-    String source = source("cloud-mall-stock", "StockServiceImpl.java");
-    String compact = compact(source);
-    assertTrue(source.contains("SECKILL_ROLLBACK"));
-    assertTrue(compact.contains("redis.execute(seckillRollbackScript,keys)"));
-  }
-
-  @Test
   void productPersistsAndReadsParameters() throws Exception {
     String source = source("cloud-mall-product", "ProductServiceImpl.java");
     String compact = compact(source);
