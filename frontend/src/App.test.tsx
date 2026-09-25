@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, auth, newIdempotencyKey, registerAndLogin } from './api'
-import { formatAddressSnapshot, productDetailToForm, productFormToRequest, resolveImageUrl } from './App'
+import { formatAddressSnapshot, getSeckillOrderRetryDelay, productDetailToForm, productFormToRequest, resolveImageUrl } from './App'
 import { isValidPhone, normalizePhone } from './validation'
 
 describe('CloudMall request conventions', () => {
@@ -90,6 +90,12 @@ describe('CloudMall request conventions', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ code: '0', message: 'OK', data: { accepted: true, orderNo: '202608ABC', status: 'PENDING_PAYMENT' } }), { status: 200 }))
     await expect(api.seckillOrder({ activityId: 9, skuId: 7, addressId: 3 })).resolves.toMatchObject({ accepted: true, orderNo: '202608ABC' })
     expect(fetchMock.mock.calls[0][0]).toContain('/seckill/orders')
+  })
+
+  it('uses bounded backoff for async seckill order lookup', () => {
+    expect(getSeckillOrderRetryDelay(0)).toBe(1000)
+    expect(getSeckillOrderRetryDelay(3)).toBe(8000)
+    expect(getSeckillOrderRetryDelay(99)).toBe(10000)
   })
 
   it('sends product parameters and SKU specJson using the frozen shapes', async () => {
