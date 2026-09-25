@@ -56,7 +56,9 @@ order 创建待支付订单时，在保存订单的同一本地事务中写入 t
 
 ### 4.4 秒杀
 
-Gateway/Sentinel 保护入口，Redis 原子预扣热点库存，成功后 RabbitMQ 异步削峰到 order/stock；持久化订单和库存最终通过既定事务与补偿规则收敛。不得把 Redis 预扣结果直接当作最终支付成功。
+Gateway/Sentinel 保护入口，Redis 原子预扣热点库存；库存服务先持久化不可变 `seckill_reservation` 和 `seckill_order_outbox`，再由 publisher-confirm dispatcher 投递 RabbitMQ，最后才返回 `accepted=true`。`accepted` 只表示 Redis 预扣和可恢复 outbox 已存在，不代表订单已落库。outbox 使用稳定 `eventId` 持续退避重试；达到告警阈值后仍继续自动恢复，不能因 RabbitMQ 或商品服务暂时停机让请求永久丢失。进入死信后由订单服务写入 `seckill_message_recovery`，自动用原事件重放；只有不可解析载荷或哈希冲突停止自动恢复。旧版无 `eventId` 消息按订单号、用户幂等键或规范化载荷哈希生成稳定 legacy eventId 后进入同一恢复链路。订单消费者以 `userId + idempotencyKey + requestHash` 原子认领；同哈希重复消息幂等确认，不同哈希进入冲突终态并告警。持久化订单、秒杀受理和库存补偿最终通过既定事务与恢复规则收敛。不得把 Redis 预扣结果直接当作最终支付成功。
+
+秒杀对账使用现有 Redis Key `stock:consistency:lock` 的随机 token：`SET key token NX PX 20000` 获取；续期和释放都必须使用比较 token 的 Lua，释放脚本仅在当前值等于 token 时 `DEL`。对账任务每 5 秒以相同 token 续期；续期失败或发现 token 不再持有时立即停止后续写入，不能在 `finally` 中无条件删除 Key。锁过期后新实例可以接管，旧实例不得继续修改投影；每个批次写入前再次检查 token。锁只防止并发对账，库存数量正确性仍由 MySQL 事实、秒杀受理台账和 Redis 原子脚本共同裁决。
 
 ### 4.5 普通库存缓存一致性
 

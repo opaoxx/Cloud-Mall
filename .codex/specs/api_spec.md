@@ -192,7 +192,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | PUT | `/api/seckill/activities/{activityId}` | 可变活动字段 | 管理员修改 |
 | POST | `/api/seckill/activities/{activityId}/publish` | 无 | 预热 Redis 并发布 |
 | POST | `/api/seckill/activities/{activityId}/start` | 无 | 管理员手动开始；活动时间窗口同时决定有效状态 |
-| POST | `/api/seckill/orders` | `{activityId,skuId}`；Header 必须有 `Idempotency-Key` | 受 Sentinel 保护的秒杀入口 |
+| POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 受 Sentinel 保护的秒杀入口；返回 `{accepted,reservationStatus,orderNo,eventId}`，仅在 Redis 预扣和秒杀 outbox 已持久化后返回 `accepted=true`，不代表订单已落库 |
 
 ## 11. 错误码
 
@@ -228,6 +228,9 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |
 | `SECKILL_LIMIT_REACHED` | 超过用户限购 | 429 |
 | `SECKILL_SOLD_OUT` | 秒杀库存耗尽 | 409 |
+| `SECKILL_IDEMPOTENCY_CONFLICT` | 同一用户跨活动幂等键对应不同请求载荷 | 409 |
+| `SECKILL_DELIVERY_UNKNOWN` | 秒杀事件已持久化但投递结果未知 | 202 |
+| `SECKILL_ORDER_RECOVERY_PENDING` | 秒杀订单进入死信恢复 | 202 |
 | `GATEWAY_RATE_LIMITED` | 网关/Sentinel 限流 | 429 |
 | `GATEWAY_SERVICE_UNAVAILABLE` | 服务熔断/降级 | 500 |
 | `COMMON_INTERNAL_ERROR` | 未预期服务错误 | 500 |
@@ -236,7 +239,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 ## 12. 跨服务事件契约（逻辑）
 
-RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认、支付成功/失败、商品浏览统计和商品索引同步。新超时消息使用 JSON envelope，至少包含 `eventId`、`eventType=ORDER_TIMEOUT`、`occurredAt`、`orderNo`、`expireAt`、`traceId` 和 `payload`；超时关单使用 TTL + DLX，消费失败按有限重试后进入死信队列。消费者兼容存量 String `orderNo` 消息，并将其规范化为 `legacy-timeout:{orderNo}`，按订单读取的 `expireAt` 走同一 CAS 关单路径。订单超时消息必须先落 order outbox，再由提交后 dispatcher 使用 publisher confirm 投递；confirm 成功但 outbox 状态更新失败时，必须重试同一 `eventId`，重复投递由消费者 CAS 幂等。必须支持未确认记录重试、消费者按事件号/订单状态幂等和死信告警。Trace ID 由 Micrometer Tracing 透传。
+RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认、支付成功/失败、秒杀订单请求、商品浏览统计和商品索引同步。秒杀订单事件使用 JSON envelope，至少包含 `eventId`、`eventType=SECKILL_ORDER_REQUEST`、`occurredAt`、`activityId`、`skuId`、`userId`、`orderNo`、`idempotencyKey`、`requestHash`、`addressSnapshot`、`traceId` 和 `payloadVersion`。库存 outbox 必须先持久化，再由 dispatcher 使用 publisher confirm 投递；confirm 成功但 outbox 状态更新失败时，持续重试同一 `eventId`，不能生成新订单号。消费者兼容存量秒杀消息：缺失 envelope 字段时按原字段生成稳定 legacy eventId 和规范化哈希，不能把缺失字段的消息当作新请求反复扣 Redis。消费者失败进入 DLQ；DLQ consumer 先写 `seckill_message_recovery` 再确认消息，replayer 使用原 `eventId`/payload 自动重放并保留重试记录。投递和重放采用持续退避（有上限间隔）并在阈值后告警，`DEAD` 仍可自动恢复；只有不可解析载荷或不可变哈希冲突进入 `CONFLICT`，人工裁决。重复消息按事件号、用户幂等键和请求哈希判定；同哈希幂等确认，不同哈希进入冲突终态。旧版无 `eventId` 消息按确定性 `legacy-seckill:{orderNo}`、`legacy-seckill:key:{userId}:{idempotencyKey}` 或完整规范化载荷哈希生成事件号，禁止使用 delivery tag/时间戳。Trace ID 由 Micrometer Tracing 透传。
 
 ## 13. 契约冻结说明
 

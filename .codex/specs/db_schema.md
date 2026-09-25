@@ -115,6 +115,23 @@
 
 字段：`id BIGINT PK`、`order_id BIGINT NOT NULL`、`order_no VARCHAR(64) NOT NULL`、`from_status VARCHAR(32)`、`to_status VARCHAR(32) NOT NULL`、`event_type VARCHAR(64) NOT NULL`、`operator_id BIGINT`、`remark VARCHAR(512)`、`created_at DATETIME(3) NOT NULL`。索引：`idx_order_created(order_id, created_at)`。用于审计和状态追踪，不替代订单主状态。
 
+### 5.3.1 `seckill_order_dedup`
+
+秒杀消息消费使用独立表作为用户幂等请求的原子认领，避免给普通订单共享的 `order_idempotency` 表增加秒杀专属字段或状态。`user_id + idempotency_key` 跨活动全局只绑定一个规范化请求载荷，不能因为重复消息改写 `order_no`。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 幂等记录 ID |
+| `user_id` | BIGINT NOT NULL | 用户 |
+| `idempotency_key` | VARCHAR(128) NOT NULL | 客户端幂等键 |
+| `order_no` | VARCHAR(64) NOT NULL | 首次成功生成的订单号 |
+| `request_hash` | CHAR(64) NOT NULL | 规范化活动、SKU、用户、地址和数量载荷 SHA-256 |
+| `status` | VARCHAR(16) NOT NULL | `PROCESSING`/`COMMITTED` |
+| `event_id` | VARCHAR(128) | 首次消费事件 ID |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
+
+约束：`uk_seckill_dedup_user_key(user_id,idempotency_key)`。消费者在同一订单本地事务内原子插入/锁定该记录并写订单；同键同哈希的并发重复消息读取 `COMMITTED` 后确认消费，不重建订单；同键不同哈希进入 `seckill_message_recovery.CONFLICT` 并确认消息，不进入 RabbitMQ 重试/死信。迁移前必须审计存量 `(user_id,idempotency_key)` 重复行：保留最早的原 `order_no` 作为事实，冲突行不得静默合并，标记为人工待处理；新增唯一约束前不得接受新的同键请求。
+
 ### 5.4 `order_reservation_intent`
 
 记录普通订单在跨服务库存预扣期间的可恢复意图，避免地址校验后、库存预扣后订单本地写入失败时留下孤立预扣。该表不按订单月分片，以便恢复任务扫描所有未完成意图；`order_no` 全局唯一，`(user_id,idempotency_key)` 组合唯一。
@@ -173,6 +190,26 @@
 
 索引：`uk_order_stock_action_order(order_no)`、`uk_order_stock_action_key(operation_key)`、`idx_order_stock_action_retry(status,next_retry_at,lease_until)`。订单状态 CAS 成功后，必须在同一订单本地事务中插入对应动作；远程调用只能发生在事务提交之后。动作完成以 stock 的最终状态查询为准：目标状态已达到视为成功；结果未知保留 `UNKNOWN` 并重试同一操作键；发现相反终态标记 `CONFLICT` 并告警，禁止继续执行相反动作或伪造订单状态。
 
+### 5.7 `seckill_message_recovery`
+
+秒杀订单死信由订单服务持久化接管，避免 DLQ 消息只停留在 RabbitMQ。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 恢复记录 ID |
+| `event_id` | VARCHAR(128) UNIQUE NOT NULL | 原事件 ID |
+| `payload` | JSON NOT NULL | 原始 envelope |
+| `request_hash` | CHAR(64) NOT NULL | 规范化载荷哈希 |
+| `status` | VARCHAR(16) NOT NULL | `DEAD`/`REPLAY_PENDING`/`REPLAYING`/`RESOLVED`/`CONFLICT`；`DEAD` 仅表示达到告警阈值，仍可重试 |
+| `attempts` | INT NOT NULL DEFAULT 0 | 重放次数 |
+| `next_retry_at` | DATETIME(3) NOT NULL | 下次重放时间 |
+| `lease_owner` | VARCHAR(128) | 当前重放任务实例 |
+| `lease_until` | DATETIME(3) | 数据库租约到期时间 |
+| `last_error` | VARCHAR(512) | 最近错误 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+DLQ consumer 先写入该表再确认死信消息；replayer 使用原 `eventId` 和原 payload 发布，成功消费后标记 `RESOLVED`。同键不同哈希标记 `CONFLICT` 并告警，不自动重放。
+
 ## 6. 库存域表
 
 ### 6.1 `stock_sku`
@@ -223,6 +260,47 @@
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
 
 索引：`uk_stock_cache_version(sku_id,source_version)`、`idx_stock_cache_retry(status,next_retry_at,lease_until)`。修复器通过 `lease_owner/lease_until` 在 MySQL 中按条件认领记录；租约只是避免多个修复实例同时处理同一记录，不是库存正确性的依据。Redis 不使用分布式锁承担一致性。Redis Key `stock:available:{skuId}` 使用 hash 字段 `quantity`、`version`。修复 Lua 只在 Redis 当前版本小于等于 `source_version` 时原子写入数量和版本；发现更高版本则将旧记录标记 `STALE`。启动校准读取 MySQL 当前版本并写入一次全量投影。
+
+### 6.4 `seckill_reservation`
+
+秒杀库存受理事实表。`(user_id,idempotency_key)` 和 `order_no` 均不可变；重复请求不得改写原订单号。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 受理记录 ID |
+| `activity_id` / `sku_id` / `user_id` | BIGINT NOT NULL | 秒杀请求维度 |
+| `order_no` | VARCHAR(64) UNIQUE NOT NULL | 异步订单号 |
+| `idempotency_key` | VARCHAR(128) NOT NULL | 客户端幂等键；同一用户跨活动全局唯一 |
+| `request_payload` | JSON NOT NULL | Lua 扣减前持久化的完整规范化请求，必须包含 addressSnapshot |
+| `request_hash` | CHAR(64) NOT NULL | 规范化请求哈希 |
+| `status` | VARCHAR(32) NOT NULL | `PENDING`/`ACCEPTED`/`REJECTED`/`ORDER_CREATED`/`CONFLICT` |
+| `last_error` | VARCHAR(512) | 最近错误 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+唯一约束：`uk_seckill_request(user_id,idempotency_key)`、`uk_seckill_order(order_no)`，并建立 `idx_seckill_activity_sku(activity_id,sku_id,status)`。同一用户同一幂等键跨活动也必须比较 `request_hash`：同哈希返回原 `order_no`，不同哈希返回 `SECKILL_IDEMPOTENCY_CONFLICT`，不得改订单号、重复扣 Redis 或发布新事件。迁移现有按活动分组的唯一约束前，必须审计跨活动重复键；保留最早原 `order_no`，冲突行标记 `CONFLICT` 并告警，不得静默生成新订单。`ACCEPTED` 只表示 Redis 预扣成功且 outbox 已持久化，不代表订单已落库。
+
+### 6.5 `seckill_order_outbox`
+
+库存服务将秒杀订单事件持久化后再异步投递 RabbitMQ，覆盖 Redis 预扣成功后进程退出和 publisher confirm 未知窗口。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | outbox ID |
+| `event_id` | VARCHAR(128) UNIQUE NOT NULL | 稳定消息 ID，重试不得改变 |
+| `order_no` | VARCHAR(64) UNIQUE NOT NULL | 对应受理订单 |
+| `idempotency_key` | VARCHAR(128) NOT NULL | 客户端幂等键 |
+| `request_hash` | CHAR(64) NOT NULL | 载荷哈希 |
+| `payload` | JSON NOT NULL | 事件 envelope |
+| `status` | VARCHAR(16) NOT NULL | `PENDING`/`PUBLISHED`/`UNKNOWN`/`DEAD` |
+| `attempts` | INT NOT NULL DEFAULT 0 | 投递次数 |
+| `next_retry_at` | DATETIME(3) NOT NULL | 下次投递时间 |
+| `lease_owner` | VARCHAR(128) | 当前 dispatcher 实例标识 |
+| `lease_until` | DATETIME(3) | outbox 认领租约到期时间 |
+| `last_error` | VARCHAR(512) | 最近错误 |
+| `published_at` | DATETIME(3) | publisher confirm 时间 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+索引：`idx_seckill_outbox_retry(status,next_retry_at,lease_until)`。dispatcher 先以 `status IN (PENDING,UNKNOWN,DEAD)`、`next_retry_at<=now` 且租约为空/已过期为条件，CAS 写入 `lease_owner` 和 `lease_until` 认领记录；发布前后都不得处理不再持有的租约。dispatcher 检查 returned message 并等待 publisher confirm；成功标记 `PUBLISHED` 并清空租约，连接/确认结果未知保持 `UNKNOWN` 并用同一 `eventId` 重试。达到告警阈值后可标记 `DEAD` 并告警，但 `DEAD` 仍参与持续退避扫描，不能停止重试、删除受理台账或直接把 Redis 预扣当作订单成功。只有不可解析或不可变载荷冲突才进入不可自动恢复的 `CONFLICT`。
 
 ## 7. 支付域表
 
