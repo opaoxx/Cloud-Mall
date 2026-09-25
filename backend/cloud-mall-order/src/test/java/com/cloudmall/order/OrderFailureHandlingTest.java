@@ -3,6 +3,7 @@ package com.cloudmall.order;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
@@ -26,6 +27,7 @@ import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
+import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -167,6 +169,45 @@ class OrderFailureHandlingTest {
   }
 
   @Test
+  void paidTransitionPersistsConfirmIntentWithoutCallingStockInOrderTransaction() {
+    StockClient stockClient = mock(StockClient.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    String orderNo = "202609paidintent";
+    pendingOrder(orderSqlMapper, orderNo);
+    when(orderSqlMapper.updateStatus(anyString(), eq(orderNo), eq("PAID"),
+        eq("PENDING_PAYMENT"), any())).thenReturn(1);
+    OrderServiceImpl orderService = service(stockClient, mock(ProductClient.class),
+        mock(UserClient.class), orderSqlMapper);
+    OrderStockActionMapper actionMapper =
+        (OrderStockActionMapper) ReflectionTestUtils.getField(orderService, "orderStockActionMapper");
+
+    AuthContext.set(8L, "USER");
+    orderService.paid(orderNo);
+
+    verify(actionMapper).insert(anyLong(), eq(orderNo), eq("CONFIRM"), any());
+    verifyNoInteractions(stockClient);
+  }
+
+  @Test
+  void timeoutTransitionPersistsRollbackIntentWithoutCallingStockInOrderTransaction() {
+    StockClient stockClient = mock(StockClient.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    String orderNo = "202609timeoutintent";
+    pendingOrder(orderSqlMapper, orderNo);
+    when(orderSqlMapper.updateStatus(anyString(), eq(orderNo), eq("CANCELLED"),
+        eq("PENDING_PAYMENT"), any())).thenReturn(1);
+    OrderServiceImpl orderService = service(stockClient, mock(ProductClient.class),
+        mock(UserClient.class), orderSqlMapper);
+    OrderStockActionMapper actionMapper =
+        (OrderStockActionMapper) ReflectionTestUtils.getField(orderService, "orderStockActionMapper");
+
+    orderService.consumeTimeout(orderNo);
+
+    verify(actionMapper).insert(anyLong(), eq(orderNo), eq("ROLLBACK"), any());
+    verifyNoInteractions(stockClient);
+  }
+
+  @Test
   void failedTimeoutTransitionDoesNotRollbackStock() {
     StockClient stockClient = mock(StockClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
@@ -245,6 +286,7 @@ class OrderFailureHandlingTest {
     ReflectionTestUtils.setField(orderService, "reservationIntentService", intentService);
     ReflectionTestUtils.setField(orderService, "reservationIntentMapper", mock(OrderReservationIntentMapper.class));
     ReflectionTestUtils.setField(orderService, "orderOutboxMapper", mock(OrderOutboxMapper.class));
+    ReflectionTestUtils.setField(orderService, "orderStockActionMapper", mock(OrderStockActionMapper.class));
     return orderService;
   }
 

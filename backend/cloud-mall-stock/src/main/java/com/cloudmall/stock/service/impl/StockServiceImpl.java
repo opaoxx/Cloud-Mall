@@ -4,6 +4,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
+import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
@@ -183,10 +184,13 @@ public class StockServiceImpl implements StockService {
   @Transactional
   @PostMapping("/reservations/{orderNo}/confirm")
   /** 执行 confirm 相关操作。 */
-  public ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo) {
+  public ApiResponse<?> confirm(
+      @PathVariable("orderNo") String orderNo,
+      @RequestBody(required = false) StockActionDTO action) {
     // 1. 接收并整理 confirm 的业务请求。
     // 2. 执行 confirm 的核心业务校验与状态处理。
     // 3. 返回 confirm 的处理结果。
+    validateActionKey(orderNo, "CONFIRM", action);
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequestForUpdate(orderNo);
     if (requestRow != null) {
       String status = String.valueOf(requestRow.get("status"));
@@ -209,10 +213,13 @@ public class StockServiceImpl implements StockService {
   @Transactional
   @PostMapping("/reservations/{orderNo}/rollback")
   /** 执行 rollback 相关操作。 */
-  public ApiResponse<?> rollback(@PathVariable("orderNo") String orderNo) {
+  public ApiResponse<?> rollback(
+      @PathVariable("orderNo") String orderNo,
+      @RequestBody(required = false) StockActionDTO action) {
     // 1. 接收并整理 rollback 的业务请求。
     // 2. 执行 rollback 的核心业务校验与状态处理。
     // 3. 返回 rollback 的处理结果。
+    validateActionKey(orderNo, "ROLLBACK", action);
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequestForUpdate(orderNo);
     if (requestRow != null) {
       String status = String.valueOf(requestRow.get("status"));
@@ -230,6 +237,22 @@ public class StockServiceImpl implements StockService {
             != 1) throw new BizException(ErrorCodes.CONFLICT, "库存回滚状态已变化", 409);
     clearLegacyReservationAfterCommit(orderNo);
     return ApiResponse.ok(Map.of("rolledBack", true, "idempotent", lines.isEmpty()));
+  }
+
+  /** 兼容已有内部调用，统一使用订单号标识同一库存动作。 */
+  public ApiResponse<?> confirm(String orderNo) {
+    return confirm(orderNo, null);
+  }
+
+  /** 兼容已有内部调用，统一使用订单号标识同一库存动作。 */
+  public ApiResponse<?> rollback(String orderNo) {
+    return rollback(orderNo, null);
+  }
+
+  /** 拒绝新协议中与订单号和动作不匹配的幂等键。 */
+  private static void validateActionKey(String orderNo, String type, StockActionDTO action) {
+    if (action != null && !Objects.equals(action.operationKey, orderNo + ":" + type))
+      throw new BizException(ErrorCodes.CONFLICT, "库存动作键与订单不匹配", 409);
   }
 
   /** 把单个未完成预扣在 MySQL 中确认或回滚，并同事务排队版本投影。 */

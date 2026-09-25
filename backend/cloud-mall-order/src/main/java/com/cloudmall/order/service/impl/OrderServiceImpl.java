@@ -21,6 +21,7 @@ import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
+import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.OrderService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -69,6 +70,9 @@ public class OrderServiceImpl implements OrderService {
 
   /** 在订单事务中更新意图状态的 Mapper。 */
   @Autowired private OrderReservationIntentMapper reservationIntentMapper;
+
+  /** 与订单终态在同一事务提交的库存动作持久层。 */
+  @Autowired private OrderStockActionMapper orderStockActionMapper;
 
   /** 创建由 Spring 字段注入依赖的订单服务实例。 */
   public OrderServiceImpl() {}
@@ -301,12 +305,16 @@ public class OrderServiceImpl implements OrderService {
     if (!Objects.equals(order.userId, userId))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
     // 3. 只返回支付恢复所需的稳定字段。
+    String actionStatus = orderStockActionMapper.statusForOrder(orderNo);
+    if (actionStatus == null)
+      actionStatus = "PENDING_PAYMENT".equals(order.status) ? "NONE" : "SUCCEEDED";
     return ApiResponse.ok(
         Map.of(
             "orderNo", order.orderNo,
             "status", order.status,
             "payAmount", order.payAmount,
-            "userId", order.userId));
+            "userId", order.userId,
+            "stockActionStatus", actionStatus));
   }
 
   @Transactional
@@ -325,7 +333,7 @@ public class OrderServiceImpl implements OrderService {
     if (!"PENDING_PAYMENT".equals(order.status))
       throw new BizException(ErrorCodes.STATUS, "订单状态不允许取消", 409);
     if (!setStatus(order, "CANCELLED")) return completedOrConflict(orderNo, "CANCELLED");
-    stock.rollback(orderNo);
+    orderStockActionMapper.insert(id(), orderNo, "ROLLBACK", now().toLocalDateTime());
     return ApiResponse.ok(find(orderNo));
   }
 
@@ -341,7 +349,7 @@ public class OrderServiceImpl implements OrderService {
     if (!"PENDING_PAYMENT".equals(order.status))
       throw new BizException(ErrorCodes.STATUS, "订单状态不允许支付", 409);
     if (!setStatus(order, "PAID")) return completedOrConflict(orderNo, "PAID");
-    stock.confirm(orderNo);
+    orderStockActionMapper.insert(id(), orderNo, "CONFIRM", now().toLocalDateTime());
     return ApiResponse.ok(find(orderNo));
   }
 
@@ -524,6 +532,7 @@ public class OrderServiceImpl implements OrderService {
   }
 
   /** 按订单号处理旧版超时消息并供恢复测试复用。 */
+  @Transactional
   public void consumeTimeout(String orderNo) {
     if (orderNo == null || orderNo.isBlank()) return;
     OrderVO order = find(orderNo);
@@ -531,7 +540,8 @@ public class OrderServiceImpl implements OrderService {
     if (order.expireAt != null && now().isBefore(OffsetDateTime.parse(order.expireAt))) {
       throw new BizException(ErrorCodes.STATUS, "订单尚未到超时关单时间", 409);
     }
-    if (setStatus(order, "CANCELLED")) stock.rollback(orderNo);
+    if (setStatus(order, "CANCELLED"))
+      orderStockActionMapper.insert(id(), orderNo, "ROLLBACK", now().toLocalDateTime());
   }
 
   /** 执行 find 相关操作。 */

@@ -121,7 +121,8 @@ public class PayConsistencyService {
       // 2. 下单支付状态未知时不得扣款或退款；明确取消且未扣款直接失败。
       OrderClient.OrderView order = readOrderState(intent);
       if (operation != null && operation.refundOperationKey() != null) {
-        if ("CANCELLED".equals(order.status())) return finishRefunded(intent);
+        if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
+          return finishRefunded(intent);
         throw new IllegalStateException("余额已退款但订单不是已取消状态: " + order.status());
       }
       if (operation == null && "CANCELLED".equals(order.status()))
@@ -142,9 +143,14 @@ public class PayConsistencyService {
       // 3. 扣款后先持久化恢复状态，再触发远程订单支付迁移。
       payRecordMapper.markOrderUnknown(intent.payNo, now());
       payDebitIntentMapper.updateOwnedStatus(intent.payNo, owner, "DEBITED", now());
-      if ("CANCELLED".equals(order.status())) return refundCancelled(intent);
-      if ("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
+      if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
+        return refundCancelled(intent);
+      if (("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
+          && stockActionSucceeded(order))
         return finishSuccess(intent);
+      if ("CANCELLED".equals(order.status()) || "PAID".equals(order.status())
+          || "COMPLETED".equals(order.status()))
+        throw new IllegalStateException("订单库存动作尚未完成: " + order.stockActionStatus());
       if (!"PENDING_PAYMENT".equals(order.status()))
         throw new IllegalStateException("订单状态暂不可判定支付结果: " + order.status());
 
@@ -152,7 +158,7 @@ public class PayConsistencyService {
           orderClient.paid(intent.orderNo, intent.userId);
       if (paid != null && "0".equals(paid.code) && paid.data != null
           && ("PAID".equals(paid.data.status()) || "COMPLETED".equals(paid.data.status())))
-        return finishSuccess(intent);
+        return resolveAfterUncertainOrderWrite(intent);
       // 4. 非明确成功时重新读订单；只有明确取消才退款。
       return resolveAfterUncertainOrderWrite(intent);
     } catch (RuntimeException remoteOrPersistenceFailure) {
@@ -180,10 +186,17 @@ public class PayConsistencyService {
   /** 远程支付写入未确认时，只依据新的订单事实决定后续动作。 */
   private String resolveAfterUncertainOrderWrite(PayDebitIntentPO intent) {
     OrderClient.OrderView current = readOrderState(intent);
-    if ("PAID".equals(current.status()) || "COMPLETED".equals(current.status()))
+    if (("PAID".equals(current.status()) || "COMPLETED".equals(current.status()))
+        && stockActionSucceeded(current))
       return finishSuccess(intent);
-    if ("CANCELLED".equals(current.status())) return refundCancelled(intent);
+    if ("CANCELLED".equals(current.status()) && stockActionSucceeded(current))
+      return refundCancelled(intent);
     throw new IllegalStateException("订单支付写入尚未确认: " + current.status());
+  }
+
+  /** 只有库存最终动作成功时才结清本地支付或退款记录。 */
+  private static boolean stockActionSucceeded(OrderClient.OrderView order) {
+    return "SUCCEEDED".equals(order.stockActionStatus());
   }
 
   /** 读取余额扣款操作，404 仅表示尚无该操作键的账本记录。 */

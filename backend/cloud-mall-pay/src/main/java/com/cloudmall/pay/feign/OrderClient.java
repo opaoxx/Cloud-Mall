@@ -30,5 +30,13 @@ public interface OrderClient {
   ApiResponse<OrderView> cancel(
       @PathVariable("orderNo") String orderNo, @RequestHeader("X-User-Id") Long userId);
 
-  record OrderView(String orderNo, String status, BigDecimal payAmount, Long userId) {}
+  /** 支付恢复需要订单状态以及对应库存动作是否已经完成。 */
+  record OrderView(
+      String orderNo, String status, BigDecimal payAmount, Long userId,
+      String stockActionStatus) {
+    /** 兼容只查询公开订单的调用与既有测试夹具。 */
+    public OrderView(String orderNo, String status, BigDecimal payAmount, Long userId) {
+      this(orderNo, status, payAmount, userId, "SUCCEEDED");
+    }
+  }
 }

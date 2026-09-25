@@ -20,10 +20,22 @@ public interface StockClient {
   ApiResponse<?> reserve(@RequestBody Reservation request);
 
   @PostMapping("/api/stock/reservations/{orderNo}/confirm")
-  ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo);
+  ApiResponse<?> confirm(
+      @PathVariable("orderNo") String orderNo, @RequestBody(required = false) Action action);
 
   @PostMapping("/api/stock/reservations/{orderNo}/rollback")
-  ApiResponse<?> rollback(@PathVariable("orderNo") String orderNo);
+  ApiResponse<?> rollback(
+      @PathVariable("orderNo") String orderNo, @RequestBody(required = false) Action action);
+
+  /** 兼容已有原订单号回滚调用。 */
+  default ApiResponse<?> rollback(String orderNo) {
+    return rollback(orderNo, null);
+  }
+
+  /** 兼容已有原订单号确认调用。 */
+  default ApiResponse<?> confirm(String orderNo) {
+    return confirm(orderNo, null);
+  }
 
   @PostMapping("/api/stock/seckill/reservations")
   ApiResponse<?> seckill(@RequestBody Map<String, Object> request);
@@ -31,4 +43,7 @@ public interface StockClient {
   record Reservation(String orderNo, List<Line> items, String scene) {}
 
   record Line(Long skuId, int quantity) {}
+
+  /** 订单状态事务提交后使用的稳定库存动作键。 */
+  record Action(String operationKey) {}
 }

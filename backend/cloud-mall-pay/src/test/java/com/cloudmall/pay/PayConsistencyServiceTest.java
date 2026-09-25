@@ -108,6 +108,33 @@ class PayConsistencyServiceTest {
     verify(intentMapper).finish(eq("pay-1"), anyString(), eq("SUCCESS"), any());
   }
 
+  @Test
+  void paidOrderDoesNotFinishPaymentUntilStockConfirmationIsDurable() {
+    when(orderClient.paymentState("order-1", 7L))
+        .thenReturn(ApiResponse.ok(
+            new OrderClient.OrderView(
+                "order-1", "PAID", new BigDecimal("10.00"), 7L, "UNKNOWN")));
+
+    String result = consistencyService.process("pay-1");
+
+    assertEquals("ORDER_SYNC_UNKNOWN", result);
+    verify(payRecordMapper, never()).markSuccess(eq("pay-1"), any(), any());
+    verify(userClient, never()).refund(any(), any(), any());
+  }
+
+  @Test
+  void cancelledOrderDoesNotRefundUntilStockRollbackIsDurable() {
+    when(orderClient.paymentState("order-1", 7L))
+        .thenReturn(ApiResponse.ok(
+            new OrderClient.OrderView(
+                "order-1", "CANCELLED", new BigDecimal("10.00"), 7L, "PENDING")));
+
+    String result = consistencyService.process("pay-1");
+
+    assertEquals("ORDER_SYNC_UNKNOWN", result);
+    verify(userClient, never()).refund(any(), any(), any());
+  }
+
   private static PayDebitIntentPO intent() {
     PayDebitIntentPO intent = new PayDebitIntentPO();
     intent.payNo = "pay-1";
