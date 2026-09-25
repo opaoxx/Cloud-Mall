@@ -134,7 +134,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 订单创建时服务端重新读取商品价格、上下架、库存和地址；禁止信任前端金额。顺序固定为：鉴权与 `Idempotency-Key` 绑定 → 校验地址归属及商品快照 → 在独立已提交本地事务中创建 `INIT` 预扣意图 → 调用库存预扣 → 在独立本地事务中标记 `RESERVED` → 在本地事务中保存订单、超时 outbox 并标记 `COMMITTED`。地址校验失败不得调用库存。若库存调用成功但进程在写入 `RESERVED` 前崩溃，恢复任务使用原 `orderNo` 重试同一预扣请求取得幂等结果，再回滚；若订单已提交则只推进/确认 `COMMITTED`。库存已预扣但订单保存失败时，接口必须按原 `orderNo` 发起回滚，并由预扣意图恢复任务兜底。订单状态：`PENDING_PAYMENT`、`PAID`、`CANCELLED`、`COMPLETED`。
 
-订单状态写操作必须返回并检查条件更新影响行数。支付成功、手工取消和超时关单只有在自身 CAS 成功时才能调用库存确认/回滚；CAS 失败必须读取当前状态，已达到目标状态时作为幂等成功返回，处于其他终态时返回 `ORDER_STATUS_INVALID`，不得再次操作库存。
+订单状态写操作必须返回并检查条件更新影响行数。支付成功、手工取消和超时关单先在本地事务中完成订单 CAS 与 `order_stock_action` 意图落库，提交后才调用库存确认/回滚；远程响应未知时动作进入 `UNKNOWN`，恢复任务查询库存最终状态并用同一 `operationKey` 重试。CAS 失败必须读取当前状态，已达到目标状态时作为幂等成功返回，处于其他终态时返回 `ORDER_STATUS_INVALID`，不得创建相反库存动作。支付成功的 `PAID` 状态一旦本地提交，不得因为后续 stock.confirm 超时回滚为 `PENDING_PAYMENT`；取消/超时只有在订单仍为 `PENDING_PAYMENT` 时才能提交 `CANCELLED` 与回滚意图。
 
 ## 8. 库存服务接口
 
@@ -145,8 +145,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | GET | `/api/stock/skus/{skuId}` | 内部请求 | 可售库存摘要；不经 Gateway 向前端公开 |
 | POST | `/api/stock/reservations` | `{orderNo,items,scene}` | 预扣结果，失败返回库存不足；同一 `orderNo` 返回同一结果 |
 | GET | `/api/stock/reservations/{orderNo}` | 无 | 查询预扣当前/最终状态和明细，不改变库存；返回 `NOT_FOUND` 仅表示尚无持久化请求认领 |
-| POST | `/api/stock/reservations/{orderNo}/confirm` | 幂等请求 | 确认扣减 |
-| POST | `/api/stock/reservations/{orderNo}/rollback` | 幂等请求 | 回滚预扣 |
+| POST | `/api/stock/reservations/{orderNo}/confirm` | `{operationKey}` | 按稳定操作键幂等确认扣减；响应丢失可通过 GET 查询最终状态 |
+| POST | `/api/stock/reservations/{orderNo}/rollback` | `{operationKey}` | 按稳定操作键幂等回滚预扣；响应丢失可通过 GET 查询最终状态 |
 | POST | `/api/stock/seckill/reservations` | `{activityId,skuId,userId}` | Redis 预扣/异步入队结果 |
 
 接口必须带订单号或幂等键，所有数量为正整数；库存服务不得返回负库存。
@@ -221,6 +221,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `ORDER_RESERVATION_UNKNOWN` | 库存预扣结果未知，等待按原订单号查询 | 202 |
 | `ORDER_RESERVATION_KEY_REUSED` | 同一订单号携带了不同的库存快照 | 409 |
 | `ORDER_STOCK_RESERVATION_REJECTED` | 库存预扣已持久化拒绝 | 409 |
+| `ORDER_STOCK_ACTION_UNKNOWN` | 库存确认/回滚结果未知，等待恢复 | 202 |
+| `ORDER_STOCK_ACTION_CONFLICT` | 库存动作发现相反终态，需要对账 | 409 |
 | `STOCK_CACHE_REPAIRING` | 库存事实已提交，缓存修复处理中 | 202 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |

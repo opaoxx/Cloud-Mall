@@ -153,6 +153,26 @@
 
 索引：`idx_outbox_status_retry(status,next_retry_at)`、`idx_outbox_order(order_no)`。订单创建事务必须同时插入该表；只有 RabbitMQ publisher confirm 成功后才能标记 `PUBLISHED`。若 confirm 已成功但 `PUBLISHED` 更新失败，记录仍保持 `PENDING` 并重试同一 `eventId`；重复消息由关单 CAS 保证无副作用，不能生成新的事件 ID。发送超时、连接失败或进程中断保留 `PENDING`，dispatcher 重试；消费者以 `eventId` 和订单状态条件更新共同保证幂等。
 
+### 5.6 `order_stock_action`
+
+支付确认、手工取消和超时关单不能在订单本地事务中直接调用库存。订单状态迁移与库存动作意图必须先独立提交，再由恢复任务执行远程确认/回滚，覆盖库存已提交但响应丢失、订单事务回滚和进程崩溃窗口。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 动作 ID |
+| `order_no` | VARCHAR(64) UNIQUE NOT NULL | 订单号；每个订单只允许一个最终库存动作 |
+| `action_type` | VARCHAR(16) NOT NULL | `CONFIRM`/`ROLLBACK` |
+| `operation_key` | VARCHAR(128) UNIQUE NOT NULL | 传给 stock 的稳定幂等键 |
+| `status` | VARCHAR(16) NOT NULL | `PENDING`/`UNKNOWN`/`SUCCEEDED`/`CONFLICT` |
+| `attempts` | INT NOT NULL DEFAULT 0 | 远程调用/恢复次数 |
+| `next_retry_at` | DATETIME(3) NOT NULL | 下次恢复时间 |
+| `lease_owner` | VARCHAR(128) | 当前恢复任务实例 |
+| `lease_until` | DATETIME(3) | 恢复租约到期时间 |
+| `last_error` | VARCHAR(512) | 最近错误 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
+
+索引：`uk_order_stock_action_order(order_no)`、`uk_order_stock_action_key(operation_key)`、`idx_order_stock_action_retry(status,next_retry_at,lease_until)`。订单状态 CAS 成功后，必须在同一订单本地事务中插入对应动作；远程调用只能发生在事务提交之后。动作完成以 stock 的最终状态查询为准：目标状态已达到视为成功；结果未知保留 `UNKNOWN` 并重试同一操作键；发现相反终态标记 `CONFLICT` 并告警，禁止继续执行相反动作或伪造订单状态。
+
 ## 6. 库存域表
 
 ### 6.1 `stock_sku`

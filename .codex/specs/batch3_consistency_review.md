@@ -6,6 +6,8 @@
 
 本批的共同原则是：每个远程写操作有持久化操作键和查询接口；未知结果保留在恢复状态，不能猜测失败；事实库提交和补偿意图必须在同一个本地事务中落盘；重试沿用原业务键，禁止生成第二个订单或第二笔扣款。
 
+订单库存动作统一采用两阶段协议：订单状态 CAS 与 `order_stock_action`（确认或回滚）意图在同一订单本地事务中提交，事务提交后才调用 stock。远程响应未知时只更新动作恢复字段，不回滚已经提交的订单状态；恢复任务通过库存查询和同一操作键收敛。
+
 ## CM-20260924-04：扣款、订单和库存
 
 ### 状态模型
@@ -45,6 +47,12 @@ Redis Key `stock:available:{skuId}` 为 hash：`quantity`、`version`。修复 L
 
 商品详情和结算校验只允许对幂等 GET 做有限重试。商品服务最终不可用时返回 `GATEWAY_SERVICE_UNAVAILABLE`/明确的服务不可用结果；订单不能使用购物车缓存价格、缓存库存或前一次查询结果创建有效订单。
 
+### 订单状态与库存动作结果未知
+
+- `paid`：本地事务提交 `PENDING_PAYMENT → PAID` 与 `CONFIRM/PENDING` 后，事务外调用 `stock.confirm`。响应超时或连接断开只将动作置为 `UNKNOWN`；恢复任务查询到 `CONFIRMED` 即成功，查询到 `RESERVED` 则以同一 `operationKey` 重试确认。不得把订单回滚为 `PENDING_PAYMENT`。
+- `cancel/timeout`：本地事务只有在 `PENDING_PAYMENT` CAS 成功时，才提交 `CANCELLED` 与 `ROLLBACK/PENDING`。响应未知时查询 stock；`ROLLED_BACK` 视为成功，`RESERVED` 以同一键重试回滚。CAS 失败不得创建回滚动作。
+- 若任一动作查询到相反终态（确认动作看到 `ROLLED_BACK`，或回滚动作看到 `CONFIRMED`），标记 `CONFLICT` 并告警，禁止继续发起相反动作或伪造订单状态。
+
 ## 验收与故障注入
 
 ### 支付
@@ -54,6 +62,9 @@ Redis Key `stock:available:{skuId}` 为 hash：`quantity`、`version`。修复 L
 - 在 order 已 CAS 成 `CANCELLED` 后注入支付恢复重试：只产生一笔退款，余额恢复原值，重复恢复无副作用。
 - 在订单查询连续超时期间检查：不得调用退款；恢复记录可重启后继续处理。
 - 清空余额扣款 Redis 幂等 Key 后重放同一 `payNo`：账本返回原结果，余额不再减少。
+- 在 order CAS 为 `PAID` 后让 `stock.confirm` 提交成功但丢弃响应，再终止 order：重启后订单仍为 `PAID`，`order_stock_action=UNKNOWN` 可查询并收敛为 `SUCCEEDED`，库存最终为 `CONFIRMED`，不得允许 cancel 回滚。
+- 让 timeout/cancel 在 `PENDING_PAYMENT` CAS 成功后丢失 `stock.rollback` 响应：订单保持 `CANCELLED`，恢复任务查询/重试同一操作键，库存最终为 `ROLLED_BACK`。
+- 并发 paid 与 cancel/timeout：最多一个订单状态 CAS 成功；胜者只创建对应动作，不能出现订单 `CANCELLED` 且库存 `CONFIRMED`（`SOLD`）。
 
 ### 普通库存
 

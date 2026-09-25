@@ -44,11 +44,11 @@ CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一�
 
 若进程在库存预扣成功后、意图更新为 RESERVED 前崩溃，恢复任务在宽限期后使用原 `orderNo` 和完整快照重试同一预扣请求；库存端必须返回原预扣结果而不是再次扣减。恢复任务随后将意图推进为 RESERVED 并回滚，或在订单已成功提交时识别为 COMMITTED。恢复任务与创建请求通过状态条件更新/租约避免同时处理同一意图。
 
-订单状态迁移使用条件更新（`where order_no=? and status=?`）并检查影响行数。只有从 `PENDING_PAYMENT` 成功迁移到 `PAID` 的调用方可以确认库存，只有从 `PENDING_PAYMENT` 成功迁移到 `CANCELLED` 的调用方可以回滚库存；影响行数为 0 时重新读取状态并按已完成的迁移返回幂等结果，禁止继续执行相反库存动作。
+订单状态迁移使用条件更新（`where order_no=? and status=?`）并检查影响行数。支付、手工取消和超时关单都先在本地事务中提交订单状态与 `order_stock_action` 意图，再在事务外调用 stock；因此 `stock.confirm` 已提交但响应丢失时，订单不会因本地事务回滚而退回 `PENDING_PAYMENT`。只有从 `PENDING_PAYMENT` 成功迁移到 `PAID` 的调用方可以创建 `CONFIRM` 动作，只有从 `PENDING_PAYMENT` 成功迁移到 `CANCELLED` 的调用方可以创建 `ROLLBACK` 动作；影响行数为 0 时重新读取状态并按已完成迁移返回幂等结果，禁止创建相反库存动作。
 
 ### 4.2 支付成功
 
-`pay` 校验模拟支付请求并记录支付结果，以 `payNo` 作为唯一操作键调用 user 的余额扣款；扣款和 `balance_ledger` 在 user 本地事务内完成。扣款成功后向 order 发起幂等支付同步。同步返回明确 `PAID` 时支付进入 `SUCCESS` 并确认库存；同步超时/断连时进入 `ORDER_SYNC_UNKNOWN`，由恢复任务用同一 `orderNo` 查询订单状态并重试。只有查询明确得到 `CANCELLED`/未支付终态才创建唯一退款操作；未知期间不得退款，避免订单其实已 `PAID` 时发生钱和货双重结算。回调、扣款、退款、库存确认均按操作键幂等。
+`pay` 校验模拟支付请求并记录支付结果，以 `payNo` 作为唯一操作键调用 user 的余额扣款；扣款和 `balance_ledger` 在 user 本地事务内完成。扣款成功后向 order 发起幂等支付同步。order 在本地事务中把订单 CAS 为 `PAID` 并写入 `order_stock_action(CONFIRM)`，提交后才调用 stock.confirm；调用超时只把动作置为 `UNKNOWN`，不会回滚已提交的 `PAID`。恢复任务查询 stock 最终状态并重试同一操作键。同步超时/断连时进入 `ORDER_SYNC_UNKNOWN`，由支付恢复任务查询订单状态；只有查询明确得到 `CANCELLED`/未支付终态才创建唯一退款操作，未知期间不得退款。回调、扣款、退款、库存确认均按操作键幂等。
 
 ### 4.3 超时关单
 
