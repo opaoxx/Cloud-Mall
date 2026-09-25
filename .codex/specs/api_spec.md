@@ -177,9 +177,9 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 | 方法 | 路径 | 响应 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/internal/orders/{orderNo}/payment-state` | `{orderNo,status,payAmount,userId}` | 只读查询订单最终支付状态；订单服务不持有 `payNo`，支付服务使用自身 `pay_record` 将订单号映射到支付操作键；对超时/断连只能查询或重试，不得换订单号 |
+| GET | `/api/internal/orders/{orderNo}/payment-state` | `{orderNo,status,payAmount,userId,stockActionStatus}` | `stockActionStatus` 为 `NONE`/`PENDING`/`UNKNOWN`/`SUCCEEDED`/`CONFLICT`；只读查询订单与库存动作最终状态。订单服务不持有 `payNo`，支付服务使用自身 `pay_record` 将订单号映射到支付操作键；对超时/断连只能查询或重试，不得换订单号 |
 
-支付状态新增 `ORDER_SYNC_UNKNOWN`、`REFUND_PENDING`、`REFUNDED`。`SUCCESS` 只表示扣款已持久化且订单已确认 `PAID`；`ORDER_SYNC_UNKNOWN` 表示扣款事实存在但订单结果未确认。支付恢复任务按 `orderNo` 查询订单：确认 `PAID` 后推进支付成功并确认库存；确认 `CANCELLED`/未支付终态后创建唯一退款操作；仍未知则保留扣款并重试，进入告警而不退款。所有状态迁移和余额操作都必须带当前状态/操作键条件。
+支付状态新增 `ORDER_SYNC_UNKNOWN`、`REFUND_PENDING`、`REFUNDED`。`SUCCESS` 只表示扣款已持久化、订单为 `PAID` 且 `stockActionStatus=SUCCEEDED`；`ORDER_SYNC_UNKNOWN` 表示扣款事实存在但订单或库存动作结果未确认。支付恢复任务按 `orderNo` 查询订单：只有 `PAID + SUCCEEDED` 才推进支付成功；只有 `CANCELLED + SUCCEEDED` 才创建唯一退款操作。历史存量终态若没有 `order_stock_action` 行，订单服务必须先查询 stock reservation 的持久状态：`PAID` 仅在库存为 `CONFIRMED` 时兼容返回 `SUCCEEDED`，`CANCELLED` 仅在库存为 `ROLLED_BACK` 时兼容返回 `SUCCEEDED`；查询失败/无记录返回 `UNKNOWN`，订单与库存状态不匹配（如 `CANCELLED + CONFIRMED` 或 `PAID + ROLLED_BACK`）返回 `CONFLICT`。不得盲信终态或直接退款。非终态或动作 `PENDING`/`UNKNOWN`/`CONFLICT` 不得结清或退款。所有状态迁移和余额操作都必须带当前状态/操作键条件。
 
 ## 10. 管理与秒杀接口
 

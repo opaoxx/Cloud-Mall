@@ -8,6 +8,8 @@
 
 订单库存动作统一采用两阶段协议：订单状态 CAS 与 `order_stock_action`（确认或回滚）意图在同一订单本地事务中提交，事务提交后才调用 stock。远程响应未知时只更新动作恢复字段，不回滚已经提交的订单状态；恢复任务通过库存查询和同一操作键收敛。
 
+支付恢复查询 `GET /api/internal/orders/{orderNo}/payment-state` 必须返回 `stockActionStatus`。支付服务只有在 `PAID + SUCCEEDED` 时将扣款结清；只有在 `CANCELLED + SUCCEEDED` 时发起退款。历史存量终态若没有动作行，订单服务必须查询 stock reservation 持久状态后再兼容映射：`PAID + CONFIRMED` 才返回 `SUCCEEDED`，`CANCELLED + ROLLED_BACK` 才返回 `SUCCEEDED`；库存查询失败/无记录返回 `UNKNOWN`，`PAID + ROLLED_BACK` 或 `CANCELLED + CONFIRMED` 等不匹配返回 `CONFLICT`。`PENDING`、`UNKNOWN` 或 `CONFLICT` 不得被支付服务当作已结清。
+
 ## CM-20260924-04：扣款、订单和库存
 
 ### 状态模型
@@ -63,6 +65,8 @@ Redis Key `stock:available:{skuId}` 为 hash：`quantity`、`version`。修复 L
 - 在订单查询连续超时期间检查：不得调用退款；恢复记录可重启后继续处理。
 - 清空余额扣款 Redis 幂等 Key 后重放同一 `payNo`：账本返回原结果，余额不再减少。
 - 在 order CAS 为 `PAID` 后让 `stock.confirm` 提交成功但丢弃响应，再终止 order：重启后订单仍为 `PAID`，`order_stock_action=UNKNOWN` 可查询并收敛为 `SUCCEEDED`，库存最终为 `CONFIRMED`，不得允许 cancel 回滚。
+- 支付恢复读取 `PAID + PENDING/UNKNOWN/CONFLICT`：不得将扣款标记为 `SUCCESS`；读取 `PAID + SUCCEEDED` 后才结清。读取 `CANCELLED + PENDING/UNKNOWN/CONFLICT`：不得退款；读取 `CANCELLED + SUCCEEDED` 后才退款。
+- 对无 `order_stock_action` 的历史 `PAID` 订单，只有 stock reservation 持久状态为 `CONFIRMED` 才兼容返回 `stockActionStatus=SUCCEEDED`；对历史 `CANCELLED` 订单，只有库存为 `ROLLED_BACK` 才兼容返回 `SUCCEEDED`。库存查询失败/无记录返回 `UNKNOWN`，状态不匹配返回 `CONFLICT`，不得盲信订单终态或退款。
 - 让 timeout/cancel 在 `PENDING_PAYMENT` CAS 成功后丢失 `stock.rollback` 响应：订单保持 `CANCELLED`，恢复任务查询/重试同一操作键，库存最终为 `ROLLED_BACK`。
 - 并发 paid 与 cancel/timeout：最多一个订单状态 CAS 成功；胜者只创建对应动作，不能出现订单 `CANCELLED` 且库存 `CONFIRMED`（`SOLD`）。
 
