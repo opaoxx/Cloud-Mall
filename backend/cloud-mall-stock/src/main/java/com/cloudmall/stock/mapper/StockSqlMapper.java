@@ -283,29 +283,6 @@ public class StockSqlMapper {
         quantity);
   }
 
-  /** 保存秒杀库存预扣台账并保持请求幂等。 */
-  public int saveSeckillPending(
-      long activityId,
-      long skuId,
-      long userId,
-      String orderNo,
-      String idempotencyKey,
-      OffsetDateTime occurredAt) {
-    return update(
-        "insert into"
-            + " seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,created_at,updated_at)"
-            + " values(?,?,?,?,?,?,'PENDING',?,?) on duplicate key update"
-            + " order_no=if(status='ACCEPTED',order_no,values(order_no)),status=if(status='ACCEPTED','ACCEPTED','PENDING'),updated_at=values(updated_at)",
-        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
-        activityId,
-        skuId,
-        userId,
-        orderNo,
-        idempotencyKey,
-        occurredAt,
-        occurredAt);
-  }
-
   /** 标记秒杀请求已接受。 */
   public int markSeckillAccepted(
       long activityId, long skuId, long userId, String idempotencyKey, OffsetDateTime updatedAt) {
@@ -412,9 +389,198 @@ public class StockSqlMapper {
         "CREATE TABLE IF NOT EXISTS seckill_reservation (id BIGINT PRIMARY KEY, activity_id BIGINT"
             + " NOT NULL, sku_id BIGINT NOT NULL, user_id BIGINT NOT NULL, order_no VARCHAR(64) NOT"
             + " NULL, idempotency_key VARCHAR(128) NOT NULL, status VARCHAR(16) NOT NULL,"
-            + " created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, UNIQUE KEY"
+            + " created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, last_error VARCHAR(512) NULL,"
+            + " request_payload JSON NULL, request_hash VARCHAR(64) NULL, UNIQUE KEY"
             + " uk_seckill_request(activity_id,user_id,idempotency_key), UNIQUE KEY"
+            + " uk_seckill_global_request(user_id,idempotency_key), UNIQUE KEY"
             + " uk_seckill_order(order_no), KEY idx_seckill_stock(activity_id,sku_id,status))");
+    addColumnIfMissing("seckill_reservation", "request_payload", "JSON NULL");
+    addColumnIfMissing("seckill_reservation", "request_hash", "VARCHAR(64) NULL");
+    addColumnIfMissing("seckill_reservation", "last_error", "VARCHAR(512) NULL");
+    addUniqueKeyIfMissing(
+        "seckill_reservation", "uk_seckill_global_request", "(user_id,idempotency_key)");
+    ensureSeckillOutboxTable();
+  }
+
+  /** 为旧版本数据库补齐秒杀请求的不可变载荷列。 */
+  private void addColumnIfMissing(String table, String column, String definition) {
+    Integer existing =
+        queryForObject(
+            "SELECT COUNT(*) FROM information_schema.columns "
+                + "WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",
+            Integer.class,
+            table,
+            column);
+    if (existing != null && existing > 0) return;
+    try {
+      execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+    } catch (org.springframework.dao.DataAccessException migrationFailure) {
+      Integer createdByAnotherInstance =
+          queryForObject(
+              "SELECT COUNT(*) FROM information_schema.columns "
+                  + "WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",
+              Integer.class,
+              table,
+              column);
+      if (createdByAnotherInstance == null || createdByAnotherInstance == 0) {
+        throw migrationFailure;
+      }
+    }
+  }
+
+  /** 为旧版本数据库补齐全局用户幂等唯一键。 */
+  private void addUniqueKeyIfMissing(String table, String key, String columns) {
+    Integer existing =
+        queryForObject(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+                + "WHERE table_schema=DATABASE() AND table_name=? AND index_name=? AND non_unique=0",
+            Integer.class,
+            table,
+            key);
+    if (existing != null && existing > 0) return;
+    try {
+      execute("ALTER TABLE " + table + " ADD UNIQUE KEY " + key + " " + columns);
+    } catch (org.springframework.dao.DataAccessException migrationFailure) {
+      // 允许并发启动实例同时创建索引，但不能吞掉权限、连接或重复数据等真实错误。
+      Integer createdByAnotherInstance =
+          queryForObject(
+              "SELECT COUNT(*) FROM information_schema.statistics "
+                  + "WHERE table_schema=DATABASE() AND table_name=? AND index_name=? AND non_unique=0",
+              Integer.class,
+              table,
+              key);
+      if (createdByAnotherInstance == null || createdByAnotherInstance == 0) {
+        throw migrationFailure;
+      }
+    }
+  }
+
+  /** 创建秒杀订单 outbox；受理接口只有在该记录提交后才可返回 accepted。 */
+  public void ensureSeckillOutboxTable() {
+    execute(
+        "CREATE TABLE IF NOT EXISTS seckill_order_outbox (id BIGINT PRIMARY KEY, event_id VARCHAR(128) NOT NULL,"
+            + " order_no VARCHAR(64) NOT NULL, idempotency_key VARCHAR(128) NOT NULL, payload JSON NOT NULL,"
+            + " request_hash VARCHAR(64) NOT NULL, status VARCHAR(16) NOT NULL, attempts INT NOT NULL DEFAULT 0,"
+            + " next_retry_at DATETIME(3) NOT NULL, lease_owner VARCHAR(128) NULL, lease_until DATETIME(3) NULL,"
+            + " last_error VARCHAR(512) NULL, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL,"
+            + " published_at DATETIME(3) NULL, UNIQUE KEY uk_seckill_outbox_event(event_id),"
+            + " UNIQUE KEY uk_seckill_outbox_order(order_no),"
+            + " KEY idx_seckill_outbox_scan(status,next_retry_at,lease_until))");
+  }
+
+  /** 按用户和幂等键锁定全局秒杀受理记录。 */
+  public Map<String, Object> findSeckillByUserKeyForUpdate(long userId, String idempotencyKey) {
+    List<Map<String, Object>> rows = queryForList(
+        "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash"
+            + " FROM seckill_reservation WHERE user_id=? AND idempotency_key=? FOR UPDATE",
+        userId, idempotencyKey);
+    return rows.isEmpty() ? null : rows.get(0);
+  }
+
+  /** 按原订单号读取秒杀受理记录，供进程重启恢复。 */
+  public Map<String, Object> findSeckillByOrderNo(String orderNo) {
+    List<Map<String, Object>> rows = queryForList(
+        "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash"
+            + " FROM seckill_reservation WHERE order_no=?", orderNo);
+    return rows.isEmpty() ? null : rows.get(0);
+  }
+
+  /** 查询订单对应的秒杀 outbox 投递状态。 */
+  public Map<String, Object> findSeckillOutboxByOrderNo(String orderNo) {
+    List<Map<String, Object>> rows = queryForList(
+        "SELECT event_id,status,payload,request_hash FROM seckill_order_outbox WHERE order_no=?",
+        orderNo);
+    return rows.isEmpty() ? null : rows.get(0);
+  }
+
+  /** 读取进程中断后仍处于 PENDING 的秒杀受理记录。 */
+  public List<Map<String, Object>> findPendingSeckillReservations(int limit) {
+    return queryForList(
+        "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,updated_at"
+            + " FROM seckill_reservation WHERE status IN ('PENDING','UNKNOWN') ORDER BY updated_at,id LIMIT ?", limit);
+  }
+
+  /** 将长期缺少 Redis marker 的受理隔离为 UNKNOWN，避免恢复任务无限饥饿。 */
+  public int markSeckillUnknown(long userId, String idempotencyKey, String error, OffsetDateTime updatedAt) {
+    return update(
+        "UPDATE seckill_reservation SET status='UNKNOWN',last_error=?,updated_at=? WHERE user_id=?"
+            + " AND idempotency_key=? AND status='PENDING'", error, updatedAt, userId, idempotencyKey);
+  }
+
+  /** 首次受理前持久化完整请求载荷和哈希。 */
+  public int saveSeckillPending(
+      long activityId, long skuId, long userId, String orderNo, String idempotencyKey,
+      String requestPayload, String requestHash, OffsetDateTime occurredAt) {
+    return update(
+        "INSERT INTO seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?, 'PENDING',?,?,?,?)",
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), activityId, skuId, userId,
+        orderNo, idempotencyKey, requestPayload, requestHash, occurredAt, occurredAt);
+  }
+
+  /** 原子认领全局秒杀幂等键；重复请求保留首次订单号和载荷。 */
+  public int insertSeckillPendingIgnore(
+      long activityId, long skuId, long userId, String orderNo, String idempotencyKey,
+      String requestPayload, String requestHash, OffsetDateTime occurredAt) {
+    return update(
+        "INSERT IGNORE INTO seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_hash,request_payload,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?, 'PENDING',?,?,?,?)",
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), activityId, skuId, userId,
+        orderNo, idempotencyKey, requestHash, requestPayload, occurredAt, occurredAt);
+  }
+
+  /** 在 Redis 预扣成功后同事务写入 ACCEPTED 和 outbox。 */
+  public int acceptSeckillAndInsertOutbox(
+      long userId, String idempotencyKey, String orderNo, String eventId, String payload,
+      String requestHash, OffsetDateTime occurredAt) {
+    int accepted = update(
+        "UPDATE seckill_reservation SET status='ACCEPTED',updated_at=? WHERE user_id=?"
+            + " AND idempotency_key=? AND order_no=? AND status IN ('PENDING','UNKNOWN')",
+        occurredAt, userId, idempotencyKey, orderNo);
+    if (accepted != 1) return 0;
+    return update(
+        "INSERT INTO seckill_order_outbox(id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts,next_retry_at,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?, 'PENDING',0,?,?,?) ON DUPLICATE KEY UPDATE event_id=VALUES(event_id)",
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), eventId,
+        orderNo, idempotencyKey, payload, requestHash, occurredAt, occurredAt, occurredAt);
+  }
+
+  /** 进程在 Lua 后崩溃时补齐同一事件的 outbox。 */
+  public int insertSeckillOutboxIfAbsent(
+      String eventId, String orderNo, String idempotencyKey, String payload, String requestHash, OffsetDateTime occurredAt) {
+    return update(
+        "INSERT IGNORE INTO seckill_order_outbox(id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts,next_retry_at,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?, 'PENDING',0,?,?,?)",
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), eventId,
+        orderNo, idempotencyKey, payload, requestHash, occurredAt, occurredAt, occurredAt);
+  }
+
+  /** 读取可投递的秒杀 outbox。 */
+  public List<Map<String, Object>> findPendingSeckillOutbox(OffsetDateTime now, int limit) {
+    return queryForList(
+        "SELECT id,event_id,order_no,payload,request_hash,status,attempts FROM seckill_order_outbox"
+            + " WHERE status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
+            + " AND (lease_until IS NULL OR lease_until<?) ORDER BY id LIMIT ?", now, now, limit);
+  }
+
+  /** 以 CAS 方式认领 outbox，避免多实例重复发布。 */
+  public int claimSeckillOutbox(long id, String owner, OffsetDateTime leaseUntil, OffsetDateTime now) {
+    return update(
+        "UPDATE seckill_order_outbox SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
+            + " WHERE id=? AND status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
+            + " AND (lease_until IS NULL OR lease_until<?)", owner, leaseUntil, now, id, now, now);
+  }
+
+  /** publisher confirm 成功后结束该 eventId 的投递重试。 */
+  public int markSeckillOutboxPublished(String eventId, String owner, OffsetDateTime publishedAt) {
+    return update("UPDATE seckill_order_outbox SET status='PUBLISHED',published_at=?,lease_owner=NULL,lease_until=NULL,updated_at=? WHERE event_id=? AND lease_owner=?",
+        publishedAt, publishedAt, eventId, owner);
+  }
+
+  /** confirm 丢失或 returned 时保留同一 eventId 并退避重试。 */
+  public int recordSeckillOutboxFailure(String eventId, String owner, String error, OffsetDateTime nextRetryAt, OffsetDateTime updatedAt) {
+    return update("UPDATE seckill_order_outbox SET status=CASE WHEN attempts>=10 THEN 'DEAD' ELSE 'UNKNOWN' END,last_error=?,next_retry_at=?,lease_owner=NULL,lease_until=NULL,updated_at=? WHERE event_id=? AND lease_owner=?",
+        error, nextRetryAt, updatedAt, eventId, owner);
   }
 
   /** 查询仍处于预扣状态的普通库存流水。 */

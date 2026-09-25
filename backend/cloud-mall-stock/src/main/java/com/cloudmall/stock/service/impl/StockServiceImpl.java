@@ -3,6 +3,7 @@ package com.cloudmall.stock.service.impl;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
+import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
@@ -48,11 +49,6 @@ public class StockServiceImpl implements StockService {
           + " redis.call('DECR',KEYS[1]); redis.call('INCRBY',KEYS[2],1);"
           + " redis.call('EXPIRE',KEYS[2],ARGV[6]); redis.call('SET',KEYS[3],ARGV[1],'EX',ARGV[6]);"
           + " return 1";
-  private static final String SECKILL_ROLLBACK =
-      "if redis.call('EXISTS',KEYS[3])==0 then return 0 end; redis.call('INCRBY',KEYS[1],1); local"
-          + " used=tonumber(redis.call('GET',KEYS[2]) or '0'); if used<=1 then"
-          + " redis.call('DEL',KEYS[2]) else redis.call('DECR',KEYS[2]) end;"
-          + " redis.call('DEL',KEYS[3]); return 1";
 
   /** 保存 redis 的业务状态或配置。 */
   @Autowired private StringRedisTemplate redis;
@@ -69,9 +65,14 @@ public class StockServiceImpl implements StockService {
   /** 先于远程库存事务持久化订单号与规范化 SKU 快照。 */
   @Autowired private StockReservationRequestService reservationRequestService;
 
+  /** 将 Redis 预扣结果与 ACCEPTED/outbox 在同一本地事务中提交。 */
+  @Autowired private SeckillAcceptanceService seckillAcceptanceService;
+
+  /** 在独立事务中原子认领秒杀用户幂等键。 */
+  @Autowired private SeckillRequestClaimService seckillRequestClaimService;
+
   private final DefaultRedisScript<Long>
-      seckillScript = new DefaultRedisScript<>(SECKILL, Long.class),
-      seckillRollbackScript = new DefaultRedisScript<>(SECKILL_ROLLBACK, Long.class);
+      seckillScript = new DefaultRedisScript<>(SECKILL, Long.class);
 
   /** 创建由 Spring 字段注入依赖的库存服务实例。 */
   public StockServiceImpl() {}
@@ -89,6 +90,8 @@ public class StockServiceImpl implements StockService {
     this.stockSqlMapper = stockSqlMapper;
     this.rabbit = rabbit;
     this.mapper = mapper;
+    this.seckillAcceptanceService = new SeckillAcceptanceService(stockSqlMapper);
+    this.seckillRequestClaimService = new SeckillRequestClaimService(stockSqlMapper);
   }
 
   @GetMapping("/skus/{skuId}")
@@ -378,6 +381,30 @@ public class StockServiceImpl implements StockService {
       throw new BizException(ErrorCodes.INVALID, "秒杀参数不完整", 400);
     if (!String.valueOf(userId).equals(requestUserId))
       throw new BizException(ErrorCodes.FORBIDDEN, "秒杀用户归属校验失败", 403);
+    String requestHash;
+    try {
+      requestHash = SeckillRequestFingerprint.hash(
+          request.activityId, request.skuId, userId, 1, request.addressSnapshot);
+    } catch (IllegalArgumentException invalidFingerprint) {
+      throw new BizException(ErrorCodes.INVALID, invalidFingerprint.getMessage(), 400);
+    }
+    String candidateOrderNo = now().format(DateTimeFormatter.ofPattern("yyyyMM"))
+        + UUID.randomUUID().toString().replace("-", "");
+    String requestPayload = toSeckillPayload(request, candidateOrderNo);
+    Map<String, Object> claimed = seckillRequestClaimService.claim(
+        request.activityId, request.skuId, userId, candidateOrderNo, request.idempotencyKey,
+        requestPayload, requestHash, now());
+    if (!requestHash.equals(String.valueOf(claimed.get("request_hash"))))
+      throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
+    String orderNo = String.valueOf(claimed.get("order_no"));
+    String claimedStatus = String.valueOf(claimed.get("status"));
+    if ("ACCEPTED".equals(claimedStatus)) {
+      return acceptedOrRecovering(claimed, orderNo, requestHash);
+    }
+    if ("REJECTED".equals(claimedStatus)) {
+      return ApiResponse.ok(Map.of("accepted", false, "orderNo", orderNo, "eventId",
+          SeckillRequestFingerprint.eventId(orderNo), "reservationStatus", claimedStatus));
+    }
     Map<Object, Object> meta =
         redis.opsForHash().entries("seckill:meta:" + activityId + ":" + skuId);
     long start = epoch(meta.get("startAt")), end = epoch(meta.get("endAt"));
@@ -392,12 +419,7 @@ public class StockServiceImpl implements StockService {
                 + ":"
                 + requestUserId
                 + ":"
-                + idempotencyKey,
-        orderNo =
-            now().format(DateTimeFormatter.ofPattern("yyyyMM"))
-                + UUID.randomUUID().toString().replace("-", "");
-    recordSeckillPending(
-        Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey, orderNo);
+                + idempotencyKey;
     List<String> keys =
         List.of(
             "seckill:stock:" + activityId + ":" + skuId,
@@ -414,10 +436,9 @@ public class StockServiceImpl implements StockService {
             String.valueOf(end),
             String.valueOf(ttl));
     if (Objects.equals(result, 3L)) {
-      String existing = redis.opsForValue().get(orderKey);
-      markSeckillAccepted(
-          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
-      return accepted(existing);
+      String existingOrderNo = redis.opsForValue().get(orderKey);
+      return acceptAfterLua(
+          userId, idempotencyKey, existingOrderNo, requestPayload, requestHash);
     }
     if (Objects.equals(result, 2L)) {
       markSeckillRejected(
@@ -440,45 +461,19 @@ public class StockServiceImpl implements StockService {
       throw new BizException("SECKILL_SOLD_OUT", "秒杀库存耗尽", 409);
     }
     String no = redis.opsForValue().get(orderKey);
-    try {
-      rabbit.convertAndSend(
-          "cloudmall.seckill.order.exchange",
-          "",
-          Map.of(
-              "eventType",
-              "SECKILL_ORDER_ACCEPTED",
-              "orderNo",
-              no,
-              "activityId",
-              Long.valueOf(activityId),
-              "skuId",
-              Long.valueOf(skuId),
-              "userId",
-              userId,
-              "idempotencyKey",
-              idempotencyKey,
-              "addressSnapshot",
-              request.addressSnapshot,
-              "occurredAt",
-              now().toString()));
-    } catch (Exception e) {
-      redis.execute(seckillRollbackScript, keys);
-      markSeckillRejected(
-          Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
-      throw new BizException(ErrorCodes.INTERNAL, "秒杀订单入队失败", 500);
-    }
-    markSeckillAccepted(Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
-    return accepted(no);
+    return acceptAfterLua(userId, idempotencyKey, no, requestPayload, requestHash);
   }
 
   /** 执行 recordSeckillPending 相关操作。 */
   private void recordSeckillPending(
-      long activityId, long skuId, long userId, String idempotencyKey, String orderNo) {
+      long activityId, long skuId, long userId, String idempotencyKey, String orderNo,
+      String requestPayload, String requestHash) {
     // 1. 接收并整理 recordSeckillPending 的业务请求。
     // 2. 执行 recordSeckillPending 的核心业务校验与状态处理。
     // 3. 返回 recordSeckillPending 的处理结果。
     OffsetDateTime now = now();
-    stockSqlMapper.saveSeckillPending(activityId, skuId, userId, orderNo, idempotencyKey, now);
+    stockSqlMapper.saveSeckillPending(
+        activityId, skuId, userId, orderNo, idempotencyKey, requestPayload, requestHash, now);
   }
 
   /** 执行 markSeckillAccepted 相关操作。 */
@@ -500,11 +495,117 @@ public class StockServiceImpl implements StockService {
   }
 
   /** 执行 accepted 相关操作。 */
-  private ApiResponse<?> accepted(String no) {
+  private ApiResponse<?> accepted(String no, String reservationStatus, String eventId) {
     // 1. 接收并整理 accepted 的业务请求。
     // 2. 执行 accepted 的核心业务校验与状态处理。
     // 3. 返回 accepted 的处理结果。
-    return ApiResponse.ok(Map.of("accepted", true, "orderNo", no, "status", "PENDING_PAYMENT"));
+    return ApiResponse.ok(Map.of("accepted", true, "orderNo", no, "eventId", eventId,
+        "reservationStatus", reservationStatus, "status", "PENDING_PAYMENT"));
+  }
+
+  /** 旧版 ACCEPTED 记录必须先确认同一 eventId 的 outbox 已持久化。 */
+  private ApiResponse<?> acceptedOrRecovering(
+      Map<String, Object> claimed, String orderNo, String requestHash) {
+    String eventId = SeckillRequestFingerprint.eventId(orderNo);
+    try {
+      Map<String, Object> outbox = stockSqlMapper.findSeckillOutboxByOrderNo(orderNo);
+      if (outbox != null) {
+        if (!eventId.equals(String.valueOf(outbox.get("event_id")))
+            || !requestHash.equals(String.valueOf(outbox.get("request_hash")))) {
+          return recoveryRequired(orderNo, eventId, "SECKILL_OUTBOX_EVENT_CONFLICT");
+        }
+        return accepted(orderNo, "ACCEPTED", eventId);
+      }
+      String payload = String.valueOf(claimed.get("request_payload"));
+      if (payload.isBlank() || "null".equals(payload)) {
+        return recoveryRequired(orderNo, eventId, "SECKILL_ACCEPTED_PAYLOAD_MISSING");
+      }
+      Map<String, Object> parsed =
+          mapper.readValue(payload, new com.fasterxml.jackson.core.type.TypeReference<>() {});
+      if (!orderNo.equals(String.valueOf(parsed.get("orderNo")))) {
+        return recoveryRequired(orderNo, eventId, "SECKILL_ACCEPTED_PAYLOAD_CONFLICT");
+      }
+      if (!requestHash.equals(String.valueOf(claimed.get("request_hash")))) {
+        return recoveryRequired(orderNo, eventId, "SECKILL_ACCEPTED_HASH_CONFLICT");
+      }
+      if (stockSqlMapper.insertSeckillOutboxIfAbsent(
+              eventId,
+              orderNo,
+              String.valueOf(claimed.get("idempotency_key")),
+              payload,
+              requestHash,
+              now())
+          != 1) {
+        return recoveryRequired(orderNo, eventId, "SECKILL_OUTBOX_RECOVERY_PENDING");
+      }
+      return accepted(orderNo, "ACCEPTED", eventId);
+    } catch (Exception recoveryFailure) {
+      log.warn("旧版 ACCEPTED 秒杀记录无法恢复 outbox，orderNo={}", orderNo, recoveryFailure);
+      return recoveryRequired(orderNo, eventId, "SECKILL_OUTBOX_RECOVERY_PENDING");
+    }
+  }
+
+  private ApiResponse<?> recoveryRequired(String orderNo, String eventId, String reason) {
+    return ApiResponse.ok(
+        Map.of(
+            "accepted", false,
+            "orderNo", orderNo,
+            "eventId", eventId,
+            "reservationStatus", "RECOVERY_REQUIRED",
+            "status", "ORDER_RECOVERY_PENDING",
+            "reason", reason));
+  }
+
+  /** 在 Redis Lua 成功后以同一 eventId 提交受理台账和 outbox。 */
+  private ApiResponse<?> acceptAfterLua(
+      long userId, String idempotencyKey, String orderNo, String payload, String requestHash) {
+    try {
+      String eventId = SeckillRequestFingerprint.eventId(orderNo);
+      seckillAcceptanceService.accept(
+          userId, idempotencyKey, orderNo, eventId, payload, requestHash, now());
+      return accepted(orderNo, "ACCEPTED", eventId);
+    } catch (RuntimeException persistenceFailure) {
+      // acceptance 失败可能只是事务响应丢失；先读取 durable 事实，禁止盲目回补并发请求已扣的配额。
+      try {
+        Map<String, Object> reservation = stockSqlMapper.findSeckillByOrderNo(orderNo);
+        Map<String, Object> outbox = stockSqlMapper.findSeckillOutboxByOrderNo(orderNo);
+        String eventId = SeckillRequestFingerprint.eventId(orderNo);
+        if (reservation != null
+            && "ACCEPTED".equals(String.valueOf(reservation.get("status")))
+            && outbox != null
+            && eventId.equals(String.valueOf(outbox.get("event_id")))
+            && requestHash.equals(String.valueOf(outbox.get("request_hash")))) {
+          return accepted(orderNo, "ACCEPTED", eventId);
+        }
+      } catch (RuntimeException durableLookupFailure) {
+        log.warn("秒杀受理结果查询失败，保留 Redis marker 等待恢复，orderNo={}", orderNo, durableLookupFailure);
+      }
+      try {
+        stockSqlMapper.markSeckillUnknown(
+            userId, idempotencyKey, "ACCEPTANCE_RESULT_UNKNOWN_REDIS_MARKER_RETAINED", now());
+      } catch (RuntimeException ledgerFailure) {
+        log.error("秒杀未知受理结果无法写入台账，orderNo={}", orderNo, ledgerFailure);
+      }
+      return recoveryRequired(
+          orderNo, SeckillRequestFingerprint.eventId(orderNo), "SECKILL_ACCEPTANCE_RESULT_UNKNOWN");
+    }
+  }
+
+  /** 保存可在进程重启后重建事件的完整受理载荷。 */
+  private String toSeckillPayload(SeckillReservationDTO request, String orderNo) {
+    try {
+      Map<String, Object> payload = new LinkedHashMap<>();
+      payload.put("activityId", request.activityId);
+      payload.put("skuId", request.skuId);
+      payload.put("userId", request.userId);
+      payload.put("quantity", 1);
+      payload.put("idempotencyKey", request.idempotencyKey);
+      payload.put("addressSnapshot", request.addressSnapshot);
+      payload.put("orderNo", orderNo);
+      return mapper.writeValueAsString(payload);
+    } catch (com.fasterxml.jackson.core.JsonProcessingException serializationFailure) {
+      throw new BizException(ErrorCodes.INVALID, "秒杀请求无法序列化", 400);
+    }
   }
 
   /** 读取 durable stock_flow 中指定订单的预扣快照，阻止 Redis 标记丢失后的重复预扣。 */
