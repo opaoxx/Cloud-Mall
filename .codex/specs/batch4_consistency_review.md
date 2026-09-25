@@ -41,9 +41,9 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 
 ### 死信自动恢复
 
-订单服务的 DLQ consumer 必须先在 `seckill_message_recovery` 写入唯一 `eventId`、原始 payload 和请求哈希，再确认 RabbitMQ 死信消息。replayer 使用数据库租约认领 `REPLAY_PENDING`，以原 `eventId` 和原 payload 投递回主交换机；重放成功后由正常消费者将记录标记 `RESOLVED`。重放次数、下次时间和最后错误持久化，采用有上限间隔的持续退避；超过告警阈值仅增加告警，不停止自动重放。事件载荷无法解析或同一幂等键出现不可变哈希冲突时进入 `CONFLICT`，人工处理并保留原消息证据。
+订单服务的 DLQ consumer 必须先在 `seckill_message_recovery` 写入唯一 `eventId`、原始 payload 和请求哈希，再确认 RabbitMQ 死信消息。replayer 使用数据库租约认领 `VERIFYING`/`REPLAY_PENDING`：先通过 stock 只读 reservation 验真接口并带 `X-Internal-Service: cloud-mall-order`。只有返回 `ACCEPTED`、`PUBLISHED` 或 `ORDER_CREATED` 才转为 `REPLAY_PENDING`，以原 `eventId` 和原 payload 投递回主交换机；成功消费后由正常消费者将记录标记 `RESOLVED`。返回 `NOT_FOUND`/`REJECTED` 转为 `QUARANTINED` 并持续核验，查询未知保持 `VERIFYING` 并退避重试，均不得创建订单或丢弃消息。重放次数、下次时间和最后错误持久化，采用有上限间隔的持续退避；超过告警阈值仅增加告警，不停止自动重放。事件载荷无法解析或同一幂等键出现不可变哈希冲突时进入 `CONFLICT`，人工处理并保留原消息证据。
 
-现有 8 条无 `eventId` 的 DLQ 消息必须先导入 `seckill_message_recovery` 再重放。已知历史版本 `eventType=SECKILL_ORDER_ACCEPTED` 的消息若包含 `orderNo`、`activityId`、`skuId`、`userId`、`idempotencyKey`，但缺少 `addressSnapshot`，按旧 OrderService 契约补为 `{}`，生成 `legacy-seckill:{orderNo}`，并用补全后的规范化载荷计算 `requestHash`，标记 `payloadVersion=0` 后自动重放。一般旧消息生成规则固定为：有 `orderNo` 使用 `legacy-seckill:{orderNo}`；没有订单号但有 `userId + idempotencyKey` 使用 `legacy-seckill:key:{userId}:{idempotencyKey}`；两者都没有则对完整规范化原始载荷使用 `legacy-seckill:hash:{sha256}`。禁止使用 RabbitMQ delivery tag、消费时间或随机 UUID。只有 `orderNo/activityId/skuId/userId/idempotencyKey` 缺失、格式非法或无法形成稳定不可变载荷时标记 `CONFLICT`；已知旧版缺失地址不属于冲突，可自动兼容重放。
+现有 8 条无 `eventId` 的 DLQ 消息必须先导入 `seckill_message_recovery` 再核验，不得直接重放。已知历史版本 `eventType=SECKILL_ORDER_ACCEPTED` 的消息若包含 `orderNo`、`activityId`、`skuId`、`userId`、`idempotencyKey`，但缺少 `addressSnapshot`，按旧 OrderService 契约补为 `{}`，生成 `legacy-seckill:{orderNo}`，并用补全后的规范化载荷计算 `requestHash`，标记 `payloadVersion=0`；只有 stock reservation 验真返回 `ACCEPTED/PUBLISHED/ORDER_CREATED` 才自动重放。若 stock 中无对应记录（当前 8 条消息的情况），标记 `QUARANTINED` 并保留消息，持续核验，不创建幽灵订单。一般旧消息生成规则固定为：有 `orderNo` 使用 `legacy-seckill:{orderNo}`；没有订单号但有 `userId + idempotencyKey` 使用 `legacy-seckill:key:{userId}:{idempotencyKey}`；两者都没有则对完整规范化原始载荷使用 `legacy-seckill:hash:{sha256}`。禁止使用 RabbitMQ delivery tag、消费时间或随机 UUID。只有 `orderNo/activityId/skuId/userId/idempotencyKey` 缺失、格式非法或无法形成稳定不可变载荷时标记 `CONFLICT`；已知旧版缺失地址不属于冲突，但没有 stock 受理事实时不能自动重放。
 
 ## CM-20260924-08：并发消费和载荷冲突
 
@@ -84,6 +84,7 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 5. RabbitMQ 或商品服务停止超过告警阈值后恢复：所有可解析且无哈希冲突的 accepted 请求最终自动恢复为订单；`DEAD` 只表示告警，不得成为永久停重试状态。
 6. 导入现存 8 条无 `eventId` DLQ 消息：每条生成稳定 legacy eventId，重复导入不新增记录；可解析记录自动重放，无法形成稳定载荷的记录进入 `CONFLICT`。
 7. 秒杀消息成功消费后模拟订单事务提交：同一事务可见订单、`seckill_order_dedup=COMMITTED` 和 `order_outbox(ORDER_TIMEOUT)`；故障注入删除/遗漏 outbox 时，恢复任务按原订单号补建超时事件，不创建第二个订单。
+8. 对现存 8 条旧 DLQ 消息执行 stock reservation 验真：无 `seckill_reservation` 的消息全部进入 `QUARANTINED`，不创建订单、不丢消息；后续核验发现 `ACCEPTED/PUBLISHED/ORDER_CREATED` 后才允许使用原 eventId 重放。
 
 ### 幂等和冲突
 

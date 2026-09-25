@@ -193,6 +193,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | POST | `/api/seckill/activities/{activityId}/publish` | 无 | 预热 Redis 并发布 |
 | POST | `/api/seckill/activities/{activityId}/start` | 无 | 管理员手动开始；活动时间窗口同时决定有效状态 |
 | POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 受 Sentinel 保护的秒杀入口；返回 `{accepted,reservationStatus,orderNo,eventId}`，仅在 Redis 预扣和秒杀 outbox 已持久化后返回 `accepted=true`，不代表订单已落库 |
+| GET | `/api/internal/stock/seckill/reservations/{orderNo}` | Header `X-Internal-Service: cloud-mall-order` | 仅供 order DLQ recovery 通过内部 Feign 调用，Gateway 不路由、前端不可访问；返回 `{orderNo,eventId,reservationStatus,requestHash}`，只读验真，不改变库存 |
 
 ## 11. 错误码
 
@@ -231,6 +232,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `SECKILL_IDEMPOTENCY_CONFLICT` | 同一用户跨活动幂等键对应不同请求载荷 | 409 |
 | `SECKILL_DELIVERY_UNKNOWN` | 秒杀事件已持久化但投递结果未知 | 202 |
 | `SECKILL_ORDER_RECOVERY_PENDING` | 秒杀订单进入死信恢复 | 202 |
+| `SECKILL_RESERVATION_NOT_VERIFIED` | 秒杀受理事实不存在或暂时无法确认 | 202 |
 | `GATEWAY_RATE_LIMITED` | 网关/Sentinel 限流 | 429 |
 | `GATEWAY_SERVICE_UNAVAILABLE` | 服务熔断/降级 | 500 |
 | `COMMON_INTERNAL_ERROR` | 未预期服务错误 | 500 |

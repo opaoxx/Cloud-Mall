@@ -200,7 +200,7 @@
 | `event_id` | VARCHAR(128) UNIQUE NOT NULL | 原事件 ID |
 | `payload` | JSON NOT NULL | 原始 envelope |
 | `request_hash` | CHAR(64) NOT NULL | 规范化载荷哈希 |
-| `status` | VARCHAR(16) NOT NULL | `DEAD`/`REPLAY_PENDING`/`REPLAYING`/`RESOLVED`/`CONFLICT`；`DEAD` 仅表示达到告警阈值，仍可重试 |
+| `status` | VARCHAR(16) NOT NULL | `DEAD`/`VERIFYING`/`REPLAY_PENDING`/`REPLAYING`/`RESOLVED`/`QUARANTINED`/`CONFLICT`；`DEAD` 仅表示达到告警阈值，仍可重试 |
 | `attempts` | INT NOT NULL DEFAULT 0 | 重放次数 |
 | `next_retry_at` | DATETIME(3) NOT NULL | 下次重放时间 |
 | `lease_owner` | VARCHAR(128) | 当前重放任务实例 |
@@ -208,7 +208,7 @@
 | `last_error` | VARCHAR(512) | 最近错误 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 
-DLQ consumer 先写入该表再确认死信消息；replayer 使用原 `eventId` 和原 payload 发布，成功消费后标记 `RESOLVED`。同键不同哈希标记 `CONFLICT` 并告警，不自动重放。
+DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GET /api/internal/stock/seckill/reservations/{orderNo}` 验证 stock 的持久受理状态，再决定重放。只有 `ACCEPTED`、`PUBLISHED` 或 `ORDER_CREATED` 才能进入 `REPLAY_PENDING` 并使用原 `eventId`/payload 发布；`NOT_FOUND`/`REJECTED` 标记 `QUARANTINED` 并持续核验，查询未知标记 `VERIFYING` 并退避重试，均不得创建订单或丢弃消息。同键不同哈希标记 `CONFLICT` 并告警，不自动重放。
 
 ## 6. 库存域表
 
