@@ -20,6 +20,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.domain.po.OrderPO;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
@@ -265,6 +266,40 @@ class OrderFailureHandlingTest {
     verify(orderSqlMapper, never()).updateStatus(anyString(), anyString(), anyString(), anyString(), any());
   }
 
+  @Test
+  void legacyCancelledOrderWithConfirmedStockCannotAuthorizeRefund() {
+    String orderNo = "202609legacyconflict";
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    StockClient stockClient = mock(StockClient.class);
+    orderWithStatus(orderSqlMapper, orderNo, "CANCELLED");
+    StockReservationStatusVO stockStatus = new StockReservationStatusVO();
+    stockStatus.status = "CONFIRMED";
+    when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(stockStatus));
+    OrderServiceImpl orderService =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
+
+    ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
+
+    assertEquals("CONFLICT", ((Map<?, ?>) response.data).get("stockActionStatus"));
+  }
+
+  @Test
+  void legacyPaidOrderNeedsConfirmedStockBeforeReportingSettlement() {
+    String orderNo = "202609legacypaid";
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    StockClient stockClient = mock(StockClient.class);
+    orderWithStatus(orderSqlMapper, orderNo, "PAID");
+    StockReservationStatusVO stockStatus = new StockReservationStatusVO();
+    stockStatus.status = "CONFIRMED";
+    when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(stockStatus));
+    OrderServiceImpl orderService =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
+
+    ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
+
+    assertEquals("SUCCEEDED", ((Map<?, ?>) response.data).get("stockActionStatus"));
+  }
+
   private static Message message(String payload) {
     return new Message(payload.getBytes(StandardCharsets.UTF_8), new MessageProperties());
   }
@@ -306,13 +341,18 @@ class OrderFailureHandlingTest {
   }
 
   private static void pendingOrder(OrderSqlMapper orderSqlMapper, String orderNo) {
+    orderWithStatus(orderSqlMapper, orderNo, "PENDING_PAYMENT");
+  }
+
+  private static void orderWithStatus(
+      OrderSqlMapper orderSqlMapper, String orderNo, String status) {
     when(orderSqlMapper.findOrder(anyString(), eq(orderNo)))
         .thenReturn(
             List.of(
                 Map.of(
                     "order_no", orderNo,
                     "user_id", 8L,
-                    "status", "PENDING_PAYMENT",
+                    "status", status,
                     "total_amount", new BigDecimal("12.30"),
                     "pay_amount", new BigDecimal("12.30"),
                     "address_snapshot", "{}")));

@@ -307,7 +307,7 @@ public class OrderServiceImpl implements OrderService {
     // 3. 只返回支付恢复所需的稳定字段。
     String actionStatus = orderStockActionMapper.statusForOrder(orderNo);
     if (actionStatus == null)
-      actionStatus = "PENDING_PAYMENT".equals(order.status) ? "NONE" : "SUCCEEDED";
+      actionStatus = legacyStockActionStatus(order);
     return ApiResponse.ok(
         Map.of(
             "orderNo", order.orderNo,
@@ -315,6 +315,28 @@ public class OrderServiceImpl implements OrderService {
             "payAmount", order.payAmount,
             "userId", order.userId,
             "stockActionStatus", actionStatus));
+  }
+
+  /** 存量终态无动作行时，必须用库存持久事实确认，不能把旧异常订单视为已结清。 */
+  private String legacyStockActionStatus(OrderVO order) {
+    // 1. 待支付订单尚未产生最终库存动作。
+    if ("PENDING_PAYMENT".equals(order.status)) return "NONE";
+    // 2. 按订单终态确定允许结清的库存终态及相反状态。
+    String expected = "CANCELLED".equals(order.status) ? "ROLLED_BACK" : "CONFIRMED";
+    String opposite = "CANCELLED".equals(order.status) ? "CONFIRMED" : "ROLLED_BACK";
+    try {
+      // 3. 只读取库存持久事实；旧记录缺失或服务不可用时保持未知。
+      ApiResponse<com.cloudmall.order.domain.vo.StockReservationStatusVO> response =
+          stock.reservation(order.orderNo);
+      if (response == null || !"0".equals(response.code) || response.data == null)
+        return "UNKNOWN";
+      if (expected.equals(response.data.status)) return "SUCCEEDED";
+      if (opposite.equals(response.data.status) || "REJECTED".equals(response.data.status))
+        return "CONFLICT";
+      return "UNKNOWN";
+    } catch (RuntimeException stockQueryFailure) {
+      return "UNKNOWN";
+    }
   }
 
   @Transactional
