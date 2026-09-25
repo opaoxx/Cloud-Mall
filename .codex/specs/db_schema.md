@@ -298,7 +298,7 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 | `last_error` | VARCHAR(512) | 最近错误 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 
-唯一约束：`uk_seckill_request(user_id,idempotency_key)`、`uk_seckill_order(order_no)`，并建立 `idx_seckill_activity_sku(activity_id,sku_id,status)`。同一用户同一幂等键跨活动也必须比较 `request_hash`：同哈希返回原 `order_no`，不同哈希返回 `SECKILL_IDEMPOTENCY_CONFLICT`，不得改订单号、重复扣 Redis 或发布新事件。迁移现有按活动分组的唯一约束前，必须审计跨活动重复键；保留最早原 `order_no`，冲突行标记 `CONFLICT` 并告警，不得静默生成新订单。`ACCEPTED` 只表示 Redis 预扣成功且 outbox 已持久化，不代表订单已落库。
+唯一约束：`uk_seckill_global_request(user_id,idempotency_key)`、`uk_seckill_order(order_no)`，并建立 `idx_seckill_activity_sku(activity_id,sku_id,status)`。同一用户同一幂等键跨活动也必须比较 `request_hash`：同哈希返回原 `order_no`，不同哈希返回 `SECKILL_IDEMPOTENCY_CONFLICT`，不得改订单号、重复扣 Redis 或发布新事件。迁移现有按活动分组的唯一约束前，必须审计跨活动重复键；保留最早原 `order_no`，冲突行标记 `CONFLICT` 并告警，不得静默生成新订单。`ACCEPTED` 只表示 Redis 预扣成功且 outbox 已持久化，不代表订单已落库。
 
 ### 6.5 `seckill_order_outbox`
 
@@ -321,7 +321,7 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 | `published_at` | DATETIME(3) | publisher confirm 时间 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 
-索引：`idx_seckill_outbox_retry(status,next_retry_at,lease_until)`。dispatcher 先以 `status IN (PENDING,UNKNOWN,DEAD)`、`next_retry_at<=now` 且租约为空/已过期为条件，CAS 写入 `lease_owner` 和 `lease_until` 认领记录；发布前后都不得处理不再持有的租约。dispatcher 检查 returned message 并等待 publisher confirm；成功标记 `PUBLISHED` 并清空租约，连接/确认结果未知保持 `UNKNOWN` 并用同一 `eventId` 重试。达到告警阈值后可标记 `DEAD` 并告警，但 `DEAD` 仍参与持续退避扫描，不能停止重试、删除受理台账或直接把 Redis 预扣当作订单成功。只有不可解析或不可变载荷冲突才进入不可自动恢复的 `CONFLICT`。
+索引：`idx_seckill_outbox_scan(status,next_retry_at,lease_until)`。dispatcher 先以 `status IN (PENDING,UNKNOWN,DEAD)`、`next_retry_at<=now` 且租约为空/已过期为条件，CAS 写入 `lease_owner` 和 `lease_until` 认领记录；发布前后都不得处理不再持有的租约。dispatcher 检查 returned message 并等待 publisher confirm；成功标记 `PUBLISHED` 并清空租约，连接/确认结果未知保持 `UNKNOWN` 并用同一 `eventId` 重试。达到告警阈值后可标记 `DEAD` 并告警，但 `DEAD` 仍参与持续退避扫描，不能停止重试、删除受理台账或直接把 Redis 预扣当作订单成功。只有不可解析或不可变载荷冲突才进入不可自动恢复的 `CONFLICT`。
 
 ## 7. 支付域表
 
