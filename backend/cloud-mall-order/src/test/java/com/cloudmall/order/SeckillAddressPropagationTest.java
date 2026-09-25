@@ -2,6 +2,7 @@ package com.cloudmall.order;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -12,12 +13,17 @@ import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
+import com.cloudmall.order.mapper.OrderOutboxMapper;
+import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
+import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
+import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class SeckillAddressPropagationTest {
   @Test
@@ -38,10 +44,24 @@ class SeckillAddressPropagationTest {
             mock(CartClient.class),
             orderSqlMapper,
             new ObjectMapper());
+    OrderOutboxMapper outboxMapper = mock(OrderOutboxMapper.class);
+    SeckillOrderDedupMapper dedupMapper = mock(SeckillOrderDedupMapper.class);
+    SeckillMessageRecoveryMapper recoveryMapper = mock(SeckillMessageRecoveryMapper.class);
+    when(dedupMapper.claim(anyLong(), anyLong(), anyString(), anyString(), anyString(), anyString(), any()))
+        .thenReturn(1);
+    ReflectionTestUtils.setField(service, "orderOutboxMapper", outboxMapper);
+    ReflectionTestUtils.setField(service, "seckillOrderDedupMapper", dedupMapper);
+    ReflectionTestUtils.setField(service, "seckillMessageRecoveryMapper", recoveryMapper);
+    String requestHash = SeckillRequestFingerprint.hash(11L, 7L, 8L, 1,
+        "{\"receiver\":\"小明\",\"phone\":\"13800138000\",\"detailAddress\":\"云购路1号\"}");
     service.consumeSeckill(
         Map.of(
             "orderNo", "20260914-seckill-1",
+            "eventId", "event-1",
+            "eventType", "SECKILL_ORDER_REQUEST",
+            "activityId", 11L,
             "idempotencyKey", "request-1",
+            "requestHash", requestHash,
             "skuId", 7L,
             "userId", 8L,
             "addressSnapshot",
@@ -54,5 +74,6 @@ class SeckillAddressPropagationTest {
     org.junit.jupiter.api.Assertions.assertEquals(
         "{\"receiver\":\"小明\",\"phone\":\"13800138000\",\"detailAddress\":\"云购路1号\"}",
         captor.getValue().addressSnapshot);
+    verify(outboxMapper).insert(any());
   }
 }

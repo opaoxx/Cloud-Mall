@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 
 @FeignClient(name = "cloud-mall-stock")
 public interface StockClient {
@@ -39,6 +40,12 @@ public interface StockClient {
 
   @PostMapping("/api/stock/seckill/reservations")
   ApiResponse<?> seckill(@RequestBody Map<String, Object> request);
+
+  /** 只读核对秒杀受理台账，供订单死信恢复确认库存事实。 */
+  @GetMapping("/api/internal/stock/seckill/reservations/{orderNo}")
+  ApiResponse<Map<String, Object>> seckillReservationFact(
+      @PathVariable("orderNo") String orderNo,
+      @RequestHeader("X-Internal-Service") String internalService);
 
   record Reservation(String orderNo, List<Line> items, String scene) {}
 

@@ -3,6 +3,8 @@ package com.cloudmall.order.config;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
+import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
+import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import javax.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
 
@@ -18,14 +20,22 @@ public class OrderReliabilityTableInitializer {
   /** 支付或关单后的库存动作持久层。 */
   private final OrderStockActionMapper orderStockActionMapper;
 
+  private final SeckillOrderDedupMapper seckillOrderDedupMapper;
+
+  private final SeckillMessageRecoveryMapper seckillMessageRecoveryMapper;
+
   /** 创建可靠性交付建表器。 */
   public OrderReliabilityTableInitializer(
       OrderReservationIntentMapper reservationIntentMapper,
       OrderOutboxMapper orderOutboxMapper,
-      OrderStockActionMapper orderStockActionMapper) {
+      OrderStockActionMapper orderStockActionMapper,
+      SeckillOrderDedupMapper seckillOrderDedupMapper,
+      SeckillMessageRecoveryMapper seckillMessageRecoveryMapper) {
     this.reservationIntentMapper = reservationIntentMapper;
     this.orderOutboxMapper = orderOutboxMapper;
     this.orderStockActionMapper = orderStockActionMapper;
+    this.seckillOrderDedupMapper = seckillOrderDedupMapper;
+    this.seckillMessageRecoveryMapper = seckillMessageRecoveryMapper;
   }
 
   /** 以幂等 DDL 准备两张订单可靠性表。 */
@@ -37,5 +47,7 @@ public class OrderReliabilityTableInitializer {
     orderOutboxMapper.ensureTable();
     // 3. 准备订单终态后的库存动作恢复表。
     orderStockActionMapper.ensureTable();
+    seckillOrderDedupMapper.ensureTable();
+    seckillMessageRecoveryMapper.ensureTable();
   }
 }

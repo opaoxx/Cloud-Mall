@@ -6,6 +6,9 @@ import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -37,6 +40,13 @@ public class OrderMessagingConfiguration {
 
   /** 保存 SECKILL_DLQ 的业务状态或配置。 */
   public static final String SECKILL_DLQ = "cloudmall.seckill.order.dlx";
+
+  /** DB 不可用时的有界延迟重入交换机。 */
+  public static final String SECKILL_DLQ_RETRY_EXCHANGE =
+      "cloudmall.seckill.order.dlx.retry.exchange";
+
+  /** DB 不可用时的有界延迟重入队列。 */
+  public static final String SECKILL_DLQ_RETRY_QUEUE = "cloudmall.seckill.order.dlx.retry";
 
   @Bean
   Jackson2JsonMessageConverter rabbitJsonMessageConverter() {
@@ -102,5 +112,37 @@ public class OrderMessagingConfiguration {
   @Bean
   Binding seckillDeadLetterBinding() {
     return BindingBuilder.bind(seckillDeadLetterQueue()).to(seckillDlx()).with("");
+  }
+
+  @Bean
+  DirectExchange seckillDlqRetryExchange() {
+    return new DirectExchange(SECKILL_DLQ_RETRY_EXCHANGE);
+  }
+
+  @Bean
+  Queue seckillDlqRetryQueue() {
+    return new Queue(
+        SECKILL_DLQ_RETRY_QUEUE,
+        true,
+        false,
+        false,
+        Map.of(
+            "x-message-ttl", 10000,
+            "x-dead-letter-exchange", SECKILL_DLX));
+  }
+
+  @Bean
+  Binding seckillDlqRetryBinding() {
+    return BindingBuilder.bind(seckillDlqRetryQueue()).to(seckillDlqRetryExchange()).with("");
+  }
+
+  /** 死信落库使用手动确认，数据库失败时由恢复队列延迟重入，避免丢消息或热循环。 */
+  @Bean("seckillDlqContainerFactory")
+  SimpleRabbitListenerContainerFactory seckillDlqContainerFactory(ConnectionFactory connectionFactory) {
+    SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(connectionFactory);
+    factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+    factory.setDefaultRequeueRejected(false);
+    return factory;
   }
 }

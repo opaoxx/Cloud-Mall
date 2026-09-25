@@ -3,6 +3,7 @@ package com.cloudmall.order.service.impl;
 import com.cloudmall.common.api.*;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
+import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
@@ -22,6 +23,8 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
+import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
+import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -73,6 +76,12 @@ public class OrderServiceImpl implements OrderService {
 
   /** 与订单终态在同一事务提交的库存动作持久层。 */
   @Autowired private OrderStockActionMapper orderStockActionMapper;
+
+  /** 秒杀消费侧独立幂等记录。 */
+  @Autowired private SeckillOrderDedupMapper seckillOrderDedupMapper;
+
+  /** 秒杀死信恢复记录。 */
+  @Autowired private SeckillMessageRecoveryMapper seckillMessageRecoveryMapper;
 
   /** 创建由 Spring 字段注入依赖的订单服务实例。 */
   public OrderServiceImpl() {}
@@ -416,9 +425,21 @@ public class OrderServiceImpl implements OrderService {
     } catch (FeignException exception) {
       if (exception.status() == 429)
         throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
+      if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(remoteCode(exception)))
+        throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
       if (exception.status() == 409)
         throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
       throw new BizException(ErrorCodes.INTERNAL, "秒杀服务暂时不可用，请稍后再试", 503);
+    }
+  }
+
+  /** 从 Feign 错误响应读取下游业务码，避免把幂等冲突误报为库存不可用。 */
+  private String remoteCode(FeignException exception) {
+    try {
+      com.fasterxml.jackson.databind.JsonNode body = mapper.readTree(exception.contentUTF8());
+      return body.path("code").asText();
+    } catch (Exception ignored) {
+      return "";
     }
   }
 
@@ -430,14 +451,68 @@ public class OrderServiceImpl implements OrderService {
     // 2. 执行 consumeSeckill 的核心业务校验与状态处理。
     // 3. 返回 consumeSeckill 的处理结果。
     try {
-      String orderNo = String.valueOf(event.get("orderNo")),
-          key = String.valueOf(event.get("idempotencyKey"));
-      long userId = ((Number) event.get("userId")).longValue();
-      if (!orderSqlMapper.findIdempotentOrderNos(userId, key).isEmpty()) return;
-      ProductClient.SkuView s = products.sku(((Number) event.get("skuId")).longValue()).data;
+      if (event == null) return;
+      String orderNo = textOrDefault(event.get("orderNo"), "");
+      String key = textOrDefault(event.get("idempotencyKey"), "");
+      long userId;
+      try {
+        userId = longValue(event.get("userId"), "userId");
+      } catch (RuntimeException invalidUser) {
+        recordSeckillConflict(event, 0L, key, textOrDefault(event.get("requestHash"), ""), orderNo,
+            textOrDefault(event.get("eventId"), ""), "userId 缺失或非法");
+        return;
+      }
+      boolean legacyMessage = "SECKILL_ORDER_ACCEPTED".equals(event.get("eventType"))
+          && event.get("addressSnapshot") == null;
+      if (orderNo.isBlank() || key.isBlank() || event.get("activityId") == null
+          || event.get("skuId") == null || (!legacyMessage && event.get("requestHash") == null)) {
+        recordSeckillConflict(event, userId, key, textOrDefault(event.get("requestHash"), ""), orderNo,
+            textOrDefault(event.get("eventId"), ""), "秒杀消息核心字段或 requestHash 缺失");
+        return;
+      }
+      long activityId;
+      long skuId;
+      try {
+        activityId = longValue(event.get("activityId"), "activityId");
+        skuId = longValue(event.get("skuId"), "skuId");
+      } catch (RuntimeException invalidCore) {
+        recordSeckillConflict(event, userId, key, textOrDefault(event.get("requestHash"), ""), orderNo,
+            textOrDefault(event.get("eventId"), ""), "秒杀核心维度非法");
+        return;
+      }
+      String addressSnapshot = textOrDefault(event.get("addressSnapshot"), "{}");
+      String computedHash = SeckillRequestFingerprint.hash(activityId, skuId, userId, 1, addressSnapshot);
+      String suppliedHash = textOrDefault(event.get("requestHash"), computedHash);
+      String eventId = textOrDefault(event.get("eventId"), SeckillRequestFingerprint.eventId(orderNo));
+      if (!legacyMessage && !computedHash.equalsIgnoreCase(suppliedHash)) {
+        recordSeckillConflict(event, userId, key, computedHash, orderNo, eventId, "requestHash 与重算值不一致");
+        return;
+      }
+      int claimed = seckillOrderDedupMapper.claim(
+          id(), userId, key, computedHash, orderNo, eventId, now().toLocalDateTime());
+      Map<String, Object> dedup = seckillOrderDedupMapper.find(userId, key);
+      if (claimed == 0) {
+        if (dedup.isEmpty()) throw new IllegalStateException("秒杀幂等认领结果未知，保留消息重试");
+        if (!computedHash.equalsIgnoreCase(String.valueOf(dedup.get("request_hash")))) {
+          recordSeckillConflict(event, userId, key, computedHash, orderNo, eventId, "requestHash 冲突");
+        }
+        if (!orderNo.equals(String.valueOf(dedup.get("order_no")))) {
+          recordSeckillConflict(event, userId, key, computedHash, orderNo, eventId, "orderNo 冲突");
+        }
+        if (computedHash.equalsIgnoreCase(String.valueOf(dedup.get("request_hash")))
+            && orderNo.equals(String.valueOf(dedup.get("order_no")))) {
+          if ("COMMITTED".equals(String.valueOf(dedup.get("status")))) {
+            seckillMessageRecoveryMapper.markResolved(eventId, now().toLocalDateTime());
+            return;
+          }
+          throw new IllegalStateException("秒杀幂等记录仍在处理中，保留消息重试");
+        }
+        return;
+      }
+      ProductClient.SkuView s = products.sku(skuId).data;
       if (s == null) throw new IllegalStateException("秒杀商品不存在: " + event.get("skuId"));
-      OffsetDateTime created = now();
-      String t = table(created);
+      OffsetDateTime created = occurredAt(event);
+      String t = tableFromNo(orderNo);
       OrderPO order = new OrderPO();
       order.id = id();
       order.orderNo = orderNo;
@@ -445,7 +520,7 @@ public class OrderServiceImpl implements OrderService {
       order.status = "PENDING_PAYMENT";
       order.totalAmount = s.unitPrice();
       order.payAmount = s.unitPrice();
-      order.addressSnapshot = String.valueOf(event.getOrDefault("addressSnapshot", "{}"));
+      order.addressSnapshot = addressSnapshot;
       order.expireAt = created.plusMinutes(30).toLocalDateTime();
       order.createdAt = created.toLocalDateTime();
       order.updatedAt = created.toLocalDateTime();
@@ -465,15 +540,72 @@ public class OrderServiceImpl implements OrderService {
       orderItem.lineAmount = s.unitPrice();
       orderItem.createdAt = created.toLocalDateTime();
       orderSqlMapper.insertOrderItem(it, orderItem);
-      OrderIdempotencyPO idempotency = new OrderIdempotencyPO();
-      idempotency.id = id();
-      idempotency.userId = userId;
-      idempotency.idempotencyKey = key;
-      idempotency.orderNo = orderNo;
-      idempotency.createdAt = created.toLocalDateTime();
-      orderSqlMapper.insertIdempotency(idempotency);
+      orderOutboxMapper.insert(timeoutOutbox(orderNo, created, created.plusMinutes(30)));
+      seckillOrderDedupMapper.markCommitted(userId, key, now().toLocalDateTime());
+      if (eventId != null && !eventId.isBlank())
+        seckillMessageRecoveryMapper.markResolved(eventId, now().toLocalDateTime());
     } catch (Exception e) {
       throw new IllegalStateException("秒杀订单消息消费失败，交由 RabbitMQ 重试或死信: " + event, e);
+    }
+  }
+
+  private static String textOrDefault(Object value, String fallback) {
+    return value == null ? fallback : String.valueOf(value);
+  }
+
+  private static long longValue(Object value, String fieldName) {
+    if (value instanceof Number number) return number.longValue();
+    try {
+      return Long.parseLong(String.valueOf(value));
+    } catch (RuntimeException exception) {
+      throw new IllegalArgumentException("秒杀消息字段非法: " + fieldName, exception);
+    }
+  }
+
+  /** 保存带原始载荷和稳定事件号的秒杀冲突证据，不触碰既有幂等记录。 */
+  private void recordSeckillConflict(
+      Map<String, Object> event, long userId, String key, String requestHash,
+      String orderNo, String eventId, String reason) {
+    String stableEventId = eventId == null || eventId.isBlank()
+        ? stableSeckillEventId(event, orderNo) : eventId;
+    String payload;
+    try {
+      payload = mapper.writeValueAsString(event);
+    } catch (Exception serializationFailure) {
+      payload = "{\"serializationError\":\"true\"}";
+    }
+    seckillOrderDedupMapper.recordConflictEvent(
+        id(), userId, key, requestHash == null || requestHash.isBlank()
+            ? sha256(payload) : requestHash, orderNo, stableEventId, reason, payload,
+        now().toLocalDateTime());
+  }
+
+  private String stableSeckillEventId(Map<String, Object> event, String orderNo) {
+    if (orderNo != null && !orderNo.isBlank()) return SeckillRequestFingerprint.eventId(orderNo);
+    try {
+      return "legacy-seckill:hash:" + sha256(mapper.writeValueAsString(event));
+    } catch (Exception serializationFailure) {
+      return "legacy-seckill:hash:" + sha256(String.valueOf(event));
+    }
+  }
+
+  private OffsetDateTime occurredAt(Map<String, Object> event) {
+    Object value = event.get("occurredAt");
+    if (value == null || String.valueOf(value).isBlank()) return now();
+    try {
+      return OffsetDateTime.parse(String.valueOf(value));
+    } catch (RuntimeException invalidTimestamp) {
+      throw new IllegalArgumentException("秒杀消息 occurredAt 非法", invalidTimestamp);
+    }
+  }
+
+  private static String sha256(String value) {
+    try {
+      return java.util.HexFormat.of().formatHex(
+          java.security.MessageDigest.getInstance("SHA-256")
+              .digest(value.getBytes(StandardCharsets.UTF_8)));
+    } catch (java.security.NoSuchAlgorithmException exception) {
+      throw new IllegalStateException("JDK 缺少 SHA-256", exception);
     }
   }
 
@@ -698,7 +830,7 @@ public class OrderServiceImpl implements OrderService {
     // 1. 接收并整理 tableFromNo 的业务请求。
     // 2. 执行 tableFromNo 的核心业务校验与状态处理。
     // 3. 返回 tableFromNo 的处理结果。
-    if (orderNo == null || !orderNo.matches("\\d{6}[A-Za-z0-9]+"))
+    if (orderNo == null || !orderNo.matches("\\d{6}[A-Za-z0-9-]+"))
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     try {
       YearMonth.parse(orderNo.substring(0, 6), DateTimeFormatter.ofPattern("yyyyMM"));
