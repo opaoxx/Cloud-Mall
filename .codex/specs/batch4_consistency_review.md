@@ -6,7 +6,7 @@
 
 ## 跨服务请求指纹
 
-`requestHash` 必须由 common 中的同一 `SeckillRequestFingerprint` 算法生成。输入字段固定为 `activityId`、`skuId`、`userId`、固定数量 `1`、`addressSnapshot`；地址快照递归按 JSON 键的字典序排序，字符串使用 UTF-8，数字使用无多余零的规范表示，去除空白。规范字符串精确为 `v1\\n{activityId}\\n{skuId}\\n{userId}\\n1\\n{canonicalAddressJson}`，其中 `\\n` 是单个换行符；计算 SHA-256 小写十六进制。stock 在受理入口生成并持久化，order 消费消息前用同一算法重算验证；任一字段或哈希不一致进入 `SECKILL_IDEMPOTENCY_CONFLICT`/`CONFLICT`，不得创建订单、改写 orderNo 或重试扣库存。旧版消息缺少字段时只能按实际可重建字段生成 legacy 指纹，无法形成完整不可变输入则人工裁决。
+`requestHash` 必须由 common 中的同一 `SeckillRequestFingerprint` 算法生成。输入字段固定为 `activityId`、`skuId`、`userId`、固定数量 `1`、`addressSnapshot`；地址快照递归按 JSON 键的字典序排序，字符串使用 UTF-8，数字使用无多余零的规范表示，去除空白。规范字符串精确为 `v1\\n{activityId}\\n{skuId}\\n{userId}\\n1\\n{canonicalAddressJson}`，其中 `\\n` 是单个换行符；计算 SHA-256 小写十六进制。stock 在受理入口生成并持久化，order 消费消息前用同一算法重算验证；任一字段或哈希不一致进入 `SECKILL_IDEMPOTENCY_CONFLICT`/`CONFLICT`，不得创建订单、改写 orderNo 或重试扣库存。旧版 `SECKILL_ORDER_ACCEPTED` 消息若缺少 `addressSnapshot`，先按旧契约补 `{}` 再计算 legacy 指纹；只有核心维度缺失/非法或无法形成稳定不可变输入才人工裁决。
 
 ## CM-20260924-07：持久受理与可靠投递
 
@@ -43,7 +43,7 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 
 订单服务的 DLQ consumer 必须先在 `seckill_message_recovery` 写入唯一 `eventId`、原始 payload 和请求哈希，再确认 RabbitMQ 死信消息。replayer 使用数据库租约认领 `REPLAY_PENDING`，以原 `eventId` 和原 payload 投递回主交换机；重放成功后由正常消费者将记录标记 `RESOLVED`。重放次数、下次时间和最后错误持久化，采用有上限间隔的持续退避；超过告警阈值仅增加告警，不停止自动重放。事件载荷无法解析或同一幂等键出现不可变哈希冲突时进入 `CONFLICT`，人工处理并保留原消息证据。
 
-现有 8 条无 `eventId` 的 DLQ 消息必须先导入 `seckill_message_recovery` 再重放。生成规则固定为：有 `orderNo` 使用 `legacy-seckill:{orderNo}`；没有订单号但有 `userId + idempotencyKey` 使用 `legacy-seckill:key:{userId}:{idempotencyKey}`；两者都没有则对完整规范化原始载荷使用 `legacy-seckill:hash:{sha256}`。禁止使用 RabbitMQ delivery tag、消费时间或随机 UUID。导入时补出 `payloadVersion=0` 和 `requestHash`；字段缺失导致无法形成不可变载荷时标记 `CONFLICT`，其余记录使用生成的稳定事件号兼容重放。
+现有 8 条无 `eventId` 的 DLQ 消息必须先导入 `seckill_message_recovery` 再重放。已知历史版本 `eventType=SECKILL_ORDER_ACCEPTED` 的消息若包含 `orderNo`、`activityId`、`skuId`、`userId`、`idempotencyKey`，但缺少 `addressSnapshot`，按旧 OrderService 契约补为 `{}`，生成 `legacy-seckill:{orderNo}`，并用补全后的规范化载荷计算 `requestHash`，标记 `payloadVersion=0` 后自动重放。一般旧消息生成规则固定为：有 `orderNo` 使用 `legacy-seckill:{orderNo}`；没有订单号但有 `userId + idempotencyKey` 使用 `legacy-seckill:key:{userId}:{idempotencyKey}`；两者都没有则对完整规范化原始载荷使用 `legacy-seckill:hash:{sha256}`。禁止使用 RabbitMQ delivery tag、消费时间或随机 UUID。只有 `orderNo/activityId/skuId/userId/idempotencyKey` 缺失、格式非法或无法形成稳定不可变载荷时标记 `CONFLICT`；已知旧版缺失地址不属于冲突，可自动兼容重放。
 
 ## CM-20260924-08：并发消费和载荷冲突
 
@@ -54,6 +54,10 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 - 首次消费事务失败：事务回滚，消息进入 RabbitMQ 重试；达到死信后走 `seckill_message_recovery`，仍使用原事件和哈希，并持续退避重放，告警阈值不等于停止恢复。
 
 同一事件重复投递与同一幂等键重复投递都必须满足：最多一条有效订单、最多一笔秒杀预扣、同一订单号保持不变。订单状态与库存受理状态查询以 MySQL 为准，Redis 只作为秒杀热点预扣执行介质。
+
+秒杀消费者成功落单的本地事务必须同时写入订单主表、订单明细、`seckill_order_dedup=COMMITTED` 和既有 `order_outbox(ORDER_TIMEOUT)`；提交后由订单 outbox dispatcher 投递待支付超时消息。订单已落库但 timeout outbox 缺失属于 CM-07 的恢复失败，必须由恢复任务按原 `orderNo` 补建同一 `eventId`，不能依赖消费者再次创建订单。
+
+本批 CM-07 的边界是“秒杀受理 → 消息可恢复 → 订单最终落库”。秒杀 Redis 配额在订单支付成功时确认、订单取消/超时时释放的最终结算，若当前 `stock.confirm/rollback` 只处理普通 `stock_flow`，则属于独立的秒杀库存结算缺陷，需要另立 bug 条目和后续批次；不能把订单落库成功当作 Redis 配额已结算。
 
 ## CM-20260924-09：对账锁安全协议
 
@@ -79,6 +83,7 @@ confirm 成功标记 `PUBLISHED` 并清空租约；confirm 超时、连接断开
 4. 重放进程在发布后崩溃：租约到期可再次重放，按事件号和幂等键收敛，无新订单号。
 5. RabbitMQ 或商品服务停止超过告警阈值后恢复：所有可解析且无哈希冲突的 accepted 请求最终自动恢复为订单；`DEAD` 只表示告警，不得成为永久停重试状态。
 6. 导入现存 8 条无 `eventId` DLQ 消息：每条生成稳定 legacy eventId，重复导入不新增记录；可解析记录自动重放，无法形成稳定载荷的记录进入 `CONFLICT`。
+7. 秒杀消息成功消费后模拟订单事务提交：同一事务可见订单、`seckill_order_dedup=COMMITTED` 和 `order_outbox(ORDER_TIMEOUT)`；故障注入删除/遗漏 outbox 时，恢复任务按原订单号补建超时事件，不创建第二个订单。
 
 ### 幂等和冲突
 
