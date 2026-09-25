@@ -22,7 +22,7 @@ public class SeckillOrderDedupMapper {
             + "request_hash CHAR(64) NOT NULL,order_no VARCHAR(64) NOT NULL,status VARCHAR(16) NOT NULL,"
             + "event_id VARCHAR(128),created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,"
             + "UNIQUE KEY uk_seckill_dedup_user_key(user_id,idempotency_key),"
-            + "UNIQUE KEY uk_seckill_order_dedup_order(order_no),KEY idx_seckill_order_dedup_event(event_id))");
+            + "UNIQUE KEY uk_seckill_dedup_order(order_no),KEY idx_seckill_dedup_event(event_id))");
     jdbcTemplate.execute(
         "CREATE TABLE IF NOT EXISTS seckill_order_dedup_conflict ("
             + "id BIGINT PRIMARY KEY,event_id VARCHAR(128) NOT NULL,"
