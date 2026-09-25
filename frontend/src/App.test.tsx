@@ -1,7 +1,12 @@
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, auth, newIdempotencyKey, registerAndLogin } from './api'
-import { formatAddressSnapshot, getSeckillOrderRetryDelay, productDetailToForm, productFormToRequest, resolveImageUrl } from './App'
+import { formatAddressSnapshot, getSeckillOrderRetryDelay, productDetailToForm, productFormToRequest, resolveImageUrl, Seckill } from './App'
 import { isValidPhone, normalizePhone } from './validation'
+
+;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
 describe('CloudMall request conventions', () => {
   beforeEach(() => { localStorage.clear(); vi.restoreAllMocks() })
@@ -96,6 +101,46 @@ describe('CloudMall request conventions', () => {
     expect(getSeckillOrderRetryDelay(0)).toBe(1000)
     expect(getSeckillOrderRetryDelay(3)).toBe(8000)
     expect(getSeckillOrderRetryDelay(99)).toBe(10000)
+  })
+
+  it('keeps accepted async seckill visible until the order is queryable', async () => {
+    vi.useFakeTimers()
+    const activity = { activityId: 9, skuId: 7, status: 'RUNNING', startAt: '2020-01-01T00:00:00Z', endAt: '2099-01-01T00:00:00Z', remainingStock: 1, perUserLimit: 1 }
+    const detail = { orderNo: 'O-ASYNC', status: 'PENDING_PAYMENT', payAmount: '12.30', createdAt: '2026-08-29T12:00:00+08:00', items: [], addressSnapshot: null }
+    vi.spyOn(api, 'seckill').mockResolvedValue(activity)
+    vi.spyOn(api, 'addresses').mockResolvedValue([{ id: 3, receiver: '小明', phone: '13800138000', detailAddress: '云购路 1 号', isDefault: true }])
+    vi.spyOn(api, 'seckillOrder').mockResolvedValue({ accepted: true, orderNo: 'O-ASYNC', status: 'PENDING_PAYMENT' })
+    const orderLookup = vi.spyOn(api, 'order').mockRejectedValueOnce(new ApiError('COMMON_INTERNAL_ERROR', '订单尚未生成', 404)).mockResolvedValueOnce(detail)
+    const host = document.createElement('div'); document.body.appendChild(host); const root = createRoot(host)
+    try {
+      await act(async () => { root.render(<MemoryRouter initialEntries={['/seckill/9']}><Routes><Route path="/seckill/:id" element={<Seckill />} /><Route path="/orders/:no" element={<div data-testid="order-detail">订单详情</div>} /></Routes></MemoryRouter>); await Promise.resolve() })
+      await act(async () => { await Promise.resolve() })
+      await act(async () => { (Array.from(host.querySelectorAll('button')).find(button => button.textContent?.includes('立即秒杀')) as HTMLButtonElement).click(); await Promise.resolve() })
+      expect(host.textContent).toContain('订单生成中')
+      expect(host.querySelector('[data-testid="order-detail"]')).toBeNull()
+      expect(orderLookup).toHaveBeenCalledTimes(1)
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      expect(host.querySelector('[data-testid="order-detail"]')).not.toBeNull()
+      expect(orderLookup).toHaveBeenCalledTimes(2)
+    } finally { root.unmount(); host.remove(); vi.useRealTimers() }
+  })
+
+  it('does not query or present an accepted order when seckill is rejected', async () => {
+    const activity = { activityId: 9, skuId: 7, status: 'RUNNING', startAt: '2020-01-01T00:00:00Z', endAt: '2099-01-01T00:00:00Z', remainingStock: 1, perUserLimit: 1 }
+    vi.spyOn(api, 'seckill').mockResolvedValue(activity)
+    vi.spyOn(api, 'addresses').mockResolvedValue([{ id: 3, receiver: '小明', phone: '13800138000', detailAddress: '云购路 1 号', isDefault: true }])
+    vi.spyOn(api, 'seckillOrder').mockResolvedValue({ accepted: false, orderNo: 'O-REJECTED', status: 'UNKNOWN' })
+    const orderLookup = vi.spyOn(api, 'order').mockResolvedValue({} as never)
+    const host = document.createElement('div'); document.body.appendChild(host); const root = createRoot(host)
+    try {
+      await act(async () => { root.render(<MemoryRouter initialEntries={['/seckill/9']}><Routes><Route path="/seckill/:id" element={<Seckill />} /></Routes></MemoryRouter>); await Promise.resolve() })
+      await act(async () => { await Promise.resolve() })
+      await act(async () => { (Array.from(host.querySelectorAll('button')).find(button => button.textContent?.includes('立即秒杀')) as HTMLButtonElement).click(); await Promise.resolve() })
+      expect(host.textContent).toContain('订单状态待核实')
+      expect(host.textContent).not.toContain('订单生成中')
+      expect(host.textContent).not.toContain('支付成功')
+      expect(orderLookup).not.toHaveBeenCalled()
+    } finally { root.unmount(); host.remove() }
   })
 
   it('sends product parameters and SKU specJson using the frozen shapes', async () => {
