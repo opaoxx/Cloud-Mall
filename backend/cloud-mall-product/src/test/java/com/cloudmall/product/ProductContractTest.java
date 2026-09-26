@@ -132,17 +132,16 @@ class ProductContractTest {
   }
 
   @Test
-  void eventPublishFailureIsPropagatedToTheTransactionalCaller() throws Exception {
-    RabbitTemplate rabbit = mock(RabbitTemplate.class);
-    org.mockito.Mockito.doThrow(new IllegalStateException("broker unavailable"))
-        .when(rabbit)
-        .convertAndSend(
-            org.mockito.ArgumentMatchers.anyString(),
-            org.mockito.ArgumentMatchers.anyString(),
-            (Object) org.mockito.ArgumentMatchers.any());
+  void outboxWriteFailureIsPropagatedToTheTransactionalCaller() throws Exception {
+    com.cloudmall.product.service.ProductIndexOutboxService outbox =
+        mock(com.cloudmall.product.service.ProductIndexOutboxService.class);
+    org.mockito.Mockito.doThrow(new IllegalStateException("database unavailable"))
+        .when(outbox).append(org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyString());
     ProductServiceImpl controller =
         new ProductServiceImpl(
-            mock(ProductSqlMapper.class), rabbit, mock(StringRedisTemplate.class), mapper);
+            mock(ProductSqlMapper.class), mock(StringRedisTemplate.class), mapper, outbox);
     Method event = ProductServiceImpl.class.getDeclaredMethod("event", String.class, long.class);
     event.setAccessible(true);
 
@@ -150,6 +149,6 @@ class ProductContractTest {
         assertThrows(
             InvocationTargetException.class,
             () -> event.invoke(controller, "PRODUCT_CHANGED", 42L));
-    assertTrue(thrown.getCause() instanceof ProductServiceImpl.ProductEventPublishException);
+    assertTrue(thrown.getCause() instanceof IllegalStateException);
   }
 }

@@ -158,7 +158,7 @@ public class ProductSqlMapper {
   /** 更新商品基础信息。 */
   public int updateProduct(Long productId, ProductDTO product, String price, Object occurredAt) {
     return update(
-        "update product set category_id=?,name=?,main_image=?,description=?,price=?,updated_at=?"
+        "update product set category_id=?,name=?,main_image=?,description=?,price=?,version=version+1,updated_at=?"
             + " where id=?",
         product.categoryId,
         product.name,
@@ -228,7 +228,15 @@ public class ProductSqlMapper {
   /** 更新商品上下架状态。 */
   public int updateProductStatus(long productId, int status, Object occurredAt) {
     return update(
-        "update product set status=?,updated_at=? where id=?", status, occurredAt, productId);
+        "update product set status=?,version=version+1,updated_at=? where id=?",
+        status,
+        occurredAt,
+        productId);
+  }
+
+  /** 查询商品当前索引版本。 */
+  public Long findProductVersion(long productId) {
+    return queryForObject("select version from product where id=?", Long.class, productId);
   }
 
   /** 查询商品基础信息。 */

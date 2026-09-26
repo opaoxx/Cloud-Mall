@@ -70,11 +70,10 @@ class BackendP1RulesTest {
   }
 
   @Test
-  void productEventFailureIsLogged() throws Exception {
+  void productEventUsesTransactionalOutbox() throws Exception {
     String product = source("cloud-mall-product", "ProductServiceImpl.java");
-    assertTrue(product.contains("LoggerFactory.getLogger(ProductServiceImpl.class)"));
-    assertTrue(product.contains("log.error(\"商品事件发送失败"));
-    assertTrue(!product.contains("catch(Exception ignored){}"));
+    assertTrue(product.contains("productIndexOutboxService.append(type, id, productVersion, traceId)"));
+    assertTrue(!product.contains("rabbit.convertAndSend"));
   }
 
   @Test

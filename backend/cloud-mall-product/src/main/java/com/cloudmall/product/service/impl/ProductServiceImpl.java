@@ -14,6 +14,7 @@ import com.cloudmall.product.domain.vo.ActivityVO;
 import com.cloudmall.product.domain.vo.HotStatVO;
 import com.cloudmall.product.mapper.ProductSqlMapper;
 import com.cloudmall.product.service.ProductService;
+import com.cloudmall.product.service.ProductIndexOutboxService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -24,10 +25,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
 import javax.validation.Valid;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,14 +33,8 @@ import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class ProductServiceImpl implements ProductService {
-  /** 执行 getLogger 相关操作。 */
-  private static final Logger log = LoggerFactory.getLogger(ProductServiceImpl.class);
-
   /** 保存 db 的业务状态或配置。 */
   @Autowired private ProductSqlMapper productSqlMapper;
-
-  /** 保存 rabbit 的业务状态或配置。 */
-  @Autowired private RabbitTemplate rabbit;
 
   /** 保存 redis 的业务状态或配置。 */
   @Autowired private StringRedisTemplate redis;
@@ -50,22 +42,25 @@ public class ProductServiceImpl implements ProductService {
   /** 保存 objectMapper 的业务状态或配置。 */
   @Autowired private ObjectMapper objectMapper;
 
+  /** 商品事实提交后写入索引 outbox。 */
+  @Autowired private ProductIndexOutboxService productIndexOutboxService;
+
   /** 创建由 Spring 字段注入依赖的商品服务实例。 */
   public ProductServiceImpl() {}
 
   /** 创建 ProductServiceImpl 实例。 */
   public ProductServiceImpl(
       ProductSqlMapper productSqlMapper,
-      RabbitTemplate rabbit,
       StringRedisTemplate redis,
-      ObjectMapper objectMapper) {
+      ObjectMapper objectMapper,
+      ProductIndexOutboxService productIndexOutboxService) {
     // 1. 接收并整理 ProductController 的业务请求。
     // 2. 执行 ProductController 的核心业务校验与状态处理。
     // 3. 返回 ProductController 的处理结果。
     this.productSqlMapper = productSqlMapper;
-    this.rabbit = rabbit;
     this.redis = redis;
     this.objectMapper = objectMapper;
+    this.productIndexOutboxService = productIndexOutboxService;
   }
 
   @GetMapping("/categories")
@@ -95,7 +90,6 @@ public class ProductServiceImpl implements ProductService {
     productSqlMapper.insertCategory(id, c, now());
     c.id = id;
     c.status = 1;
-    event("CATEGORY_CHANGED", id);
     return ApiResponse.ok(c);
   }
 
@@ -112,7 +106,6 @@ public class ProductServiceImpl implements ProductService {
     productSqlMapper.updateCategory(id, c, now());
     c.id = id;
     c.status = 1;
-    event("CATEGORY_CHANGED", id);
     return ApiResponse.ok(c);
   }
 
@@ -126,7 +119,6 @@ public class ProductServiceImpl implements ProductService {
     AuthContext.requireAdmin();
     requireCategory(id);
     productSqlMapper.disableCategory(id, now());
-    event("CATEGORY_CHANGED", id);
     return ApiResponse.ok(null);
   }
 
@@ -489,27 +481,23 @@ public class ProductServiceImpl implements ProductService {
     // 1. 接收并整理 event 的业务请求。
     // 2. 执行 event 的核心业务校验与状态处理。
     // 3. 返回 event 的处理结果。
-    try {
-      rabbit.convertAndSend(
-          "cloudmall.product.exchange", "product.changed", eventEnvelope(type, id));
-    } catch (Exception e) {
-      log.error("商品事件发送失败，事件类型={}，商品/分类ID={}；事务将回滚，Rabbit 消费端重试/DLX继续负责消费失败处理", type, id, e);
-      throw new ProductEventPublishException(type, id, e);
-    }
-  }
-
-  public static final class ProductEventPublishException extends RuntimeException {
-    ProductEventPublishException(String type, long id, Exception cause) {
-      super("商品事件发送失败，事件类型=" + type + "，商品/分类ID=" + id, cause);
-    }
+    if (type.startsWith("CATEGORY_")) return;
+    Long storedVersion = productSqlMapper.findProductVersion(id);
+    long productVersion = storedVersion == null ? 0L : storedVersion;
+    String traceId = traceId(UUID.randomUUID().toString());
+    productIndexOutboxService.append(type, id, productVersion, traceId);
   }
 
   public static Map<String, Object> eventEnvelope(String type, long id) {
+    return eventEnvelope(type, id, 0L);
+  }
+
+  public static Map<String, Object> eventEnvelope(String type, long id, long productVersion) {
     String entityType = type.startsWith("CATEGORY") ? "CATEGORY" : "PRODUCT";
     String businessKeyName = "CATEGORY".equals(entityType) ? "categoryId" : "productId";
     OffsetDateTime occurredAt = now();
     String eventId = UUID.randomUUID().toString();
-    Map<String, Object> payload = Map.of(businessKeyName, id);
+    Map<String, Object> payload = Map.of(businessKeyName, id, "productVersion", productVersion);
     return Map.of(
         "eventId",
         eventId,
@@ -521,6 +509,8 @@ public class ProductServiceImpl implements ProductService {
         Map.of("name", businessKeyName, "value", id),
         businessKeyName,
         id,
+        "productVersion",
+        productVersion,
         "traceId",
         traceId(eventId),
         "payload",
