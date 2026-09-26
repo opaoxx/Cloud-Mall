@@ -97,6 +97,7 @@
 | `product_version` | INT NOT NULL | 事务提交后的商品版本 |
 | `event_type` | VARCHAR(32) NOT NULL | `UPSERT`/`HIDE`；删除、下架都使用 `HIDE` |
 | `source` | VARCHAR(32) NOT NULL | `LIVE`/`REBUILD`/`LEGACY_REPLAY` |
+| `payload_json` | JSON NOT NULL | 完整 JSON envelope；事务内固定 `eventId/eventType/productId/productVersion/occurredAt/traceId/source/payloadVersion`，重试原样发布 |
 | `status` | VARCHAR(32) NOT NULL | `PENDING`/`UNKNOWN`/`PUBLISHED`/`DEAD`/`CONFLICT` |
 | `attempts` | INT NOT NULL | 投递尝试次数 |
 | `next_retry_at` | DATETIME(3) NOT NULL | 下次投递时间 |
@@ -104,7 +105,7 @@
 | `lease_owner` / `lease_until` | VARCHAR(64)/DATETIME(3) | dispatcher 租约 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 
-索引：`uk_product_index_event(event_id)`、`idx_product_index_outbox_retry(status,next_retry_at,lease_until)`、`idx_product_index_outbox_ack(status,ack_deadline_at)`、`idx_product_index_product(product_id,product_version)`。同一商品允许多个版本事件共存；事件发送成功不代表 ES 已应用。`PUBLISHED` 事件在 `ack_deadline_at` 前未出现 `product_index_consumption=APPLIED/STALE` 时，dispatcher 必须以同一 `event_id` 重新投递并延长截止时间；不得因为已发布就永久停止扫描。
+索引：`uk_product_index_event(event_id)`、`idx_product_index_outbox_retry(status,next_retry_at,lease_until)`、`idx_product_index_outbox_ack(status,ack_deadline_at)`、`idx_product_index_product(product_id,product_version)`。同一商品允许多个版本事件共存；事件发送成功不代表 ES 已应用。`PUBLISHED` 事件在 `ack_deadline_at` 前未出现 `product_index_consumption=APPLIED/STALE` 时，dispatcher 必须以同一 `event_id` 重新投递并延长截止时间；不得因为已发布就永久停止扫描。`occurredAt`、`traceId` 和其他 envelope 字段只从 `payload_json` 读取，dispatcher 不得用当前时间或当前 MDC 重建 payload。
 
 ### 4.7 `product_index_consumption`
 

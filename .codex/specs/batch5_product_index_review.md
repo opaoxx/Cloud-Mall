@@ -11,6 +11,7 @@
 ## 2. 状态与契约
 
 - outbox：`PENDING → PUBLISHED`；确认未知、returned 或状态落库失败为 `UNKNOWN` 并重试；`PUBLISHED` 必须带 `ack_deadline_at`，超时仍无 `APPLIED/STALE` ACK 时由 dispatcher 按同一 `eventId` 重新发布并退避；达到告警阈值可标记 `DEAD`，但仍继续扫描；不可变冲突为 `CONFLICT`。
+- outbox 在商品本地事务内持久化完整 `payload_json`。`occurredAt`、原请求 `traceId`、`eventId`、事件类型、版本和 `source` 在首次写入时固定；dispatcher 和重试器原样发布同一 JSON payload，强制 `content_type=application/json`，不得用重试时的当前时间或 MDC 重建 envelope。
 - 消费 ACK：`PROCESSING → APPLIED/STALE`；ES/MySQL 暂时不可用为 `RETRY`；不可解析、缺少商品 ID 或不可变载荷冲突为 `QUARANTINED`。只有 ACK 持久化成功后确认 RabbitMQ 消息。
 - DLQ 证据：新 JSON 消息先完整写入 MySQL `raw_payload LONGBLOB` 与 SHA-256，应用上限 1 MiB；保存失败、超限或摘要不一致不得 ACK。新 JSON 若缺少原 outbox，校验稳定字段后用同一 `eventId` 从当前事实创建恢复 outbox；无法安全恢复则隔离。
 - 事件 envelope：`eventId,eventType,occurredAt,productId,productVersion,source,traceId,payloadVersion`。消费者不信任快照，按 `productId`读取当前事实。
