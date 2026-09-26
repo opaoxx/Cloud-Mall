@@ -93,7 +93,7 @@ Gateway/Sentinel 保护入口，Redis 原子预扣热点库存；库存服务先
 ## 5. 数据与缓存边界
 
 - MySQL 是用户、商品、订单、库存、支付等事实数据的持久化来源。
-- Redis 登录态 TTL 为 2 小时，购物车 value 使用 JSON 且 TTL 为 30 天；必须区分用户登录态、购物车、热点商品、秒杀库存、限流计数。
+- Redis 登录态 TTL 为 2 小时，购物车 value 使用 JSON 且 TTL 为 30 天；必须区分用户登录态、购物车、热点商品、秒杀库存、限流计数。Redis 连接、超时或命令失败时，Gateway Bearer 校验、用户登录 Token 写入、购物车读写和秒杀入口统一返回 503 `REDIS_SERVICE_UNAVAILABLE`，不得降级为匿名、空购物车或 `accepted=true`；商品/分类公开 GET 不依赖 Token Redis。
 - Elasticsearch 是商品检索索引，不替代 MySQL 事实数据；商品变更通过 RabbitMQ 异步同步并记录失败结果。
 - 订单表由 Sharding-JDBC 按 `created_at` 路由到月度逻辑表，开发阶段预建当前月份及测试需要的物理表。
 - 日志通过 Kibana 分析，Micrometer Tracing 将 Trace ID 透传至 Zipkin，Prometheus 抓取 Spring Actuator 指标端点并在 Grafana 展示。
