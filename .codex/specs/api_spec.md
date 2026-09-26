@@ -107,6 +107,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 商品写接口中的商品参数 `ProductParameter` 统一为 `{name: string, value: string}`；SKU 的 `specJson` 统一为 `Record<string, string>` 对应的 JSON 对象，不使用字符串化 JSON。数据库内部列名仍为 `param_name`/`param_value`，仅由后端负责 API 字段映射，无需修改 `db_schema.md`。商品列表 `sort` 支持 `hot`、`sales`、`latest`、`price_asc`、`price_desc`，其中 `sales` 使用商品热度统计中的源销量计数排序，未知值按默认热门顺序处理。前端展示库存是参考值，结算必须重新校验。
 
+商品写接口成功只表示 MySQL 商品事实本地事务提交；索引同步是异步最终一致。所有影响公开索引的商品、SKU、参数和上下架写操作必须递增 `product.version` 并同时写入 `product_index_outbox`，由提交后的 dispatcher 使用 RabbitMQ publisher confirm/returned 可靠投递。索引消费者按 `productId` 重新读取当前 MySQL 事实并写入 ES，不能使用消息快照直接覆盖；`productVersion` 小于已处理版本的事件只能记录 `STALE`。上架/修改生成 `PRODUCT_INDEX_UPSERT`；下架、停用和删除生成 `PRODUCT_INDEX_HIDE`，查询不可见，保留版本 tombstone 防止旧消息复活。消息投递或 ES 暂时失败不回滚商品写入，后台持续重试并告警。分类接口仍按原契约执行，但分类变更不生成商品索引事件；商品索引 outbox 不接收 `CATEGORY_CHANGED`，避免分类事件被消费者静默忽略。
+
 ## 6. 购物车服务接口
 
 | 方法 | 路径 | 请求 | 响应/说明 |
@@ -244,7 +246,9 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 ## 12. 跨服务事件契约（逻辑）
 
-RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认、支付成功/失败、秒杀订单请求、商品浏览统计和商品索引同步。秒杀订单事件使用 JSON envelope，至少包含 `eventId`、`eventType=SECKILL_ORDER_REQUEST`、`occurredAt`、`activityId`、`skuId`、`userId`、`orderNo`、`idempotencyKey`、`requestHash`、`addressSnapshot`、`traceId` 和 `payloadVersion`。库存 outbox 必须先持久化，再由 dispatcher 使用 publisher confirm 投递；confirm 成功但 outbox 状态更新失败时，持续重试同一 `eventId`，不能生成新订单号。消费者兼容存量秒杀消息：缺失 envelope 字段时按原字段生成稳定 legacy eventId 和规范化哈希，不能把缺失字段的消息当作新请求反复扣 Redis。消费者失败进入 DLQ；DLQ consumer 先写 `seckill_message_recovery` 再确认消息，replayer 使用原 `eventId`/payload 自动重放并保留重试记录。投递和重放采用持续退避（有上限间隔）并在阈值后告警，`DEAD` 仍可自动恢复；只有不可解析载荷或不可变哈希冲突进入 `CONFLICT`，人工裁决。重复消息按事件号、用户幂等键和请求哈希判定；同哈希幂等确认，不同哈希进入冲突终态。旧版无 `eventId` 消息按确定性 `legacy-seckill:{orderNo}`、`legacy-seckill:key:{userId}:{idempotencyKey}` 或完整规范化载荷哈希生成事件号，禁止使用 delivery tag/时间戳。Trace ID 由 Micrometer Tracing 透传。
+RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认、支付成功/失败、秒杀订单请求、商品浏览统计和商品索引同步。商品索引事件使用显式 JSON converter 和 `content_type=application/json` 的 JSON envelope，至少包含 `eventId`、`eventType=PRODUCT_INDEX_UPSERT|PRODUCT_INDEX_HIDE`、`occurredAt`、`productId`、`productVersion`、`source`、`traceId` 和 `payloadVersion`；事件不承载可直接覆盖事实的商品快照。商品 outbox 必须先持久化，再由 dispatcher 使用 publisher confirm 和 returned message 检查投递结果；确认未知、退回或 outbox 状态更新失败时持续重试同一 `eventId`。消费者完成 ES 写入及 `product_index_consumption` 持久 ACK 后才确认消息，重复消息按 `eventId` 幂等，旧版本写入标记 `STALE`。ES 停机、读取 MySQL 失败或 bulk 部分失败进入退避重试；不可解析或无法识别商品的旧消息进入隔离。DLQ listener 必须先将完整原始 payload 写入 MySQL 隔离表并校验 SHA-256，应用上限为 1 MiB；超限、写入失败或校验失败不得 ACK。当前两条 DLQ 消息来自 `cloudmall.product.exchange`，原错误为 JSON 解析 Java 序列化字节失败（`Unexpected character code 172`），载荷是 Base64 `application/x-java-serialized-object`（`rO0ABXNy...`），不得按 JSON 盲目重放或使用不受限 Java 原生反序列化。新 JSON 消息先持久化后写消费 `RETRY` 并自动重放；若缺少 outbox，校验稳定字段后用同一 `eventId` 创建恢复 outbox，无法从当前事实安全恢复则 `QUARANTINED`。旧消息优先根据商品事实、outbox 或 rebuild 重建，只有受控解析并核验稳定 `productId` 后才可生成 `LEGACY_REPLAY`。
+
+商品索引存量重建使用 `product_index_rebuild_job` 按商品 ID 游标限速直接读取当前 MySQL 事实并调用有界 ES Bulk，不为每条存量商品生成 outbox 和 RabbitMQ 消息；实时变更仍使用 `product_index_outbox`。不得随服务启动无界全量发送。默认单批 200 条，速率由配置限制；Bulk 成功后推进持久游标，部分失败、进程重启或 ES 中断不推进游标并重试同一批，依靠 ES external version 幂等。重建验收核对 MySQL 商品数/上架数、实时 outbox 状态、消费 ACK、ES 可见文档和 tombstone 数，并记录 Bulk 部分失败；ES 查询切换仍属于 CM-20260924-19。
 
 ## 13. 契约冻结说明
 

@@ -71,7 +71,7 @@
 | `version` | INT NOT NULL | 乐观并发版本 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的审计时间 |
 
-索引：`idx_category_status(category_id, status)`、`idx_status_updated(status, updated_at)`；搜索索引由 ES 管理。
+索引：`idx_category_status(category_id, status)`、`idx_status_updated(status, updated_at)`；搜索索引由 ES 管理。所有会影响公开索引的商品、SKU、参数、上下架和删除写操作必须在同一本地事务内把 `version` 严格递增一次；事件使用提交后的版本。迁移前必须审计并修正历史更新未递增造成的重复版本，不能依赖时间戳猜测新旧。
 
 ### 4.3 `product_sku`
 
@@ -84,6 +84,86 @@
 ### 4.5 `product_hot_stat`
 
 `product_id BIGINT PK`、`view_count BIGINT NOT NULL`、`search_count BIGINT NOT NULL`、`hot_score DECIMAL(18,6) NOT NULL`、`stat_date DATE NOT NULL`、`updated_at DATETIME(3) NOT NULL`。本期按商品维度维护累计热度，浏览事件经 RabbitMQ 异步写入。
+
+### 4.6 `product_index_outbox`
+
+商品事实写入事务与索引事件的可靠交付表。商品创建、修改、上架、下架和删除在修改 `product`（以及同一商品的 SKU/参数事实）时，在同一本地事务插入一条索引事件；事务提交后才由 dispatcher 投递 RabbitMQ。事件只携带事实定位信息和版本，消费者必须重新读取当前 MySQL 商品事实，不得信任消息内的价格、名称或上下架状态。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | outbox 内部 ID |
+| `event_id` | VARCHAR(128) UNIQUE NOT NULL | 稳定事件号；重试和重放不得改变 |
+| `product_id` | BIGINT NOT NULL | 商品事实 ID |
+| `product_version` | INT NOT NULL | 事务提交后的商品版本 |
+| `event_type` | VARCHAR(32) NOT NULL | `UPSERT`/`HIDE`；删除、下架都使用 `HIDE` |
+| `source` | VARCHAR(32) NOT NULL | `LIVE`/`REBUILD`/`LEGACY_REPLAY` |
+| `status` | VARCHAR(32) NOT NULL | `PENDING`/`UNKNOWN`/`PUBLISHED`/`DEAD`/`CONFLICT` |
+| `attempts` | INT NOT NULL | 投递尝试次数 |
+| `next_retry_at` | DATETIME(3) NOT NULL | 下次投递时间 |
+| `last_published_at` / `ack_deadline_at` | DATETIME(3)/DATETIME(3) | 最近一次确认发布时间、消费 ACK 截止时间 |
+| `lease_owner` / `lease_until` | VARCHAR(64)/DATETIME(3) | dispatcher 租约 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+索引：`uk_product_index_event(event_id)`、`idx_product_index_outbox_retry(status,next_retry_at,lease_until)`、`idx_product_index_outbox_ack(status,ack_deadline_at)`、`idx_product_index_product(product_id,product_version)`。同一商品允许多个版本事件共存；事件发送成功不代表 ES 已应用。`PUBLISHED` 事件在 `ack_deadline_at` 前未出现 `product_index_consumption=APPLIED/STALE` 时，dispatcher 必须以同一 `event_id` 重新投递并延长截止时间；不得因为已发布就永久停止扫描。
+
+### 4.7 `product_index_consumption`
+
+商品索引消费者的持久 ACK/处理记录。`event_id` 是幂等键，消费者完成 ES 写入或确认该事件已被更高版本覆盖后才写 `APPLIED`/`STALE`；失败保留 `RETRY`，不可解析或载荷冲突进入 `QUARANTINED`。ACK 写失败时消息不得确认，重复投递必须安全重入。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `event_id` | VARCHAR(128) PK | 对应 outbox 事件 |
+| `product_id` | BIGINT NOT NULL | 商品事实 ID |
+| `event_version` | INT | 事件版本；旧消息可为空 |
+| `applied_version` | INT | 实际写入或观察到的 ES 版本 |
+| `status` | VARCHAR(32) NOT NULL | `PROCESSING`/`APPLIED`/`STALE`/`RETRY`/`QUARANTINED` |
+| `attempts` | INT NOT NULL | 消费尝试次数 |
+| `last_error` | VARCHAR(1024) | 最近错误摘要，不写堆栈和敏感数据 |
+| `lease_owner` / `lease_until` | VARCHAR(64)/DATETIME(3) | 消费租约 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+索引：`idx_product_index_consume_retry(status,updated_at,lease_until)`、`idx_product_index_consume_product(product_id,applied_version)`。该表是消费 ACK 和恢复依据，不承担商品事实。
+
+### 4.8 `product_index_dlq_quarantine`
+
+无法安全解释的历史索引消息隔离表。消费 DLQ 时必须先在 MySQL 保存消息元数据、完整原始 payload 和 SHA-256，再确认 RabbitMQ 消息；禁止对 `application/x-java-serialized-object` 使用 Java 原生反序列化，也禁止把未知载荷盲目转换为新 JSON envelope。`product_id` 可为空，后续优先通过商品事实和 outbox 重建，不能安全归属的消息保留证据并人工核验。应用接受的原始 payload 上限为 1 MiB，超过上限时不得截断后 ACK；只能记录元数据和摘要、保持消息未确认并告警。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `quarantine_id` | VARCHAR(128) PK | `queue + message_id + sha256` 的稳定键 |
+| `queue_name` | VARCHAR(255) NOT NULL | 来源队列/DLQ |
+| `content_type` | VARCHAR(128) | 原始 content type |
+| `content_encoding` | VARCHAR(64) | 原始编码 |
+| `payload_sha256` | CHAR(64) NOT NULL | 原始 payload 摘要 |
+| `raw_payload` | LONGBLOB NOT NULL | 完整原始消息字节；应用层限制不超过 1 MiB，不反序列化 |
+| `payload_size` | INT UNSIGNED NOT NULL | 原始 payload 字节数 |
+| `product_id` | BIGINT | 仅在安全解析并核验后填写 |
+| `reason` | VARCHAR(512) NOT NULL | 隔离原因 |
+| `status` | VARCHAR(32) NOT NULL | `QUARANTINED`/`REVIEWED`/`REBUILT` |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+索引：`uk_product_index_quarantine_hash(queue_name,payload_sha256)`、`idx_product_index_quarantine_status(status,created_at)`。只有 `raw_payload` 已完整写入且 SHA-256 校验通过时才允许 ACK 原 DLQ；超限、写入失败或摘要不一致必须保持未 ACK。
+
+### 4.9 `product_index_rebuild_job`
+
+存量索引重建控制表。重建按商品 ID 游标分批读取当前 MySQL 事实，直接调用有界 ES Bulk；实时商品变更仍走 `product_index_outbox`。禁止服务启动时一次性扫描并发送全表。Bulk 批次失败时不推进游标，重试同一批即可依靠 ES external version 幂等收敛。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `job_id` | VARCHAR(64) PK | 重建任务号 |
+| `target_index` | VARCHAR(128) NOT NULL | 目标 ES 索引名，如 `cloudmall_product` |
+| `cursor_product_id` | BIGINT NOT NULL | 已生成事件的最大商品 ID |
+| `batch_size` | INT NOT NULL | 单批最大商品数，默认 200 |
+| `max_events_per_minute` | INT NOT NULL | 限速阈值，按本地开发资源配置 |
+| `last_batch_count` | INT NOT NULL | 最近一次批量商品数 |
+| `last_bulk_at` | DATETIME(3) | 最近一次 Bulk 请求时间 |
+| `index_generation` | INT NOT NULL | 目标索引重建代次；索引丢失时递增 |
+| `status` | VARCHAR(32) NOT NULL | `PENDING`/`RUNNING`/`PAUSED`/`COMPLETED`/`FAILED` |
+| `lease_owner` / `lease_until` | VARCHAR(64)/DATETIME(3) | 扫描租约 |
+| `last_error` | VARCHAR(1024) | 最近错误摘要 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
+
+任务按 `(product_id > cursor_product_id) ORDER BY product_id LIMIT batch_size` 读取，Bulk 成功后才推进游标；部分失败或 ES 中断不推进游标并退避重试。任务暂停、进程重启或 ES 不可用时保留游标，恢复后从未完成批次继续；重复读取同一批依靠 external version 幂等，不产生 88,000 条额外 outbox 和消息堆积。周期检查发现目标索引不存在或代际标识改变时，必须在租约内把 `index_generation` 加一、`cursor_product_id=0`、状态置为 `RUNNING`，从头限速重建；`COMPLETED` 不是永久终态。`FAILED` 只表示本轮失败并保留错误，达到退避时间后仍可由同一任务重试，不得丢弃游标。实时事件与 backfill 共用 external version 规则，不能让 backfill 旧版本覆盖实时新版本。
 
 ## 5. 订单域表
 
