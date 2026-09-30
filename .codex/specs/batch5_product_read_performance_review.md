@@ -53,21 +53,22 @@
 
 ### 4.2 第一阶段索引候选
 
-在接近当前查询规模的副本上用 `EXPLAIN ANALYZE` 验证后，再执行以下最小迁移：
+当前默认请求 `/api/products?page=1&pageSize=20` 没有 `status` 或 `categoryId` 条件。此路径的 `ORDER BY updated_at DESC,id DESC` 不会绑定 `(status,updated_at,id)` 的前导列，因此候选索引必须先覆盖全局稳定排序：
 
 ```sql
 ALTER TABLE product
-  ADD KEY idx_status_updated_id (status, updated_at, id),
-  ADD KEY idx_category_status_updated_id (category_id, status, updated_at, id);
+  ADD KEY idx_updated_id (updated_at, id);
 ```
 
-两个索引分别服务公开上架列表的状态过滤和分类过滤，并为 `latest` 的稳定排序提供候选路径。`idx_category_status` 不得在未完成线上/本地索引构建核对前删除；新索引上线后通过实际 `EXPLAIN ANALYZE` 和写入影响评估决定是否保留旧索引。当前规格中记载的 `idx_status_updated(status,updated_at)` 若实际不存在，应由这次迁移补齐或由数据库规格改为真实状态；不得把规格中的“已存在”当作现场事实。
+上面的索引只在 `EXPLAIN ANALYZE` 证明能减少默认路径扫描/排序成本后执行。`(status,updated_at,id)` 和 `(category_id,status,updated_at,id)` 仅作为带状态或分类过滤的后续候选，不能在本轮未经执行计划和写入代价证明就一并创建。带 `status` 的查询可能受益于前导状态索引，带分类的查询可能受益于分类索引，但这两个路径与无过滤默认列表是不同问题。
+
+`idx_category_status` 不得在未完成本地索引构建核对前删除；新索引上线后通过实际 `EXPLAIN ANALYZE` 和写入影响评估决定是否保留旧索引。当前规格中记载的 `idx_status_updated(status,updated_at)` 若实际不存在，应由后续有证据的迁移补齐，或由数据库规格改为真实状态；不得把规格中的“已存在”当作现场事实。
 
 本轮不预先增加 `price`、`view_count`、`hot_score` 的全部组合索引。热度和价格排序是否值得增加专用索引，必须以各排序的扫描行数、排序耗时、索引大小及写入代价为依据单独决定；`product_hot_stat` 的排序索引还要证明能在商品状态过滤和连接后减少成本。
 
 ### 4.3 分页边界
 
-服务端先以 `long` 计算 `(page - 1) * pageSize`，检查正数、乘法溢出和 JDBC `LIMIT` 可接受范围，再转换为驱动需要的整数类型。建议冻结 `pageSize` 上限 100、`offset` 上限 100,000；超过上限返回 `COMMON_INVALID_ARGUMENT`，不得整数溢出后回到负偏移或执行不可控深分页。
+保持当前接口对页码参数的兼容语义：`page <= 0` 归一为 1，`pageSize <= 0` 归一为 1，`pageSize > 100` 归一为 100。本轮不把这些输入改成新的 400 契约。归一化后，服务端以 `long` 计算 `(page - 1) * pageSize`，检查乘法溢出和 JDBC `LIMIT` 可接受范围；建议冻结 `offset` 上限 100,000，超过上限或溢出时返回 `COMMON_INVALID_ARGUMENT`，不得整数溢出后回到负偏移或执行不可控深分页。
 
 当前前端目录在 88,476 条商品规模下远小于该边界。若后续需要无限滚动或更深的运营后台分页，另行设计基于 `(updated_at,id)` 的游标接口，不能在本轮悄悄改变现有页码接口。
 
@@ -105,7 +106,7 @@ ALTER TABLE product
 ### 功能与结果一致性
 
 - 五种排序、关键词、分类、状态、第一页/中间页/边界页的 `items` 与修复前基线一致；同一排序的相同快照中无重复或漏项。
-- `pageSize > 100` 被限制或拒绝；非正 page/pageSize、offset 溢出和 offset 超过 100,000 返回 `COMMON_INVALID_ARGUMENT`，不执行 SQL。
+- `page <= 0`、`pageSize <= 0` 和 `pageSize > 100` 保持现有归一化结果；归一化后的 offset 溢出或超过 100,000 返回 `COMMON_INVALID_ARGUMENT`，不执行分页 SQL。
 - 计数查询不连接 `product_hot_stat`；非热度排序的列表 SQL 不连接 `product_hot_stat`；热度/销量排序仍保留缺失热度行的零值语义。
 
 ### 性能与连接观测
