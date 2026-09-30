@@ -10,7 +10,7 @@
 
 本轮不切换 Elasticsearch 查询路径（该工作属于 CM-20260924-19），不扩大 Hikari 连接池，不引入缓存或新的中间件，不修改商品写入和索引 outbox 契约。
 
-结论：先采用按排序分支裁剪 `product_hot_stat` 连接、补充经过 EXPLAIN ANALYZE 证明有效的复合索引，并限制深分页；同时补齐数据库连接获取失败和查询耗时的可观测性。历史连接故障在本轮没有复现，不能把本轮列表长尾下降或压测零错误表述为连接故障根因已经消除。
+结论：先采用按排序分支裁剪 `product_hot_stat` 连接、补充经过 EXPLAIN ANALYZE 证明有效的复合索引、修复商品列表映射阶段的 SKU 访问路径，并限制深分页；同时补齐数据库连接获取失败和查询耗时的可观测性。历史连接故障在本轮没有复现，不能把本轮列表长尾下降或压测零错误表述为连接故障根因已经消除。
 
 `api_spec.md` 当前文字把缺省/未知 `sort` 写成热门排序，但运行代码和现有调用链的缺省分支是最新排序。本轮冻结并保留运行中的默认/未知排序为 `latest`，不借性能修复改变公开响应顺序；后续若要切换为热门排序，必须另行修订 API 契约、前端调用和验收基线。`db_schema.md` 还记载了现场不存在的 `idx_status_updated(status,updated_at)`，索引迁移必须以实际 `SHOW INDEX` 为准并同步修正规格漂移。
 
@@ -23,7 +23,9 @@
 | 商品列表，5 线程约 30 秒 | 143 | 0 | 1,137 ms | 1,200 ms |
 | 商品详情，5 线程约 30 秒 | 2,822 | 0 | 63 ms | 70 ms |
 
-同一轮 Hikari 逐秒采样有 18 个样本处于 `active=10`，但 `pending=0`、`timeout_total=0`；MySQL `max_connections=151`，`Threads_running` 最大约 12，未出现连接上限。默认列表 EXPLAIN 对约 86,677 行执行全表扫描和 `Using filesort`；即使排序不使用热度字段，现有 SQL 仍无条件 `LEFT JOIN product_hot_stat`。计数查询走现有覆盖索引的全索引扫描。
+同一轮 Hikari 逐秒采样有 18 个样本处于 `active=10`，但 `pending=0`、`timeout_total=0`；MySQL `max_connections=151`，`Threads_running` 最大约 12，未出现连接上限。最初默认列表 EXPLAIN 对约 86,677 行执行全表扫描和 `Using filesort`；即使排序不使用热度字段，现有 SQL 仍无条件 `LEFT JOIN product_hot_stat`。计数查询走现有覆盖索引的全索引扫描。
+
+随后创建 `product(updated_at,id)` 后，默认列表主查询的 `EXPLAIN ANALYZE` 已降为约 20 行、约 0.06ms，但 JMeter 列表 P95 仍约 1,058ms，说明主查询不是全部长尾来源。调用链复核发现 `ProductServiceImpl.productView → read` 为列表每个商品读取 `product_sku` 和 `product_parameter`；当前 `product_sku` 实际只有 PRIMARY(id) 和 UNIQUE(sku_code)，`findSkus(product_id=? ORDER BY id)` 使用 PRIMARY 全索引扫描约 88,303 行。20 条商品会触发 20 次该扫描，构成当前可复现的主要数据库读放大。`db_schema.md` 记载的 `idx_product_status(product_id,status)` 在实际 schema/运行库中不存在。
 
 历史 JMeter 记录中的 10 次 500 均在 2026-09-05 16:25:58.8 同一瞬间发出，约 30 秒后一起失败；原服务日志没有异常栈。该模式可能与连接获取、请求超时或运行环境瞬时故障有关，但当前证据不足以区分具体原因。
 
@@ -51,7 +53,20 @@
 
 实现可在 Mapper 内使用两个固定 SQL 模板或受控的分支构造。排序字段仍只能来自固定白名单，不能把请求参数直接拼成 SQL。
 
-### 4.2 第一阶段索引候选
+### 4.2 商品列表映射的首要索引
+
+本轮首要迁移是为实际 SQL `where product_id=? order by id` 增加前导商品索引：
+
+```sql
+ALTER TABLE product_sku
+  ADD KEY idx_product_id_id (product_id, id);
+```
+
+该索引必须先在当前 88,476 条商品目录上用 `EXPLAIN ANALYZE` 验证：`findSkus` 按单个 `product_id` 只扫描该商品的 SKU 行，并消除 PRIMARY 全索引扫描。索引创建后重跑同一 JMeter 列表组，比较列表 P95/P99、数据库查询耗时和 Hikari active/pending；若列表长尾仍高，再按调用计数决定是否设计批量读取，不能在本轮无证据地大规模重写 `productView`。
+
+`product_parameter` 当前已有 `(product_id, sort_no)` 索引，但实际 SQL 还按 `id` 做稳定 tie-break；只有执行计划证明参数读取仍有明显排序/扫描成本时，才另行评估 `(product_id, sort_no, id)`。不因 SKU 的 N+1 问题顺带引入无证据的参数索引或批量接口变化。
+
+### 4.3 商品主表第一阶段索引候选
 
 当前默认请求 `/api/products?page=1&pageSize=20` 没有 `status` 或 `categoryId` 条件。此路径的 `ORDER BY updated_at DESC,id DESC` 不会绑定 `(status,updated_at,id)` 的前导列，因此候选索引必须先覆盖全局稳定排序：
 
@@ -66,7 +81,7 @@ ALTER TABLE product
 
 本轮不预先增加 `price`、`view_count`、`hot_score` 的全部组合索引。热度和价格排序是否值得增加专用索引，必须以各排序的扫描行数、排序耗时、索引大小及写入代价为依据单独决定；`product_hot_stat` 的排序索引还要证明能在商品状态过滤和连接后减少成本。
 
-### 4.3 分页边界
+### 4.4 分页边界
 
 保持当前接口对页码参数的兼容语义：`page <= 0` 归一为 1，`pageSize <= 0` 归一为 1，`pageSize > 100` 归一为 100。本轮不把这些输入改成新的 400 契约。归一化后，服务端以 `long` 计算 `(page - 1) * pageSize`，检查乘法溢出和 JDBC `LIMIT` 可接受范围；建议冻结 `offset` 上限 100,000，超过上限或溢出时返回 `COMMON_INVALID_ARGUMENT`，不得整数溢出后回到负偏移或执行不可控深分页。
 
@@ -95,10 +110,10 @@ ALTER TABLE product
 
 ## 6. 迁移策略
 
-1. 在测试或备份副本创建候选索引，记录创建耗时、表锁影响、索引大小和 `information_schema.statistics` 结果。
-2. 对无筛选、status、categoryId、五种 sort、keyword 以及深分页请求分别执行 `EXPLAIN ANALYZE`；保存扫描行数、实际耗时和是否仍有 filesort。
-3. 先部署按需 hot join 与分页边界，再验证结果集、排序稳定性和 `total` 不变；再在维护窗口执行索引迁移。
-4. 迁移后以真实目录规模执行列表/详情阶梯压测，至少覆盖 1、5、10、连接池上限附近并发；同时采集 Hikari、MySQL `Threads_running`、错误码和查询耗时。
+1. 在测试或备份副本创建 `product_sku(product_id,id)` 首要索引和 `product(updated_at,id)` 候选索引，记录创建耗时、表锁影响、索引大小和 `information_schema.statistics` 结果。
+2. 对 `findSkus(product_id=? ORDER BY id)`、无筛选列表、status、categoryId、五种 sort、keyword 以及深分页请求分别执行 `EXPLAIN ANALYZE`；保存扫描行数、实际耗时和是否仍有 filesort。
+3. 先验证 SKU 索引是否消除每个商品约 8.8 万行的 PRIMARY 扫描，再部署按需 hot join 与分页边界；结果集、排序稳定性和 `total` 不变后，才在维护窗口执行主表索引迁移。
+4. 迁移后以真实目录规模执行列表/详情阶梯压测，至少覆盖 1、5、10、连接池上限附近并发；同时采集 Hikari、MySQL `Threads_running`、错误码和按 Mapper 分组的查询耗时。列表 P95 的改善必须与 SKU 查询扫描量下降一起记录。
 5. 只有当新索引在目标请求上稳定降低扫描/排序成本，且写入延迟与索引空间在可接受范围内，才保留并提交 schema 变更。回滚使用 `ALTER TABLE ... DROP INDEX`，但必须先确认没有其他查询依赖该索引。
 
 ## 7. 验收条件
@@ -106,12 +121,14 @@ ALTER TABLE product
 ### 功能与结果一致性
 
 - 五种排序、关键词、分类、状态、第一页/中间页/边界页的 `items` 与修复前基线一致；同一排序的相同快照中无重复或漏项。
+- `findSkus(product_id=? ORDER BY id)` 的执行计划按商品 ID 定位 SKU 行，不再对 `product_sku` PRIMARY 做全索引扫描；列表映射返回字段和顺序不变。
 - `page <= 0`、`pageSize <= 0` 和 `pageSize > 100` 保持现有归一化结果；归一化后的 offset 溢出或超过 100,000 返回 `COMMON_INVALID_ARGUMENT`，不执行分页 SQL。
 - 计数查询不连接 `product_hot_stat`；非热度排序的列表 SQL 不连接 `product_hot_stat`；热度/销量排序仍保留缺失热度行的零值语义。
 
 ### 性能与连接观测
 
 - 在同一目录、同一数据量和同一压测脚本下，默认列表 P95、P99、扫描行数和 filesort 结果有可记录的改善；不能只以零错误作为性能结论。
+- SKU 索引迁移后，列表 P95/P99 与 `product_sku` 扫描行数、列表 Mapper 调用耗时一起复测；若 P95 仍然较高，记录剩余 N+1 调用数量和归因，再决定是否单独评审批量读取。
 - 详情 P95 不得因列表优化出现回归；商品写入和索引 outbox 的事务行为不变。
 - 复测必须记录 Hikari `pending/timeout_total`、MySQL `Threads_running` 和连接上限；不得用扩大连接池掩盖 SQL 长尾。
 - 注入连接获取失败、数据库断连和 SQL 超时中的至少两类，均得到可区分的服务端日志/指标；客户端对确定的读依赖不可用返回 `PRODUCT_QUERY_UNAVAILABLE`/503。
