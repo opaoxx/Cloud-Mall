@@ -19,13 +19,15 @@ import java.security.MessageDigest;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.DataType;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -390,13 +392,15 @@ public class StockServiceImpl implements StockService {
     }
     String candidateOrderNo = now().format(DateTimeFormatter.ofPattern("yyyyMM"))
         + UUID.randomUUID().toString().replace("-", "");
-    String requestPayload = toSeckillPayload(request, candidateOrderNo);
+    String candidatePayload = toSeckillPayload(request, candidateOrderNo);
     Map<String, Object> claimed = seckillRequestClaimService.claim(
         request.activityId, request.skuId, userId, candidateOrderNo, request.idempotencyKey,
-        requestPayload, requestHash, now());
+        candidatePayload, requestHash, now());
     if (!requestHash.equals(String.valueOf(claimed.get("request_hash"))))
       throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
     String orderNo = String.valueOf(claimed.get("order_no"));
+    if (orderNo.isBlank() || "null".equals(orderNo))
+      throw new BizException("SECKILL_CLAIM_CONFLICT", "秒杀请求认领事实无效", 409);
     String claimedStatus = String.valueOf(claimed.get("status"));
     if ("ACCEPTED".equals(claimedStatus)) {
       return acceptedOrRecovering(claimed, orderNo, requestHash);
@@ -405,28 +409,34 @@ public class StockServiceImpl implements StockService {
       return ApiResponse.ok(Map.of("accepted", false, "orderNo", orderNo, "eventId",
           SeckillRequestFingerprint.eventId(orderNo), "reservationStatus", claimedStatus));
     }
+    String requestPayload = String.valueOf(claimed.get("request_payload"));
+    if (requestPayload.isBlank() || "null".equals(requestPayload)
+        || !payloadMatchesOrder(requestPayload, orderNo))
+      return recoveryRequired(orderNo, SeckillRequestFingerprint.eventId(orderNo),
+          "SECKILL_CLAIM_PAYLOAD_INVALID");
     Map<Object, Object> meta =
-        redis.opsForHash().entries("seckill:meta:" + activityId + ":" + skuId);
+        redisOperation(() -> redis.opsForHash().entries("seckill:meta:" + activityId + ":" + skuId));
+    if (meta == null || !meta.containsKey("stockLimit")
+        || !meta.containsKey("perUserLimit")) throw redisUnavailable();
     long start = epoch(meta.get("startAt")), end = epoch(meta.get("endAt"));
-    int limit = Integer.parseInt(String.valueOf(meta.getOrDefault("perUserLimit", "1")));
+    if (start <= 0 || end <= start) throw redisUnavailable();
+    int limit;
+    try {
+      limit = Integer.parseInt(String.valueOf(meta.get("perUserLimit")));
+    } catch (NumberFormatException invalidLimit) {
+      throw redisUnavailable();
+    }
+    if (limit < 1) throw redisUnavailable();
     long ttl = Math.max(1, (end - System.currentTimeMillis() / 1000));
-    String
-        orderKey =
-            "seckill:accepted:"
-                + activityId
-                + ":"
-                + skuId
-                + ":"
-                + requestUserId
-                + ":"
-                + idempotencyKey;
+    String orderKey = "seckill:accepted:" + activityId + ":" + skuId + ":"
+        + requestUserId + ":" + idempotencyKey;
     List<String> keys =
         List.of(
             "seckill:stock:" + activityId + ":" + skuId,
             "seckill:user:" + activityId + ":" + requestUserId,
             orderKey);
     Long result =
-        redis.execute(
+        redisOperation(() -> redis.execute(
             seckillScript,
             keys,
             orderNo,
@@ -434,9 +444,10 @@ public class StockServiceImpl implements StockService {
             String.valueOf(System.currentTimeMillis() / 1000),
             String.valueOf(start),
             String.valueOf(end),
-            String.valueOf(ttl));
+            String.valueOf(ttl)));
     if (Objects.equals(result, 3L)) {
-      String existingOrderNo = redis.opsForValue().get(orderKey);
+      String existingOrderNo = redisOperation(() -> redis.opsForValue().get(orderKey));
+      if (!orderNo.equals(existingOrderNo)) throw redisUnavailable();
       return acceptAfterLua(
           userId, idempotencyKey, existingOrderNo, requestPayload, requestHash);
     }
@@ -460,8 +471,33 @@ public class StockServiceImpl implements StockService {
           Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
       throw new BizException("SECKILL_SOLD_OUT", "秒杀库存耗尽", 409);
     }
-    String no = redis.opsForValue().get(orderKey);
-    return acceptAfterLua(userId, idempotencyKey, no, requestPayload, requestHash);
+    if (!Objects.equals(result, 1L)) throw redisUnavailable();
+    String confirmedOrderNo = redisOperation(() -> redis.opsForValue().get(orderKey));
+    if (!orderNo.equals(confirmedOrderNo)) throw redisUnavailable();
+    return acceptAfterLua(userId, idempotencyKey, confirmedOrderNo, requestPayload, requestHash);
+  }
+
+  /** 只把 Redis 读写异常映射为依赖故障，保留 MySQL 错误的真实归属。 */
+  private <T> T redisOperation(Supplier<T> operation) {
+    try {
+      return operation.get();
+    } catch (DataAccessException redisFailure) {
+      throw redisUnavailable();
+    }
+  }
+
+  /** 认领行中的不可变载荷必须指向同一原订单号。 */
+  private boolean payloadMatchesOrder(String requestPayload, String orderNo) {
+    try {
+      return orderNo.equals(mapper.readTree(requestPayload).path("orderNo").asText());
+    } catch (Exception malformedPayload) {
+      return false;
+    }
+  }
+
+  /** Redis 结果无法确认时保留原幂等键供安全重试。 */
+  private static BizException redisUnavailable() {
+    return new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
   }
 
   /** 执行 recordSeckillPending 相关操作。 */

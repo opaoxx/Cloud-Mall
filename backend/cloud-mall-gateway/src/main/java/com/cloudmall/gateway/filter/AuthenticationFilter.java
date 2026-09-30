@@ -1,5 +1,7 @@
 package com.cloudmall.gateway.filter;
 
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
@@ -8,6 +10,7 @@ import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -34,13 +37,15 @@ public class AuthenticationFilter implements GlobalFilter {
       return unauthorized(exchange);
     String token = authorization.substring("Bearer ".length()).trim();
     if (token.isEmpty()) return unauthorized(exchange);
-    return redis
-        .opsForValue()
-        .get("auth:token:" + token)
-        .switchIfEmpty(Mono.just(""))
+    Mono<TokenLookup> lookup = Mono.defer(() -> redis.opsForValue().get("auth:token:" + token))
+        .map(value -> new TokenLookup(value, false))
+        .defaultIfEmpty(new TokenLookup("", false))
+        .onErrorReturn(new TokenLookup("", true));
+    return lookup
         .flatMap(
-            value -> {
-              String[] parts = value.split(":", 2);
+            result -> {
+              if (result.unavailable()) return unavailable(exchange);
+              String[] parts = result.value().split(":", 2);
               if (parts.length != 2) return unauthorized(exchange);
               ServerWebExchange forwarded =
                   exchange
@@ -76,7 +81,25 @@ public class AuthenticationFilter implements GlobalFilter {
 
   /** 执行 unauthorized 相关操作。 */
   private Mono<Void> unauthorized(ServerWebExchange exchange) {
-    exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-    return exchange.getResponse().setComplete();
+    return error(exchange, HttpStatus.UNAUTHORIZED, "COMMON_UNAUTHORIZED", "请先登录");
   }
+
+  /** Redis 查令牌失败时拒绝转发，故障响应禁止缓存。 */
+  private Mono<Void> unavailable(ServerWebExchange exchange) {
+    exchange.getResponse().getHeaders().setCacheControl("no-store");
+    return error(exchange, HttpStatus.SERVICE_UNAVAILABLE, "REDIS_SERVICE_UNAVAILABLE",
+        "依赖服务暂时不可用，请稍后重试");
+  }
+
+  /** 按既有 ApiResponse 字段写入固定错误，不回传底层异常细节。 */
+  private Mono<Void> error(ServerWebExchange exchange, HttpStatus status, String code, String message) {
+    exchange.getResponse().setStatusCode(status);
+    exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
+    String json = "{\"code\":\"" + code + "\",\"message\":\"" + message
+        + "\",\"data\":null,\"requestId\":\"" + UUID.randomUUID() + "\"}";
+    byte[] body = json.getBytes(StandardCharsets.UTF_8);
+    return exchange.getResponse().writeWith(Mono.just(exchange.getResponse().bufferFactory().wrap(body)));
+  }
+
+  private record TokenLookup(String value, boolean unavailable) {}
 }

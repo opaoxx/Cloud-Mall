@@ -14,7 +14,9 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
@@ -100,7 +102,7 @@ public class CartServiceImpl implements CartService {
     // 1. 接收并整理 delete 的业务请求。
     // 2. 执行 delete 的核心业务校验与状态处理。
     // 3. 返回 delete 的处理结果。
-    redis.opsForHash().delete(key(), String.valueOf(skuId));
+    redisOperation(() -> redis.opsForHash().delete(key(), String.valueOf(skuId)));
     return ApiResponse.ok(null);
   }
 
@@ -125,7 +127,7 @@ public class CartServiceImpl implements CartService {
     // 3. 返回 clearChecked 的处理结果。
     readItems().stream()
         .filter(i -> Boolean.TRUE.equals(i.checked))
-        .forEach(i -> redis.opsForHash().delete(key(), String.valueOf(i.skuId)));
+        .forEach(i -> redisOperation(() -> redis.opsForHash().delete(key(), String.valueOf(i.skuId))));
     return ApiResponse.ok(null);
   }
 
@@ -157,6 +159,7 @@ public class CartServiceImpl implements CartService {
             total.add(
                 new BigDecimal(current.unitPrice()).multiply(BigDecimal.valueOf(item.quantity)));
       } catch (BizException e) {
+        if (e.getHttpStatus() >= 500) throw e;
         invalid.add(Map.of("skuId", item.skuId, "code", e.getCode(), "message", e.getMessage()));
       }
     }
@@ -186,9 +189,7 @@ public class CartServiceImpl implements CartService {
     // 2. 执行 readMap 的核心业务校验与状态处理。
     // 3. 返回 readMap 的处理结果。
     Map<String, CartItemPO> result = new LinkedHashMap<>();
-    redis
-        .opsForHash()
-        .entries(key())
+    redisOperation(() -> redis.opsForHash().entries(key()))
         .forEach(
             (field, value) -> {
               try {
@@ -224,6 +225,7 @@ public class CartServiceImpl implements CartService {
         item.unitPrice = current.unitPrice();
         write(item);
       } catch (BizException ignored) {
+        if (ignored.getHttpStatus() >= 500) throw ignored;
         // Keep an invalid cart item visible so the settlement flow can report it.
       }
     }
@@ -235,11 +237,25 @@ public class CartServiceImpl implements CartService {
     // 1. 接收并整理 write 的业务请求。
     // 2. 执行 write 的核心业务校验与状态处理。
     // 3. 返回 write 的处理结果。
+    String json;
     try {
-      redis.opsForHash().put(key(), String.valueOf(item.skuId), mapper.writeValueAsString(item));
-      redis.expire(key(), TTL);
+      json = mapper.writeValueAsString(item);
     } catch (Exception e) {
       throw new BizException(ErrorCodes.INTERNAL, "购物车保存失败", 500);
+    }
+    redisOperation(() -> {
+      redis.opsForHash().put(key(), String.valueOf(item.skuId), json);
+      redis.expire(key(), TTL);
+      return null;
+    });
+  }
+
+  /** Redis 故障统一按已评审的可重试依赖错误返回。 */
+  private <T> T redisOperation(Supplier<T> operation) {
+    try {
+      return operation.get();
+    } catch (DataAccessException redisFailure) {
+      throw new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
     }
   }
 

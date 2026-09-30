@@ -34,6 +34,7 @@ import java.util.UUID;
 import javax.annotation.PostConstruct;
 import javax.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -135,7 +136,11 @@ public class UserServiceImpl implements UserService {
       throw new BizException("USER_LOGIN_FAILED", "用户名或密码错误", 401);
     }
     String token = UUID.randomUUID().toString();
-    redis.opsForValue().set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
+    try {
+      redis.opsForValue().set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
+    } catch (DataAccessException redisFailure) {
+      throw new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
+    }
     return ApiResponse.ok(Map.of("token", token, "user", UserVO.from(user)));
   }
 
@@ -147,7 +152,11 @@ public class UserServiceImpl implements UserService {
     // 2. 删除对应 Redis 登录态。
     // 3. 返回登出成功响应。
     if (authorization != null && authorization.startsWith("Bearer ")) {
-      redis.delete("auth:token:" + authorization.substring(7).trim());
+      try {
+        redis.delete("auth:token:" + authorization.substring(7).trim());
+      } catch (DataAccessException redisFailure) {
+        throw new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
+      }
     }
     return ApiResponse.ok(null);
   }

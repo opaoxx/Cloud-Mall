@@ -100,28 +100,6 @@ class BackendP1RulesTest {
   }
 
   @Test
-  void gatewayAuthenticationDoesNotTreatSuccessfulDownstreamCompletionAsEmptyAuth()
-      throws Exception {
-    String filter =
-        Files.readString(
-            Path.of(
-                    "..",
-                    "cloud-mall-gateway",
-                    "src",
-                    "main",
-                    "java",
-                    "com",
-                    "cloudmall",
-                    "gateway",
-                    "filter",
-                    "AuthenticationFilter.java")
-                .normalize());
-    assertTrue(filter.contains(".switchIfEmpty(Mono.just(\"\"))"));
-    assertFalse(filter.contains("switchIfEmpty(unauthorized(exchange))"));
-    assertFalse(filter.contains("onErrorResume(error -> unauthorized(exchange))"));
-  }
-
-  @Test
   void allBusinessServicesExposePrometheusWithBootManagedRegistry() throws Exception {
     for (String module :
         List.of(
