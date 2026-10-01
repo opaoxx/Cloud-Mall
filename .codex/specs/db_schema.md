@@ -71,11 +71,11 @@
 | `version` | INT NOT NULL | 乐观并发版本 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义的审计时间 |
 
-索引：`idx_category_status(category_id, status)`、`idx_status_updated(status, updated_at)`；搜索索引由 ES 管理。所有会影响公开索引的商品、SKU、参数、上下架和删除写操作必须在同一本地事务内把 `version` 严格递增一次；事件使用提交后的版本。迁移前必须审计并修正历史更新未递增造成的重复版本，不能依赖时间戳猜测新旧。
+索引：`idx_category_status(category_id, status)`、`idx_product_updated_id(updated_at DESC, id DESC)`；搜索索引由 ES 管理。`idx_product_updated_id` 服务无筛选的最新排序列表，必须以实际 `EXPLAIN ANALYZE` 验证后迁移。带 `status` 或 `category_id` 的复合索引不视为已存在，需基于实际执行计划和写入代价另行评审。所有会影响公开索引的商品、SKU、参数、上下架和删除写操作必须在同一本地事务内把 `version` 严格递增一次；事件使用提交后的版本。迁移前必须审计并修正历史更新未递增造成的重复版本，不能依赖时间戳猜测新旧。
 
 ### 4.3 `product_sku`
 
-`id BIGINT PK`、`product_id BIGINT NOT NULL`、`sku_code VARCHAR(64) UNIQUE NOT NULL`、`spec_json JSON NOT NULL`、`price DECIMAL(18,2) NOT NULL`、`status TINYINT NOT NULL`、`created_at`、`updated_at`。索引：`idx_product_status(product_id, status)`。`spec_json` 使用属性名到属性值的 JSON 对象表达 SKU 规格，订单明细保存不可变 `sku_snapshot`。
+`id BIGINT PK`、`product_id BIGINT NOT NULL`、`sku_code VARCHAR(64) UNIQUE NOT NULL`、`spec_json JSON NOT NULL`、`price DECIMAL(18,2) NOT NULL`、`status TINYINT NOT NULL`、`created_at`、`updated_at`。索引：`idx_product_id_id(product_id, id)`。该索引服务商品详情和列表映射按商品读取 SKU 并按 `id` 稳定排序；`product_id,status` 组合索引不视为已存在，只有实际执行计划证明需要时再单独评审。`spec_json` 使用属性名到属性值的 JSON 对象表达 SKU 规格，订单明细保存不可变 `sku_snapshot`。
 
 ### 4.4 `product_parameter`
 

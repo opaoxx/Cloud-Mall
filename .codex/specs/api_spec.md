@@ -105,7 +105,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | POST | `/api/products/{id}/unpublish` | 无 | 下架 |
 | GET | `/api/products/{id}/hot-stat` | 无 | 热度统计/排序信息 |
 
-商品写接口中的商品参数 `ProductParameter` 统一为 `{name: string, value: string}`；SKU 的 `specJson` 统一为 `Record<string, string>` 对应的 JSON 对象，不使用字符串化 JSON。数据库内部列名仍为 `param_name`/`param_value`，仅由后端负责 API 字段映射，无需修改 `db_schema.md`。商品列表 `sort` 支持 `hot`、`sales`、`latest`、`price_asc`、`price_desc`，其中 `sales` 使用商品热度统计中的源销量计数排序，未知值按默认热门顺序处理。前端展示库存是参考值，结算必须重新校验。
+商品写接口中的商品参数 `ProductParameter` 统一为 `{name: string, value: string}`；SKU 的 `specJson` 统一为 `Record<string, string>` 对应的 JSON 对象，不使用字符串化 JSON。数据库内部列名仍为 `param_name`/`param_value`，仅由后端负责 API 字段映射，无需修改 `db_schema.md`。商品列表 `sort` 支持 `hot`、`sales`、`latest`、`price_asc`、`price_desc`，其中 `sales` 使用商品热度统计中的源销量计数排序；缺省或未知 `sort` 按当前运行契约使用 `latest`，不得由性能修复隐式切换为热门排序。前端展示库存是参考值，结算必须重新校验。`page <= 0` 归一为 1，`pageSize <= 0` 归一为 1，`pageSize > 100` 归一为 100；归一化后的 `(page-1)*pageSize` 溢出或 `offset > 100000` 返回 `COMMON_INVALID_ARGUMENT`（400）。
 
 商品写接口成功只表示 MySQL 商品事实本地事务提交；索引同步是异步最终一致。所有影响公开索引的商品、SKU、参数和上下架写操作必须递增 `product.version` 并同时写入 `product_index_outbox`，由提交后的 dispatcher 使用 RabbitMQ publisher confirm/returned 可靠投递。索引消费者按 `productId` 重新读取当前 MySQL 事实并写入 ES，不能使用消息快照直接覆盖；`productVersion` 小于已处理版本的事件只能记录 `STALE`。上架/修改生成 `PRODUCT_INDEX_UPSERT`；下架、停用和删除生成 `PRODUCT_INDEX_HIDE`，查询不可见，保留版本 tombstone 防止旧消息复活。消息投递或 ES 暂时失败不回滚商品写入，后台持续重试并告警。分类接口仍按原契约执行，但分类变更不生成商品索引事件；商品索引 outbox 不接收 `CATEGORY_CHANGED`，避免分类事件被消费者静默忽略。
 
@@ -229,6 +229,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `ORDER_STOCK_ACTION_UNKNOWN` | 库存确认/回滚结果未知，等待恢复 | 202 |
 | `ORDER_STOCK_ACTION_CONFLICT` | 库存动作发现相反终态，需要对账 | 409 |
 | `ORDER_QUERY_SHARD_UNAVAILABLE` | 订单列表涉及的月份表缺失或查询失败，结果不可完整确定 | 503 |
+| `PRODUCT_QUERY_UNAVAILABLE` | 商品读接口获取数据库连接或执行 SQL 超时，本次结果不可可靠确定 | 503 |
 | `STOCK_CACHE_REPAIRING` | 库存事实已提交，缓存修复处理中 | 202 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |
