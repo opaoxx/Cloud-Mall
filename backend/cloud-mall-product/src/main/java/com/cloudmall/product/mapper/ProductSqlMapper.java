@@ -5,8 +5,12 @@ import com.cloudmall.product.domain.dto.CategoryDTO;
 import com.cloudmall.product.domain.dto.ProductDTO;
 import com.cloudmall.product.domain.dto.ProductParameterDTO;
 import com.cloudmall.product.domain.dto.SkuDTO;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -17,9 +21,31 @@ public class ProductSqlMapper {
   /** Spring JDBC 执行器。 */
   private final JdbcTemplate jdbcTemplate;
 
+  /** 各阶段 JDBC 耗时，区别主查询与附属 SKU/参数读取。 */
+  private final Timer productCountTimer;
+  private final Timer productListTimer;
+  private final Timer productDetailTimer;
+  private final Timer productSkuTimer;
+  private final Timer productParameterTimer;
+
   /** 创建商品 SQL Mapper。 */
-  public ProductSqlMapper(JdbcTemplate jdbcTemplate) {
+  public ProductSqlMapper(JdbcTemplate jdbcTemplate, MeterRegistry meterRegistry) {
     this.jdbcTemplate = jdbcTemplate;
+    this.productCountTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "count");
+    this.productListTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "list");
+    this.productDetailTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "detail");
+    this.productSkuTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "sku");
+    this.productParameterTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "parameter");
+  }
+
+  /** 同时记录成功和失败的查询耗时，不改变原异常传播。 */
+  private static <T> T timed(Timer timer, Supplier<T> query) {
+    long startedAt = System.nanoTime();
+    try {
+      return query.get();
+    } finally {
+      timer.record(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
+    }
   }
 
   /** 执行商品查询。 */
@@ -104,8 +130,8 @@ public class ProductSqlMapper {
     StringBuilder condition = new StringBuilder(" where 1=1");
     List<Object> arguments = new java.util.ArrayList<>();
     appendProductConditions(condition, arguments, keyword, categoryId, status);
-    return queryForObject(
-        "select count(*) from product" + condition, arguments.toArray(), Long.class);
+    return timed(productCountTimer, () -> queryForObject(
+        "select count(*) from product" + condition, arguments.toArray(), Long.class));
   }
 
   /** 分页查询商品。 */
@@ -117,14 +143,16 @@ public class ProductSqlMapper {
     arguments.add(offset);
     arguments.add(pageSize);
     String orderBy = productOrderBy(sort);
-    return queryForList(
+    String hotStatJoin = "hot".equals(sort) || "sales".equals(sort)
+        ? " left join product_hot_stat hot on hot.product_id=p.id" : "";
+    return timed(productListTimer, () -> queryForList(
         "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status"
-            + " from product p left join product_hot_stat hot on hot.product_id=p.id"
+            + " from product p" + hotStatJoin
             + condition
             + " order by "
             + orderBy
             + " limit ?,?",
-        arguments.toArray());
+        arguments.toArray()));
   }
 
   /** 将公开排序参数映射为固定 SQL 片段，避免把请求参数拼入 SQL。 */
@@ -241,9 +269,9 @@ public class ProductSqlMapper {
 
   /** 查询商品基础信息。 */
   public List<Map<String, Object>> findProduct(Long productId) {
-    return queryForList(
+    return timed(productDetailTimer, () -> queryForList(
         "select id,category_id,name,main_image,description,price,status from product where id=?",
-        productId);
+        productId));
   }
 
   /** 判断商品分类是否存在。 */
@@ -254,18 +282,18 @@ public class ProductSqlMapper {
 
   /** 查询商品 SKU 列表。 */
   public List<Map<String, Object>> findSkus(Long productId) {
-    return queryForList(
+    return timed(productSkuTimer, () -> queryForList(
         "select id,product_id,sku_code,spec_json,price,status from product_sku where product_id=?"
             + " order by id",
-        productId);
+        productId));
   }
 
   /** 查询商品参数列表。 */
   public List<Map<String, Object>> findParameters(Long productId) {
-    return queryForList(
+    return timed(productParameterTimer, () -> queryForList(
         "select id,product_id,param_name,param_value,sort_no from product_parameter where"
             + " product_id=? order by sort_no,id",
-        productId);
+        productId));
   }
 
   /** 新增或更新 SKU。 */

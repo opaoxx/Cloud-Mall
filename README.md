@@ -45,6 +45,13 @@ docker compose up -d
 
 首次启动时，MySQL 会执行 `backend/database/schema.sql`，创建数据库、表和本地演示商品。
 
+已有 MySQL 数据卷不会重新执行初始化脚本。升级商品读索引时，在项目根目录执行一次（脚本可重复执行）：
+
+```powershell
+Get-Content -Raw backend/database/migrate_product_read_indexes.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot
+```
+
 ### 2. 启动后端
 
 使用 IntelliJ IDEA 导入根目录 `pom.xml`，再分别启动各服务的 `*Application`。

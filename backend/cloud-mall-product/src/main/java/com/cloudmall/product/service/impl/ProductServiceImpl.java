@@ -25,14 +25,23 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
 import javax.validation.Valid;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class ProductServiceImpl implements ProductService {
+  /** 记录异常慢读请求的筛选类型、返回行数与耗时。 */
+  private static final Logger log = LoggerFactory.getLogger(ProductServiceImpl.class);
+
+  /** 页码接口允许的最大数据库偏移，避免无界深分页占用连接。 */
+  private static final long MAX_LIST_OFFSET = 100_000L;
+
   /** 保存 db 的业务状态或配置。 */
   @Autowired private ProductSqlMapper productSqlMapper;
 
@@ -123,6 +132,7 @@ public class ProductServiceImpl implements ProductService {
   }
 
   @GetMapping("/products")
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   /** 执行 products 相关操作。 */
   public ApiResponse<?> products(
       @RequestParam(required = false) String keyword,
@@ -134,15 +144,27 @@ public class ProductServiceImpl implements ProductService {
     // 1. 接收并整理 products 的业务请求。
     // 2. 执行 products 的核心业务校验与状态处理。
     // 3. 返回 products 的处理结果。
+    long startedAt = System.nanoTime();
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
+    long offset = Math.multiplyExact((long) page - 1L, pageSize);
+    if (offset > MAX_LIST_OFFSET)
+      throw new BizException(ErrorCodes.INVALID, "商品列表页码超出可查询范围", 400);
     long total = productSqlMapper.countProducts(keyword, categoryId, status);
+    if (offset >= total)
+      return ApiResponse.ok(new PageResult<>(List.of(), page, pageSize, total));
     List<ProductDTO> items =
         productSqlMapper
-            .findProducts(keyword, categoryId, status, (page - 1) * pageSize, pageSize, sort)
+            .findProducts(keyword, categoryId, status, (int) offset, pageSize, sort)
             .stream()
             .map(this::productView)
             .toList();
+    long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+        System.nanoTime() - startedAt);
+    if (elapsedMillis > 200L)
+      log.warn("商品列表慢读，elapsedMs={}，page={}，pageSize={}，sort={}，keyword={}，categoryFiltered={}，statusFiltered={}，total={}，rows={}，traceId={}",
+          elapsedMillis, page, pageSize, sort, keyword != null && !keyword.isBlank(),
+          categoryId != null, status != null, total, items.size(), MDC.get("traceId"));
     return ApiResponse.ok(new PageResult<>(items, page, pageSize, total));
   }
 
