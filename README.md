@@ -101,6 +101,17 @@ npm run build
 mvn test
 ```
 
+秒杀并发复核可使用 [JMeter 测试计划](backend/loadtest/seckill-ladder.jmx)。先准备有效 Token、收货地址和独立的已开始活动；每个并发档位使用新活动，避免前一档消耗库存。PowerShell 示例：
+
+```powershell
+jmeter -n -t backend/loadtest/seckill-ladder.jmx `
+  "-Jcloudmall.token=$token" "-Jcloudmall.activityId=$activityId" `
+  "-Jcloudmall.skuId=$skuId" "-Jcloudmall.addressId=$addressId" `
+  -Jcloudmall.threads=20 -Jcloudmall.loops=1 -l results.jtl
+```
+
+测试后同时核对 HTTP 受理、MySQL 秒杀受理/outbox/订单、Redis 配额及 RabbitMQ 死信；`409/429` 业务拒绝应与系统错误分开统计。
+
 部分旧测试依赖的 Mockito/Byte Buddy 版本不支持 JDK 21，推荐使用 JDK 17 运行完整测试集。
 
 ## 项目结构

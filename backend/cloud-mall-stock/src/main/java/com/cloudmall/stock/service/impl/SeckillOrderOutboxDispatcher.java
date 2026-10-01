@@ -9,6 +9,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
@@ -75,12 +76,22 @@ public class SeckillOrderOutboxDispatcher {
               + row.get("user_id") + ":" + row.get("idempotency_key"));
       if (!orderNo.equals(marker)) {
         if (isPastMarkerGrace(row.get("updated_at"))) {
-          stockSqlMapper.markSeckillUnknown(
+          int transitioned = stockSqlMapper.markSeckillUnknown(
               ((Number) row.get("user_id")).longValue(),
               String.valueOf(row.get("idempotency_key")),
               "REDIS_MARKER_MISSING_AFTER_GRACE_PERIOD",
               now());
-          log.error("秒杀受理缺少 Redis marker，已转 UNKNOWN 保留人工/对账证据，orderNo={}", orderNo);
+          if (transitioned == 1) {
+            log.error("秒杀受理缺少 Redis marker，已转 UNKNOWN 保留人工/对账证据，orderNo={}", orderNo);
+          } else {
+            try {
+              if (!alreadyCommitted(row, orderNo))
+                log.warn("秒杀缺少 marker 且 UNKNOWN 转换未命中，保留原记录继续核验，orderNo={}", orderNo);
+            } catch (RuntimeException verificationFailure) {
+              log.warn("秒杀缺少 marker 后的持久事实核验失败，orderNo={}", orderNo,
+                  verificationFailure);
+            }
+          }
         }
         continue;
       }
@@ -94,9 +105,35 @@ public class SeckillOrderOutboxDispatcher {
             String.valueOf(row.get("request_hash")),
             now());
       } catch (RuntimeException recoveryFailure) {
+        try {
+          if (alreadyCommitted(row, orderNo)) continue;
+        } catch (RuntimeException verificationFailure) {
+          recoveryFailure.addSuppressed(verificationFailure);
+        }
         log.warn("秒杀 PENDING 受理恢复失败，将在下一轮重试，orderNo={}", orderNo, recoveryFailure);
       }
     }
+  }
+
+  /** CAS 败方只在原订单号、用户幂等键、哈希和 outbox 事件全匹配时静默收敛。 */
+  private boolean alreadyCommitted(Map<String, Object> scanned, String orderNo) {
+    Map<String, Object> reservation = stockSqlMapper.findSeckillByOrderNo(orderNo);
+    Map<String, Object> outbox = stockSqlMapper.findSeckillOutboxByOrderNo(orderNo);
+    if (reservation == null || reservation.isEmpty() || outbox == null || outbox.isEmpty())
+      return false;
+    String status = String.valueOf(reservation.get("status"));
+    String outboxStatus = String.valueOf(outbox.get("status"));
+    return Set.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED").contains(status)
+        && Set.of("PENDING", "PUBLISHED", "UNKNOWN", "DEAD").contains(outboxStatus)
+        && orderNo.equals(String.valueOf(reservation.get("order_no")))
+        && String.valueOf(scanned.get("user_id")).equals(String.valueOf(reservation.get("user_id")))
+        && String.valueOf(scanned.get("idempotency_key"))
+            .equals(String.valueOf(reservation.get("idempotency_key")))
+        && String.valueOf(scanned.get("request_hash"))
+            .equals(String.valueOf(reservation.get("request_hash")))
+        && SeckillRequestFingerprint.eventId(orderNo).equals(String.valueOf(outbox.get("event_id")))
+        && String.valueOf(scanned.get("request_hash"))
+            .equals(String.valueOf(outbox.get("request_hash")));
   }
 
   /** 判断 PENDING 记录是否已超过 marker 恢复宽限期，避免旧记录永久占用扫描窗口。 */
