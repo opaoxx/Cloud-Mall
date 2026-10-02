@@ -1,10 +1,13 @@
 package com.cloudmall.order.service.impl;
 
+import com.alibaba.csp.sentinel.Entry;
+import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.cloudmall.common.api.*;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
+import com.cloudmall.order.config.SeckillSentinelConfiguration;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.domain.dto.SeckillOrderDTO;
@@ -479,24 +482,41 @@ public class OrderServiceImpl implements OrderService {
         || req.skuId == null
         || req.addressId == null)
       bad("秒杀参数不完整");
-    Map<String, Object> address = findAddress(req.addressId);
-    Map<String, Object> b = new HashMap<>();
-    b.put("activityId", req.activityId);
-    b.put("skuId", req.skuId);
-    b.put("userId", userId);
-    b.put("idempotencyKey", key);
-    b.put("addressSnapshot", toJson(address));
+    Entry sentinelEntry;
     try {
-      ApiResponse<?> row = stock.seckill(b);
-      return row == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : row;
-    } catch (FeignException exception) {
-      if (exception.status() == 429)
-        throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
-      if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(remoteCode(exception)))
-        throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
-      if (exception.status() == 409)
-        throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
-      throw new BizException(ErrorCodes.INTERNAL, "秒杀服务暂时不可用，请稍后再试", 503);
+      sentinelEntry = SeckillSentinelConfiguration.enter(userId, req.activityId);
+    } catch (BlockException blocked) {
+      SeckillSentinelConfiguration.recordBlock();
+      throw new BizException("GATEWAY_RATE_LIMITED", "请求过于频繁，请稍后重试", 429);
+    }
+    try {
+      Map<String, Object> address = findAddress(req.addressId);
+      Map<String, Object> stockRequest = new HashMap<>();
+      stockRequest.put("activityId", req.activityId);
+      stockRequest.put("skuId", req.skuId);
+      stockRequest.put("userId", userId);
+      stockRequest.put("idempotencyKey", key);
+      stockRequest.put("addressSnapshot", toJson(address));
+      try {
+        ApiResponse<?> row = stock.seckill(stockRequest);
+        return row == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : row;
+      } catch (FeignException exception) {
+        if (exception.status() == 429) {
+          String downstreamCode = remoteCode(exception);
+          if ("GATEWAY_RATE_LIMITED".equals(downstreamCode))
+            throw new BizException("GATEWAY_RATE_LIMITED", "请求过于频繁，请稍后重试", 429);
+          if ("SECKILL_LIMIT_REACHED".equals(downstreamCode))
+            throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
+          throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
+        }
+        if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(remoteCode(exception)))
+          throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
+        if (exception.status() == 409)
+          throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
+        throw new BizException(ErrorCodes.INTERNAL, "秒杀服务暂时不可用，请稍后再试", 503);
+      }
+    } finally {
+      sentinelEntry.exit(1, userId, req.activityId);
     }
   }
 

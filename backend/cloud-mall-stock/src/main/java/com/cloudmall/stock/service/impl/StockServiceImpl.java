@@ -1,9 +1,12 @@
 package com.cloudmall.stock.service.impl;
 
+import com.alibaba.csp.sentinel.Entry;
+import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
+import com.cloudmall.stock.config.SeckillSentinelConfiguration;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
@@ -383,6 +386,23 @@ public class StockServiceImpl implements StockService {
       throw new BizException(ErrorCodes.INVALID, "秒杀参数不完整", 400);
     if (!String.valueOf(userId).equals(requestUserId))
       throw new BizException(ErrorCodes.FORBIDDEN, "秒杀用户归属校验失败", 403);
+    Entry sentinelEntry;
+    try {
+      sentinelEntry = SeckillSentinelConfiguration.enter();
+    } catch (BlockException blocked) {
+      SeckillSentinelConfiguration.recordBlock();
+      throw new BizException("GATEWAY_RATE_LIMITED", "请求过于频繁，请稍后重试", 429);
+    }
+    try {
+      return seckillAfterSentinel(request, userId, activityId, skuId, requestUserId, idempotencyKey);
+    } finally {
+      sentinelEntry.exit();
+    }
+  }
+
+  /** Sentinel 放行后才进入指纹、持久认领、Redis 预扣与 outbox 受理流程。 */
+  private ApiResponse<?> seckillAfterSentinel(SeckillReservationDTO request, long userId,
+      String activityId, String skuId, String requestUserId, String idempotencyKey) {
     String requestHash;
     try {
       requestHash = SeckillRequestFingerprint.hash(
@@ -454,7 +474,7 @@ public class StockServiceImpl implements StockService {
     if (Objects.equals(result, 2L)) {
       markSeckillRejected(
           Long.parseLong(activityId), Long.parseLong(skuId), userId, idempotencyKey);
-      throw new BizException(ErrorCodes.DUPLICATE, "超过用户限购", 429);
+      throw new BizException("SECKILL_LIMIT_REACHED", "超过用户限购", 429);
     }
     if (Objects.equals(result, 4L)) {
       markSeckillRejected(

@@ -83,11 +83,13 @@ class BackendP1RulesTest {
             Path.of("..", "cloud-mall-gateway", "src", "main", "resources", "application.yml")
                 .normalize());
     int activities = config.indexOf("id: seckill-activities");
+    int seckillOrders = config.indexOf("id: seckill-order");
     int orders = config.indexOf("id: order");
 
     assertTrue(config.contains("server: {port: 8080}"));
     assertTrue(activities >= 0);
-    assertTrue(orders > activities);
+    assertTrue(seckillOrders > activities);
+    assertTrue(orders > seckillOrders);
     assertTrue(
         config.contains(
             "uri: lb://cloud-mall-product, predicates:"
@@ -95,7 +97,8 @@ class BackendP1RulesTest {
     assertTrue(
         config.contains(
             "uri: lb://cloud-mall-order, predicates:"
-                + " [\"Path=/api/orders/**,/api/seckill/orders,/api/seckill/orders/**\"]"));
+                + " [\"Path=/api/seckill/orders,/api/seckill/orders/**\"]"));
+    assertTrue(config.contains("uri: lb://cloud-mall-order, predicates: [\"Path=/api/orders/**\"]"));
     assertTrue(!config.contains("Path=/api/seckill/**"));
   }
 

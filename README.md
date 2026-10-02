@@ -76,6 +76,16 @@ npm run dev
 
 本地管理员账号为 `admin`，密码为 `admin123`。
 
+### 秒杀 Sentinel 规则
+
+Gateway 与订单服务启动时自带秒杀限流默认规则。Nacos 可持久保存开发环境规则；首次启动中间件后执行：
+
+```powershell
+.\deploy\nacos\publish-sentinel-rules.ps1
+```
+
+脚本只创建缺失的 `CLOUDMALL_DEV` 规则。需要用仓库中的规则覆盖现有 Nacos 配置时，显式添加 `-Force`。Sentinel Dashboard 的临时调整不会自动写回 Nacos；需要长期保留的调整应更新 `deploy/nacos/sentinel/` 的 JSON 并发布。
+
 ### 扩充本地商品目录
 
 需要使用 `F:\hmall\sql\hm-item.sql` 的完整商品数据时，在 MySQL 容器启动后执行：

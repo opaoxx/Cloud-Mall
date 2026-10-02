@@ -5,7 +5,6 @@ import java.util.UUID;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
-import org.springframework.core.annotation.Order;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -16,14 +15,19 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE)
-public class AuthenticationFilter implements GlobalFilter {
+public class AuthenticationFilter implements GlobalFilter, Ordered {
   /** 保存 redis 的业务状态或配置。 */
   private final ReactiveStringRedisTemplate redis;
 
   /** 创建 AuthenticationFilter 实例。 */
   public AuthenticationFilter(ReactiveStringRedisTemplate redis) {
     this.redis = redis;
+  }
+
+  /** 鉴权先于 Sentinel 过滤器执行，避免无 Token 请求占用秒杀配额。 */
+  @Override
+  public int getOrder() {
+    return Ordered.HIGHEST_PRECEDENCE;
   }
 
   @Override

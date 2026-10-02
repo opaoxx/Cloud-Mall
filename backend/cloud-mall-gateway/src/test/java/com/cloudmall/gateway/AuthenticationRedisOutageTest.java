@@ -9,6 +9,7 @@ import com.cloudmall.gateway.filter.AuthenticationFilter;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.core.Ordered;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.ReactiveValueOperations;
@@ -29,6 +30,7 @@ class AuthenticationRedisOutageTest {
 
   @Test
   void protectedRouteRejectsRedisFailureWith503AndNoStore() {
+    assertEquals(Ordered.HIGHEST_PRECEDENCE, filter.getOrder());
     when(redis.opsForValue()).thenReturn(values);
     when(values.get("auth:token:test-token"))
         .thenReturn(Mono.error(new RedisConnectionFailureException("redis down")));

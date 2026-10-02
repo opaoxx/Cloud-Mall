@@ -6,6 +6,8 @@ spring:
   rabbitmq: {host: localhost, port: 15673, username: root, password: root, publisher-confirm-type: correlated, publisher-returns: true}
   task.scheduling.pool.size: 2
 management.endpoints.web.exposure.include: health,info,prometheus
+spring.cloud.sentinel.eager: true
+spring.cloud.sentinel.transport.dashboard: localhost:8858
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root

@@ -5,6 +5,7 @@ import com.cloudmall.common.error.BizException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
@@ -19,8 +20,10 @@ public class GlobalExceptionHandler {
   /** 转换业务异常为统一响应。 */
   @ExceptionHandler(BizException.class)
   public ResponseEntity<ApiResponse<Object>> biz(BizException exception) {
-    return ResponseEntity.status(exception.getHttpStatus())
-        .body(ApiResponse.error(exception.getCode(), exception.getMessage()));
+    ResponseEntity.BodyBuilder response = ResponseEntity.status(exception.getHttpStatus());
+    if (exception.getHttpStatus() == 429 || exception.getHttpStatus() == 503)
+      response.cacheControl(CacheControl.noStore());
+    return response.body(ApiResponse.error(exception.getCode(), exception.getMessage()));
   }
 
   /** 转换参数校验异常为统一响应。 */

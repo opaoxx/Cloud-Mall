@@ -112,6 +112,27 @@ class RedisOutageSeckillTest {
     verifyNoInteractions(acceptance);
   }
 
+  @Test
+  void userPurchaseLimitKeepsItsBusinessCodeDistinctFromSentinel() {
+    prepareClaim("202610original");
+    HashOperations<String, Object, Object> hashes = mock(HashOperations.class);
+    when(redis.opsForHash()).thenReturn(hashes);
+    Map<Object, Object> meta = new HashMap<>();
+    meta.put("startAt", Instant.now().minusSeconds(60).toString());
+    meta.put("endAt", Instant.now().plusSeconds(3600).toString());
+    meta.put("perUserLimit", "1");
+    meta.put("stockLimit", "5");
+    when(hashes.entries(any())).thenReturn(meta);
+    when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(),
+        any(), any(), any())).thenReturn(2L);
+
+    BizException limited = assertThrows(BizException.class, () -> service.seckill(request()));
+
+    assertEquals(429, limited.getHttpStatus());
+    assertEquals("SECKILL_LIMIT_REACHED", limited.getCode());
+    verifyNoInteractions(acceptance);
+  }
+
   private String prepareClaim(String originalOrderNo) {
     ReflectionTestUtils.setField(service, "seckillRequestClaimService", claims);
     ReflectionTestUtils.setField(service, "seckillAcceptanceService", acceptance);

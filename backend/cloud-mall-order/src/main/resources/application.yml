@@ -23,9 +23,15 @@ spring:
   cloud.alibaba.seata.tx-service-group: cloudmall_tx_group
   task.scheduling.pool.size: 2
 management.endpoints.web.exposure.include: health,info,prometheus
+spring.cloud.sentinel.eager: true
+spring.cloud.sentinel.transport.dashboard: localhost:8858
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
+cloudmall.order.seckill.sentinel.flow-qps: 20
+cloudmall.order.seckill.sentinel.user-qps: 20
+cloudmall.order.seckill.sentinel.activity-qps: 20
+cloudmall.order.sentinel.nacos-retry-ms: 5000
 cloudmall:
   order:
     outbox:
