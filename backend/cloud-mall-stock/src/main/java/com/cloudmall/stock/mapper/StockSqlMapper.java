@@ -1,6 +1,7 @@
 package com.cloudmall.stock.mapper;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -184,11 +185,64 @@ public class StockSqlMapper {
             + "next_retry_at,created_at,updated_at)"
             + " SELECT UUID_SHORT(),sku_id,available_quantity,version,'PENDING',0,?,?,?"
             + " FROM stock_sku"
-            + " ON DUPLICATE KEY UPDATE target_available=VALUES(target_available),status='PENDING',"
-            + "next_retry_at=VALUES(next_retry_at),last_error=NULL,updated_at=VALUES(updated_at)",
+            + " ON DUPLICATE KEY UPDATE target_available=VALUES(target_available),"
+            + "status=CASE WHEN status='APPLIED' THEN status ELSE 'PENDING' END,"
+            + "next_retry_at=CASE WHEN status='APPLIED' THEN next_retry_at ELSE VALUES(next_retry_at) END,"
+            + "last_error=CASE WHEN status='APPLIED' THEN last_error ELSE NULL END,"
+            + "updated_at=VALUES(updated_at)",
         occurredAt,
         occurredAt,
         occurredAt);
+  }
+
+  /** 按 SKU 主键游标读取有界库存事实，避免启动校准一次性加载全表。 */
+  public List<Map<String, Object>> findAvailableStockBatchAfter(long cursorSkuId, int limit) {
+    int boundedLimit = Math.max(1, Math.min(2000, limit));
+    return queryForList(
+        "SELECT sku_id,available_quantity,version FROM stock_sku "
+            + "WHERE sku_id>? ORDER BY sku_id LIMIT ?",
+        cursorSkuId,
+        boundedLimit);
+  }
+
+  /**
+   * 为确认存在差异的 SKU 批量创建或唤醒当前版本修复意图。
+   *
+   * <p>使用一条 INSERT SELECT 和 JDBC 参数绑定，避免按 SKU 逐条往返；同版本 APPLIED 只有在
+   * 差异复核明确确认缓存不一致时才会被重新唤醒。
+   */
+  public int enqueueCacheRepairsForSkuIds(
+      List<Long> skuIds, OffsetDateTime occurredAt) {
+    if (skuIds == null || skuIds.isEmpty()) {
+      return 0;
+    }
+    if (skuIds.size() > 2000) {
+      throw new IllegalArgumentException("skuIds batch must contain at most 2000 items");
+    }
+    StringBuilder placeholders = new StringBuilder();
+    List<Object> arguments = new ArrayList<>(skuIds.size() + 3);
+    arguments.add(occurredAt);
+    arguments.add(occurredAt);
+    arguments.add(occurredAt);
+    for (int index = 0; index < skuIds.size(); index++) {
+      Long skuId = skuIds.get(index);
+      if (skuId == null || skuId <= 0) {
+        throw new IllegalArgumentException("skuIds must contain positive values");
+      }
+      if (index > 0) {
+        placeholders.append(',');
+      }
+      placeholders.append('?');
+      arguments.add(skuId);
+    }
+    String sql =
+        "INSERT INTO stock_cache_repair(id,sku_id,target_available,source_version,status,attempts,"
+            + "next_retry_at,created_at,updated_at) SELECT UUID_SHORT(),sku_id,available_quantity,"
+            + "version,'PENDING',0,?,?,? FROM stock_sku WHERE sku_id IN ("
+            + placeholders
+            + ") ON DUPLICATE KEY UPDATE target_available=VALUES(target_available),status='PENDING',"
+            + "next_retry_at=VALUES(next_retry_at),last_error=NULL,updated_at=VALUES(updated_at)";
+    return update(sql, arguments.toArray());
   }
 
   /** 整批 Redis EVAL 都成功后仅确认 MySQL 仍处于来源版本的投影记录。 */
