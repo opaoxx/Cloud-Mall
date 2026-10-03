@@ -11,3 +11,24 @@ spring.cloud.sentinel.transport.dashboard: localhost:8858
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
+cloudmall:
+  seata:
+    cm18:
+      enabled: ${CLOUDMALL_SEATA_CM18_ENABLED:false}
+      pause-after-stock-write-ms: ${CLOUDMALL_SEATA_CM18_PAUSE_AFTER_STOCK_WRITE_MS:0}
+seata:
+  enabled: ${CLOUDMALL_SEATA_ENABLED:false}
+  client:
+    mode: AT
+    tm-commit-retry-count: 3
+    tm-rollback-retry-count: 3
+  registry:
+    type: file
+  config:
+    type: file
+  tx-service-group: cloudmall_tx_group
+  service:
+    vgroup-mapping:
+      cloudmall_tx_group: default
+    grouplist:
+      default: ${CLOUDMALL_SEATA_TC:127.0.0.1:8091}

@@ -86,6 +86,17 @@ Gateway 与订单服务启动时自带秒杀限流默认规则。Nacos 可持久
 
 脚本只创建缺失的 `CLOUDMALL_DEV` 规则。需要用仓库中的规则覆盖现有 Nacos 配置时，显式添加 `-Force`。Sentinel Dashboard 的临时调整不会自动写回 Nacos；需要长期保留的调整应更新 `deploy/nacos/sentinel/` 的 JSON 并发布。
 
+### Seata AT 受控演练
+
+CM-18 第一阶段在 Order 与 Stock 的独立演练表验证全局提交、回滚和 XID 透传，不修改真实订单、库存或支付数据。已有 MySQL 数据卷先执行可重复迁移：
+
+```powershell
+Get-Content -Raw backend/database/migrate_seata_cm18_demo.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot
+```
+
+确认 Seata Server 健康后，仅在非生产环境为 Order 和 Stock 显式设置 `CLOUDMALL_SEATA_CM18_ENABLED=true`；Stock 同时设置 `CLOUDMALL_SEATA_ENABLED=true`。默认不开启演练入口。演练使用专用内部 Header 和 `cm18-` 前缀事务 ID，结果不能代表真实订单、库存、支付已经具备 Seata 三方原子事务。
+
 ### 扩充本地商品目录
 
 需要使用 `F:\hmall\sql\hm-item.sql` 的完整商品数据时，在 MySQL 容器启动后执行：

@@ -1,6 +1,8 @@
 package com.cloudmall.order.feign;
 
 import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.order.domain.dto.Cm18SeataBranchDTO;
+import com.cloudmall.order.domain.vo.Cm18SeataBranchVO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import java.util.List;
 import java.util.Map;
@@ -13,6 +15,14 @@ import org.springframework.web.bind.annotation.RequestHeader;
 
 @FeignClient(name = "cloud-mall-stock")
 public interface StockClient {
+  /** 调用 Stock 的 CM-18 独立演练分支并传播 Seata XID。 */
+  @PostMapping("/api/internal/cm18/seata/demo/branch")
+  ApiResponse<Cm18SeataBranchVO> cm18SeataBranch(
+      @RequestBody Cm18SeataBranchDTO request,
+      @RequestHeader("TX_XID") String xid,
+      @RequestHeader("X-CM18-Failure-Point") String failurePoint,
+      @RequestHeader("X-Internal-Service") String internalService);
+
   /** 按原订单号读取库存预扣的持久化结果，不改变数量。 */
   @GetMapping("/api/stock/reservations/{orderNo}")
   ApiResponse<StockReservationStatusVO> reservation(@PathVariable("orderNo") String orderNo);

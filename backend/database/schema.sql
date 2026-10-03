@@ -26,6 +26,23 @@ CREATE TABLE IF NOT EXISTS product_index_dlq_quarantine (quarantine_id VARCHAR(1
 CREATE TABLE IF NOT EXISTS product_index_rebuild_job (job_id VARCHAR(64) PRIMARY KEY, target_index VARCHAR(128) NOT NULL, index_generation INT NOT NULL, cursor_product_id BIGINT NOT NULL, batch_size INT NOT NULL, max_events_per_minute INT NOT NULL, last_batch_count INT NOT NULL, last_bulk_at DATETIME(3), status VARCHAR(32) NOT NULL, lease_owner VARCHAR(64), lease_until DATETIME(3), last_error VARCHAR(1024), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_product_rebuild_status(status,lease_until));
 CREATE TABLE IF NOT EXISTS seckill_activity (id BIGINT PRIMARY KEY, sku_id BIGINT NOT NULL, start_at DATETIME(3) NOT NULL, end_at DATETIME(3) NOT NULL, stock_limit INT NOT NULL, per_user_limit INT NOT NULL, status VARCHAR(16) NOT NULL, created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_activity_window(status,start_at,end_at));
 USE cloudmall_stock;
+-- Seata 1.5.2 AT rollback log and isolated CM18 branch demonstration.
+CREATE TABLE IF NOT EXISTS undo_log (
+  branch_id BIGINT NOT NULL,
+  xid VARCHAR(128) NOT NULL,
+  context VARCHAR(128) NOT NULL,
+  rollback_info LONGBLOB NOT NULL,
+  log_status INT(11) NOT NULL,
+  log_created DATETIME(6) NOT NULL,
+  log_modified DATETIME(6) NOT NULL,
+  UNIQUE KEY ux_undo_log (xid, branch_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS seata_cm18_stock_demo (
+  tx_id VARCHAR(64) PRIMARY KEY,
+  tx_xid VARCHAR(128) NOT NULL,
+  marker VARCHAR(32) NOT NULL,
+  created_at DATETIME(3) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS stock_sku (sku_id BIGINT PRIMARY KEY, product_id BIGINT NOT NULL, total_quantity INT NOT NULL, available_quantity INT NOT NULL, reserved_quantity INT NOT NULL, sold_quantity INT NOT NULL, version INT NOT NULL DEFAULT 0, updated_at DATETIME(3) NOT NULL);
 CREATE TABLE IF NOT EXISTS stock_flow (id BIGINT PRIMARY KEY, sku_id BIGINT NOT NULL, order_no VARCHAR(64) NOT NULL, flow_type VARCHAR(32) NOT NULL, quantity INT NOT NULL, idempotency_key VARCHAR(128) NOT NULL UNIQUE, created_at DATETIME(3) NOT NULL);
 CREATE TABLE IF NOT EXISTS stock_reservation_request (id BIGINT PRIMARY KEY, order_no VARCHAR(64) NOT NULL UNIQUE, scene VARCHAR(32) NOT NULL, items_snapshot JSON NOT NULL, items_hash CHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, result_code VARCHAR(64), last_error VARCHAR(512), next_retry_at DATETIME(3), lease_owner VARCHAR(128), lease_until DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_stock_request_status(status,next_retry_at,lease_until));
@@ -37,6 +54,22 @@ CREATE TABLE IF NOT EXISTS pay_record (id BIGINT PRIMARY KEY, pay_no VARCHAR(64)
 CREATE TABLE IF NOT EXISTS pay_callback_log (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL, callback_id VARCHAR(128) NOT NULL UNIQUE, callback_status VARCHAR(32) NOT NULL, payload JSON, processed_at DATETIME(3), created_at DATETIME(3) NOT NULL);
 CREATE TABLE IF NOT EXISTS pay_debit_intent (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL UNIQUE, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, status VARCHAR(32) NOT NULL, attempts INT NOT NULL DEFAULT 0, next_retry_at DATETIME(3) NOT NULL, lease_owner VARCHAR(128), lease_until DATETIME(3), last_error VARCHAR(512), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_pay_debit_recovery(status,next_retry_at,lease_until), KEY idx_pay_debit_order(order_no));
 USE cloudmall_order;
+CREATE TABLE IF NOT EXISTS undo_log (
+  branch_id BIGINT NOT NULL,
+  xid VARCHAR(128) NOT NULL,
+  context VARCHAR(128) NOT NULL,
+  rollback_info LONGBLOB NOT NULL,
+  log_status INT(11) NOT NULL,
+  log_created DATETIME(6) NOT NULL,
+  log_modified DATETIME(6) NOT NULL,
+  UNIQUE KEY ux_undo_log (xid, branch_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS seata_cm18_order_demo (
+  tx_id VARCHAR(64) PRIMARY KEY,
+  tx_xid VARCHAR(128) NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  created_at DATETIME(3) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- Pre-create the current and near-term physical tables required by the frozen monthly strategy.
 CREATE TABLE IF NOT EXISTS mall_order_template (id BIGINT PRIMARY KEY, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, status VARCHAR(32) NOT NULL, total_amount DECIMAL(18,2) NOT NULL, pay_amount DECIMAL(18,2) NOT NULL, address_snapshot JSON NOT NULL, expire_at DATETIME(3), paid_at DATETIME(3), cancelled_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_user_created(user_id,created_at), KEY idx_status_expire(status,expire_at));
 CREATE TABLE IF NOT EXISTS mall_order_202608 LIKE mall_order_template;

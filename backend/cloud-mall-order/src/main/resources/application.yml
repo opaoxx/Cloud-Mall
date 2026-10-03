@@ -33,6 +33,9 @@ cloudmall.order.seckill.sentinel.user-qps: 20
 cloudmall.order.seckill.sentinel.activity-qps: 20
 cloudmall.order.sentinel.nacos-retry-ms: 5000
 cloudmall:
+  seata:
+    cm18:
+      enabled: false
   order:
     outbox:
       dispatch-interval-ms: 1000
