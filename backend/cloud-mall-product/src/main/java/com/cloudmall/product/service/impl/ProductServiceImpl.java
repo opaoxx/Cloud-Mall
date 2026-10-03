@@ -13,6 +13,10 @@ import com.cloudmall.product.domain.dto.SkuDTO;
 import com.cloudmall.product.domain.vo.ActivityVO;
 import com.cloudmall.product.domain.vo.HotStatVO;
 import com.cloudmall.product.mapper.ProductSqlMapper;
+import com.cloudmall.product.domain.po.ProductSearchHit;
+import com.cloudmall.product.domain.po.ProductSearchPage;
+import com.cloudmall.product.service.ProductKeywordSearch;
+import com.cloudmall.product.util.ProductDateTimes;
 import com.cloudmall.product.service.ProductService;
 import com.cloudmall.product.service.ProductIndexOutboxService;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -29,6 +33,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -53,6 +60,20 @@ public class ProductServiceImpl implements ProductService {
 
   /** 商品事实提交后写入索引 outbox。 */
   @Autowired private ProductIndexOutboxService productIndexOutboxService;
+
+  /** 非空关键词是否进入已验收的 ES 索引；缺省保持旧查询路径。 */
+  @Value("${cloudmall.product.search.enabled:false}")
+  private boolean searchEnabled;
+
+  /** 查询路径所使用的商品 ES 物理索引名。 */
+  @Value("${cloudmall.product.elasticsearch.index:cloudmall_product}")
+  private String searchIndexName = "cloudmall_product";
+
+  /** 在 MySQL 事务外执行远程检索的客户端。 */
+  @Autowired(required = false) private ProductKeywordSearch productKeywordSearch;
+
+  /** 只用于当前页的 MySQL 事实快照；ES 网络请求不占用数据库事务。 */
+  @Autowired(required = false) private PlatformTransactionManager transactionManager;
 
   /** 创建由 Spring 字段注入依赖的商品服务实例。 */
   public ProductServiceImpl() {}
@@ -132,7 +153,6 @@ public class ProductServiceImpl implements ProductService {
   }
 
   @GetMapping("/products")
-  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   /** 执行 products 相关操作。 */
   public ApiResponse<?> products(
       @RequestParam(required = false) String keyword,
@@ -150,22 +170,96 @@ public class ProductServiceImpl implements ProductService {
     long offset = Math.multiplyExact((long) page - 1L, pageSize);
     if (offset > MAX_LIST_OFFSET)
       throw new BizException(ErrorCodes.INVALID, "商品列表页码超出可查询范围", 400);
-    long total = productSqlMapper.countProducts(keyword, categoryId, status);
-    if (offset >= total)
-      return ApiResponse.ok(new PageResult<>(List.of(), page, pageSize, total));
-    List<ProductDTO> items =
-        productSqlMapper
-            .findProducts(keyword, categoryId, status, (int) offset, pageSize, sort)
-            .stream()
-            .map(this::productView)
-            .toList();
+    final int normalizedPage = page;
+    final int normalizedPageSize = pageSize;
+    PageResult<ProductDTO> result = searchEnabled && keyword != null && !keyword.isBlank()
+        ? searchProducts(keyword.trim(), categoryId, status, normalizedPage,
+            normalizedPageSize, (int) offset, sort)
+        : withReadTransaction(() -> sqlProducts(keyword, categoryId, status,
+            normalizedPage, normalizedPageSize, (int) offset, sort));
     long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
         System.nanoTime() - startedAt);
     if (elapsedMillis > 200L)
       log.warn("商品列表慢读，elapsedMs={}，page={}，pageSize={}，sort={}，keyword={}，categoryFiltered={}，statusFiltered={}，total={}，rows={}，traceId={}",
           elapsedMillis, page, pageSize, sort, keyword != null && !keyword.isBlank(),
-          categoryId != null, status != null, total, items.size(), MDC.get("traceId"));
-    return ApiResponse.ok(new PageResult<>(items, page, pageSize, total));
+          categoryId != null, status != null, result.total, result.items.size(), MDC.get("traceId"));
+    return ApiResponse.ok(result);
+  }
+
+  /** 保持空关键词和关闭搜索开关时的原 MySQL 分页语义。 */
+  private PageResult<ProductDTO> sqlProducts(String keyword, Long categoryId, Integer status,
+      int page, int pageSize, int offset, String sort) {
+    long total = productSqlMapper.countProducts(keyword, categoryId, status);
+    if (offset >= total) return new PageResult<>(List.of(), page, pageSize, total);
+    List<ProductDTO> items = productSqlMapper
+        .findProducts(keyword, categoryId, status, offset, pageSize, sort).stream()
+        .map(this::productView).toList();
+    return new PageResult<>(items, page, pageSize, total);
+  }
+
+  /** ES 先获取同一查询快照，再在独立短事务内验证并组装 MySQL 商品事实。 */
+  private PageResult<ProductDTO> searchProducts(String keyword, Long categoryId, Integer status,
+      int page, int pageSize, int offset, String sort) {
+    if (productKeywordSearch == null)
+      throw new BizException("PRODUCT_SEARCH_UNAVAILABLE", "商品检索暂时不可用", 503);
+    for (int attempt = 0; attempt < 2; attempt++) {
+      ProductSearchPage matches;
+      try {
+        matches = productKeywordSearch.search(keyword, categoryId,
+            status, offset, pageSize, sort);
+      } catch (Exception searchFailure) {
+        log.warn("商品 ES 检索失败，index={}，traceId={}，reason={}",
+            searchIndexName, MDC.get("traceId"), searchFailure.toString());
+        throw new BizException("PRODUCT_SEARCH_UNAVAILABLE", "商品检索暂时不可用", 503);
+      }
+      if (matches.hits().isEmpty())
+        return new PageResult<>(List.of(), page, pageSize, matches.total());
+      PageResult<ProductDTO> verified = withReadTransaction(
+          () -> verifiedSearchPage(matches, categoryId, status, page, pageSize));
+      if (verified != null) return verified;
+    }
+    log.warn("商品 ES 页内事实连续两次变化，traceId={}，page={}，pageSize={}",
+        MDC.get("traceId"), page, pageSize);
+    throw new BizException("PRODUCT_SEARCH_RETRYABLE", "商品检索结果正在更新，请重试", 503);
+  }
+
+  /** 按 ES 原顺序验证所有命中，版本变化时丢弃整页并请求重试。 */
+  private PageResult<ProductDTO> verifiedSearchPage(ProductSearchPage matches, Long categoryId,
+      Integer status, int page, int pageSize) {
+    List<Long> productIds = matches.hits().stream().map(ProductSearchHit::id).toList();
+    Map<Long, Map<String, Object>> factsById = new HashMap<>();
+    for (Map<String, Object> row : productSqlMapper.findProductFacts(productIds))
+      factsById.put(((Number) row.get("id")).longValue(), row);
+    List<ProductDTO> items = new ArrayList<>();
+    for (ProductSearchHit hit : matches.hits()) {
+      Map<String, Object> fact = factsById.get(hit.id());
+      if (fact == null || ((Number) fact.get("version")).longValue() != hit.productVersion()
+          || ((Number) fact.get("status")).intValue() != hit.status()
+          || !Objects.equals(fact.get("name"), hit.name())
+          || ((Number) fact.get("category_id")).longValue() != hit.categoryId()
+          || ((BigDecimal) fact.get("price")).compareTo(hit.price()) != 0
+          || ProductDateTimes.asLocalDateTime(fact.get("updated_at"))
+              .atZone(java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli()
+              != hit.updatedAt()
+          || status != null && ((Number) fact.get("status")).intValue() != status
+          || categoryId != null && ((Number) fact.get("category_id")).longValue() != categoryId) {
+        log.warn("商品 ES 页内事实变化，index={}，productId={}，indexedVersion={}，factVersion={}，"
+                + "discarded=1，traceId={}", searchIndexName, hit.id(), hit.productVersion(),
+            fact == null ? null : fact.get("version"), MDC.get("traceId"));
+        return null;
+      }
+      items.add(productView(fact));
+    }
+    return new PageResult<>(items, page, pageSize, matches.total());
+  }
+
+  /** 对数据库事实页使用短暂的只读可重复读事务。 */
+  private <T> T withReadTransaction(java.util.function.Supplier<T> work) {
+    if (transactionManager == null) return work.get();
+    TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+    transaction.setReadOnly(true);
+    transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    return transaction.execute(status -> work.get());
   }
 
   @GetMapping("/products/{id}")

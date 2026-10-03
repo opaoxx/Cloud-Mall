@@ -12,8 +12,14 @@ spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 cloudmall:
   product:
+    search:
+      enabled: false
     elasticsearch:
       url: http://localhost:9200
       index: cloudmall_product
     index:
+      dispatch-enabled: true
+      consumer-enabled: true
+      dlq-replay-enabled: true
+      rebuild-enabled: false
       outbox-dispatch-ms: 1000

@@ -14,6 +14,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
 
 /** 以稳定 eventId 投递商品索引 outbox，并在 confirm 未知时退避重试。 */
 @Component
@@ -22,6 +23,9 @@ public class ProductIndexOutboxDispatcher {
   private final RabbitTemplate rabbitTemplate;
   private final ObjectMapper objectMapper;
   private final String owner = "product-index-" + UUID.randomUUID();
+  /** 是否允许投递索引 outbox，缺省保持现有自动投递。 */
+  @Value("${cloudmall.product.index.dispatch-enabled:true}")
+  private boolean dispatchEnabled;
 
   public ProductIndexOutboxDispatcher(
       ProductIndexOutboxMapper mapper, RabbitTemplate rabbitTemplate, ObjectMapper objectMapper) {
@@ -33,6 +37,7 @@ public class ProductIndexOutboxDispatcher {
 
   @Scheduled(fixedDelayString = "${cloudmall.product.index.outbox-dispatch-ms:1000}")
   public void dispatch() {
+    if (!dispatchEnabled) return;
     OffsetDateTime now = OffsetDateTime.now();
     List<ProductIndexOutbox> events = mapper.claimDue(owner, 50, now, now.plusSeconds(30));
     for (ProductIndexOutbox event : events) {

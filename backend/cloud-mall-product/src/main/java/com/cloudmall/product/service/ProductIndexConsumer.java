@@ -104,7 +104,8 @@ public class ProductIndexConsumer {
   /** 持久化 DLQ 原字节后才确认消息，旧 Java 序列化只隔离不反序列化。 */
   @RabbitListener(
       queues = ProductMessagingConfiguration.PRODUCT_INDEX_DLQ,
-      containerFactory = ProductMessagingConfiguration.PRODUCT_INDEX_DLQ_CONTAINER_FACTORY)
+      containerFactory = ProductMessagingConfiguration.PRODUCT_INDEX_DLQ_CONTAINER_FACTORY,
+      autoStartup = "${cloudmall.product.index.consumer-enabled:true}")
   public void consumeDeadLetter(
       Message message, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag)
       throws Exception {
@@ -146,7 +147,8 @@ public class ProductIndexConsumer {
 
   @RabbitListener(
       queues = ProductMessagingConfiguration.PRODUCT_INDEX_QUEUE,
-      containerFactory = ProductMessagingConfiguration.PRODUCT_INDEX_CONTAINER_FACTORY)
+      containerFactory = ProductMessagingConfiguration.PRODUCT_INDEX_CONTAINER_FACTORY,
+      autoStartup = "${cloudmall.product.index.consumer-enabled:true}")
   /** 执行 consume 相关操作。 */
   public void consume(byte[] body) throws Exception {
     // 1. 接收并整理 consume 的业务请求。

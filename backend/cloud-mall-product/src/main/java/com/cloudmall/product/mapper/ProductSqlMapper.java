@@ -155,6 +155,16 @@ public class ProductSqlMapper {
         arguments.toArray()));
   }
 
+  /** 按 ES 当前页 ID 批量读取商品事实，避免把索引投影直接当作业务响应。 */
+  public List<Map<String, Object>> findProductFacts(List<Long> productIds) {
+    if (productIds == null || productIds.isEmpty()) return List.of();
+    if (productIds.size() > 100) throw new IllegalArgumentException("商品事实批量查询最多 100 条");
+    String placeholders = String.join(",", java.util.Collections.nCopies(productIds.size(), "?"));
+    return timed(productListTimer, () -> queryForList(
+        "select id,category_id,name,main_image,description,price,status,version,updated_at"
+            + " from product where id in (" + placeholders + ")", productIds.toArray()));
+  }
+
   /** 将公开排序参数映射为固定 SQL 片段，避免把请求参数拼入 SQL。 */
   private static String productOrderBy(String sort) {
     return switch (sort == null ? "" : sort) {

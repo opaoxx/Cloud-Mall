@@ -107,6 +107,24 @@ Get-Content -Raw backend/database/migrate_seata_cm18_demo.sql |
 
 脚本会先导入 hmall 商品源表，再将每条商品转换为 CloudMall 商品、SKU、库存、分类和热度数据，并校验迁移行数。它只重建商品和库存演示目录，不迁移 hmall 的订单或支付数据；由于旧购物车中的 SKU 会失效，脚本会清理 CloudMall 的 `cart:*` Redis 缓存。执行前应保留数据库备份。
 
+### 商品关键词搜索切换 Elasticsearch（CM-19）
+
+新版本的商品服务缺省 `cloudmall.product.search.enabled=false`，关键词继续使用原 MySQL 路径；上线 ES 查询前要完成一次本地索引映射扩展和字段回填。不要直接打开搜索开关读取旧索引。
+
+全新数据卷没有旧物理索引时，跳过下述旧索引映射脚本及 `COMPLETED` 游标复位；以 `rebuild-enabled=true` 启动 Product，重建任务会创建带完整映射的新索引并从初始游标回填，完成后执行相同的数量和字段核对。
+
+1. 在索引仍为原本地物理名 `cloudmall_product`、商品搜索尚未启用时执行 `./deploy/elasticsearch/extend-product-search-index.ps1`。脚本先核对现有 `productVersion` 外部版本及字段类型，再增加 `updatedAt/viewCount/searchCount/hotScore` 和受控分页窗口，不删除索引。
+2. 以 `cloudmall.product.search.enabled=false`、`cloudmall.product.index.rebuild-enabled=true` 启动新版 Product。其他索引投递、消费和死信重放开关保持 `true`。确认服务启动日志打印的物理索引名及全部开关值。
+3. 仅在 `product_index_rebuild_job` 的目标索引为 `cloudmall_product` 且状态为 `COMPLETED` 时，执行下面的受控游标复位。此操作不会清空商品数据或 ES 索引；进度失败后保留游标继续重试。
+
+   ```powershell
+   docker exec cloud-mall-mysql mysql -uroot -proot -e "UPDATE cloudmall_product.product_index_rebuild_job SET index_generation=index_generation+1,cursor_product_id=0,last_batch_count=0,last_bulk_at=NULL,status='PENDING',lease_owner=NULL,lease_until=NULL,last_error=NULL WHERE job_id='cloudmall-product-index' AND target_index='cloudmall_product' AND status='COMPLETED'; SELECT ROW_COUNT();"
+   ```
+
+4. 等待任务重新达到 `COMPLETED`，核对 MySQL 商品总数/上架数与 ES 文档总数/`visible=true` 数、四个新增字段覆盖率、版本抽样、价格排序和关键词样例；确认 outbox 和消费 ACK 无积压或失败。只有核对通过，才在所有 Product 实例一致地设置 `cloudmall.product.search.enabled=true` 并重启。若查询故障，将开关显式设回 `false`，保留物理索引和回填游标排查。
+
+非空关键词走 ES 的中文分词匹配，原 MySQL 路径只对名称做子串匹配，两者命中总数可能不同；无关键词列表仍走 MySQL。Elasticsearch 或映射不可用时，已启用的关键词路径返回 503，不会静默退回 MySQL。
+
 ## 验证命令
 
 ```bash

@@ -37,6 +37,8 @@ public class ProductIndexRebuildJob {
   private final int defaultBatchSize;
   /** 首次任务创建时每分钟最多索引的商品数。 */
   private final int defaultMaxEventsPerMinute;
+  /** 是否执行索引回填；完成任务仍可独立执行只读数量审计。 */
+  private final boolean rebuildEnabled;
 
   /** 创建可重启的商品索引重建任务。 */
   public ProductIndexRebuildJob(
@@ -55,6 +57,8 @@ public class ProductIndexRebuildJob {
     this.defaultMaxEventsPerMinute =
         Math.max(1, environment.getProperty(
             "cloudmall.product.index.rebuild-max-events-per-minute", Integer.class, 6000));
+    this.rebuildEnabled = environment.getProperty(
+        "cloudmall.product.index.rebuild-enabled", Boolean.class, false);
   }
 
   /** 现有数据卷首次启动时建立任务表，之后保留原游标与暂停状态。 */
@@ -72,6 +76,7 @@ public class ProductIndexRebuildJob {
       fixedDelayString = "${cloudmall.product.index.rebuild-interval-ms:1000}",
       initialDelayString = "${cloudmall.product.index.rebuild-interval-ms:1000}")
   public void runNextBatch() {
+    if (!rebuildEnabled) return;
     // 1. 读取任务状态与速率窗口；暂停、完成和退避中的任务不访问 ES。
     LocalDateTime currentTime = now();
     ProductIndexRebuildJobPO visible = rebuildMapper.findJob(JOB_ID);

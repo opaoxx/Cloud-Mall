@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.time.ZoneId;
 import org.elasticsearch.ElasticsearchStatusException;
 import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.bulk.BulkRequest;
@@ -101,8 +102,13 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
     fields.put("published", Map.of("type", "boolean"));
     fields.put("visible", Map.of("type", "boolean"));
     fields.put("productVersion", Map.of("type", "long"));
+    fields.put("updatedAt", Map.of("type", "date", "format", "epoch_millis"));
+    fields.put("viewCount", Map.of("type", "long"));
+    fields.put("searchCount", Map.of("type", "long"));
+    fields.put("hotScore", Map.of("type", "scaled_float", "scaling_factor", 1000000));
     CreateIndexRequest request = new CreateIndexRequest(indexName);
     request.mapping(Map.of("properties", fields));
+    request.settings(Map.of("index", Map.of("max_result_window", 100100)));
     try {
       client.indices().create(request, RequestOptions.DEFAULT);
     } catch (ElasticsearchStatusException concurrentCreate) {
@@ -136,6 +142,11 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
     source.put("published", document.status() == 1);
     source.put("visible", document.status() == 1);
     source.put("productVersion", document.version());
+    source.put("updatedAt", document.updatedAt()
+        .atZone(ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli());
+    source.put("viewCount", document.viewCount());
+    source.put("searchCount", document.searchCount());
+    source.put("hotScore", document.hotScore());
     return new IndexRequest(indexName)
         .id(String.valueOf(document.id()))
         .source(objectMapper.writeValueAsBytes(source), XContentType.JSON)

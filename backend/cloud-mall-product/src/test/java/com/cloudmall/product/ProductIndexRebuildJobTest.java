@@ -129,6 +129,7 @@ class ProductIndexRebuildJobTest {
         new MockEnvironment()
             .withProperty("cloudmall.product.elasticsearch.index", "cloudmall_product")
             .withProperty("cloudmall.product.index.rebuild-batch-size", "2")
+            .withProperty("cloudmall.product.index.rebuild-enabled", "true")
             .withProperty("cloudmall.product.index.rebuild-max-events-per-minute", "120"));
   }
 

@@ -2,6 +2,7 @@ package com.cloudmall.product.service;
 
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.mapper.ProductIndexMapper;
+import com.cloudmall.product.util.ProductDateTimes;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,6 +55,10 @@ public class ProductIndexDocumentLoader {
         (String) source.get("description"),
         (java.math.BigDecimal) source.get("price"),
         ((Number) source.get("status")).intValue(),
-        ((Number) source.get("version")).longValue());
+        ((Number) source.get("version")).longValue(),
+        ProductDateTimes.asLocalDateTime(source.get("updated_at")),
+        ((Number) source.get("view_count")).longValue(),
+        ((Number) source.get("search_count")).longValue(),
+        (java.math.BigDecimal) source.get("hot_score"));
   }
 }

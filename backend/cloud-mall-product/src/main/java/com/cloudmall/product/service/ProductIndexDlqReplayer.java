@@ -16,6 +16,7 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
 
 /** 核对原事务事件后，以数据库租约和 publisher confirm 重放 JSON 死信。 */
 @Component
@@ -26,6 +27,9 @@ public class ProductIndexDlqReplayer {
   private final RabbitTemplate rabbitTemplate;
   private final ObjectMapper objectMapper;
   private final String owner = "product-dlq-" + UUID.randomUUID();
+  /** 是否允许自动重放索引死信，缺省保持现有行为。 */
+  @Value("${cloudmall.product.index.dlq-replay-enabled:true}")
+  private boolean replayEnabled;
 
   public ProductIndexDlqReplayer(ProductIndexDeadLetterMapper mapper,
       ProductIndexOutboxMapper outboxMapper, RabbitTemplate rabbitTemplate,
@@ -39,6 +43,7 @@ public class ProductIndexDlqReplayer {
   /** 每轮只处理有界数量；不可核验的载荷保持隔离。 */
   @Scheduled(fixedDelayString = "${cloudmall.product.index.dlq-replay-ms:5000}")
   public void replay() {
+    if (!replayEnabled) return;
     OffsetDateTime now = OffsetDateTime.now();
     for (ProductIndexDeadLetterMapper.DeadLetterPayload payload :
         mapper.claimRetryPayloads(owner, 20, now, now.plusSeconds(30))) {
