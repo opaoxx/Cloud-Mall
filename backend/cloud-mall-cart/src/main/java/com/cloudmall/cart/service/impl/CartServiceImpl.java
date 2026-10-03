@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -65,18 +66,21 @@ public class CartServiceImpl implements CartService {
     Map<String, CartItemPO> items = readMap();
     CartItemPO item = items.get(String.valueOf(request.skuId));
     if (item == null) {
+      // 1. 从请求构造新项，但商品摘要只信任商品服务的当前 SKU 事实。
       item = toPersistence(request);
       item.productId = current.productId();
-      request.productName = current.productName();
-      request.unitPrice = current.unitPrice();
-      request.checked = true;
-      request.addedAt = OffsetDateTime.now().toString();
+      item.productName = current.productName();
+      item.unitPrice = current.unitPrice();
+      // 2. 首次响应和 Redis 存储必须读取同一个完整 PO。
+      item.checked = true;
+      item.addedAt = OffsetDateTime.now(ZoneOffset.ofHours(8)).toString();
     } else {
       item.quantity += request.quantity;
       item.productId = current.productId();
       item.productName = current.productName();
       item.unitPrice = current.unitPrice();
     }
+    // 3. 持久化并从同一 PO 构造响应，避免首次添加与随后读取不一致。
     write(item);
     return ApiResponse.ok(CartItemVO.from(item));
   }
