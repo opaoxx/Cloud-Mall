@@ -86,6 +86,8 @@ Gateway、订单和库存服务启动时自带秒杀限流默认规则。Nacos �
 
 脚本只创建缺失的 `CLOUDMALL_DEV` 规则，包括 Stock 内部秒杀资源 `cloudmall-stock-flow-rules`；Stock 的本地兜底阈值为单实例 200 QPS。需要用仓库中的规则覆盖现有 Nacos 配置时，显式添加 `-Force`。测试隔离可使用脚本的 `-Group` 参数及 Stock 的 `cloudmall.stock.seckill.sentinel.rule-group` 配置。Sentinel Dashboard 的临时调整不会自动写回 Nacos；需要长期保留的调整应更新 `deploy/nacos/sentinel/` 的 JSON 并发布。
 
+Order 还订阅 `cloudmall-order-degrade-rules`，保护普通库存预扣、秒杀受理、库存状态查询和确认/回滚四类 Feign 调用。普通预扣被熔断后仍按原订单号进入结果未知恢复，不会直接释放库存；订单已提交后的库存动作按原操作键退避。规则仅作用于单个 Order 实例，不代表 Stock 内部 Redis/MySQL 已具备熔断，也不代替持久意图和对账。
+
 ### Seata AT 受控演练
 
 CM-18 第一阶段在 Order 与 Stock 的独立演练表验证全局提交、回滚和 XID 透传，不修改真实订单、库存或支付数据。已有 MySQL 数据卷先执行可重复迁移：

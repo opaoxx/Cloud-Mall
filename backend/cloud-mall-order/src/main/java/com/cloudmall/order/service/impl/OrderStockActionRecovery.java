@@ -70,8 +70,10 @@ public class OrderStockActionRecovery {
       // 2. 只对 RESERVED 使用同一操作键重试，远端写响应不能代表最终事实。
       StockClient.Action request = new StockClient.Action(action.operationKey);
       ApiResponse<?> result = "CONFIRM".equals(action.actionType)
-          ? stockClient.confirm(action.orderNo, request)
-          : stockClient.rollback(action.orderNo, request);
+          ? OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.ACTION,
+              () -> stockClient.confirm(action.orderNo, request))
+          : OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.ACTION,
+              () -> stockClient.rollback(action.orderNo, request));
       if (result == null || !"0".equals(result.code))
         throw new IllegalStateException("库存动作响应未确认");
       // 3. 再读持久状态；仅目标终态允许把本地动作标记成功。
@@ -97,7 +99,8 @@ public class OrderStockActionRecovery {
 
   /** 查询库存端唯一的预扣最终状态。 */
   private String stockStatus(String orderNo) {
-    ApiResponse<StockReservationStatusVO> response = stockClient.reservation(orderNo);
+    ApiResponse<StockReservationStatusVO> response = OrderStockCircuitBreaker.call(
+        OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
     if (response == null || !"0".equals(response.code) || response.data == null)
       throw new IllegalStateException("库存状态查询结果未知");
     return response.data.status;

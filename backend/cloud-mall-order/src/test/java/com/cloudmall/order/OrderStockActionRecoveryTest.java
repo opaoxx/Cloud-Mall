@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -16,6 +17,8 @@ import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderStockActionRecovery;
+import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
+import com.cloudmall.order.service.impl.StockCircuitOpenException;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -73,6 +76,20 @@ class OrderStockActionRecoveryTest {
     recovery.recoverDue();
 
     verify(actionMapper).finish(eq(1L), anyString(), eq("CONFLICT"), anyString(), any());
+    verify(stockClient, never()).rollback(anyString(), any(StockClient.Action.class));
+  }
+
+  @Test
+  void statusCircuitOpenRetainsUnknownActionWithoutAnyStockWrite() {
+    due("CONFIRM");
+    doThrow(new StockCircuitOpenException(OrderStockCircuitBreaker.STATUS,
+        new IllegalStateException("open"))).when(stockClient).reservation("order-1");
+
+    recovery.recoverDue();
+
+    verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+    verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+    verify(stockClient, never()).confirm(anyString(), any(StockClient.Action.class));
     verify(stockClient, never()).rollback(anyString(), any(StockClient.Action.class));
   }
 

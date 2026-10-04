@@ -1,0 +1,6 @@
+[
+  {"resource":"order-stock-reserve","grade":0,"count":3000,"slowRatioThreshold":0.5,"minRequestAmount":20,"statIntervalMs":60000,"timeWindow":10},
+  {"resource":"order-stock-seckill","grade":1,"count":0.2,"minRequestAmount":20,"statIntervalMs":60000,"timeWindow":10},
+  {"resource":"order-stock-status","grade":1,"count":0.2,"minRequestAmount":20,"statIntervalMs":60000,"timeWindow":10},
+  {"resource":"order-stock-action","grade":1,"count":0.2,"minRequestAmount":20,"statIntervalMs":60000,"timeWindow":10}
+]

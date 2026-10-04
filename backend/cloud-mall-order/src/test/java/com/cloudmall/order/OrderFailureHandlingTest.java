@@ -31,8 +31,14 @@ import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
+import com.cloudmall.order.service.impl.StockCircuitOpenException;
+import com.alibaba.csp.sentinel.slots.block.RuleConstant;
+import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
+import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.Request;
+import feign.FeignException;
 import feign.RetryableException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -50,6 +56,83 @@ class OrderFailureHandlingTest {
   @AfterEach
   void clearAuthentication() {
     AuthContext.clear();
+    DegradeRuleManager.loadRules(List.of());
+  }
+
+  @Test
+  void openReserveCircuitKeepsTheCommittedIntentForRecovery() {
+    DegradeRule slowRule = new DegradeRule(OrderStockCircuitBreaker.RESERVE)
+        .setGrade(RuleConstant.DEGRADE_GRADE_RT).setCount(10)
+        .setSlowRatioThreshold(0.5).setMinRequestAmount(2)
+        .setStatIntervalMs(1000).setTimeWindow(2);
+    DegradeRuleManager.loadRules(List.of(slowRule));
+    boolean opened = false;
+    for (int attempt = 0; attempt < 8 && !opened; attempt++) {
+      try {
+        OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.RESERVE, () -> {
+          try {
+            Thread.sleep(30L);
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+          }
+          return ApiResponse.ok("slow-stock");
+        });
+      } catch (StockCircuitOpenException blocked) {
+        opened = true;
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertTrue(opened);
+    StockClient stockClient = mock(StockClient.class);
+    ProductClient productClient = mock(ProductClient.class);
+    UserClient userClient = mock(UserClient.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    when(orderSqlMapper.findIdempotentOrderNos(8L, "circuit-open")).thenReturn(List.of());
+    when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
+    when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderReservationIntentService intentService =
+        (OrderReservationIntentService) ReflectionTestUtils.getField(
+            orderService, "reservationIntentService");
+
+    AuthContext.set(8L, "USER");
+    BizException result = assertThrows(BizException.class,
+        () -> orderService.create("circuit-open", orderRequest()));
+
+    assertEquals("ORDER_RESERVATION_UNKNOWN", result.getCode());
+    assertEquals(202, result.getHttpStatus());
+    verify(intentService).createIntent(any());
+    verify(intentService).markReserveUnknown(anyString(), anyString());
+    verify(intentService, never()).markReleased(anyString());
+    verifyNoInteractions(stockClient);
+  }
+
+  @Test
+  void malformedStock409CannotReleaseAnUnknownReservationIntent() {
+    StockClient stockClient = mock(StockClient.class);
+    ProductClient productClient = mock(ProductClient.class);
+    UserClient userClient = mock(UserClient.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    when(orderSqlMapper.findIdempotentOrderNos(8L, "malformed-409")).thenReturn(List.of());
+    when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
+    when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+    FeignException malformed = mock(FeignException.class);
+    when(malformed.status()).thenReturn(409);
+    when(malformed.contentUTF8()).thenReturn("not-json");
+    doThrow(malformed).when(stockClient).reserve(any());
+    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderReservationIntentService intentService =
+        (OrderReservationIntentService) ReflectionTestUtils.getField(
+            orderService, "reservationIntentService");
+
+    AuthContext.set(8L, "USER");
+    BizException result = assertThrows(BizException.class,
+        () -> orderService.create("malformed-409", orderRequest()));
+
+    assertEquals("ORDER_RESERVATION_UNKNOWN", result.getCode());
+    assertEquals(202, result.getHttpStatus());
+    verify(intentService).markReserveUnknown(anyString(), anyString());
+    verify(intentService, never()).markReleased(anyString());
+    verify(stockClient, never()).rollback(anyString());
   }
 
   @Test

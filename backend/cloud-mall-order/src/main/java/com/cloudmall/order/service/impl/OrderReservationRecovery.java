@@ -89,8 +89,9 @@ public class OrderReservationRecovery {
                 intent.itemsSnapshot, new TypeReference<List<StockClient.Line>>() {});
         if (originalLines.isEmpty()) throw new IllegalStateException("预扣意图明细为空");
         try {
-          stockClient.reserve(
-              new StockClient.Reservation(intent.orderNo, originalLines, "NORMAL"));
+          OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.RESERVE,
+              () -> stockClient.reserve(
+                  new StockClient.Reservation(intent.orderNo, originalLines, "NORMAL")));
         } catch (FeignException explicitRejection) {
           if (explicitRejection.status() != 409) throw explicitRejection;
         }
@@ -98,7 +99,8 @@ public class OrderReservationRecovery {
       }
       if ("RESERVED".equals(status) || "ALREADY_RESERVED".equals(status)) {
         // 4. 已确认预扣才调用幂等回滚，随后结束意图。
-        ApiResponse<?> rollbackResult = stockClient.rollback(intent.orderNo);
+        ApiResponse<?> rollbackResult = OrderStockCircuitBreaker.call(
+            OrderStockCircuitBreaker.ACTION, () -> stockClient.rollback(intent.orderNo));
         if (rollbackResult == null || !"0".equals(rollbackResult.code))
           throw new IllegalStateException("库存回滚结果未确认");
       } else if (!"REJECTED".equals(status)
@@ -116,7 +118,8 @@ public class OrderReservationRecovery {
 
   /** 按原订单号读取库存端的当前或终态事实。 */
   private String reservationStatus(String orderNo) {
-    ApiResponse<StockReservationStatusVO> response = stockClient.reservation(orderNo);
+    ApiResponse<StockReservationStatusVO> response = OrderStockCircuitBreaker.call(
+        OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
     if (response == null || !"0".equals(response.code) || response.data == null)
       throw new IllegalStateException("库存预扣查询结果未知");
     return response.data.status;

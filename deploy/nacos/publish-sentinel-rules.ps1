@@ -13,6 +13,7 @@ $dataIds = @(
   'cloudmall-gateway-flow-rules',
   'cloudmall-order-flow-rules',
   'cloudmall-order-param-flow-rules',
+  'cloudmall-order-degrade-rules',
   'cloudmall-stock-flow-rules'
 )
 

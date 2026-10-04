@@ -176,10 +176,14 @@ public class OrderServiceImpl implements OrderService {
       // 1. 预扣请求始终使用已提交意图中的原订单号，网络结果未知时也可安全恢复。
       ApiResponse<?> reserved;
       try {
-        reserved = stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL"));
+        reserved = OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.RESERVE,
+            () -> stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL")));
       } catch (RuntimeException remoteFailure) {
         if (remoteFailure instanceof FeignException feignFailure
-            && feignFailure.status() == 409) {
+            && feignFailure.status() == 409
+            && Set.of(ErrorCodes.STOCK, ErrorCodes.CONFLICT, ErrorCodes.DUPLICATE,
+                    "ORDER_RESERVATION_KEY_REUSED")
+                .contains(remoteCode(feignFailure))) {
           definiteRejection = true;
           reservationIntentService.markReleased(orderNo);
           throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
@@ -406,7 +410,8 @@ public class OrderServiceImpl implements OrderService {
     try {
       // 3. 只读取库存持久事实；旧记录缺失或服务不可用时保持未知。
       ApiResponse<com.cloudmall.order.domain.vo.StockReservationStatusVO> response =
-          stock.reservation(order.orderNo);
+          OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.STATUS,
+              () -> stock.reservation(order.orderNo));
       if (response == null || !"0".equals(response.code) || response.data == null)
         return "UNKNOWN";
       if (expected.equals(response.data.status)) return "SUCCEEDED";
@@ -498,8 +503,11 @@ public class OrderServiceImpl implements OrderService {
       stockRequest.put("idempotencyKey", key);
       stockRequest.put("addressSnapshot", toJson(address));
       try {
-        ApiResponse<?> row = stock.seckill(stockRequest);
-        return row == null ? ApiResponse.error(ErrorCodes.INTERNAL, "库存服务不可用") : row;
+        ApiResponse<?> row = OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.SECKILL,
+            () -> stock.seckill(stockRequest));
+        if (row == null)
+          throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
+        return row;
       } catch (FeignException exception) {
         if (exception.status() == 429) {
           String downstreamCode = remoteCode(exception);
@@ -509,11 +517,16 @@ public class OrderServiceImpl implements OrderService {
             throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
           throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
         }
-        if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(remoteCode(exception)))
+        String downstreamCode = remoteCode(exception);
+        if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(downstreamCode))
           throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
-        if (exception.status() == 409)
+        if (exception.status() == 409 && Set.of("SECKILL_NOT_STARTED", "SECKILL_ENDED",
+                "SECKILL_SOLD_OUT", "SECKILL_CLAIM_CONFLICT", "COMMON_CONFLICT")
+            .contains(downstreamCode))
           throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
-        throw new BizException(ErrorCodes.INTERNAL, "秒杀服务暂时不可用，请稍后再试", 503);
+        throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
+      } catch (StockCircuitOpenException circuitOpen) {
+        throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
       }
     } finally {
       sentinelEntry.exit(1, userId, req.activityId);
@@ -847,7 +860,8 @@ public class OrderServiceImpl implements OrderService {
   /** 尝试同步回滚失败订单的远端库存，保留原失败供调用方处理。 */
   private void compensateFailedCreate(String orderNo, RuntimeException creationFailure) {
     try {
-      ApiResponse<?> rollbackResult = stock.rollback(orderNo);
+      ApiResponse<?> rollbackResult = OrderStockCircuitBreaker.call(
+          OrderStockCircuitBreaker.ACTION, () -> stock.rollback(orderNo));
       if (rollbackResult == null || !"0".equals(rollbackResult.code))
         throw new BizException(ErrorCodes.INTERNAL, "订单失败后的库存回滚未确认", 500);
       reservationIntentService.markReleased(orderNo);

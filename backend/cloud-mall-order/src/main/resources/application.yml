@@ -37,6 +37,15 @@ cloudmall:
     cm18:
       enabled: false
   order:
+    stock-degrade:
+      reserve-slow-ms: 3000
+      reserve-slow-ratio: 0.5
+      exception-ratio: 0.2
+      min-request-amount: 20
+      stat-interval-ms: 60000
+      time-window-seconds: 10
+      nacos-retry-ms: 5000
+      rule-group: CLOUDMALL_DEV
     outbox:
       dispatch-interval-ms: 1000
       batch-size: 50

@@ -160,7 +160,8 @@ public class SeckillMessageRecovery {
         recoveryMapper.markVerification(id, owner, "CONFLICT", "缺少 orderNo，无法核对库存受理", now.plusMinutes(5));
         return false;
       }
-      var response = stockClient.seckillReservationFact(orderNo, "cloud-mall-order");
+      var response = OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.STATUS,
+          () -> stockClient.seckillReservationFact(orderNo, "cloud-mall-order"));
       if (response == null || !"0".equals(response.code) || response.data == null) {
         recoveryMapper.markVerification(id, owner, "VERIFYING", "库存受理查询响应无效", now.plusSeconds(30));
         return false;

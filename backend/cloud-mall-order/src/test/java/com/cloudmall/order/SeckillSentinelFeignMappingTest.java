@@ -16,6 +16,8 @@ import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
+import com.cloudmall.order.service.impl.StockCircuitOpenException;
+import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
 import java.util.List;
@@ -62,6 +64,61 @@ class SeckillSentinelFeignMappingTest {
     when(response.contentUTF8()).thenReturn("garbled");
     BizException unknown = assertThrows(BizException.class,
         () -> orders.seckill("same-key", request));
+    assertEquals(503, unknown.getHttpStatus());
+    assertEquals("GATEWAY_SERVICE_UNAVAILABLE", unknown.getCode());
+  }
+
+  @Test
+  void openStockCircuitReturnsRetryable503WithoutChangingTheOriginalKey() {
+    AuthContext.set(33L, "USER");
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 3L))));
+    SeckillOrderDTO request = new SeckillOrderDTO();
+    request.activityId = 11L;
+    request.skuId = 22L;
+    request.addressId = 3L;
+    when(stock.seckill(anyMap())).thenThrow(new StockCircuitOpenException(
+        OrderStockCircuitBreaker.SECKILL, new IllegalStateException("open")));
+
+    BizException blocked = assertThrows(BizException.class,
+        () -> orders.seckill("same-key", request));
+
+    assertEquals(503, blocked.getHttpStatus());
+    assertEquals("GATEWAY_SERVICE_UNAVAILABLE", blocked.getCode());
+  }
+
+  @Test
+  void nullStockResponseIs503RatherThanSuccessfulHttpWithInternalCode() {
+    AuthContext.set(33L, "USER");
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 3L))));
+    SeckillOrderDTO request = new SeckillOrderDTO();
+    request.activityId = 11L;
+    request.skuId = 22L;
+    request.addressId = 3L;
+    when(stock.seckill(anyMap())).thenReturn(null);
+
+    BizException unavailable = assertThrows(BizException.class,
+        () -> orders.seckill("same-key", request));
+
+    assertEquals(503, unavailable.getHttpStatus());
+    assertEquals("GATEWAY_SERVICE_UNAVAILABLE", unavailable.getCode());
+  }
+
+  @Test
+  void malformedStock409CannotLookLikeAConfirmedBusinessRejection() {
+    AuthContext.set(33L, "USER");
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 3L))));
+    SeckillOrderDTO request = new SeckillOrderDTO();
+    request.activityId = 11L;
+    request.skuId = 22L;
+    request.addressId = 3L;
+    FeignException malformed = mock(FeignException.class);
+    when(malformed.status()).thenReturn(409);
+    when(malformed.contentUTF8()).thenReturn("not-json");
+    when(stock.seckill(anyMap())).thenThrow(malformed);
+
+    BizException unknown = assertThrows(BizException.class,
+        () -> orders.seckill("same-key", request));
+
     assertEquals(503, unknown.getHttpStatus());
     assertEquals("GATEWAY_SERVICE_UNAVAILABLE", unknown.getCode());
   }
