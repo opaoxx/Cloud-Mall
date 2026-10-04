@@ -14,11 +14,25 @@ public class HotStatVO {
   /** 热度分数。 */
   public final String hotScore;
 
+  /** 指标来源类型，历史目录为 LEGACY_IMPORT。 */
+  public final String sourceType;
+
+  /** 指标来源引用；未知来源时为空。 */
+  public final String sourceRef;
+
   /** 创建商品热度响应。 */
   public HotStatVO(long productId, long viewCount, long searchCount, String hotScore) {
+    this(productId, viewCount, searchCount, hotScore, "UNKNOWN", null);
+  }
+
+  /** 创建携带来源标记的商品热度响应。 */
+  public HotStatVO(long productId, long viewCount, long searchCount, String hotScore,
+      String sourceType, String sourceRef) {
     this.productId = productId;
     this.viewCount = viewCount;
     this.searchCount = searchCount;
     this.hotScore = hotScore;
+    this.sourceType = sourceType;
+    this.sourceRef = sourceRef;
   }
 }

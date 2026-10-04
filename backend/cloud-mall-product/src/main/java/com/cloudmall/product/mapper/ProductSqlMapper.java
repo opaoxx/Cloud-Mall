@@ -188,7 +188,8 @@ public class ProductSqlMapper {
   /** 查询商品热度统计。 */
   public List<Map<String, Object>> findHotStat(Long productId) {
     return queryForList(
-        "select product_id,view_count,search_count,hot_score from product_hot_stat where"
+        "select product_id,view_count,search_count,hot_score,source_type,source_ref"
+            + " from product_hot_stat where"
             + " product_id=?",
         productId);
   }

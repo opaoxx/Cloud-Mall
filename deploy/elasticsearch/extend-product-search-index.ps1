@@ -28,6 +28,8 @@ $fields = @{
     viewCount = @{ type = 'long' }
     searchCount = @{ type = 'long' }
     hotScore = @{ type = 'scaled_float'; scaling_factor = 1000000 }
+    metricSourceType = @{ type = 'keyword' }
+    metricSourceRef = @{ type = 'keyword' }
   }
 } | ConvertTo-Json -Depth 6 -Compress
 $mappingResult = Invoke-RestMethod -Uri "$indexUrl/_mapping" -Method Put `
@@ -39,7 +41,8 @@ $settingsResult = Invoke-RestMethod -Uri "$indexUrl/_settings" -Method Put `
 if (-not $settingsResult.acknowledged) { throw 'Product index result window update was not acknowledged' }
 
 $verified = Invoke-RestMethod -Uri "$indexUrl/_mapping" -Method Get
-foreach ($field in @('updatedAt', 'viewCount', 'searchCount', 'hotScore')) {
+foreach ($field in @('updatedAt', 'viewCount', 'searchCount', 'hotScore',
+    'metricSourceType', 'metricSourceRef')) {
   if ($null -eq $verified.$IndexName.mappings.properties.$field) {
     throw "Product index mapping is still missing $field"
   }

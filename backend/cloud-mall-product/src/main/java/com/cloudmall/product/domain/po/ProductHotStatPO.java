@@ -32,4 +32,12 @@ public class ProductHotStatPO {
   /** 更新时间。 */
   @TableField("updated_at")
   public LocalDateTime updatedAt;
+
+  /** 指标来源，历史目录为 LEGACY_IMPORT。 */
+  @TableField("source_type")
+  public String sourceType;
+
+  /** 来源数据集或未来指标事件的稳定引用。 */
+  @TableField("source_ref")
+  public String sourceRef;
 }

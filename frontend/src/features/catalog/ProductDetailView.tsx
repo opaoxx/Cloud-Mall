@@ -3,12 +3,13 @@ import type { ProductDetail, Sku } from '../../api'
 
 export type ProductDetailViewProps = {
   product: ProductDetail
+  metricSourceType?: string
   onAddToCart?: (sku: Sku, quantity: number) => void | Promise<void>
   addingToCart?: boolean
   message?: string
 }
 
-export function ProductDetailView({ product, onAddToCart, addingToCart = false, message = '' }: ProductDetailViewProps) {
+export function ProductDetailView({ product, metricSourceType, onAddToCart, addingToCart = false, message = '' }: ProductDetailViewProps) {
   const activeSkus = product.skus?.filter(sku => sku.status) || []
   const [selectedSkuId, setSelectedSkuId] = useState<string>(() => String(activeSkus[0]?.id ?? ''))
   const [quantity, setQuantity] = useState(1)
@@ -33,6 +34,8 @@ export function ProductDetailView({ product, onAddToCart, addingToCart = false, 
         {product.parameters?.find(parameter => parameter.name.includes('品牌')) ? <div className="detail-brand"><span>品牌</span><strong>{product.parameters.find(parameter => parameter.name.includes('品牌'))?.value}</strong></div> : null}
         <div className="price">¥{Number(displayPrice || 0).toFixed(2)}</div>
         {product.description ? <p>{product.description}</p> : null}
+        {metricSourceType === 'LEGACY_IMPORT' ? <p>热度数据来源：历史目录导入，非实时成交或浏览统计。</p> : null}
+        {metricSourceType === 'UNKNOWN' ? <p>热度数据来源尚未确认。</p> : null}
         {activeSkus.length > 0 ? (
           <>
             <h4>选择规格</h4>

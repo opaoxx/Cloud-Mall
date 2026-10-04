@@ -32,6 +32,8 @@ class ProductIndexDocumentLoaderTest {
     row.put("view_count", 9L);
     row.put("search_count", 2L);
     row.put("hot_score", new BigDecimal("9.000000"));
+    row.put("metric_source_type", "LEGACY_IMPORT");
+    row.put("metric_source_ref", "hm-item.item");
     when(mapper.selectIndexSourcesAfter(0L, 200)).thenReturn(List.of(row));
 
     ProductIndexDocument document = new ProductIndexDocumentLoader(mapper).loadBatch(0L, 200).get(0);
@@ -39,5 +41,7 @@ class ProductIndexDocumentLoaderTest {
     assertEquals(updatedAt, document.updatedAt());
     assertEquals(9L, document.viewCount());
     assertEquals(new BigDecimal("9.000000"), document.hotScore());
+    assertEquals("LEGACY_IMPORT", document.metricSourceType());
+    assertEquals("hm-item.item", document.metricSourceRef());
   }
 }

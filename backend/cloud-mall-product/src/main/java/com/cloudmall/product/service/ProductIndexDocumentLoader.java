@@ -59,6 +59,9 @@ public class ProductIndexDocumentLoader {
         ProductDateTimes.asLocalDateTime(source.get("updated_at")),
         ((Number) source.get("view_count")).longValue(),
         ((Number) source.get("search_count")).longValue(),
-        (java.math.BigDecimal) source.get("hot_score"));
+        (java.math.BigDecimal) source.get("hot_score"),
+        source.get("metric_source_type") == null
+            ? "UNKNOWN" : String.valueOf(source.get("metric_source_type")),
+        (String) source.get("metric_source_ref"));
   }
 }

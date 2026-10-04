@@ -71,7 +71,7 @@ export default function ModernHomePage() {
         <span>COUPON CENTER · 演示</span><b>领券中心</b><p>满 199 减 20 · 新人专享</p><strong>查看可用商品 →</strong>
       </Link>
     </section>
-    <section className="modern-section modern-discovery"><div className="modern-section-heading"><div><span className="modern-kicker">DISCOVER</span><h2>按分类逛逛</h2></div><Link to="/products">查看全部 →</Link></div><div className="modern-category-grid"><Link className="modern-category all" to="/products"><b>全部商品</b><span>探索完整商品目录</span></Link>{categories.slice(0, 10).map(category => <Link className="modern-category" key={category.id} to={`/products?categoryId=${category.id}`}><b>{category.name}</b><span>热门好物 · 每日更新</span></Link>)}</div></section>
+    <section className="modern-section modern-discovery"><div className="modern-section-heading"><div><span className="modern-kicker">DISCOVER</span><h2>按分类逛逛</h2></div><Link to="/products">查看全部 →</Link></div><div className="modern-category-grid"><Link className="modern-category all" to="/products"><b>全部商品</b><span>探索完整商品目录</span></Link>{categories.slice(0, 10).map(category => <Link className="modern-category" key={category.id} to={`/products?categoryId=${category.id}`}><b>{category.name}</b><span>历史热度参考</span></Link>)}</div></section>
     <section className="modern-section"><div className="modern-section-heading"><div><span className="modern-kicker">FOR YOU</span><h2>今日推荐</h2></div><Link to="/products">更多商品 →</Link></div><div className="modern-product-grid">{products.map(product => <ProductTile key={product.id} product={product} />)}</div></section>
   </div>
 }

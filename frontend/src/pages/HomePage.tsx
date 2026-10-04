@@ -53,7 +53,7 @@ export default function HomePage({ pageSize = 12, onProductAction }: HomePagePro
             products={products}
             loading={loading}
             title={activeKeyword ? `“${activeKeyword}”的搜索结果` : '今日推荐'}
-            subtitle="根据热度精选，挑选今天值得带回家的好物"
+            subtitle="依据历史目录热度展示，数据仅供选购参考"
             onProductClick={onProductAction}
             emptyTitle="还没有匹配的商品"
           />

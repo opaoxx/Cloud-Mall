@@ -526,7 +526,9 @@ public class ProductServiceImpl implements ProductService {
         ((Number) row.get("product_id")).longValue(),
         ((Number) row.get("view_count")).longValue(),
         ((Number) row.get("search_count")).longValue(),
-        hotScore == null ? "0.000000" : hotScore.toPlainString());
+        hotScore == null ? "0.000000" : hotScore.toPlainString(),
+        row.get("source_type") == null ? "UNKNOWN" : String.valueOf(row.get("source_type")),
+        (String) row.get("source_ref"));
   }
 
   /** 执行 read 相关操作。 */

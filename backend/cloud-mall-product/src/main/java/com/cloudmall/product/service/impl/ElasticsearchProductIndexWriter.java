@@ -106,6 +106,8 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
     fields.put("viewCount", Map.of("type", "long"));
     fields.put("searchCount", Map.of("type", "long"));
     fields.put("hotScore", Map.of("type", "scaled_float", "scaling_factor", 1000000));
+    fields.put("metricSourceType", Map.of("type", "keyword"));
+    fields.put("metricSourceRef", Map.of("type", "keyword"));
     CreateIndexRequest request = new CreateIndexRequest(indexName);
     request.mapping(Map.of("properties", fields));
     request.settings(Map.of("index", Map.of("max_result_window", 100100)));
@@ -147,6 +149,8 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
     source.put("viewCount", document.viewCount());
     source.put("searchCount", document.searchCount());
     source.put("hotScore", document.hotScore());
+    source.put("metricSourceType", document.metricSourceType());
+    source.put("metricSourceRef", document.metricSourceRef());
     return new IndexRequest(indexName)
         .id(String.valueOf(document.id()))
         .source(objectMapper.writeValueAsBytes(source), XContentType.JSON)

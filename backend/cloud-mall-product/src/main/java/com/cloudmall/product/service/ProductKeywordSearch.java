@@ -113,7 +113,7 @@ public class ProductKeywordSearch {
     JsonNode properties = mappings.path(indexName).path("mappings").path("properties");
     for (String field : List.of("id", "categoryId", "name", "description", "price",
         "status", "visible", "productVersion", "updatedAt", "viewCount",
-        "searchCount", "hotScore")) {
+          "searchCount", "hotScore", "metricSourceType", "metricSourceRef")) {
       if (properties.path(field).isMissingNode())
         throw new IllegalStateException("商品 ES 索引缺少字段: " + field);
     }

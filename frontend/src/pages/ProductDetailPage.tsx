@@ -7,6 +7,7 @@ export function ProductDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const [product, setProduct] = useState<ProductDetail | null>(null)
+  const [metricSourceType, setMetricSourceType] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -16,7 +17,9 @@ export function ProductDetailPage() {
     let active = true
     setLoading(true)
     setError('')
+    setMetricSourceType('')
     api.product(id).then(value => { if (active) setProduct(value) }).catch(() => { if (active) setError('商品详情暂时无法加载') }).finally(() => { if (active) setLoading(false) })
+    api.hotStat(id).then(value => { if (active) setMetricSourceType(value.sourceType) }).catch(() => { if (active) setMetricSourceType('UNKNOWN') })
     return () => { active = false }
   }, [id])
 
@@ -30,5 +33,5 @@ export function ProductDetailPage() {
 
   if (loading) return <section className="page"><p>正在加载商品详情…</p></section>
   if (error || !product) return <section className="page"><p className="alert" role="alert">{error || '商品不存在'}</p></section>
-  return <section className="page"><ProductDetailView product={product} onAddToCart={addToCart} addingToCart={addingToCart} message={message} /></section>
+  return <section className="page"><ProductDetailView product={product} metricSourceType={metricSourceType} onAddToCart={addToCart} addingToCart={addingToCart} message={message} /></section>
 }

@@ -111,14 +111,16 @@ FROM `hm-item`.item AS item
 WHERE item.spec IS NOT NULL AND TRIM(item.spec) <> '';
 
 INSERT INTO cloudmall_product.product_hot_stat
-    (product_id, view_count, search_count, hot_score, stat_date, updated_at)
+    (product_id, view_count, search_count, hot_score, stat_date, updated_at, source_type, source_ref)
 SELECT
   item.id,
   COALESCE(item.sold, 0),
   COALESCE(item.comment_count, 0),
   COALESCE(item.sold, 0),
   CURRENT_DATE,
-  NOW(3)
+  NOW(3),
+  'LEGACY_IMPORT',
+  'hm-item.item'
 FROM `hm-item`.item AS item;
 
 INSERT INTO cloudmall_stock.stock_sku

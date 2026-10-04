@@ -13,7 +13,8 @@ public interface ProductIndexMapper {
   @Select(
       "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status,p.version,"
           + "p.updated_at,coalesce(h.view_count,0) view_count,"
-          + "coalesce(h.search_count,0) search_count,coalesce(h.hot_score,0) hot_score"
+          + "coalesce(h.search_count,0) search_count,coalesce(h.hot_score,0) hot_score,"
+          + "coalesce(h.source_type,'UNKNOWN') metric_source_type,h.source_ref metric_source_ref"
           + " from product p left join product_hot_stat h on h.product_id=p.id"
           + " where p.id=#{productId}")
   List<Map<String, Object>> selectIndexSource(@Param("productId") long productId);
@@ -22,7 +23,8 @@ public interface ProductIndexMapper {
   @Select(
       "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status,p.version,"
           + "p.updated_at,coalesce(h.view_count,0) view_count,"
-          + "coalesce(h.search_count,0) search_count,coalesce(h.hot_score,0) hot_score"
+          + "coalesce(h.search_count,0) search_count,coalesce(h.hot_score,0) hot_score,"
+          + "coalesce(h.source_type,'UNKNOWN') metric_source_type,h.source_ref metric_source_ref"
           + " from product p left join product_hot_stat h on h.product_id=p.id"
           + " where p.id>#{cursorProductId} order by p.id limit #{batchSize}")
   List<Map<String, Object>> selectIndexSourcesAfter(
