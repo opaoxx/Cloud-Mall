@@ -2,16 +2,18 @@ param(
   [string]$Server = 'http://localhost:18848',
   [string]$Username = 'root',
   [string]$Password = 'root',
+  [string]$Group = 'CLOUDMALL_DEV',
   [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
-$group = 'CLOUDMALL_DEV'
+$group = $Group
 $rulesDirectory = Join-Path $PSScriptRoot 'sentinel'
 $dataIds = @(
   'cloudmall-gateway-flow-rules',
   'cloudmall-order-flow-rules',
-  'cloudmall-order-param-flow-rules'
+  'cloudmall-order-param-flow-rules',
+  'cloudmall-stock-flow-rules'
 )
 
 $login = Invoke-RestMethod -Method Post -Uri "$Server/nacos/v1/auth/login" -Body @{

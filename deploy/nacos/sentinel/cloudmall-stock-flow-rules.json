@@ -1,0 +1,1 @@
+[{"resource":"seckill-stock-reservation","grade":1,"count":200,"limitApp":"default","strategy":0,"controlBehavior":0,"warmUpPeriodSec":0,"maxQueueingTimeMs":0,"clusterMode":false}]

@@ -78,13 +78,13 @@ npm run dev
 
 ### 秒杀 Sentinel 规则
 
-Gateway 与订单服务启动时自带秒杀限流默认规则。Nacos 可持久保存开发环境规则；首次启动中间件后执行：
+Gateway、订单和库存服务启动时自带秒杀限流默认规则。Nacos 可持久保存开发环境规则；首次启动中间件后执行：
 
 ```powershell
 .\deploy\nacos\publish-sentinel-rules.ps1
 ```
 
-脚本只创建缺失的 `CLOUDMALL_DEV` 规则。需要用仓库中的规则覆盖现有 Nacos 配置时，显式添加 `-Force`。Sentinel Dashboard 的临时调整不会自动写回 Nacos；需要长期保留的调整应更新 `deploy/nacos/sentinel/` 的 JSON 并发布。
+脚本只创建缺失的 `CLOUDMALL_DEV` 规则，包括 Stock 内部秒杀资源 `cloudmall-stock-flow-rules`；Stock 的本地兜底阈值为单实例 200 QPS。需要用仓库中的规则覆盖现有 Nacos 配置时，显式添加 `-Force`。测试隔离可使用脚本的 `-Group` 参数及 Stock 的 `cloudmall.stock.seckill.sentinel.rule-group` 配置。Sentinel Dashboard 的临时调整不会自动写回 Nacos；需要长期保留的调整应更新 `deploy/nacos/sentinel/` 的 JSON 并发布。
 
 ### Seata AT 受控演练
 

@@ -12,6 +12,12 @@ spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 cloudmall:
+  stock:
+    seckill:
+      sentinel:
+        flow-qps: 200
+        nacos-retry-ms: 5000
+        rule-group: CLOUDMALL_DEV
   seata:
     cm18:
       enabled: ${CLOUDMALL_SEATA_CM18_ENABLED:false}
