@@ -83,7 +83,7 @@
 
 ### 4.5 `product_hot_stat`
 
-`product_id BIGINT PK`、`view_count BIGINT NOT NULL`、`search_count BIGINT NOT NULL`、`hot_score DECIMAL(18,6) NOT NULL`、`stat_date DATE NOT NULL`、`updated_at DATETIME(3) NOT NULL`。本期按商品维度维护累计热度，浏览事件经 RabbitMQ 异步写入。
+`product_id BIGINT PK`、`view_count BIGINT NOT NULL`、`search_count BIGINT NOT NULL`、`hot_score DECIMAL(18,6) NOT NULL`、`stat_date DATE NOT NULL`、`updated_at DATETIME(3) NOT NULL`、`source_type VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'`、`source_ref VARCHAR(128) NULL`。现有目录行由 `hm-item.item` 导入，`view_count` 实际保存源 `sold`，`search_count` 实际保存源 `comment_count`，`hot_score` 初始保存源 `sold`；`LEGACY_IMPORT` 来源标记说明它们是历史快照，不是本地实时浏览、搜索或成交事实。在线指标事件与独立版本协议待 CM-21 后续阶段实现，现阶段不得宣称浏览事件已经通过 RabbitMQ 写入。
 
 ### 4.6 `product_index_outbox`
 
