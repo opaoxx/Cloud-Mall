@@ -1,14 +1,18 @@
 package com.cloudmall.stock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
+import com.cloudmall.stock.domain.po.StockConsistencyAuditStatePO;
 import com.cloudmall.stock.service.impl.StockConsistencyReconciler;
 import java.time.Duration;
 import java.util.List;
@@ -28,6 +32,8 @@ class StockConsistencyLockTest {
     @SuppressWarnings("unchecked")
     ValueOperations<String, String> values = mock(ValueOperations.class);
     StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
+    StockConsistencyAuditStateMapper auditStateMapper = mock(StockConsistencyAuditStateMapper.class);
+    when(auditStateMapper.findState()).thenReturn(state(0L));
     AtomicReference<String> lockValue = new AtomicReference<>();
     when(redis.opsForValue()).thenReturn(values);
     when(values.setIfAbsent(
@@ -36,7 +42,7 @@ class StockConsistencyLockTest {
           lockValue.set(invocation.getArgument(1));
           return true;
         });
-    when(stockSqlMapper.findAvailableStock()).thenAnswer(invocation -> {
+    when(stockSqlMapper.findAvailableStockBatchAfter(0L, 500)).thenAnswer(invocation -> {
       lockValue.set("new-owner");
       return List.of();
     });
@@ -50,10 +56,11 @@ class StockConsistencyLockTest {
       return lockValue.compareAndSet(expectedOwner, null) ? 1L : 0L;
     });
 
-    assertThrows(IllegalStateException.class,
-        () -> new StockConsistencyReconciler(redis, stockSqlMapper).scheduledAudit());
+    assertDoesNotThrow(() -> new StockConsistencyReconciler(redis, stockSqlMapper,
+        auditStateMapper).scheduledAudit());
 
     assertEquals("new-owner", lockValue.get());
+    verify(auditStateMapper).recordFailure(anyString(), any());
   }
 
   @Test
@@ -62,6 +69,9 @@ class StockConsistencyLockTest {
     @SuppressWarnings("unchecked")
     ValueOperations<String, String> values = mock(ValueOperations.class);
     StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
+    StockConsistencyAuditStateMapper auditStateMapper = mock(StockConsistencyAuditStateMapper.class);
+    when(auditStateMapper.findState()).thenReturn(state(0L));
+    when(auditStateMapper.completeCycle(anyLong(), any())).thenReturn(1);
     AtomicReference<String> lockValue = new AtomicReference<>();
     AtomicInteger renewals = new AtomicInteger();
     CountDownLatch renewalSeen = new CountDownLatch(1);
@@ -72,7 +82,7 @@ class StockConsistencyLockTest {
           return true;
         });
     when(values.get(anyString())).thenAnswer(invocation -> lockValue.get());
-    when(stockSqlMapper.findAvailableStock()).thenAnswer(invocation -> {
+    when(stockSqlMapper.findAvailableStockBatchAfter(0L, 500)).thenAnswer(invocation -> {
       renewalSeen.await(8, TimeUnit.SECONDS);
       return List.of();
     });
@@ -87,9 +97,17 @@ class StockConsistencyLockTest {
       return lockValue.compareAndSet(owner, null) ? 1L : 0L;
     });
 
-    new StockConsistencyReconciler(redis, stockSqlMapper).scheduledAudit();
+    new StockConsistencyReconciler(redis, stockSqlMapper, auditStateMapper).scheduledAudit();
 
     assertTrue(renewals.get() >= 1);
     assertEquals(null, lockValue.get());
+  }
+
+  /** 构造未开始的普通库存审计游标。 */
+  private static StockConsistencyAuditStatePO state(long cursor) {
+    StockConsistencyAuditStatePO state = new StockConsistencyAuditStatePO();
+    state.stateKey = "NORMAL_STOCK";
+    state.cursorSkuId = cursor;
+    return state;
   }
 }

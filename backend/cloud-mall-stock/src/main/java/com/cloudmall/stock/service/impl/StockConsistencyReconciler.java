@@ -1,7 +1,11 @@
 package com.cloudmall.stock.service.impl;
 
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
+import com.cloudmall.stock.domain.po.StockConsistencyAuditStatePO;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -19,8 +23,10 @@ import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.connection.DataType;
+import org.springframework.data.redis.connection.ReturnType;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -63,19 +69,53 @@ public class StockConsistencyReconciler {
   /** 对账租约为 20 秒，由独立线程每 5 秒续期。 */
   private static final Duration LOCK_TTL = Duration.ofSeconds(20);
 
+  /** 单次有界 Lua 同序读取缓存类型、数量和版本。 */
+  private static final byte[] READ_NORMAL_STOCK = (
+      "local result={}; for index=1,#KEYS do "
+          + "local kind=redis.call('TYPE',KEYS[index]).ok; result[#result+1]=kind;"
+          + "if kind=='hash' then result[#result+1]=redis.call('HGET',KEYS[index],'quantity') or '';"
+          + "result[#result+1]=redis.call('HGET',KEYS[index],'version') or '';"
+          + "else result[#result+1]=''; result[#result+1]=''; end; end; return result"
+      ).getBytes(StandardCharsets.UTF_8);
+
   /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
 
   /** 保存 db 的业务状态或配置。 */
   private final StockSqlMapper stockSqlMapper;
 
+  /** 跨实例和重启均可恢复的普通库存审计游标。 */
+  private final StockConsistencyAuditStateMapper auditStateMapper;
+
+  /** 普通库存单批读取数量，运行时限制在 1 至 1000。 */
+  @Value("${cloudmall.stock.consistency.normal-audit-batch-size:500}")
+  private int configuredBatchSize = 500;
+
+  /** 每次调度的最大普通库存批次数。 */
+  @Value("${cloudmall.stock.consistency.normal-audit-max-batches:4}")
+  private int configuredMaxBatches = 4;
+
+  /** 单轮普通库存审计最大时长，单位毫秒。 */
+  @Value("${cloudmall.stock.consistency.normal-audit-max-ms:3000}")
+  private long configuredMaxMillis = 3000L;
+
+  /** Redis Lua 单批最大允许耗时，单位毫秒。 */
+  @Value("${cloudmall.stock.consistency.normal-audit-redis-max-ms:500}")
+  private long configuredRedisMaxMillis = 500L;
+
+  /** Redis Lua 单批最大返回字节数。 */
+  @Value("${cloudmall.stock.consistency.normal-audit-reply-max-bytes:100000}")
+  private long configuredReplyMaxBytes = 100000L;
+
   /** 创建 StockConsistencyReconciler 实例。 */
-  public StockConsistencyReconciler(StringRedisTemplate redis, StockSqlMapper stockSqlMapper) {
+  public StockConsistencyReconciler(StringRedisTemplate redis, StockSqlMapper stockSqlMapper,
+      StockConsistencyAuditStateMapper auditStateMapper) {
     // 1. 接收并整理 StockConsistencyReconciler 的业务请求。
     // 2. 执行 StockConsistencyReconciler 的核心业务校验与状态处理。
     // 3. 返回 StockConsistencyReconciler 的处理结果。
     this.redis = redis;
     this.stockSqlMapper = stockSqlMapper;
+    this.auditStateMapper = auditStateMapper;
   }
 
   @PostConstruct
@@ -85,6 +125,8 @@ public class StockConsistencyReconciler {
     // 2. 执行 initialize 的核心业务校验与状态处理。
     // 3. 返回 initialize 的处理结果。
     ensureSeckillLedgerTable();
+    auditStateMapper.ensureTable();
+    auditStateMapper.insertIfAbsent(LocalDateTime.now(ZoneOffset.ofHours(8)));
     // 普通库存预扣事实已经由 stock_flow 和 stock_cache_repair 恢复；启动时不再重建旧 Redis 标记。
     try {
       recoverAcceptedSeckillLedger(() -> {});
@@ -101,10 +143,19 @@ public class StockConsistencyReconciler {
     // 2. 执行 scheduledAudit 的核心业务校验与状态处理。
     // 3. 返回 scheduledAudit 的处理结果。
     String token = UUID.randomUUID().toString();
-    if (!Boolean.TRUE.equals(
-        redis.opsForValue().setIfAbsent(LOCK_KEY, token, LOCK_TTL))) {
+    boolean acquired;
+    try {
+      acquired = Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(LOCK_KEY, token, LOCK_TTL));
+    } catch (RuntimeException lockFailure) {
+      recordAuditFailure(lockFailure);
+      log.warn("库存对账无法获取 Redis 租约，本轮稍后重试", lockFailure);
       return;
     }
+    if (!acquired) {
+      log.debug("库存对账租约由其他实例持有，本轮跳过");
+      return;
+    }
+    long lockStartedAt = System.nanoTime();
     AtomicBoolean leaseOwned = new AtomicBoolean(true);
     ScheduledExecutorService renewalExecutor = Executors.newSingleThreadScheduledExecutor(
         task -> {
@@ -116,15 +167,35 @@ public class StockConsistencyReconciler {
         () -> renewLease(token, leaseOwned), 5, 5, TimeUnit.SECONDS);
     Runnable guard = () -> requireLease(token, leaseOwned);
     try {
-      auditNormalStock(leaseOwned);
+      auditNormalStock(guard);
       guard.run();
       recoverAcceptedSeckillLedger(guard);
       guard.run();
       reconcileSeckillStock(guard);
+    } catch (RuntimeException auditFailure) {
+      recordAuditFailure(auditFailure);
+      log.warn("库存周期对账本轮失败，游标保留并等待下一轮重试", auditFailure);
     } finally {
       renewal.cancel(true);
       renewalExecutor.shutdownNow();
-      redis.execute(RELEASE_LOCK, List.of(LOCK_KEY), token);
+      try {
+        redis.execute(RELEASE_LOCK, List.of(LOCK_KEY), token);
+      } catch (RuntimeException releaseFailure) {
+        log.warn("库存对账租约释放失败，等待 TTL 自然过期", releaseFailure);
+      }
+      log.info("库存周期对账本轮结束，lockHeldMs={}，leaseOwned={}",
+          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lockStartedAt), leaseOwned.get());
+    }
+  }
+
+  /** 只记录失败摘要，不改变已经完成的库存审计进度。 */
+  private void recordAuditFailure(RuntimeException failure) {
+    try {
+      String description = failure.toString();
+      auditStateMapper.recordFailure(description.substring(0, Math.min(512, description.length())),
+          LocalDateTime.now(ZoneOffset.ofHours(8)));
+    } catch (RuntimeException stateFailure) {
+      log.warn("库存审计失败状态无法落库，原始故障仍保留在调度日志", stateFailure);
     }
   }
 
@@ -211,24 +282,121 @@ public class StockConsistencyReconciler {
   }
 
   /** 执行 auditNormalStock 相关操作。 */
-  private void auditNormalStock(AtomicBoolean leaseOwned) {
-    // 1. 接收并整理 auditNormalStock 的业务请求。
-    // 2. 执行 auditNormalStock 的核心业务校验与状态处理。
-    // 3. 返回 auditNormalStock 的处理结果。
-    for (Map<String, Object> row : stockSqlMapper.findAvailableStock()) {
-      if (!leaseOwned.get()) throw new IllegalStateException("库存对账锁已失效，本轮停止审计");
-      Number skuId = (Number) row.get("sku_id");
-      Number mysql = (Number) row.get("available_quantity");
-      if (skuId == null || mysql == null) continue;
-      String stockKey = NORMAL_PREFIX + skuId.longValue();
-      if (redis.type(stockKey) == DataType.STRING) {
-        log.warn("普通库存仍使用旧字符串缓存，等待版本投影迁移，skuId={}", skuId);
-        continue;
+  private void auditNormalStock(Runnable guard) {
+    // 1. 从持久游标开始，每轮只获取有限的 MySQL 库存事实批次。
+    StockConsistencyAuditStatePO state = auditStateMapper.findState();
+    if (state == null || state.cursorSkuId == null || state.cursorSkuId < 0)
+      throw new IllegalStateException("普通库存审计游标缺失或无效");
+    long cursor = state.cursorSkuId;
+    long startCursor = cursor;
+    long startedAt = System.nanoTime();
+    int batchSize = Math.max(1, Math.min(1000, configuredBatchSize));
+    int maxBatches = Math.max(1, Math.min(16, configuredMaxBatches));
+    long maxMillis = Math.max(100L, configuredMaxMillis);
+    long checked = 0L;
+    long different = 0L;
+    long newer = 0L;
+    int batches = 0;
+    long mysqlMillis = 0L;
+    long redisMillis = 0L;
+    for (; batches < maxBatches
+        && TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < maxMillis; batches++) {
+      guard.run();
+      long mysqlStartedAt = System.nanoTime();
+      List<Map<String, Object>> rows = stockSqlMapper.findAvailableStockBatchAfter(cursor, batchSize);
+      mysqlMillis += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - mysqlStartedAt);
+      if (rows.isEmpty()) {
+        guard.run();
+        if (auditStateMapper.completeCycle(cursor, LocalDateTime.now(ZoneOffset.ofHours(8))) != 1)
+          throw new IllegalStateException("普通库存审计周期完成时游标竞争失败");
+        log.info("普通库存审计周期完成，startCursor={}，lastCursor={}，rowsThisRun={}，"
+                + "batches={}，mysqlMs={}，redisMs={}", startCursor, cursor, checked,
+            batches, mysqlMillis, redisMillis);
+        return;
       }
-      Object redisValue = redis.opsForHash().get(stockKey, "quantity");
-      if (redisValue == null || !String.valueOf(Math.max(0, mysql.intValue())).equals(String.valueOf(redisValue))) {
-        log.warn("普通库存缓存与数据库不一致，skuId={}，redis={}，mysql={}", skuId, redisValue, mysql);
+      // 2. 一个 Redis Lua 读取同序类型、数量和版本；未知观察不推进游标。
+      long redisStartedAt = System.nanoTime();
+      List<?> values = readNormalStockBatch(rows);
+      redisMillis += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redisStartedAt);
+      int batchDifferences = 0;
+      for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+        Map<String, Object> row = rows.get(rowIndex);
+        long skuId = ((Number) row.get("sku_id")).longValue();
+        String type = decode(values.get(rowIndex * 3));
+        Long redisQuantity = parseNumber(values.get(rowIndex * 3 + 1));
+        Long redisVersion = parseNumber(values.get(rowIndex * 3 + 2));
+        long mysqlQuantity = ((Number) row.get("available_quantity")).longValue();
+        long mysqlVersion = ((Number) row.get("version")).longValue();
+        if ("hash".equals(type) && redisVersion != null && redisVersion > mysqlVersion) {
+          newer++;
+          continue;
+        }
+        if (!"hash".equals(type) || redisQuantity == null || redisVersion == null
+            || redisQuantity != mysqlQuantity || redisVersion != mysqlVersion) {
+          batchDifferences++;
+          if (batchDifferences <= 5)
+            log.warn("普通库存审计差异，skuId={}，type={}，redisQuantity={}，redisVersion={}，"
+                    + "mysqlQuantity={}，mysqlVersion={}", skuId, type, redisQuantity,
+                redisVersion, mysqlQuantity, mysqlVersion);
+        }
       }
+      // 3. 再次核对租约，仅完整观察的批次能通过数据库 CAS 推进游标。
+      guard.run();
+      long nextCursor = ((Number) rows.get(rows.size() - 1).get("sku_id")).longValue();
+      if (nextCursor <= cursor || auditStateMapper.advance(cursor, nextCursor, rows.size(),
+          LocalDateTime.now(ZoneOffset.ofHours(8))) != 1)
+        throw new IllegalStateException("普通库存审计游标推进失败");
+      cursor = nextCursor;
+      checked += rows.size();
+      different += batchDifferences;
+      if (batchDifferences > 5)
+        log.warn("普通库存审计当前批次差异较多，示例已限制 5 条，batchDifferences={}",
+            batchDifferences);
+    }
+    log.info("普通库存审计有界批次完成，startCursor={}，cursor={}，batches={}，rows={}，"
+            + "different={}，newer={}，mysqlMs={}，redisMs={}", startCursor, cursor,
+        batches, checked, different, newer,
+        mysqlMillis, redisMillis);
+  }
+
+  /** 以 Redis 单次只读 Lua 批量查询，并拒绝耗时、长度或返回字节超限的结果。 */
+  private List<?> readNormalStockBatch(List<Map<String, Object>> rows) {
+    byte[][] keys = rows.stream()
+        .map(row -> (NORMAL_PREFIX + ((Number) row.get("sku_id")).longValue())
+            .getBytes(StandardCharsets.UTF_8))
+        .toArray(byte[][]::new);
+    long startedAt = System.nanoTime();
+    List<?> values = redis.execute((RedisCallback<List<?>>) connection ->
+        (List<?>) connection.eval(READ_NORMAL_STOCK, ReturnType.MULTI, rows.size(), keys));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+    if (elapsedMillis > Math.max(1L, configuredRedisMaxMillis))
+      throw new IllegalStateException("普通库存审计 Redis 批次超过耗时上限");
+    if (values == null || values.size() != rows.size() * 3)
+      throw new IllegalStateException("普通库存审计 Redis 批次返回不完整");
+    long replyBytes = 0L;
+    for (Object value : values) {
+      replyBytes += value instanceof byte[] bytes ? bytes.length : decode(value).length();
+      if (replyBytes > Math.max(3000L, configuredReplyMaxBytes))
+        throw new IllegalStateException("普通库存审计 Redis 批次返回过大");
+    }
+    log.debug("普通库存审计 Redis 批次完成，keys={}，elapsedMs={}，replyBytes={}",
+        rows.size(), elapsedMillis, replyBytes);
+    return values;
+  }
+
+  /** Redis 回调可能返回原始字节或已转换字符串。 */
+  private static String decode(Object value) {
+    if (value == null) return "";
+    return value instanceof byte[] bytes
+        ? new String(bytes, StandardCharsets.UTF_8) : String.valueOf(value);
+  }
+
+  /** 字段缺失或非法按观察差异处理，不能把无效数字当作零库存。 */
+  private static Long parseNumber(Object value) {
+    try {
+      return Long.valueOf(decode(value));
+    } catch (NumberFormatException malformed) {
+      return null;
     }
   }
 
