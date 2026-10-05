@@ -19,10 +19,10 @@ spring:
           initial-interval: 1000ms
           multiplier: 2
           max-interval: 10000ms
-  cloud.openfeign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
   cloud.alibaba.seata.tx-service-group: cloudmall_tx_group
   task.scheduling.pool.size: 2
 management.endpoints.web.exposure.include: health,info,prometheus
+feign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
 spring.cloud.sentinel.eager: true
 spring.cloud.sentinel.transport.dashboard: localhost:8858
 spring.cloud.nacos.discovery.server-addr: localhost:18848
