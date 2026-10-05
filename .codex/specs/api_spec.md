@@ -150,9 +150,9 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | --- | --- | --- | --- |
 | GET | `/api/stock/skus/{skuId}` | 内部请求 | 可售库存摘要；不经 Gateway 向前端公开 |
 | POST | `/api/stock/reservations` | `{orderNo,items,scene}` | 预扣结果，失败返回库存不足；同一 `orderNo` 返回同一结果 |
-| GET | `/api/stock/reservations/{orderNo}` | 无 | 查询预扣当前/最终状态和明细，不改变库存；返回 `NOT_FOUND` 仅表示尚无持久化请求认领 |
-| POST | `/api/stock/reservations/{orderNo}/confirm` | `{operationKey}` | 按稳定操作键幂等确认扣减；响应丢失可通过 GET 查询最终状态 |
-| POST | `/api/stock/reservations/{orderNo}/rollback` | `{operationKey}` | 按稳定操作键幂等回滚预扣；响应丢失可通过 GET 查询最终状态 |
+| GET | `/api/stock/reservations/{orderNo}` | 无 | 查询普通或秒杀预扣的当前/最终状态和明细，不改变库存；秒杀 `RELEASE_PENDING`/`PROJECTION_BLOCKED` 对兼容调用方映射为 `UNKNOWN`；`NOT_FOUND` 仅表示尚无持久化请求认领 |
+| POST | `/api/stock/reservations/{orderNo}/confirm` | `{operationKey}` | 按稳定操作键幂等确认；秒杀只确认持久配额事实，不写普通 `stock_flow`；响应丢失可通过 GET 查询最终状态 |
+| POST | `/api/stock/reservations/{orderNo}/rollback` | `{operationKey}` | 按稳定操作键幂等回滚；秒杀只在受理 op marker、活动 revision 和 quota key 完整时恢复活动 quota，不减少用户限购计数；缺失投影进入 `PROJECTION_BLOCKED`，不得直接回补 |
 | POST | `/api/stock/seckill/reservations` | `{activityId,skuId,userId}` | Redis 预扣/异步入队结果 |
 
 接口必须带订单号或幂等键，所有数量为正整数；库存服务不得返回负库存。
@@ -198,7 +198,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | PUT | `/api/seckill/activities/{activityId}` | 可变活动字段 | 管理员修改 |
 | POST | `/api/seckill/activities/{activityId}/publish` | 无 | 预热 Redis 并发布 |
 | POST | `/api/seckill/activities/{activityId}/start` | 无 | 管理员手动开始；活动时间窗口同时决定有效状态 |
-| POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 受 Sentinel 保护的秒杀入口；返回 `{accepted,reservationStatus,orderNo,eventId}`，仅在 Redis 预扣和秒杀 outbox 已持久化后返回 `accepted=true`，不代表订单已落库 |
+| POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 受 Sentinel 保护的秒杀入口；受理 Lua 必须同时写 quota、用户累计计数、accepted marker、`seckill:quota:op:{orderNo}=RESERVED` 和活动全局 revision；返回 `{accepted,reservationStatus,orderNo,eventId}`，仅在 Redis 预扣和秒杀 outbox 已持久化后返回 `accepted=true`，不代表订单已落库 |
 | GET | `/api/internal/stock/seckill/reservations/{orderNo}` | Header `X-Internal-Service: cloud-mall-order` | 仅供 order DLQ recovery 通过内部 Feign 调用，Gateway 不路由、前端不可访问；返回 `{orderNo,eventId,reservationStatus,requestHash}`，只读验真，不改变库存 |
 
 ## 11. 错误码

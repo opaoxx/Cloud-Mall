@@ -375,11 +375,36 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 | `idempotency_key` | VARCHAR(128) NOT NULL | 客户端幂等键；同一用户跨活动全局唯一 |
 | `request_payload` | JSON NOT NULL | Lua 扣减前持久化的完整规范化请求，必须包含 addressSnapshot |
 | `request_hash` | CHAR(64) NOT NULL | 规范化请求哈希 |
+| `accepted_redis_revision` | BIGINT NULL | 受理 Lua 同一原子脚本返回的活动全局 Redis revision；旧数据为空时不得补造受理 marker |
 | `status` | VARCHAR(32) NOT NULL | `PENDING`/`UNKNOWN`/`ACCEPTED`/`REJECTED`/`ORDER_CREATED`/`CONFLICT`；`UNKNOWN` 必须持续核验原 Redis marker 和 outbox，不能停止恢复 |
 | `last_error` | VARCHAR(512) | 最近错误 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 
 唯一约束：`uk_seckill_global_request(user_id,idempotency_key)`、`uk_seckill_order(order_no)`，并建立 `idx_seckill_activity_sku(activity_id,sku_id,status)`。同一用户同一幂等键跨活动也必须比较 `request_hash`：同哈希返回原 `order_no`，不同哈希返回 `SECKILL_IDEMPOTENCY_CONFLICT`，不得改订单号、重复扣 Redis 或发布新事件。迁移现有按活动分组的唯一约束前，必须审计跨活动重复键；保留最早原 `order_no`，冲突行标记 `CONFLICT` 并告警，不得静默生成新订单。`ACCEPTED` 只表示 Redis 预扣成功且 outbox 已持久化，不代表订单已落库。
+
+### 6.4.1 `seckill_quota_settlement`
+
+秒杀受理之后的独立最终配额结算事实。该表不替换 `seckill_reservation` 的 `ACCEPTED` 语义，也不写入普通 `stock_flow`。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PRIMARY KEY | 结算 ID |
+| `order_no` | VARCHAR(64) UNIQUE NOT NULL | 秒杀订单唯一键 |
+| `activity_id` / `sku_id` / `user_id` | BIGINT NOT NULL | 从受理事实 `INSERT ... SELECT` 固定复制 |
+| `idempotency_key` | VARCHAR(128) NOT NULL | 原受理幂等键 |
+| `quantity` | INT NOT NULL | 当前固定为 1 |
+| `status` | VARCHAR(32) NOT NULL | `OPEN`/`RELEASE_PENDING`/`RELEASED`/`CONFIRMED`/`PROJECTION_BLOCKED`/`CONFLICT` |
+| `revision` | BIGINT NOT NULL | 单订单结算 revision；OPEN=1，rollback 方向=2；不等同活动全局 Redis revision |
+| `operation_key` | VARCHAR(160) | `orderNo:ROLLBACK` 或 `orderNo:CONFIRM` |
+| `redis_revision` | BIGINT | 受理/结算 Lua receipt 中的活动全局 revision |
+| `last_error` | VARCHAR(512) | 可恢复错误摘要 |
+| `next_retry_at` | DATETIME(3) | 恢复扫描时间 |
+| `lease_owner` / `lease_until` | VARCHAR(128) / DATETIME(3) | 恢复租约 |
+| `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
+
+约束：`uk_seckill_settlement_order(order_no)`、`uk_seckill_settlement_operation(operation_key)`；索引 `idx_seckill_settlement_retry(status,next_retry_at,lease_until)`、`idx_seckill_settlement_activity(activity_id,sku_id,status)`。受理事务使用锁定的 `seckill_reservation` 事实插入 `OPEN`；reconciler 只可为已有 `ACCEPTED` ledger 补建 OPEN，不可把缺失 op marker 猜测成 RESERVED。
+
+Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityId}:{skuId}`，并写 `seckill:quota:op:{orderNo}=RESERVED|orderNo|acceptanceRevision`。释放 Lua 只能匹配该 RESERVED marker 或同 operationKey、同 settlement revision 的 APPLIED marker；缺 quota key、marker、活动 revision 或元数据时保持 `RELEASE_PENDING/PROJECTION_BLOCKED`，禁止 SET 重建或 INCR 回补。`seckill:user:{activityId}:{userId}` 只增不减。
 
 ### 6.5 `seckill_order_outbox`
 
