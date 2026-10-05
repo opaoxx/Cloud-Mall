@@ -241,7 +241,7 @@ MySQL 事实；只有 MySQL 事实也不可用时返回 `STOCK_SERVICE_UNAVAILAB
 | `ORDER_STOCK_ACTION_UNKNOWN` | 库存确认/回滚结果未知，等待恢复 | 202 |
 | `ORDER_STOCK_ACTION_CONFLICT` | 库存动作发现相反终态，需要对账 | 409 |
 | `ORDER_QUERY_SHARD_UNAVAILABLE` | 订单列表涉及的月份表缺失或查询失败，结果不可完整确定 | 503 |
-| `PRODUCT_QUERY_UNAVAILABLE` | 商品读接口获取数据库连接或执行 SQL 超时，本次结果不可可靠确定 | 503 |
+| `PRODUCT_QUERY_UNAVAILABLE` | 公开商品 GET 在获取数据库连接、数据库通信或执行 SQL 超时且本次结果不可可靠确定；非 GET 和未知实现错误使用 `COMMON_INTERNAL_ERROR` | 503 |
 | `STOCK_CACHE_REPAIRING` | 库存事实已提交，缓存修复处理中 | 202 |
 | `STOCK_SERVICE_UNAVAILABLE` | Stock 的 MySQL 连接、事务、查询/提交超时或依赖熔断；库存结果不可可靠确定 | 503 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
