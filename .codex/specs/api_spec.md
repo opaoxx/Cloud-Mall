@@ -157,6 +157,16 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 接口必须带订单号或幂等键，所有数量为正整数；库存服务不得返回负库存。
 
+库存依赖不可用时保持结果未知语义，不改变上述请求结构、订单号、`operationKey` 或
+`Idempotency-Key`：秒杀 Redis 连接、超时、命令/协议错误或熔断返回
+`REDIS_SERVICE_UNAVAILABLE`（HTTP 503）；普通预扣、确认、回滚及库存事实读取的
+MySQL 连接、事务、查询/提交超时或熔断返回 `STOCK_SERVICE_UNAVAILABLE`（HTTP 503）。
+该响应不表示库存不足、已回滚或已确认，调用方必须使用原订单号/操作键查询或由恢复任务
+继续处理。普通 `GET /api/stock/skus/{skuId}` 在 Redis 投影不可用时允许回退读取
+MySQL 事实；只有 MySQL 事实也不可用时返回 `STOCK_SERVICE_UNAVAILABLE`，不得返回
+`0`、过期 Redis 值或隐式写入缓存修复记录。Redis Lua 明确返回售罄、限购、未开始或
+已结束时仍返回既有业务错误码，不映射为 `REDIS_SERVICE_UNAVAILABLE`。
+
 普通预扣接口对同一 `orderNo` 必须返回同一业务结果，并以规范化 `items_hash` 绑定请求内容。库存服务先在独立事务中提交不可变的 `stock_reservation_request=INIT`，再在第二个事务中锁定该请求行并处理整笔 SKU 集合；不能只按 SKU 查询 `stock_flow` 判断订单是否已经预扣。库存不足时第二个事务整体回滚，随后独立持锁事务将原请求标记为持久化 `REJECTED`。库存服务必须记录 `RESERVE`、`CONFIRM`、`ROLLBACK` 的唯一幂等键；回滚/确认请求在找不到未完成预扣时返回幂等已处理结果或明确的状态冲突，不能按新请求再次改变数量。`POST` 的 Feign 超时不得自动换订单号重试；调用方将结果标记为未知，使用原订单号调用本查询接口，再决定回滚/确认。`GET` 返回 `NOT_FOUND` 时只表示没有观察到持久化请求认领，不能据此直接回滚或生成新订单；恢复任务可在保护等待后用相同订单号和相同快照重试原 POST。`REJECTED` 必须持久化，不能用 `NOT_FOUND` 代替库存不足或参数冲突。Redis 记录丢失不等于未执行，查询必须以请求台账、`stock_flow` 和库存状态为准。正常库存以 MySQL 提交结果为事实，Redis 只是带版本的可售投影；提交后缓存更新失败由持久化修复任务重试。
 
 ## 9. 支付服务接口
@@ -233,6 +243,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `ORDER_QUERY_SHARD_UNAVAILABLE` | 订单列表涉及的月份表缺失或查询失败，结果不可完整确定 | 503 |
 | `PRODUCT_QUERY_UNAVAILABLE` | 商品读接口获取数据库连接或执行 SQL 超时，本次结果不可可靠确定 | 503 |
 | `STOCK_CACHE_REPAIRING` | 库存事实已提交，缓存修复处理中 | 202 |
+| `STOCK_SERVICE_UNAVAILABLE` | Stock 的 MySQL 连接、事务、查询/提交超时或依赖熔断；库存结果不可可靠确定 | 503 |
 | `SECKILL_NOT_STARTED` | 秒杀未开始 | 409 |
 | `SECKILL_ENDED` | 秒杀已结束 | 409 |
 | `SECKILL_LIMIT_REACHED` | 超过用户限购 | 429 |
@@ -243,7 +254,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 | `SECKILL_RESERVATION_NOT_VERIFIED` | 秒杀受理事实不存在或暂时无法确认 | 202 |
 | `GATEWAY_RATE_LIMITED` | 网关/Sentinel 限流 | 429 |
 | `GATEWAY_SERVICE_UNAVAILABLE` | 服务熔断/降级 | 503 |
-| `REDIS_SERVICE_UNAVAILABLE` | Redis 连接、超时或命令失败；本次请求结果不可可靠确定 | 503 |
+| `REDIS_SERVICE_UNAVAILABLE` | Stock 依赖 Redis 连接、超时、命令/协议失败或依赖熔断；本次请求结果不可可靠确定 | 503 |
 | `COMMON_INTERNAL_ERROR` | 未预期服务错误 | 500 |
 
 错误码命名、HTTP 映射和是否返回可展示 message 需在 common 实现前冻结；不得把内部异常、账号密码或堆栈返回前端。
