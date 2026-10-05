@@ -92,11 +92,10 @@ Stock 启动时以幂等 DDL 或正式迁移创建；禁止在请求线程隐式
 | `activity_id` / `sku_id` / `user_id` | `BIGINT NOT NULL` | 固定受理维度，不可改写 |
 | `idempotency_key` | `VARCHAR(128) NOT NULL` | 原受理幂等键 |
 | `quantity` | `INT NOT NULL` | 本轮固定为 1，需 `>0` |
-| `accepted_redis_revision` | `BIGINT` | 受理 Lua 同一原子脚本返回的活动全局 revision；旧 ACCEPTED 为空时不得猜测补 marker |
 | `status` | `VARCHAR(32) NOT NULL` | `OPEN/RELEASE_PENDING/RELEASED/CONFIRMED/CONFLICT/PROJECTION_BLOCKED`；投影阻塞必须由 `operation_key` 保留原动作方向 |
 | `revision` | `BIGINT NOT NULL` | 结算事实 revision；受理 OPEN 为 1，释放方向固定为 2；与活动全局 Redis revision 分离 |
 | `operation_key` | `VARCHAR(160)` | 当前结算动作唯一键 |
-| `redis_revision` | `BIGINT` | 受理/结算 Lua receipt 中观察到的活动全局 revision |
+| `redis_revision` | `BIGINT` | 释放结算 Lua 成功 receipt 中观察到的活动全局 revision；OPEN 阶段为空 |
 | `last_error` | `VARCHAR(512)` | 最近可恢复错误，不写敏感凭据 |
 | `next_retry_at` | `DATETIME(3)` | 恢复时间 |
 | `lease_owner` / `lease_until` | `VARCHAR(128)` / `DATETIME(3)` | 恢复器数据库租约 |
@@ -104,7 +103,7 @@ Stock 启动时以幂等 DDL 或正式迁移创建；禁止在请求线程隐式
 
 约束和索引：`uk_seckill_settlement_order(order_no)`、`uk_seckill_settlement_operation(operation_key)`、`idx_seckill_settlement_retry(status,next_retry_at,lease_until)`、`idx_seckill_settlement_activity(activity_id,sku_id,status)`。同一订单只允许一行；不允许通过更新维度字段修复冲突。
 
-结算行必须在 `seckill_reservation` 从 `PENDING/UNKNOWN` 成为 `ACCEPTED` 的同一 Stock 本地事务中插入 `OPEN`，并保存受理 Lua receipt 的活动全局 `redis_revision`。实现可使用 `INSERT ... SELECT` 从已锁定的受理事实读取不可变维度，禁止请求线程另查后拼接可变字段。存量 `ACCEPTED` 行缺少结算记录时，reconciler 可在锁定原 ledger 后以 `INSERT ... SELECT` 补建 `OPEN`；这不改变 `ACCEPTED` 语义。
+结算行必须在 `seckill_reservation` 从 `PENDING/UNKNOWN` 成为 `ACCEPTED` 的同一 Stock 本地事务中插入 `OPEN`。受理 Lua 的全局 revision 只保存在 Redis `RESERVED|orderNo|acceptanceRevision` receipt 中，不在数据库冗余；结算表 `redis_revision` 在释放 Lua 成功后保存其活动全局 revision，OPEN 阶段允许为空。实现可使用 `INSERT ... SELECT` 从已锁定的受理事实读取不可变维度，禁止请求线程另查后拼接可变字段。存量 `ACCEPTED` 行缺少结算记录时，reconciler 可在锁定原 ledger 后以 `INSERT ... SELECT` 补建 `OPEN`；这不改变 `ACCEPTED` 语义。
 
 ### 4.2 Mapper 语义
 

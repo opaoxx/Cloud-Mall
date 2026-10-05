@@ -375,7 +375,6 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 | `idempotency_key` | VARCHAR(128) NOT NULL | 客户端幂等键；同一用户跨活动全局唯一 |
 | `request_payload` | JSON NOT NULL | Lua 扣减前持久化的完整规范化请求，必须包含 addressSnapshot |
 | `request_hash` | CHAR(64) NOT NULL | 规范化请求哈希 |
-| `accepted_redis_revision` | BIGINT NULL | 受理 Lua 同一原子脚本返回的活动全局 Redis revision；旧数据为空时不得补造受理 marker |
 | `status` | VARCHAR(32) NOT NULL | `PENDING`/`UNKNOWN`/`ACCEPTED`/`REJECTED`/`ORDER_CREATED`/`CONFLICT`；`UNKNOWN` 必须持续核验原 Redis marker 和 outbox，不能停止恢复 |
 | `last_error` | VARCHAR(512) | 最近错误 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
@@ -396,7 +395,7 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 | `status` | VARCHAR(32) NOT NULL | `OPEN`/`RELEASE_PENDING`/`RELEASED`/`CONFIRMED`/`PROJECTION_BLOCKED`/`CONFLICT` |
 | `revision` | BIGINT NOT NULL | 单订单结算 revision；OPEN=1，rollback 方向=2；不等同活动全局 Redis revision |
 | `operation_key` | VARCHAR(160) | `orderNo:ROLLBACK` 或 `orderNo:CONFIRM` |
-| `redis_revision` | BIGINT | 受理/结算 Lua receipt 中的活动全局 revision |
+| `redis_revision` | BIGINT | 释放结算 Lua 成功 receipt 中的活动全局 revision；OPEN 阶段为空 |
 | `last_error` | VARCHAR(512) | 可恢复错误摘要 |
 | `next_retry_at` | DATETIME(3) | 恢复扫描时间 |
 | `lease_owner` / `lease_until` | VARCHAR(128) / DATETIME(3) | 恢复租约 |
