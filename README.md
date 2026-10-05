@@ -101,6 +101,25 @@ Gateway、订单和库存服务启动时自带秒杀限流默认规则。Nacos �
 
 Order 还订阅 `cloudmall-order-degrade-rules`，保护普通库存预扣、秒杀受理、库存状态查询和确认/回滚四类 Feign 调用。普通预扣被熔断后仍按原订单号进入结果未知恢复，不会直接释放库存；订单已提交后的库存动作按原操作键退避。规则仅作用于单个 Order 实例，不代表 Stock 内部 Redis/MySQL 已具备熔断，也不代替持久意图和对账。
 
+### 秒杀订单最终配额结算（CM-24）
+
+已有 MySQL 数据卷先执行可重复迁移，新数据卷由 `schema.sql` 建表：
+
+```powershell
+Get-Content -Raw backend/database/migrate_seckill_quota_settlement.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot
+```
+
+升级前停止旧 Stock 写入，避免旧受理 Lua 与新结算协议同时处理活动。新受理在扣减配额时
+原子保存每个订单的 Redis 操作回执；MySQL 的 `seckill_quota_settlement` 与受理、outbox
+一起提交。支付确认只确认秒杀成交事实；取消和超时关单通过持久释放意图回补一次活动
+配额，保留用户累计限购计数和原受理幂等键，不改变普通商品库存。
+
+释放尚未确认时，库存状态查询返回 `UNKNOWN`，订单/支付恢复任务继续等待。
+Redis 操作成功而响应丢失时，通过原回执确认，不再重复回补。缺少配额、元数据或原
+受理回执时保留 `PROJECTION_BLOCKED`，禁止按受理数量猜测重建；需要核验历史事实并
+执行受控恢复。旧受理记录可补建 `OPEN`，但不能补造 Redis 回执或猜测其已经释放。
+
 ### Seata AT 受控演练
 
 CM-18 第一阶段在 Order 与 Stock 的独立演练表验证全局提交、回滚和 XID 透传，不修改真实订单、库存或支付数据。已有 MySQL 数据卷先执行可重复迁移：

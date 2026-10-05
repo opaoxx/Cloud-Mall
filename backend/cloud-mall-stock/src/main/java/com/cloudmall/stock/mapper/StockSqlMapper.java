@@ -690,11 +690,14 @@ public class StockSqlMapper {
     return queryForList("select sku_id,available_quantity from stock_sku");
   }
 
-  /** 统计已接受的秒杀预扣数量。 */
+  /** 只读统计已受理且尚未确认释放的占用量，不用于重建 Redis 配额。 */
   public Long countAcceptedReservations(long activityId, long skuId) {
     return queryForObject(
-        "select count(*) from seckill_reservation where activity_id=? and sku_id=? and"
-            + " status='ACCEPTED'",
+        "select count(*) from seckill_reservation reservation LEFT JOIN seckill_quota_settlement"
+            + " settlement ON settlement.order_no=reservation.order_no"
+            + " where reservation.activity_id=? and reservation.sku_id=?"
+            + " and reservation.status='ACCEPTED'"
+            + " and (settlement.status IS NULL OR settlement.status<>'RELEASED')",
         Long.class,
         activityId,
         skuId);

@@ -1,0 +1,168 @@
+package com.cloudmall.stock.service.impl;
+
+import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.common.error.BizException;
+import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
+import com.cloudmall.stock.domain.vo.StockReservationVO;
+import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
+import com.cloudmall.stock.mapper.StockSqlMapper;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/** 秒杀配额最终结算事实服务；不触碰普通库存流水。 */
+@Service
+public class SeckillQuotaSettlementService {
+  /** 秒杀结算事实 Mapper。 */
+  private final SeckillQuotaSettlementMapper settlementMapper;
+
+  /** 只读读取历史 ACCEPTED 事实，GET 不通过它写入结算行。 */
+  private final StockSqlMapper stockSqlMapper;
+
+  /** 创建秒杀结算服务。 */
+  @Autowired
+  public SeckillQuotaSettlementService(
+      SeckillQuotaSettlementMapper settlementMapper, StockSqlMapper stockSqlMapper) {
+    this.settlementMapper = settlementMapper;
+    this.stockSqlMapper = stockSqlMapper;
+  }
+
+  /** 启动时幂等建表并为已有 ACCEPTED 事实补建 OPEN，不改受理状态。 */
+  @PostConstruct
+  public void ensureTable() {
+    // 1. 先兼容已有数据卷的受理表，再创建独立结算事实。
+    stockSqlMapper.ensureSeckillLedgerTable();
+    settlementMapper.ensureTable();
+    settlementMapper.insertMissingAcceptedOpen(now());
+  }
+
+  /** 查询秒杀结算状态，未找到秒杀事实时返回 null 交给普通库存路径。 */
+  public StockReservationVO reservation(String orderNo) {
+    // 1. 只读取结算行；缺行时读取旧受理事实，不在 GET 中迁移。
+    if (orderNo == null || orderNo.isBlank()) return null;
+    SeckillQuotaSettlementPO settlement = settlementMapper.findSettlement(orderNo);
+    if (settlement == null) {
+      Map<String, Object> accepted = stockSqlMapper.findSeckillByOrderNo(orderNo);
+      if (accepted == null || !"ACCEPTED".equals(String.valueOf(accepted.get("status"))))
+        return null;
+      long skuId = requiredPositive(accepted.get("sku_id"), "sku_id");
+      return new StockReservationVO(
+          orderNo,
+          "RESERVED",
+          List.of(new com.cloudmall.stock.domain.vo.StockReservationItemVO(skuId, 1, "RESERVED")));
+    }
+    validateSettlement(settlement);
+    String status = externalStatus(settlement.status);
+    return new StockReservationVO(
+        orderNo,
+        status,
+        List.of(
+            new com.cloudmall.stock.domain.vo.StockReservationItemVO(
+                settlement.skuId, settlement.quantity, status)));
+  }
+
+  /** 按既有库存动作协议确认或释放秒杀配额；rollback 只提交待投影事实。 */
+  @Transactional
+  public ApiResponse<?> settle(String orderNo, String actionType) {
+    if (orderNo == null || orderNo.isBlank()) return null;
+    if (!"CONFIRM".equals(actionType) && !"ROLLBACK".equals(actionType)) {
+      throw new BizException("COMMON_INVALID_ARGUMENT", "秒杀结算动作无效", 400);
+    }
+    // 1. 只从已提交 ACCEPTED 受理事实补建 OPEN，禁止请求参数拼接结算维度。
+    // 先插入再锁定，避免两个存量请求先取得相同缺行 gap lock 再相互等待插入。
+    settlementMapper.insertOpenIfAbsent(orderNo, now());
+    SeckillQuotaSettlementPO settlement = settlementMapper.findSettlementForUpdate(orderNo);
+    if (settlement == null) {
+      return null;
+    }
+    validateSettlement(settlement);
+    String operationKey = orderNo + ":" + actionType;
+    String status = settlement.status;
+    long revision = settlement.revision;
+    // 2. 在 MySQL 中先完成唯一状态 CAS；Redis 只由恢复器在提交后投影。
+    if ("CONFIRM".equals(actionType)) {
+      if ("CONFIRMED".equals(status))
+        return ApiResponse.ok(Map.of("confirmed", true, "idempotent", true));
+      if ("RELEASED".equals(status)
+          || "RELEASE_PENDING".equals(status)
+          || ("PROJECTION_BLOCKED".equals(status) && !operationKey.equals(settlement.operationKey)))
+        return conflict();
+      int changed =
+          "PROJECTION_BLOCKED".equals(status)
+              ? settlementMapper.transitionBlockedToConfirmed(orderNo, operationKey, revision)
+              : settlementMapper.transitionOpenToConfirmed(orderNo, operationKey, revision);
+      if (changed == 1) return ApiResponse.ok(Map.of("confirmed", true, "idempotent", false));
+      throw unknownCas(orderNo);
+    }
+    if ("RELEASED".equals(status))
+      return ApiResponse.ok(Map.of("rolledBack", true, "idempotent", true));
+    if ("CONFIRMED".equals(status)) return conflict();
+    if ("OPEN".equals(status)) {
+      int changed = settlementMapper.transitionToReleasePending(orderNo, operationKey, revision);
+      if (changed == 1) return pendingRollback();
+      throw unknownCas(orderNo);
+    }
+    if ("RELEASE_PENDING".equals(status) || "PROJECTION_BLOCKED".equals(status)) {
+      if (!operationKey.equals(settlement.operationKey)) return conflict();
+      return pendingRollback();
+    }
+    return conflict();
+  }
+
+  /** 对外隐藏待投影内部状态，避免订单动作误判为成功。 */
+  private static ApiResponse<?> pendingRollback() {
+    return ApiResponse.ok(Map.of("rolledBack", false, "pending", true, "status", "UNKNOWN"));
+  }
+
+  /** 返回与普通库存动作一致的冲突语义。 */
+  private static ApiResponse<?> conflict() {
+    throw new BizException("SECKILL_SETTLEMENT_CONFLICT", "秒杀结算动作与既有终态冲突", 409);
+  }
+
+  /** CAS 竞争或提交结果未知时返回 503，交给订单动作恢复器重试。 */
+  private static BizException unknownCas(String orderNo) {
+    return new BizException("SECKILL_SETTLEMENT_UNKNOWN", "秒杀结算提交结果未知: " + orderNo, 503);
+  }
+
+  /** 严格拒绝损坏的结算维度，避免以默认值掩盖事实。 */
+  private static void validateSettlement(SeckillQuotaSettlementPO settlement) {
+    if (settlement.revision == null
+        || settlement.revision <= 0
+        || settlement.quantity == null
+        || settlement.quantity != 1
+        || settlement.activityId == null
+        || settlement.activityId <= 0
+        || settlement.skuId == null
+        || settlement.skuId <= 0
+        || settlement.userId == null
+        || settlement.userId <= 0) {
+      throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀结算事实维度无效", 500);
+    }
+  }
+
+  /** 旧台账缺少合法 SKU 时保持错误，禁止默认成可结算事实。 */
+  private static long requiredPositive(Object value, String name) {
+    if (!(value instanceof Number number) || number.longValue() <= 0) {
+      throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀受理事实 " + name + " 无效", 500);
+    }
+    return number.longValue();
+  }
+
+  /** 获取与 MySQL DATETIME(3) 一致的上海本地时间。 */
+  private static LocalDateTime now() {
+    return LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+  }
+
+  /** 将内部结算状态映射为既有库存查询状态。 */
+  private static String externalStatus(String status) {
+    if ("CONFIRMED".equals(status)) return "CONFIRMED";
+    if ("RELEASED".equals(status)) return "ROLLED_BACK";
+    if ("OPEN".equals(status)) return "RESERVED";
+    return "UNKNOWN";
+  }
+}

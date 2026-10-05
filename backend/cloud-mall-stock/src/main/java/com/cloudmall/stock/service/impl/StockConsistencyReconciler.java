@@ -1,8 +1,9 @@
 package com.cloudmall.stock.service.impl;
 
-import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
 import com.cloudmall.stock.domain.po.StockConsistencyAuditStatePO;
+import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
+import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
+import com.cloudmall.stock.mapper.StockSqlMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -22,11 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -87,6 +89,9 @@ public class StockConsistencyReconciler {
   /** 跨实例和重启均可恢复的普通库存审计游标。 */
   private final StockConsistencyAuditStateMapper auditStateMapper;
 
+  /** 为存量秒杀受理恢复独立 OPEN 结算事实，不猜测最终动作。 */
+  @Autowired private SeckillQuotaSettlementMapper settlementMapper;
+
   /** 普通库存单批读取数量，运行时限制在 1 至 1000。 */
   @Value("${cloudmall.stock.consistency.normal-audit-batch-size:500}")
   private int configuredBatchSize = 500;
@@ -125,6 +130,10 @@ public class StockConsistencyReconciler {
     // 2. 执行 initialize 的核心业务校验与状态处理。
     // 3. 返回 initialize 的处理结果。
     ensureSeckillLedgerTable();
+    if (settlementMapper != null) {
+      settlementMapper.ensureTable();
+      settlementMapper.insertMissingAcceptedOpen(LocalDateTime.now(ZoneOffset.ofHours(8)));
+    }
     auditStateMapper.ensureTable();
     auditStateMapper.insertIfAbsent(LocalDateTime.now(ZoneOffset.ofHours(8)));
     // 普通库存预扣事实已经由 stock_flow 和 stock_cache_repair 恢复；启动时不再重建旧 Redis 标记。
@@ -278,6 +287,8 @@ public class StockConsistencyReconciler {
           orderNo,
           parts[3],
           now);
+      if (settlementMapper != null)
+        settlementMapper.insertOpenIfAbsent(orderNo, now.toLocalDateTime());
     }
   }
 
@@ -422,9 +433,11 @@ public class StockConsistencyReconciler {
       String stockKey = SECKILL_STOCK_PREFIX + suffix;
       String actual = redis.opsForValue().get(stockKey);
       if (actual == null) {
-        guard.run();
-        redis.opsForValue().set(stockKey, String.valueOf(expected));
-        log.warn("秒杀库存 key 缺失，已按 durable ledger 重建，activitySku={}，remaining={}", suffix, expected);
+        // Lua 已扣但数据库尚未受理、或取消投影尚未确认时，计数不能证明可售数量。
+        log.error(
+            "秒杀库存 key 缺失，活动保持不可售，禁止根据计数自动重建；" + "需核验受理与结算回执，activitySku={}，ledgerExpected={}",
+            suffix,
+            expected);
       } else if (!String.valueOf(expected).equals(actual)) {
         log.warn(
             "秒杀库存对账不一致，activitySku={}，redis={}，ledgerExpected={}；保留现值等待补偿",

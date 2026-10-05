@@ -12,8 +12,8 @@ import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
-import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.domain.vo.StockReservationItemVO;
+import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,6 +28,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.DataType;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -44,16 +45,6 @@ public class StockServiceImpl implements StockService {
 
   /** 保存 PREFIX 的业务状态或配置。 */
   private static final String PREFIX = "stock:available:", RES = "stock:reservation:";
-
-  private static final String SECKILL =
-      "if redis.call('EXISTS',KEYS[3])==1 then return 3 end; local now=tonumber(ARGV[3]); local"
-          + " start=tonumber(ARGV[4]); local finish=tonumber(ARGV[5]); if now<start then return 4"
-          + " end; if now>=finish then return 5 end; local used=tonumber(redis.call('GET',KEYS[2])"
-          + " or '0'); if used>=tonumber(ARGV[2]) then return 2 end; local"
-          + " n=tonumber(redis.call('GET',KEYS[1]) or '0'); if n<1 then return 0 end;"
-          + " redis.call('DECR',KEYS[1]); redis.call('INCRBY',KEYS[2],1);"
-          + " redis.call('EXPIRE',KEYS[2],ARGV[6]); redis.call('SET',KEYS[3],ARGV[1],'EX',ARGV[6]);"
-          + " return 1";
 
   /** 保存 redis 的业务状态或配置。 */
   @Autowired private StringRedisTemplate redis;
@@ -76,8 +67,16 @@ public class StockServiceImpl implements StockService {
   /** 在独立事务中原子认领秒杀用户幂等键。 */
   @Autowired private SeckillRequestClaimService seckillRequestClaimService;
 
-  private final DefaultRedisScript<Long>
-      seckillScript = new DefaultRedisScript<>(SECKILL, Long.class);
+  /** 独立秒杀配额终态与原订单库存动作协议的适配服务。 */
+  @Autowired private SeckillQuotaSettlementService seckillSettlementService;
+
+  /** 同时扣配额并写入唯一结算回执的受理 Lua。 */
+  private final DefaultRedisScript<Long> seckillScript = new DefaultRedisScript<>();
+
+  {
+    seckillScript.setLocation(new ClassPathResource("lua/seckill-reserve.lua"));
+    seckillScript.setResultType(Long.class);
+  }
 
   /** 创建由 Spring 字段注入依赖的库存服务实例。 */
   public StockServiceImpl() {}
@@ -191,14 +190,18 @@ public class StockServiceImpl implements StockService {
 
   @Transactional
   @PostMapping("/reservations/{orderNo}/confirm")
-  /** 执行 confirm 相关操作。 */
+  /** 按原操作键确认秒杀配额或普通库存，重复动作读取同一终态。 */
   public ApiResponse<?> confirm(
       @PathVariable("orderNo") String orderNo,
       @RequestBody(required = false) StockActionDTO action) {
-    // 1. 接收并整理 confirm 的业务请求。
-    // 2. 执行 confirm 的核心业务校验与状态处理。
-    // 3. 返回 confirm 的处理结果。
+    // 1. 校验稳定动作键，秒杀结算由独立持久状态机处理。
     validateActionKey(orderNo, "CONFIRM", action);
+    if (seckillSettlementService != null) {
+      ApiResponse<?> seckillResult = seckillSettlementService.settle(orderNo, "CONFIRM");
+      if (seckillResult != null) return seckillResult;
+      requireNoUnsettledSeckillFact(orderNo);
+    }
+    // 2. 普通库存按持久请求状态及流水确认，拒绝相反终态。
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequestForUpdate(orderNo);
     if (requestRow != null) {
       String status = String.valueOf(requestRow.get("status"));
@@ -220,14 +223,18 @@ public class StockServiceImpl implements StockService {
 
   @Transactional
   @PostMapping("/reservations/{orderNo}/rollback")
-  /** 执行 rollback 相关操作。 */
+  /** 按原操作键释放秒杀配额或普通预扣，秒杀 Redis 投影由提交后恢复器执行。 */
   public ApiResponse<?> rollback(
       @PathVariable("orderNo") String orderNo,
       @RequestBody(required = false) StockActionDTO action) {
-    // 1. 接收并整理 rollback 的业务请求。
-    // 2. 执行 rollback 的核心业务校验与状态处理。
-    // 3. 返回 rollback 的处理结果。
+    // 1. 校验稳定动作键，秒杀仅提交唯一释放意图。
     validateActionKey(orderNo, "ROLLBACK", action);
+    if (seckillSettlementService != null) {
+      ApiResponse<?> seckillResult = seckillSettlementService.settle(orderNo, "ROLLBACK");
+      if (seckillResult != null) return seckillResult;
+      requireNoUnsettledSeckillFact(orderNo);
+    }
+    // 2. 普通预扣沿用 MySQL 流水和版本投影，不操作秒杀配额。
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequestForUpdate(orderNo);
     if (requestRow != null) {
       String status = String.valueOf(requestRow.get("status"));
@@ -263,6 +270,13 @@ public class StockServiceImpl implements StockService {
       throw new BizException(ErrorCodes.CONFLICT, "库存动作键与订单不匹配", 409);
   }
 
+  /** 秒杀认领未受理或结算行损坏时不能落入普通空流水的幂等成功分支。 */
+  private void requireNoUnsettledSeckillFact(String orderNo) {
+    Map<String, Object> fact = stockSqlMapper.findSeckillByOrderNo(orderNo);
+    if (fact != null && !fact.isEmpty())
+      throw new BizException("SECKILL_SETTLEMENT_UNKNOWN", "秒杀受理结算事实尚未确认", 503);
+  }
+
   /** 把单个未完成预扣在 MySQL 中确认或回滚，并同事务排队版本投影。 */
   private void settleNormalLine(String orderNo, Map<String, Object> line, String flowType) {
     long skuId = ((Number) line.get("sku_id")).longValue();
@@ -289,6 +303,26 @@ public class StockServiceImpl implements StockService {
   }
 
   private ApiResponse<StockReservationVO> reservationResult(String orderNo) {
+    if (seckillSettlementService != null) {
+      StockReservationVO seckillResult = seckillSettlementService.reservation(orderNo);
+      if (seckillResult != null) return ApiResponse.ok(seckillResult);
+    }
+    Map<String, Object> seckillFact = stockSqlMapper.findSeckillByOrderNo(orderNo);
+    if (seckillFact != null && !seckillFact.isEmpty()) {
+      String acceptedStatus = String.valueOf(seckillFact.get("status"));
+      String status =
+          "ACCEPTED".equals(acceptedStatus)
+              ? "RESERVED"
+              : ("REJECTED".equals(acceptedStatus) ? "REJECTED" : "UNKNOWN");
+      // 只读兼容存量台账；GET 不补表、不造回执，也不猜测最终结算。
+      return ApiResponse.ok(
+          new StockReservationVO(
+              orderNo,
+              status,
+              List.of(
+                  new StockReservationItemVO(
+                      ((Number) seckillFact.get("sku_id")).longValue(), 1, status))));
+    }
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequest(orderNo);
     List<Map<String, Object>> rows = stockSqlMapper.findReservationFlows(orderNo);
     if ((rows == null || rows.isEmpty()) && requestRow == null) {
@@ -441,12 +475,14 @@ public class StockServiceImpl implements StockService {
     long start = epoch(meta.get("startAt")), end = epoch(meta.get("endAt"));
     if (start <= 0 || end <= start) throw redisUnavailable();
     int limit;
+    int stockLimit;
     try {
       limit = Integer.parseInt(String.valueOf(meta.get("perUserLimit")));
+      stockLimit = Integer.parseInt(String.valueOf(meta.get("stockLimit")));
     } catch (NumberFormatException invalidLimit) {
       throw redisUnavailable();
     }
-    if (limit < 1) throw redisUnavailable();
+    if (limit < 1 || stockLimit < 1) throw redisUnavailable();
     long ttl = Math.max(1, (end - System.currentTimeMillis() / 1000));
     String orderKey = "seckill:accepted:" + activityId + ":" + skuId + ":"
         + requestUserId + ":" + idempotencyKey;
@@ -454,17 +490,22 @@ public class StockServiceImpl implements StockService {
         List.of(
             "seckill:stock:" + activityId + ":" + skuId,
             "seckill:user:" + activityId + ":" + requestUserId,
-            orderKey);
+            orderKey,
+            "seckill:quota:op:" + orderNo,
+            "seckill:quota:revision:" + activityId + ":" + skuId);
     Long result =
-        redisOperation(() -> redis.execute(
-            seckillScript,
-            keys,
-            orderNo,
-            String.valueOf(limit),
-            String.valueOf(System.currentTimeMillis() / 1000),
-            String.valueOf(start),
-            String.valueOf(end),
-            String.valueOf(ttl)));
+        redisOperation(
+            () ->
+                redis.execute(
+                    seckillScript,
+                    keys,
+                    orderNo,
+                    String.valueOf(limit),
+                    String.valueOf(System.currentTimeMillis() / 1000),
+                    String.valueOf(start),
+                    String.valueOf(end),
+                    String.valueOf(ttl),
+                    String.valueOf(stockLimit)));
     if (Objects.equals(result, 3L)) {
       String existingOrderNo = redisOperation(() -> redis.opsForValue().get(orderKey));
       if (!orderNo.equals(existingOrderNo)) throw redisUnavailable();

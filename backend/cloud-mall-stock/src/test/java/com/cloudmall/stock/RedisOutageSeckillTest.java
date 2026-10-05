@@ -84,8 +84,9 @@ class RedisOutageSeckillTest {
     meta.put("perUserLimit", "1");
     meta.put("stockLimit", "5");
     when(hashes.entries(any())).thenReturn(meta);
-    when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(),
-        any(), any(), any())).thenReturn(3L);
+    when(redis.execute(
+            any(RedisScript.class), anyList(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(3L);
     when(values.get(any())).thenReturn(originalOrderNo);
 
     service.seckill(request());
@@ -123,8 +124,9 @@ class RedisOutageSeckillTest {
     meta.put("perUserLimit", "1");
     meta.put("stockLimit", "5");
     when(hashes.entries(any())).thenReturn(meta);
-    when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(),
-        any(), any(), any())).thenReturn(2L);
+    when(redis.execute(
+            any(RedisScript.class), anyList(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(2L);
 
     BizException limited = assertThrows(BizException.class, () -> service.seckill(request()));
 
