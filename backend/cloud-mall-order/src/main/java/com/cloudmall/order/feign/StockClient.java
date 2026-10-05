@@ -40,12 +40,12 @@ public interface StockClient {
 
   /** 兼容已有原订单号回滚调用。 */
   default ApiResponse<?> rollback(String orderNo) {
-    return rollback(orderNo, null);
+    return rollback(orderNo, new Action(orderNo + ":ROLLBACK"));
   }
 
   /** 兼容已有原订单号确认调用。 */
   default ApiResponse<?> confirm(String orderNo) {
-    return confirm(orderNo, null);
+    return confirm(orderNo, new Action(orderNo + ":CONFIRM"));
   }
 
   @PostMapping("/api/stock/seckill/reservations")
