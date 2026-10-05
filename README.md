@@ -62,6 +62,8 @@ Get-Content -Raw backend/database/migrate_product_read_indexes.sql |
 --add-opens java.base/java.lang=ALL-UNNAMED
 ```
 
+当前 Spring Cloud OpenFeign 3.1.5 使用 `feign.client.config.default` 配置连接 3000 ms、读取 5000 ms 超时。升级框架前应检查属性前缀是否匹配；未识别的配置不会改变 Feign 默认超时。
+
 ### 3. 启动前端
 
 ```bash
@@ -153,6 +155,8 @@ npm run build
 ```bash
 mvn test
 ```
+
+Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 
 秒杀并发复核可使用 [JMeter 测试计划](backend/loadtest/seckill-ladder.jmx)。先准备有效 Token、收货地址和独立的已开始活动；每个并发档位使用新活动，避免前一档消耗库存。PowerShell 示例：
 
