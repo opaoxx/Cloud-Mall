@@ -101,6 +101,18 @@ Gateway、订单和库存服务启动时自带秒杀限流默认规则。Nacos �
 
 Order 还订阅 `cloudmall-order-degrade-rules`，保护普通库存预扣、秒杀受理、库存状态查询和确认/回滚四类 Feign 调用。普通预扣被熔断后仍按原订单号进入结果未知恢复，不会直接释放库存；订单已提交后的库存动作按原操作键退避。规则仅作用于单个 Order 实例，不代表 Stock 内部 Redis/MySQL 已具备熔断，也不代替持久意图和对账。
 
+Stock 内部依赖保护订阅独立的 `cloudmall-stock-degrade-rules`，共五个资源、十条异常比例/
+慢调用规则；首次部署也由上述脚本创建缺失配置。可通过
+`cloudmall.stock.dependency-degrade.*` 覆盖本地默认值，并用 `rule-group` 隔离演练。
+Redis 保护覆盖普通读写、Lua、扫描和租约；MySQL 保护覆盖完整事务、只读查询与后台
+恢复批次，事务在开始前取得保护，提交或回滚结束后才退出。恢复批次慢耗时包含整批
+工作，不能当作单条 SQL 延迟。初始化校准/DDL 与 Seata 演练不计入业务熔断统计。
+
+依赖不可用时，Redis 写路径返回 `REDIS_SERVICE_UNAVAILABLE`/503，数据库路径返回
+`STOCK_SERVICE_UNAVAILABLE`/503。普通库存缓存读失败仍可读取 MySQL 事实，缓存命中
+不因数据库熔断而阻断；双故障不会返回伪造的零库存。熔断只暂停执行，恢复器沿用原
+订单号、operationKey、revision、eventId 和意图，禁止自动换键、重复扣减或猜测回补。
+
 ### 秒杀订单最终配额结算（CM-24）
 
 已有 MySQL 数据卷先执行可重复迁移，新数据卷由 `schema.sql` 建表：

@@ -2,6 +2,7 @@ package com.cloudmall.stock.service.impl;
 
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
+import com.cloudmall.stock.util.StockDependencyGuard;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
@@ -51,6 +52,7 @@ public class SeckillQuotaSettlementRecovery {
     try {
       recoverDue();
     } catch (RuntimeException scanFailure) {
+      StockDependencyGuard.noteMysqlFailure(scanFailure);
       log.warn("秒杀结算恢复扫描失败，分类=SCAN_FAILURE", scanFailure);
     }
   }
@@ -108,13 +110,20 @@ public class SeckillQuotaSettlementRecovery {
               "seckill:quota:op:" + settlement.orderNo,
               "seckill:quota:revision:" + settlement.activityId + ":" + settlement.skuId);
       Long redisRevision =
-          redis.execute(
-              releaseScript,
-              keys,
-              settlement.orderNo,
-              settlement.operationKey,
-              String.valueOf(revision),
-          String.valueOf(settlement.quantity));
+          StockDependencyGuard.redis(
+              StockDependencyGuard.REDIS_PROJECTION,
+              () -> {
+                Long outcome =
+                    redis.execute(
+                        releaseScript,
+                        keys,
+                        settlement.orderNo,
+                        settlement.operationKey,
+                        String.valueOf(revision),
+                        String.valueOf(settlement.quantity));
+                if (outcome == null) throw StockDependencyGuard.redisProtocolFailure();
+                return outcome;
+              });
       if (redisRevision != null && redisRevision > 0) {
         if (settlementMapper.markReleased(
                 settlement.orderNo, settlement.operationKey, revision, redisRevision, owner)
@@ -153,6 +162,7 @@ public class SeckillQuotaSettlementRecovery {
           revision);
       return false;
     } catch (RuntimeException failure) {
+      StockDependencyGuard.noteMysqlFailure(failure);
       settlementMapper.retry(
           settlement.orderNo,
           settlement.operationKey,

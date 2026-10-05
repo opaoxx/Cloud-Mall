@@ -16,6 +16,7 @@ import com.cloudmall.stock.domain.vo.StockReservationItemVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockService;
+import com.cloudmall.stock.util.StockDependencyGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -29,7 +30,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
-import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.DataType;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -255,11 +255,13 @@ public class StockServiceImpl implements StockService {
   }
 
   /** 兼容已有内部调用，统一使用订单号标识同一库存动作。 */
+  @Transactional
   public ApiResponse<?> confirm(String orderNo) {
     return confirm(orderNo, null);
   }
 
   /** 兼容已有内部调用，统一使用订单号标识同一库存动作。 */
+  @Transactional
   public ApiResponse<?> rollback(String orderNo) {
     return rollback(orderNo, null);
   }
@@ -469,9 +471,29 @@ public class StockServiceImpl implements StockService {
       return recoveryRequired(orderNo, SeckillRequestFingerprint.eventId(orderNo),
           "SECKILL_CLAIM_PAYLOAD_INVALID");
     Map<Object, Object> meta =
-        redisOperation(() -> redis.opsForHash().entries("seckill:meta:" + activityId + ":" + skuId));
-    if (meta == null || !meta.containsKey("stockLimit")
-        || !meta.containsKey("perUserLimit")) throw redisUnavailable();
+        redisOperation(
+            () -> {
+              Map<Object, Object> metadata =
+                  redis.opsForHash().entries("seckill:meta:" + activityId + ":" + skuId);
+              if (metadata == null
+                  || !metadata.containsKey("stockLimit")
+                  || !metadata.containsKey("perUserLimit"))
+                throw StockDependencyGuard.redisProtocolFailure();
+              long beginsAt = epoch(metadata.get("startAt"));
+              long endsAt = epoch(metadata.get("endAt"));
+              try {
+                if (beginsAt <= 0
+                    || endsAt <= beginsAt
+                    || Integer.parseInt(String.valueOf(metadata.get("stockLimit"))) < 1
+                    || Integer.parseInt(String.valueOf(metadata.get("perUserLimit"))) < 1)
+                  throw StockDependencyGuard.redisProtocolFailure();
+              } catch (NumberFormatException invalidMetadata) {
+                throw StockDependencyGuard.redisProtocolFailure();
+              }
+              return metadata;
+            });
+    if (meta == null || !meta.containsKey("stockLimit") || !meta.containsKey("perUserLimit"))
+      throw redisUnavailable();
     long start = epoch(meta.get("startAt")), end = epoch(meta.get("endAt"));
     if (start <= 0 || end <= start) throw redisUnavailable();
     int limit;
@@ -496,18 +518,19 @@ public class StockServiceImpl implements StockService {
     Long result =
         redisOperation(
             () ->
-                redis.execute(
-                    seckillScript,
-                    keys,
-                    orderNo,
-                    String.valueOf(limit),
-                    String.valueOf(System.currentTimeMillis() / 1000),
-                    String.valueOf(start),
-                    String.valueOf(end),
-                    String.valueOf(ttl),
-                    String.valueOf(stockLimit)));
+                checkedSeckillLua(
+                    redis.execute(
+                        seckillScript,
+                        keys,
+                        orderNo,
+                        String.valueOf(limit),
+                        String.valueOf(System.currentTimeMillis() / 1000),
+                        String.valueOf(start),
+                        String.valueOf(end),
+                        String.valueOf(ttl),
+                        String.valueOf(stockLimit))));
     if (Objects.equals(result, 3L)) {
-      String existingOrderNo = redisOperation(() -> redis.opsForValue().get(orderKey));
+      String existingOrderNo = redisOperation(() -> checkedOrderMarker(orderKey, orderNo));
       if (!orderNo.equals(existingOrderNo)) throw redisUnavailable();
       return acceptAfterLua(
           userId, idempotencyKey, existingOrderNo, requestPayload, requestHash);
@@ -533,18 +556,28 @@ public class StockServiceImpl implements StockService {
       throw new BizException("SECKILL_SOLD_OUT", "秒杀库存耗尽", 409);
     }
     if (!Objects.equals(result, 1L)) throw redisUnavailable();
-    String confirmedOrderNo = redisOperation(() -> redis.opsForValue().get(orderKey));
+    String confirmedOrderNo = redisOperation(() -> checkedOrderMarker(orderKey, orderNo));
     if (!orderNo.equals(confirmedOrderNo)) throw redisUnavailable();
     return acceptAfterLua(userId, idempotencyKey, confirmedOrderNo, requestPayload, requestHash);
   }
 
   /** 只把 Redis 读写异常映射为依赖故障，保留 MySQL 错误的真实归属。 */
   private <T> T redisOperation(Supplier<T> operation) {
-    try {
-      return operation.get();
-    } catch (DataAccessException redisFailure) {
-      throw redisUnavailable();
-    }
+    return StockDependencyGuard.redis(StockDependencyGuard.REDIS_SECKILL, operation);
+  }
+
+  /** 非业务 Lua 返回值在同一个调用 Entry 内记协议异常，原认领保留等待核验。 */
+  private static Long checkedSeckillLua(Long result) {
+    if (result == null || result < 0 || result > 5)
+      throw StockDependencyGuard.redisProtocolFailure();
+    return result;
+  }
+
+  /** 原受理 marker 必须指向同一订单号，不能在响应未知时重新认领或伪装售罄。 */
+  private String checkedOrderMarker(String markerKey, String orderNo) {
+    String marker = redis.opsForValue().get(markerKey);
+    if (!orderNo.equals(marker)) throw StockDependencyGuard.redisProtocolFailure();
+    return marker;
   }
 
   /** 认领行中的不可变载荷必须指向同一原订单号。 */
@@ -779,7 +812,9 @@ public class StockServiceImpl implements StockService {
     } catch (RuntimeException unavailableProjection) {
       // Redis 只是普通库存投影，读接口仍可回退到 MySQL 事实。
     }
-    Map<String, Object> durableStock = stockSqlMapper.findStock(sku);
+    Map<String, Object> durableStock =
+        StockDependencyGuard.call(
+            StockDependencyGuard.MYSQL_READ, () -> stockSqlMapper.findStock(sku));
     return durableStock == null ? 0 : ((Number) durableStock.get("available_quantity")).intValue();
   }
 

@@ -14,7 +14,8 @@ $dataIds = @(
   'cloudmall-order-flow-rules',
   'cloudmall-order-param-flow-rules',
   'cloudmall-order-degrade-rules',
-  'cloudmall-stock-flow-rules'
+  'cloudmall-stock-flow-rules',
+  'cloudmall-stock-degrade-rules'
 )
 
 $login = Invoke-RestMethod -Method Post -Uri "$Server/nacos/v1/auth/login" -Body @{

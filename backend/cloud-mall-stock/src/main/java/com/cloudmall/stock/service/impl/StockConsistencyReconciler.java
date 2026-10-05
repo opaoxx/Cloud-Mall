@@ -4,6 +4,7 @@ import com.cloudmall.stock.domain.po.StockConsistencyAuditStatePO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.util.StockDependencyGuard;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -126,6 +127,11 @@ public class StockConsistencyReconciler {
   @PostConstruct
   /** 执行 initialize 相关操作。 */
   public void initialize() {
+    StockDependencyGuard.initialize(this::initializeStorage);
+  }
+
+  /** 启动建表和受理恢复不作为前台依赖故障样本。 */
+  private void initializeStorage() {
     // 1. 接收并整理 initialize 的业务请求。
     // 2. 执行 initialize 的核心业务校验与状态处理。
     // 3. 返回 initialize 的处理结果。
@@ -182,6 +188,7 @@ public class StockConsistencyReconciler {
       guard.run();
       reconcileSeckillStock(guard);
     } catch (RuntimeException auditFailure) {
+      StockDependencyGuard.noteMysqlFailure(auditFailure);
       recordAuditFailure(auditFailure);
       log.warn("库存周期对账本轮失败，游标保留并等待下一轮重试", auditFailure);
     } finally {

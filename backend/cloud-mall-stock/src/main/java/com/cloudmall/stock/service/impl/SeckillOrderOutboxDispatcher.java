@@ -2,12 +2,12 @@ package com.cloudmall.stock.service.impl;
 
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.util.StockDependencyGuard;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -17,9 +17,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.data.redis.core.StringRedisTemplate;
 
 /** 恢复秒杀受理窗口并可靠投递已提交的订单 outbox。 */
 @Component
@@ -105,6 +105,7 @@ public class SeckillOrderOutboxDispatcher {
             String.valueOf(row.get("request_hash")),
             now());
       } catch (RuntimeException recoveryFailure) {
+        StockDependencyGuard.noteMysqlFailure(recoveryFailure);
         try {
           if (alreadyCommitted(row, orderNo)) continue;
         } catch (RuntimeException verificationFailure) {

@@ -254,7 +254,7 @@ MySQL 事实；只有 MySQL 事实也不可用时返回 `STOCK_SERVICE_UNAVAILAB
 | `SECKILL_RESERVATION_NOT_VERIFIED` | 秒杀受理事实不存在或暂时无法确认 | 202 |
 | `GATEWAY_RATE_LIMITED` | 网关/Sentinel 限流 | 429 |
 | `GATEWAY_SERVICE_UNAVAILABLE` | 服务熔断/降级 | 503 |
-| `REDIS_SERVICE_UNAVAILABLE` | Stock 依赖 Redis 连接、超时、命令/协议失败或依赖熔断；本次请求结果不可可靠确定 | 503 |
+| `REDIS_SERVICE_UNAVAILABLE` | Redis 连接、超时、命令/协议失败或 Stock 内部 Redis 依赖熔断；本次请求结果不可可靠确定 | 503 |
 | `COMMON_INTERNAL_ERROR` | 未预期服务错误 | 500 |
 
 错误码命名、HTTP 映射和是否返回可展示 message 需在 common 实现前冻结；不得把内部异常、账号密码或堆栈返回前端。

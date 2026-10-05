@@ -1,6 +1,7 @@
 package com.cloudmall.stock.service.impl;
 
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.util.StockDependencyGuard;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -112,6 +113,11 @@ public class StockCacheReconciler {
   /** 在服务启动前有界核对库存事实，只为真实差异写入持久修复意图。 */
   @PostConstruct
   public void initialize() {
+    StockDependencyGuard.initialize(this::initializeStorage);
+  }
+
+  /** 校准和 DDL 仍沿用原流程，尚未就绪的耗时不污染业务熔断统计。 */
+  private void initializeStorage() {
     long startedAt = System.nanoTime();
     // 1. 准备数据库可靠性表并核验旧协议预扣。
     stockSqlMapper.ensureStockReliabilityTables();
@@ -319,7 +325,7 @@ public class StockCacheReconciler {
   /** Redis 故障与结果未知都转为可恢复的校准失败，不遮蔽 MySQL 异常。 */
   private <T> T redisRead(Supplier<T> operation) {
     try {
-      return operation.get();
+      return StockDependencyGuard.redis(StockDependencyGuard.REDIS_PROJECTION, operation);
     } catch (RedisCalibrationException knownFailure) {
       throw knownFailure;
     } catch (RuntimeException redisFailure) {

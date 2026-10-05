@@ -13,6 +13,19 @@ spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 cloudmall:
   stock:
+    dependency-degrade:
+      redis-seckill-write-slow-ms: 500
+      redis-projection-slow-ms: 500
+      mysql-reservation-slow-ms: 1000
+      mysql-read-slow-ms: 500
+      mysql-recovery-slow-ms: 2000
+      slow-ratio-threshold: 0.5
+      exception-ratio: 0.5
+      min-request-amount: 20
+      stat-interval-ms: 60000
+      time-window-seconds: 10
+      nacos-retry-ms: 5000
+      rule-group: CLOUDMALL_DEV
     seckill:
       sentinel:
         flow-qps: 200
