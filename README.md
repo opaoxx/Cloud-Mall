@@ -45,6 +45,17 @@ docker compose up -d
 
 首次启动时，MySQL 会执行 `backend/database/schema.sql`，创建数据库、表和本地演示商品。
 
+Nacos 使用固定 hostname 作为 standalone Raft 节点身份。新数据卷默认使用
+`cloud-mall-nacos`；已有数据卷必须把持久 Raft 日志中唯一 peer 的 hostname 写入本机
+`.env` 的 `NACOS_NODE_HOSTNAME`，以后保持该值。当前本机恢复值为 `57c05639b175`。
+容器重建后 hostname 漂移会让 HTTP 健康端点仍为 UP、命名 Raft 却没有 leader。
+恢复前应停写并备份完整的 Nacos data/logs 两个 named volume，核验归档和旧 peer，
+再仅重建 Nacos；不要清空 Raft 目录。`.env.example` 的缺省值适用于新数据卷。
+
+Nacos 的 Compose 健康检查同时核对 HTTP UP 和三个命名 Raft 组的本机 leader；
+可独立执行 `docker exec cloud-mall-nacos python /home/nacos/bin/cloudmall-healthcheck.py`。
+该检查使用容器已有的内部身份配置，首次启动不依赖 bootstrap 尚未创建的 root 用户。
+
 已有 MySQL 数据卷不会重新执行初始化脚本。升级商品读索引时，在项目根目录执行一次（脚本可重复执行）：
 
 ```powershell

@@ -66,6 +66,8 @@ services:
   nacos:
     image: nacos/nacos-server:v2.2.0
     container_name: cloud-mall-nacos
+    # Raft stores this node identity; re-creating a container must not change it.
+    hostname: ${NACOS_NODE_HOSTNAME:-cloud-mall-nacos}
     restart: unless-stopped
     environment:
       MODE: standalone
@@ -84,10 +86,11 @@ services:
     volumes:
       - cloud_mall_nacos_data:/home/nacos/data
       - cloud_mall_nacos_logs:/home/nacos/logs
+      - ./deploy/nacos/healthcheck.py:/home/nacos/bin/cloudmall-healthcheck.py:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8848/nacos/actuator/health >/dev/null"]
+      test: ["CMD", "python", "/home/nacos/bin/cloudmall-healthcheck.py"]
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 20
       start_period: 45s
     networks: [cloud-mall]
