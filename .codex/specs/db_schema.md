@@ -471,6 +471,8 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 新 receipt 只允许绑定原 `pay_record` 的精确 TCC/PENDING 事实和同 XID 的 `pay_tcc_dispatch(state=PREPARED)`；已有 receipt 重放只核对原事实。被拒第二 branch 只有 Fence `SUSPENDED`、本 branch 无 receipt 行且另一 branch 有确定永久 owner 时才可安全 ACK。
 
+第 16B2 `pay_tcc_execution` 的唯一键为 `pay_no、xid、operation_key、ledger_key`，不设置 lease/attempts；INSERT winner 的执行权不可转移。`xid` 可空只表示 begin 未确认，必须保留 BEGIN_UNKNOWN，不能新建 XID。decision 只能 NONE/COMMIT/ROLLBACK 单向推进，recover 不能新增 decision。
+
 ### 7.4 `pay_debit_intent`
 
 支付服务在调用用户余额服务前，必须先在支付库独立提交扣款意图。该表覆盖进程在用户扣款提交后、`pay_record` 更新前退出的窗口；恢复任务扫描该表，而不能只扫描支付记录状态。

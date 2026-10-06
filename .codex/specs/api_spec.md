@@ -193,6 +193,8 @@ CM-18 第 16A 只允许显式内部测试/迁移入口使用 TCC bridge。Pay �
 
 CM-18 第 16B1 新增 Pay 自有 `pay_tcc_receipt` LocalTCC 资源，action name 固定为 `cloudmallPayDebitReceipt`，状态为 `CLAIMED/TRYING/CONFIRMED/CANCELLED`；它不是 User 状态镜像。`PayTccReceiptService.prepare(PayTccDispatchDTO)` 先调用 16A dispatch 的持久 anchor，再由 CLAIMED 唯一 winner 注册 Pay receipt branch；不自动调用 User、不创建新 XID。配置 `cloudmall.pay.tcc-receipt.enabled=false` 默认关闭，开启时必须同时启用 Pay bridge、Seata 并关闭 AT 自动数据源代理。Pay receipt Confirm/Cancel 没有 HTTP/Feign，Pay 对外支付仍为 LEGACY。
 
+CM-18 第 16B2 只提供内部 `execute/recover` Service，配置 `cloudmall.pay.tcc-coordinator.enabled=false` 默认关闭；一次性 execution 以 payNo、XID、operationKey、ledgerKey 唯一绑定，超时上限 120000ms。已有 dispatch/receipt 但无 execution 时禁止新 begin；XID 丢失时保持 BEGIN_UNKNOWN。recover 不新增 decision、不接管 Try，只能使用原 XID 重试同一 COMMIT/ROLLBACK；终态必须同时有 Pay receipt 与 User 完整持久事实，TC Unknown 不能作为结论。
+
 支付服务与用户服务之间的内部接口契约：
 
 | 方法 | 路径 | 请求/响应 | 说明 |
