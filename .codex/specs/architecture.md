@@ -182,3 +182,7 @@ TCC 主动取消使用独立 `pay_tcc_cancel` 台账和 `cloudmall.pay.tcc-cance
 ### CM-20261007-18 COMMITTED TCC failure 结果语义（16H）
 
 COMMITTED execution 不接入 16E 无 execution cancel；failure 仅按持久 Pay 状态准确分类：REFUND_PENDING 返回退款处理中 202，PENDING/ORDER_SYNC_UNKNOWN 返回普通结果未知 202，SUCCESS/REFUNDED/FAILED 沿用既有终态语义。不得从 failure 入口调用 Order/TC/User 写入或直接驱动 delivery refund；COMMITTED 用户取消另行设计持久意图与交付互斥。
+
+### CM-20261007-18 TCC delivery 恢复保护（16L）
+
+16L 仅修复 delivery 台账的候选种植和租约写入边界。`findMissing` 必须在 LIMIT 前过滤 `execution.xid` 非空且去空白，避免无 XID 的 COMMITTED 脏记录反复占满种子批次；`PayTccDeliveryStore.stage` 在 Pay→delivery 锁定后以同一当前时间检查当前 token、非空且未过期的 `lease_until`，过期直接返回 false，不得更新 PayRecord。Mapper 的 `updateState` 与 `finishAttempt` 以 `BINARY lease_owner` 和 `lease_until > now` 作为最终 CAS 条件，防止迟到 worker 写本地状态或覆盖新 owner 的重试字段。RPC 已发出不承诺撤回，租约只保护本地状态和重试元数据。本轮不新增 schema/flag，不实现 COMMITTED 主动取消，delivery 与 User/Order/TCC 事实边界保持 16C/H/K 不变。
