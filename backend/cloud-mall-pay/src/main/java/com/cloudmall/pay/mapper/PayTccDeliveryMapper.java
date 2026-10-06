@@ -53,19 +53,27 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
           + " execution.created_at,execution.id LIMIT #{limit}")
   List<PayTccExecutionPO> findMissing(@Param("limit") int limit);
 
+  /** 将未开始交付且无租约的 READY 台账原子改向取消恢复。 */
+  @Update(
+      "UPDATE pay_tcc_delivery SET state='CANCEL_REQUESTED',updated_at=#{now} WHERE BINARY"
+          + " pay_no=BINARY #{payNo} AND BINARY state='READY' AND attempts=0 AND lease_owner IS"
+          + " NULL AND lease_until IS NULL")
+  int requestCancellation(@Param("payNo") String payNo, @Param("now") LocalDateTime now);
+
   /** 找出状态可恢复、重试到期且租约已释放的交付台账。 */
   @Select(
       "SELECT delivery.* FROM pay_tcc_delivery delivery JOIN pay_tcc_execution execution ON"
           + " execution.pay_no=delivery.pay_no JOIN pay_record payment ON"
           + " payment.pay_no=execution.pay_no WHERE BINARY delivery.state IN"
-          + " ('READY','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND delivery.next_retry_at<=#{now}"
-          + " AND (delivery.lease_until IS NULL OR delivery.lease_until<=#{now}) AND BINARY"
-          + " execution.state='COMMITTED' AND BINARY execution.decision='COMMIT' AND execution.xid"
-          + " IS NOT NULL AND LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND"
-          + " BINARY payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id"
-          + " AND BINARY payment.order_no=BINARY execution.order_no AND"
-          + " payment.amount=execution.amount AND BINARY delivery.pay_no=BINARY execution.pay_no"
-          + " AND delivery.user_id=execution.user_id AND BINARY delivery.order_no=BINARY"
+          + " ('READY','CANCEL_REQUESTED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
+          + " delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
+          + " delivery.lease_until<=#{now}) AND BINARY execution.state='COMMITTED' AND BINARY"
+          + " execution.decision='COMMIT' AND execution.xid IS NOT NULL AND"
+          + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"
+          + " payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id AND"
+          + " BINARY payment.order_no=BINARY execution.order_no AND payment.amount=execution.amount"
+          + " AND BINARY delivery.pay_no=BINARY execution.pay_no AND"
+          + " delivery.user_id=execution.user_id AND BINARY delivery.order_no=BINARY"
           + " execution.order_no AND delivery.amount=execution.amount AND BINARY"
           + " delivery.xid=BINARY execution.xid AND BINARY delivery.refund_operation_key=BINARY"
           + " CONCAT('refund:',delivery.pay_no) AND BINARY execution.operation_key=BINARY"
@@ -82,14 +90,15 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
           + " payment.pay_no=execution.pay_no SET delivery.lease_owner=#{token},"
           + "delivery.lease_until=#{leaseUntil},delivery.attempts=LEAST(delivery.attempts+1,31),delivery.updated_at=#{now}"
           + " WHERE delivery.pay_no=#{payNo} AND BINARY delivery.state IN"
-          + " ('READY','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND delivery.next_retry_at<=#{now}"
-          + " AND (delivery.lease_until IS NULL OR delivery.lease_until<=#{now}) AND BINARY"
-          + " execution.state='COMMITTED' AND BINARY execution.decision='COMMIT' AND execution.xid"
-          + " IS NOT NULL AND LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND"
-          + " BINARY payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id"
-          + " AND BINARY payment.order_no=BINARY execution.order_no AND"
-          + " payment.amount=execution.amount AND BINARY delivery.pay_no=BINARY execution.pay_no"
-          + " AND delivery.user_id=execution.user_id AND BINARY delivery.order_no=BINARY"
+          + " ('READY','CANCEL_REQUESTED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
+          + " delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
+          + " delivery.lease_until<=#{now}) AND BINARY execution.state='COMMITTED' AND BINARY"
+          + " execution.decision='COMMIT' AND execution.xid IS NOT NULL AND"
+          + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"
+          + " payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id AND"
+          + " BINARY payment.order_no=BINARY execution.order_no AND payment.amount=execution.amount"
+          + " AND BINARY delivery.pay_no=BINARY execution.pay_no AND"
+          + " delivery.user_id=execution.user_id AND BINARY delivery.order_no=BINARY"
           + " execution.order_no AND delivery.amount=execution.amount AND BINARY"
           + " delivery.xid=BINARY execution.xid AND BINARY delivery.refund_operation_key=BINARY"
           + " CONCAT('refund:',delivery.pay_no) AND BINARY execution.operation_key=BINARY"

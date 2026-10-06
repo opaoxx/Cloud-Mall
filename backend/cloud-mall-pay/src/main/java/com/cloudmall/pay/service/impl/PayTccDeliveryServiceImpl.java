@@ -72,17 +72,23 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
       // 2. 当前两个资源证据完整后才允许订单动作，退款也不省略此核对。
       UserClient.BalanceOperationView debit = verifyMoney(job);
       OrderClient.OrderView order = readOrder(job);
+      boolean cancelRequested = "CANCEL_REQUESTED".equals(job.state);
+      if (cancelRequested) requireCancellableOrder(order);
       if ("PENDING_PAYMENT".equals(order.status())) {
         if (debit.refundOperationKey() != null || "REFUND_PENDING".equals(job.state))
           throw conflict("存在退款事实或意图，禁止再次支付订单");
-        if (!store.stage(job.payNo, token, "ORDER_SYNC_UNKNOWN"))
+        // 取消方向持久化后只允许cancel；RPC前再次以当前租约核验原方向。
+        if (!store.stage(
+            job.payNo, token, cancelRequested ? "CANCEL_REQUESTED" : "ORDER_SYNC_UNKNOWN"))
           return PayTccDeliveryVO.from(store.read(payNo));
         try {
-          orders.paid(job.orderNo, job.userId);
+          if (cancelRequested) orders.cancel(job.orderNo, job.userId);
+          else orders.paid(job.orderNo, job.userId);
         } catch (RuntimeException responseUnknown) {
           /* 以紧接着的只读事实为准。 */
         }
         order = readOrder(job);
+        if (cancelRequested) requireCancellableOrder(order);
       }
       if (Set.of("PAID", "COMPLETED").contains(order.status())
           && "SUCCEEDED".equals(order.stockActionStatus())) {
@@ -115,7 +121,7 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
         verifyLedger(fact, job.refundOperationKey, "REFUND", job.amount);
         store.stage(job.payNo, token, "REFUNDED");
       } else {
-        if (!"REFUND_PENDING".equals(job.state))
+        if (!cancelRequested && !"REFUND_PENDING".equals(job.state))
           store.stage(job.payNo, token, "ORDER_SYNC_UNKNOWN");
         throw pending();
       }
@@ -129,6 +135,12 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
       store.finish(job.payNo, token, job.attempts == null ? 1 : job.attempts, error);
     }
     return PayTccDeliveryVO.from(store.read(payNo));
+  }
+
+  /** 取消方向不可被订单相反终态改写，库存冲突必须保留人工核验。 */
+  private void requireCancellableOrder(OrderClient.OrderView order) {
+    if (Set.of("PAID", "COMPLETED").contains(order.status())
+        || "CONFLICT".equals(order.stockActionStatus())) throw conflict("取消意图与订单或库存状态冲突");
   }
 
   /** 不使用 bridge 的终态缓存代替 User 当前持久证据。 */

@@ -91,8 +91,13 @@ public class PayTccDeliveryStore {
   /** 单次随机 token 认领后立即结束事务，不跨 RPC 持锁。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccDeliveryPO claim(String payNo, String token) {
+    // 1. 与取消方向选择共用Pay→delivery锁序，再执行原资格CAS。
+    payments.selectForUpdate(payNo);
+    PayTccDeliveryPO current = deliveries.selectForUpdate(payNo);
+    if (current == null) return null;
     LocalDateTime now = now();
     if (deliveries.claim(payNo, token, now.plusSeconds(60), now) != 1) return null;
+    // 2. 使用本次认领后的状态，不能沿用ensure阶段读取的旧READY视图。
     return deliveries.selectByPayNo(payNo);
   }
 
@@ -128,12 +133,18 @@ public class PayTccDeliveryStore {
     PayRecordPO payment = records.get(0);
     requirePayment(payment, execution);
     // 2. REFUND_PENDING 不允许回到订单交付，也不能覆盖任一相反终态。
-    if (!Set.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING", "SUCCESS", "REFUNDED").contains(target)
+    if (!Set.of("CANCEL_REQUESTED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING", "SUCCESS", "REFUNDED")
+            .contains(target)
+        || ("CANCEL_REQUESTED".equals(job.state)
+            && !Set.of("CANCEL_REQUESTED", "REFUND_PENDING").contains(target))
+        || ("CANCEL_REQUESTED".equals(job.state)
+            && !Set.of("PENDING", "ORDER_SYNC_UNKNOWN").contains(payment.status))
+        || (!"CANCEL_REQUESTED".equals(job.state) && "CANCEL_REQUESTED".equals(target))
         || ("REFUND_PENDING".equals(job.state)
             && Set.of("ORDER_SYNC_UNKNOWN", "SUCCESS").contains(target))
         || ("REFUNDED".equals(target) && !"REFUND_PENDING".equals(job.state))) throw conflict();
     int changed;
-    if (target.equals(payment.status)) changed = 1;
+    if (target.equals(payment.status) || "CANCEL_REQUESTED".equals(target)) changed = 1;
     else if ("ORDER_SYNC_UNKNOWN".equals(target)) changed = payments.markOrderUnknown(payNo, now);
     else if ("REFUND_PENDING".equals(target)) changed = payments.markRefundPending(payNo, now);
     else if ("SUCCESS".equals(target)) changed = payments.markSuccess(payNo, now, now);

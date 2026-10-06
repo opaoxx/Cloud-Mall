@@ -498,20 +498,22 @@ class PayTccCancelIT {
           () -> {
             try {
               post("/api/payments/" + request.payNo + "/mock-success", Map.of(), Map.of());
-              return Set.of("SUCCESS", "FAILED").contains(paymentState());
+              return Set.of("SUCCESS", "FAILED", "REFUNDED").contains(paymentState());
             } catch (Exception failure) {
               throw new RuntimeException(failure);
             }
           },
           30);
       if ("FAILED".equals(paymentState())) assertFunds("100.00", 0, 0);
+      else if ("REFUNDED".equals(paymentState())) assertFunds("100.00", 1, 1);
       else assertFunds("90.00", 1, 0);
     }
   }
 
   @Test
   @Order(3)
-  void existingCommittedExecutionRejectsCancellationWithoutChangingDecision() throws Exception {
+  void previouslyClaimedCommittedDeliveryRejectsCancellationEvenAfterLeaseExpiry()
+      throws Exception {
     createPublic();
     assertEquals(
         "COMMITTED",
@@ -519,12 +521,18 @@ class PayTccCancelIT {
             .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
             .execute(request)
             .state);
+    var deliveryStore =
+        application.getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class);
+    deliveryStore.ensure(request.payNo);
+    assertNotNull(deliveryStore.claim(request.payNo, "prior-delivery"));
+    payDb.update("UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY)");
     assertEquals(
         202, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
     assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
     assertEquals(
         "COMMIT", payDb.queryForObject("SELECT decision FROM pay_tcc_execution", String.class));
     assertEquals("PENDING_PAYMENT", orderState());
+    assertEquals("READY", deliveryStore.read(request.payNo).state);
     assertFunds("90.00", 1, 0);
   }
 
@@ -819,6 +827,138 @@ class PayTccCancelIT {
             .status());
     assertEquals("PENDING_PAYMENT", orderState());
     assertFunds("100.00", 0, 0);
+  }
+
+  /** 原资金已提交但交付从未认领时，显式失败请求选择取消并由后台唯一退款。 */
+  @Test
+  @Order(12)
+  void committedUnclaimedDeliveryCanBeCancelledAndRefunded() throws Exception {
+    createPublic();
+    var coordinator = application.getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class);
+    assertEquals("COMMITTED", coordinator.execute(request).state);
+    assertFunds("90.00", 1, 0);
+    Response accepted = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+    assertEquals(202, accepted.status(), accepted.body().toString());
+    assertEquals(
+        List.of("CANCEL_REQUESTED"),
+        payDb.queryForList(
+            "SELECT state FROM pay_tcc_delivery WHERE pay_no=?", String.class, request.payNo));
+    assertEquals("PENDING", paymentState());
+    assertEquals("PENDING_PAYMENT", orderState());
+    assertEquals("COMMIT", decision());
+    assertEquals(0, proxies.get("order").paidPostCount());
+    assertEquals(0, proxies.get("user").refundPostCount());
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
+    parentRunning.set(false);
+    pauseOwned = false;
+    await(() -> "REFUNDED".equals(paymentState()), 40);
+    assertEquals("CANCELLED", orderState());
+    assertStock(10, 0, 0);
+    assertFunds("100.00", 1, 1);
+    assertEquals(0, proxies.get("order").paidPostCount());
+    assertEquals("COMMIT", decision());
+  }
+
+  /** 已选取消在开关关闭的新Pay进程仍能恢复，库存未知及退款响应丢失均不改向。 */
+  @Test
+  @Order(13)
+  void committedCancellationCallbackSurvivesLostResponsesAndRestartWithFlagOff() throws Exception {
+    createPublic();
+    assertEquals(
+        "COMMITTED",
+        application
+            .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
+            .execute(request)
+            .state);
+    application
+        .getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class)
+        .ensure(request.payNo);
+    Map<String, Object> failureCallback = callback(false, "committed-cancel");
+    assertEquals(202, post("/api/payments/callback", failureCallback, callbackHeaders()).status());
+    var accepted =
+        payDb.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no=?", request.payNo);
+    assertEquals(202, post("/api/payments/callback", failureCallback, callbackHeaders()).status());
+    assertEquals(
+        accepted,
+        payDb.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no=?", request.payNo));
+    stockDb.execute(
+        "CREATE TRIGGER block_settlement BEFORE UPDATE ON stock_reservation_request FOR EACH ROW"
+            + " BEGIN IF NEW.status='ROLLED_BACK' THEN SIGNAL SQLSTATE '45000' SET"
+            + " MESSAGE_TEXT='test committed cancellation stock unavailable'; END IF; END");
+    proxies.get("order").dropNextPostBodyForPath("/cancel");
+    try {
+      assertEquals("CANCEL_REQUESTED", delivery.deliver(request.payNo).state);
+      assertEquals("CANCELLED", orderState());
+      assertEquals("PENDING", paymentState());
+      assertFunds("90.00", 1, 0);
+      assertEquals(0, proxies.get("order").paidPostCount());
+    } finally {
+      stockDb.execute("DROP TRIGGER IF EXISTS block_settlement");
+    }
+    orderDb.update(
+        "UPDATE order_stock_action SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+            + " order_no=?",
+        request.orderNo);
+    await(
+        () ->
+            "SUCCEEDED"
+                .equals(
+                    orderDb.queryForObject(
+                        "SELECT status FROM order_stock_action WHERE order_no=?",
+                        String.class,
+                        request.orderNo)),
+        30);
+    proxies.get("user").dropNextPostBodyForPath("/refunds");
+    forceDue();
+    List<String> arguments =
+        new ArrayList<>(
+            List.of(
+                javaExecutable(),
+                "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "-Xmx256m",
+                "-jar",
+                Path.of("target", "cloud-mall-pay-0.1.0-SNAPSHOT.jar")
+                    .toAbsolutePath()
+                    .toString()));
+    arguments.addAll(List.of(payArguments()));
+    arguments.removeIf(
+        argument ->
+            argument.startsWith("--cloudmall.pay.tcc-cancel.enabled=")
+                || argument.startsWith("--spring.cloud.nacos.discovery.register-enabled=")
+                || argument.startsWith("--seata.application-id="));
+    arguments.addAll(
+        List.of(
+            "--cloudmall.pay.tcc-cancel.enabled=false",
+            "--spring.main.web-application-type=none",
+            "--spring.cloud.nacos.discovery.register-enabled=false",
+            "--seata.application-id=" + batch + "-committed-replacement"));
+    replacementPay =
+        new ProcessBuilder(arguments)
+            .redirectErrorStream(true)
+            .redirectOutput(artifacts.resolve("committed-cancel-replacement.log").toFile())
+            .start();
+    await(
+        () -> {
+          if (!replacementPay.isAlive())
+            throw new AssertionError("replacement Pay exited: " + artifacts);
+          return "REFUND_PENDING".equals(paymentState());
+        },
+        90);
+    assertFunds("100.00", 1, 1);
+    await(() -> "REFUNDED".equals(paymentState()), 40);
+    assertFunds("100.00", 1, 1);
+    assertStock(10, 0, 0);
+    assertTrue(proxies.get("user").refundPostCount() >= 2);
+    assertEquals(0, proxies.get("order").paidPostCount());
+    assertEquals(409, post("/api/payments/callback", failureCallback, callbackHeaders()).status());
+    assertEquals(
+        "RECEIVED_FAILURE",
+        payDb.queryForObject(
+            "SELECT callback_status FROM pay_callback_log WHERE pay_no=?",
+            String.class,
+            request.payNo));
+    assertEquals("COMMIT", decision());
+    stopReplacement();
   }
 
   private String decision() {

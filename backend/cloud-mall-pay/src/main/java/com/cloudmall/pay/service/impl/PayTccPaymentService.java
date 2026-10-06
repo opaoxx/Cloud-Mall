@@ -38,6 +38,10 @@ public class PayTccPaymentService {
   @Autowired(required = false)
   private PayTccAbortService abortService;
 
+  /** 已提交但尚未开始交付时的本地取消编排。 */
+  @Autowired(required = false)
+  private PayTccCommittedCancelService committedCancelService;
+
   /** 唯一一次 begin 和原执行恢复入口。 */
   private final PayTccCoordinatorService coordinator;
 
@@ -130,6 +134,12 @@ public class PayTccPaymentService {
       // 已进入退款交付时保留明确的退款中语义；失败请求不推进交付或再次退款。
       if ("COMMITTED".equals(execution.state) && "REFUND_PENDING".equals(payment.status))
         throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
+      if ("COMMITTED".equals(execution.state)
+          && Set.of("PENDING", "ORDER_SYNC_UNKNOWN").contains(payment.status)
+          && committedCancelService != null) {
+        committedCancelService.request(payment);
+        throw pending();
+      }
       if (!"ROLLEDBACK".equals(execution.state)) {
         if (abortService != null && "NONE".equals(execution.decision)) {
           abortService.requestRollback(payment);

@@ -228,6 +228,88 @@ class PayTccDeliveryServiceTest {
     verify(orders, never()).paid(any(), any());
   }
 
+  /** 取消方向只调用cancel，丢失POST响应后以GET确认再走原唯一退款。 */
+  @Test
+  void committedCancellationUsesCancelAndRefundEvenWhenCancelResponseIsLost() {
+    PayTccDeliveryPO job = job("CANCEL_REQUESTED");
+    prepareJob(job);
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT", "SUCCEEDED")))
+        .thenReturn(ApiResponse.ok(order("CANCELLED", "SUCCEEDED")));
+    doThrow(new IllegalStateException("cancel response lost"))
+        .when(orders)
+        .cancel(ORDER_NO, USER_ID);
+    when(users.refund(any(), any(), any()))
+        .thenReturn(ApiResponse.ok(new UserClient.BalanceView(REFUND_KEY, "APPLIED", "100.00")));
+    when(users.operation(USER_ID, REFUND_KEY, USER_ID))
+        .thenReturn(
+            ApiResponse.ok(
+                new UserClient.BalanceOperationView(
+                    REFUND_KEY, "REFUND", "APPLIED", "12.34", REFUND_KEY)));
+
+    service.deliver(PAY_NO);
+
+    verify(orders).cancel(ORDER_NO, USER_ID);
+    verify(orders, never()).paid(any(), any());
+    verify(store).stage(eq(PAY_NO), any(), eq("REFUND_PENDING"));
+    verify(store).stage(eq(PAY_NO), any(), eq("REFUNDED"));
+    verify(users)
+        .refund(
+            USER_ID,
+            USER_ID,
+            new UserClient.RefundRequest(REFUND_KEY, PAY_NO, PAY_NO, ORDER_NO, AMOUNT));
+  }
+
+  /** 库存未确认回滚时保留取消方向，不能退回paid路径或提前退款。 */
+  @Test
+  void committedCancellationWaitsForStockWithoutChangingDirection() {
+    prepareJob(job("CANCEL_REQUESTED"));
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("CANCELLED", "UNKNOWN")));
+
+    service.deliver(PAY_NO);
+
+    verify(orders, never()).paid(any(), any());
+    verify(users, never()).refund(any(), any(), any());
+    verify(store, never()).stage(any(), any(), any());
+  }
+
+  /** 相反订单终态或库存冲突不能通过退款或正常交付覆盖。 */
+  @Test
+  void committedCancellationPreservesConflictingOrderFacts() {
+    prepareJob(job("CANCEL_REQUESTED"));
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PAID", "SUCCEEDED")))
+        .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT", "CONFLICT")));
+
+    service.deliver(PAY_NO);
+    service.deliver(PAY_NO);
+
+    verify(orders, never()).paid(any(), any());
+    verify(orders, never()).cancel(any(), any());
+    verify(users, never()).refund(any(), any(), any());
+    verify(store, never()).stage(any(), any(), any());
+  }
+
+  /** 取消RPC开始前租约已失效时，不发送远程取消。 */
+  @Test
+  void committedCancellationWithExpiredLeaseDoesNotCallCancel() {
+    prepareJob(job("CANCEL_REQUESTED"));
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT", "SUCCEEDED")));
+    when(store.stage(eq(PAY_NO), any(), eq("CANCEL_REQUESTED"))).thenReturn(false);
+
+    service.deliver(PAY_NO);
+
+    verify(orders, never()).cancel(any(), any());
+    verify(orders, never()).paid(any(), any());
+    verify(users, never()).refund(any(), any(), any());
+  }
+
   private PayTccDeliveryPO job(String state) {
     PayTccDeliveryPO job = new PayTccDeliveryPO();
     job.payNo = PAY_NO;
