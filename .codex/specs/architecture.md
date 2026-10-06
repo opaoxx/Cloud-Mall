@@ -170,3 +170,7 @@ TCC 主动取消使用独立 `pay_tcc_cancel` 台账和 `cloudmall.pay.tcc-cance
 ### CM-20261007-18 TCC 已回滚失败入口收尾（16F）
 
 16F 只补已有 `ROLLEDBACK` execution 的公开 failure 收尾：在 `NOT_SUPPORTED` 边界核对 Pay receipt/Fence 与 User live TCC 的同 XID/branch `CANCELLED`、no-ledger 证据，再由短事务 CAS Pay FAILED；callback 同步完成失败回调日志。非 ROLLEDBACK、证据未知或冲突均保留 202，不主动 recover/TC/Order/User 写入，不创建取消台账、不改 decision，不增加自动投影 scanner。无 execution 的主动取消继续由 16E 独立 opt-in 负责。
+
+### CM-20261007-18 TCC 后台 ROLLEDBACK 失败投影（16G）
+
+16G 在既有 recovery scheduler 中增加第二阶段，复用 `tcc-recovery.enabled`、recovery_attempts/next_recovery_at/随机 lease 和有界预算；独立 projection service 不依赖公开 PaymentService。整轮最多 20 条、共享启动后 10 秒预算，首轮旧 recovery 优先、后续轮次交替优先，两阶段候选 LIMIT 使用剩余额度；阶段异常隔离且失败/未知独立退避，避免长期饥饿。SQL 在 LIMIT 前过滤 ROLLEDBACK、决议/XID/原 tuple、TCC、Pay 未失败、dispatch/receipt 存在及 cancel/Legacy intent 缺失。User live CANCELLED/no-ledger 证明后，以 token/lease 校验的 Pay+execution 短事务 CAS FAILED；不改 decision、不调用 TC/Order/User 写入、不自动完成 callback。
