@@ -171,6 +171,16 @@ Get-Content -Raw backend/database/migrate_seata_cm18_demo.sql |
 
 非空关键词走 ES 的中文分词匹配，原 MySQL 路径只对名称做子串匹配，两者命中总数可能不同；无关键词列表仍走 MySQL。Elasticsearch 或映射不可用时，已启用的关键词路径返回 503，不会静默退回 MySQL。
 
+### 商品读数据库故障排查（CM-16）
+
+商品公开 GET 遇到可确认的数据库连接获取、查询响应超时或通信故障时返回
+`PRODUCT_QUERY_UNAVAILABLE`/503，并禁止缓存该错误响应。诊断计数为
+`cloudmall.product.read.failures`，原因标签分别是 `connection_acquire`、`sql_timeout`
+和 `db_connection`；服务端日志保留 requestId、traceId 和实际异常链。
+事务开始异常会检查底层连接证据，未知事务失败、坏 SQL 和其他实现错误仍为 500；
+写请求保持原 500 契约，也不增加商品读失败计数。排查时同时核对 Hikari active/pending/
+timeout 指标，不能只凭“等待约 30 秒”判定唯一根因或直接扩大连接池。
+
 ### 商品热度历史来源标记（CM-21 第一阶段）
 
 现有 `sales` 和 `hot` 排序使用导入目录的历史快照，尚无实时浏览、搜索或成交事件链路。已有 MySQL 数据卷先运行可重复迁移，再按上一节的步骤扩展 ES mapping、关闭搜索开关并重新运行完整商品索引回填，确认每条历史热度记录和 ES 商品文档都有来源字段后再开启搜索：
