@@ -302,3 +302,7 @@ RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认�
 ### CM-20261007-18 TCC 后台 ROLLEDBACK 失败投影（16G）
 
 复用 `cloudmall.pay.tcc-recovery.enabled=false` 和既有 recovery lease/退避，不新增 flag/table。Recovery scheduler 第二阶段只筛选已持久 `ROLLEDBACK`、已有 XID/dispatch/receipt、TCC tuple 一致、Pay 为 PENDING/ORDER_SYNC_UNKNOWN 且无 cancel/Legacy intent 的 execution；claim 使用独立随机 token。User live GET 完整证明同 XID/branch 的 CANCELLED/no-ledger 后，短事务锁 Pay+execution 并核验 token/lease，再 CAS Pay FAILED。未知/冲突退避且不写 Pay；不调用 recover/TC/Order/User 写入、不改 decision、不自动完成 callback。
+
+### CM-20261007-18 COMMITTED TCC failure 结果语义（16H）
+
+COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明确返回 `PAY_REFUND_PENDING`/202；Pay `PENDING`/`ORDER_SYNC_UNKNOWN` 返回 `PAY_ORDER_SYNC_UNKNOWN`/202；SUCCESS/REFUNDED/FAILED 保持既有 409/幂等。入口不调用 Order cancel/paid、User refund、TC/recover，不创建 16E cancel 台账，不生成新退款键；真正的 COMMITTED 取消与原 delivery 退款编排另行评审。
