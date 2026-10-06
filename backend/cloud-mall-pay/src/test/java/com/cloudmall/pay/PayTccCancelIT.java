@@ -512,7 +512,7 @@ class PayTccCancelIT {
 
   @Test
   @Order(3)
-  void activeCommittedDeliveryLeaseRejectsCancellation() throws Exception {
+  void committedDeliveryWithPaidPermissionRejectsCancellation() throws Exception {
     createPublic();
     assertEquals(
         "COMMITTED",
@@ -524,13 +524,15 @@ class PayTccCancelIT {
         application.getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class);
     deliveryStore.ensure(request.payNo);
     assertNotNull(deliveryStore.claim(request.payNo, "prior-delivery"));
+    assertTrue(deliveryStore.stage(request.payNo, "prior-delivery", "ORDER_SYNC_UNKNOWN"));
     assertEquals(
         202, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
     assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
     assertEquals(
         "COMMIT", payDb.queryForObject("SELECT decision FROM pay_tcc_execution", String.class));
     assertEquals("PENDING_PAYMENT", orderState());
-    assertEquals("READY", deliveryStore.read(request.payNo).state);
+    assertEquals("ORDER_SYNC_UNKNOWN", deliveryStore.read(request.payNo).state);
+    assertEquals("ORDER_SYNC_UNKNOWN", paymentState());
     assertFunds("90.00", 1, 0);
     deliveryStore.finish(request.payNo, "prior-delivery", 1, null);
   }
@@ -964,6 +966,18 @@ class PayTccCancelIT {
   @Test
   @Order(14)
   void expiredReadyCancellationBlocksLatePaidWorkerAndRefunds() throws Exception {
+    assertPausedReadyCancellation(true);
+  }
+
+  /** 取消只改变READY方向，保留有效租约，原持有者迟到stage不得取得paid许可。 */
+  @Test
+  @Order(15)
+  void activeReadyCancellationBlocksLatePaidWorkerWithoutStealingLease() throws Exception {
+    assertPausedReadyCancellation(false);
+  }
+
+  /** 在paid许可提交前暂停真实worker，分别验证有效与过期lease下的同向清算。 */
+  private void assertPausedReadyCancellation(boolean expireLease) throws Exception {
     createPublic();
     assertEquals(
         "COMMITTED",
@@ -1001,17 +1015,25 @@ class PayTccCancelIT {
       oldWorker = pool.submit(() -> delivery.deliver(request.payNo));
       assertTrue(entered.await(15, TimeUnit.SECONDS));
       assertEquals("READY", original.read(request.payNo).state);
-      payDb.update(
-          "UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE pay_no=?",
-          request.payNo);
-      var expired = original.read(request.payNo);
+      if (expireLease) {
+        payDb.update(
+            "UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+                + " pay_no=?",
+            request.payNo);
+      }
+      var claimed = original.read(request.payNo);
       Response result = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
       assertEquals(202, result.status(), result.body().toString());
       var cancellation = original.read(request.payNo);
       assertEquals("CANCEL_REQUESTED", cancellation.state);
-      assertEquals(expired.attempts, cancellation.attempts);
-      assertEquals(expired.leaseOwner, cancellation.leaseOwner);
-      assertEquals(expired.leaseUntil, cancellation.leaseUntil);
+      assertEquals(claimed.attempts, cancellation.attempts);
+      assertEquals(claimed.leaseOwner, cancellation.leaseOwner);
+      assertEquals(claimed.leaseUntil, cancellation.leaseUntil);
+      if (!expireLease) {
+        assertTrue(cancellation.leaseUntil.isAfter(LocalDateTime.now(ZoneId.of("Asia/Shanghai"))));
+        assertNull(original.claim(request.payNo, "premature-recovery"));
+        assertEquals(claimed.leaseOwner, original.read(request.payNo).leaseOwner);
+      }
       release.countDown();
       assertEquals("CANCEL_REQUESTED", oldWorker.get(20, TimeUnit.SECONDS).state);
       assertEquals(0, proxies.get("order").paidPostCount());

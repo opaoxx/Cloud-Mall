@@ -53,13 +53,13 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
           + " execution.created_at,execution.id LIMIT #{limit}")
   List<PayTccExecutionPO> findMissing(@Param("limit") int limit);
 
-  /** 将尚未取得paid写许可且无有效租约的READY台账原子改向取消恢复。 */
+  /** 仅改变尚未取得paid写许可的READY方向，保留原有效或过期租约。 */
   @Update(
       "UPDATE pay_tcc_delivery SET state='CANCEL_REQUESTED',next_retry_at=LEAST(next_retry_at,"
           + "#{now}),updated_at=#{now} WHERE BINARY pay_no=BINARY #{payNo} AND BINARY state='READY'"
           + " AND attempts IS NOT NULL AND attempts>=0 AND ((lease_owner IS NULL AND"
           + " lease_until IS NULL) OR (lease_owner IS NOT NULL AND TRIM(lease_owner)<>'' AND"
-          + " lease_until IS NOT NULL AND lease_until<=#{now}))")
+          + " lease_until IS NOT NULL))")
   int requestCancellation(@Param("payNo") String payNo, @Param("now") LocalDateTime now);
 
   /** 找出状态可恢复、重试到期且租约已释放的交付台账。 */

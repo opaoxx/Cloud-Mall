@@ -161,16 +161,32 @@ class PayTccCommittedCancelMySqlIT {
   }
 
   @Test
-  void activeAttemptedOrLeasedDeliveryCannotBeReversed() {
+  void activeReadyLeaseCanBeRedirectedWithoutLeaseTakeover() {
     insertFacts("attempted");
     LocalDateTime hostNow = hostNow();
     insertDelivery(
         "attempted", "READY", 1, "active-worker", hostNow.plusDays(1), hostNow.minusMinutes(1));
-    BizException error =
-        assertThrows(BizException.class, () -> cancellations.request(payment("attempted")));
-    assertEquals(202, error.getHttpStatus());
-    assertEquals("READY", deliveryState("attempted"));
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='attempted'");
+    cancellations.request(payment("attempted"));
+    assertEquals("CANCEL_REQUESTED", deliveryState("attempted"));
+    assertNull(deliveries.claim("attempted", "new-worker"));
+    Map<String, Object> after =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='attempted'");
+    assertEquals(before.get("attempts"), after.get("attempts"));
+    assertEquals(before.get("lease_owner"), after.get("lease_owner"));
+    assertEquals(before.get("lease_until"), after.get("lease_until"));
+    assertEquals("active-worker", after.get("lease_owner"));
     assertEquals(1, attempts("attempted"));
+    deliveries.finish("attempted", "active-worker", 1, "cancel-side retry");
+    assertNull(
+        fixture.queryForObject(
+            "SELECT lease_owner FROM pay_tcc_delivery WHERE pay_no='attempted'", String.class));
+    assertNull(deliveries.claim("attempted", "new-worker"));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+            + " pay_no='attempted'");
+    assertNotNull(deliveries.claim("attempted", "new-worker"));
   }
 
   @Test
@@ -239,7 +255,15 @@ class PayTccCommittedCancelMySqlIT {
 
     insertFacts("sql-active");
     insertDelivery("sql-active", "READY", 0, "active", DUE.plusSeconds(1), DUE.minusMinutes(1));
-    assertEquals(0, deliveryMapper.requestCancellation("sql-active", DUE));
+    Map<String, Object> activeBefore =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='sql-active'");
+    assertEquals(1, deliveryMapper.requestCancellation("sql-active", DUE));
+    Map<String, Object> activeAfter =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='sql-active'");
+    assertEquals("CANCEL_REQUESTED", activeAfter.get("state"));
+    assertEquals(activeBefore.get("attempts"), activeAfter.get("attempts"));
+    assertEquals(activeBefore.get("lease_owner"), activeAfter.get("lease_owner"));
+    assertEquals(activeBefore.get("lease_until"), activeAfter.get("lease_until"));
 
     insertFacts("sql-boundary");
     insertDelivery("sql-boundary", "READY", 0, "expired", DUE, DUE.minusMinutes(1));
@@ -328,15 +352,12 @@ class PayTccCommittedCancelMySqlIT {
         boolean requestAccepted = request.get(15, TimeUnit.SECONDS);
         PayTccDeliveryPO claimed = claim.get(15, TimeUnit.SECONDS);
         assertNotNull(claimed);
-        String state = deliveryState(payNo);
-        if (requestAccepted) {
-          assertEquals("CANCEL_REQUESTED", state);
-          assertEquals("CANCEL_REQUESTED", claimed.state);
-        } else {
-          assertEquals("READY", state);
-          assertEquals("READY", claimed.state);
-          assertEquals(1, attempts(payNo));
-        }
+        assertTrue(requestAccepted);
+        assertTrue("READY".equals(claimed.state) || "CANCEL_REQUESTED".equals(claimed.state));
+        assertEquals("CANCEL_REQUESTED", deliveryState(payNo));
+        assertThrows(
+            BizException.class, () -> deliveries.stage(payNo, token, "ORDER_SYNC_UNKNOWN"));
+        assertEquals("CANCEL_REQUESTED", deliveryState(payNo));
       }
     } finally {
       pool.shutdownNow();
@@ -403,6 +424,29 @@ class PayTccCommittedCancelMySqlIT {
         BizException.class, () -> deliveries.stage("stale-stage", "stale-worker", "SUCCESS"));
     assertEquals("CANCEL_REQUESTED", deliveryState("stale-stage"));
     assertEquals("PENDING", paymentState("stale-stage"));
+  }
+
+  @Test
+  void acceptedCancellationRetainsValidOwnerForRefundOnlyStage() {
+    insertFacts("active-refund");
+    LocalDateTime hostNow = hostNow();
+    insertDelivery(
+        "active-refund",
+        "READY",
+        2,
+        "original-worker",
+        hostNow.plusDays(1),
+        hostNow.minusMinutes(1));
+    cancellations.request(payment("active-refund"));
+    assertThrows(
+        BizException.class, () -> deliveries.stage("active-refund", "original-worker", "SUCCESS"));
+    assertThrows(
+        BizException.class,
+        () -> deliveries.stage("active-refund", "original-worker", "ORDER_SYNC_UNKNOWN"));
+    assertTrue(deliveries.stage("active-refund", "original-worker", "REFUND_PENDING"));
+    assertTrue(deliveries.stage("active-refund", "original-worker", "REFUNDED"));
+    assertEquals("REFUNDED", deliveryState("active-refund"));
+    assertEquals("REFUNDED", paymentState("active-refund"));
   }
 
   @Test

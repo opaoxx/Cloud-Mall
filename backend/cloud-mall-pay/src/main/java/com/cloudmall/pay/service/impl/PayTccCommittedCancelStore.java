@@ -91,7 +91,7 @@ public class PayTccCommittedCancelStore {
     if (dispatch == null
         || !"COMMITTED".equals(evidence.classify(execution, PayTccDispatchVO.from(dispatch))))
       throw pending("TCC 永久证据尚未确认");
-    // 3. 缺失台账创建取消状态；READY在租约已释放或过期时可CAS改向，保留历史尝试事实。
+    // 3. 缺失台账创建取消状态；READY仅改变方向，不接管已有 lease，保留历史尝试事实。
     if (current == null) {
       insertCancellation(execution, currentTime);
       return;
@@ -99,15 +99,12 @@ public class PayTccCommittedCancelStore {
     validateDelivery(current, execution);
     if ("CANCEL_REQUESTED".equals(current.state)) return;
     boolean noLease = current.leaseOwner == null && current.leaseUntil == null;
-    boolean expiredLease =
-        current.leaseOwner != null
-            && !current.leaseOwner.isBlank()
-            && current.leaseUntil != null
-            && !current.leaseUntil.isAfter(currentTime);
+    boolean completeLease =
+        current.leaseOwner != null && !current.leaseOwner.isBlank() && current.leaseUntil != null;
     if (!"READY".equals(current.state)
         || current.attempts == null
         || current.attempts < 0
-        || (!noLease && !expiredLease)) throw pending("交付已经开始，保留原资金结果");
+        || (!noLease && !completeLease)) throw pending("交付已经开始，保留原资金结果");
     if (deliveries.requestCancellation(payment.payNo, currentTime) != 1) {
       PayTccDeliveryPO observed = deliveries.selectForUpdate(payment.payNo);
       if (observed == null || !"CANCEL_REQUESTED".equals(observed.state))

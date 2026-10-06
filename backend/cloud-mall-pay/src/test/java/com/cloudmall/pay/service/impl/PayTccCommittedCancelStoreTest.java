@@ -98,7 +98,22 @@ class PayTccCommittedCancelStoreTest {
   }
 
   @Test
-  void readyPartialOrActiveLeaseAndNegativeAttemptsAreRejected() {
+  void readyActiveClaimedDeliveryCanCasWithoutTakingItsLease() {
+    PayVO payment = payment();
+    PayTccExecutionPO execution = execution();
+    PayTccDeliveryPO active =
+        delivery("READY", 2, "active-worker", java.time.LocalDateTime.now().plusMinutes(1));
+    prepare(payment, execution, active);
+    when(deliveries.requestCancellation(eq(payment.payNo), any())).thenReturn(1);
+
+    store.request(payment);
+
+    verify(deliveries).requestCancellation(eq(payment.payNo), any());
+    verify(deliveries, never()).insert(any());
+  }
+
+  @Test
+  void readyPartialBlankNullAndNegativeAttemptsAreRejected() {
     PayVO payment = payment();
     PayTccExecutionPO execution = execution();
     PayTccDeliveryPO missingAttempts = delivery("READY", 0, null, null);
@@ -109,8 +124,7 @@ class PayTccCommittedCancelStoreTest {
             delivery("READY", -1, null, null),
             delivery("READY", 1, "worker", null),
             delivery("READY", 1, null, java.time.LocalDateTime.now().minusSeconds(1)),
-            delivery("READY", 1, " ", java.time.LocalDateTime.now().minusSeconds(1)),
-            delivery("READY", 1, "worker", java.time.LocalDateTime.now().plusMinutes(1)))) {
+            delivery("READY", 1, " ", java.time.LocalDateTime.now().minusSeconds(1)))) {
       prepare(payment, execution, candidate);
       assertThrows(BizException.class, () -> store.request(payment));
       verify(deliveries, never()).requestCancellation(any(), any());
