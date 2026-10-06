@@ -266,7 +266,22 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_receipt.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-本阶段没有自动开启全局事务、提交决议或扫描未知 receipt 的主编排。CLAIMED 后、分支注册前退出的窗口仍保持未知；禁止换 XID 或重注册来猜测恢复。后续需补主编排、Pay 进程故障验收及 Order/Stock 交付。
+16B1 的资源层本身不创建全局事务。16B2 已补下述内部编排；CLAIMED 后、分支注册前退出仍可能保持未知，禁止换 XID 或重注册来猜测恢复。公开支付入口和 Order/Stock 交付仍待后续验收。
+
+### Pay 内部 TCC 主编排（CM-18 第 16 轮 B2）
+
+`PayTccCoordinatorService.execute` 先在 `pay_tcc_execution` 独立认领一次性执行权，唯一胜者才能 begin、持久化 XID，并依次调用 Pay receipt 和 User Try。已有独立 dispatch/receipt 的旧尝试禁止取得新 XID。并发重入只走 `recover`，不会接管首次执行权。
+
+只有两个资源明确 TRYING 才持久化 COMMIT；首次执行无法确认同时受理时持久化 ROLLBACK 请求。决议在 TC RPC 前独立提交，之后只能重试原 XID、原方向。commit/rollback 的响应并不等于资金终态：必须核对 Pay receipt/Fence 与 User 完整事实，两端同时确认或取消后才结束扣款切片。公开支付状态暂不随此结果变为 SUCCESS。
+
+begin 响应丢失且 XID 未落库时保留 `BEGIN_UNKNOWN`；已有 XID 但没有 decision 时恢复只观察，不自动提交、不重做 Try。两个资源或其证据缺失时继续 UNKNOWN，TC Unknown 本身不能推断资金结果。原调用仍在等待 begin 响应时，其他线程的 UNKNOWN 观察不会剥夺它保存原 XID 的权限。
+
+`cloudmall.pay.tcc-coordinator.enabled=false` 默认关闭；启用要求 receipt、bridge、Seata 均启用且 AT 代理关闭。`cloudmall.pay.tcc-coordinator.timeout-ms` 默认 30000，允许范围为 1–120000 毫秒。execute/recover 拒绝继承外部 XID 或本地事务。当前仅提供内部 Java Service，没有新 HTTP 或定时扫描器，自动恢复扫描、Order/Stock/退款衔接和对外入口切换仍待后续批次。
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_execution.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
 
 ## 验证命令
 
@@ -349,6 +364,19 @@ mvn -pl backend/cloud-mall-pay -am test `
 ```
 
 11 项验收覆盖双资源提交/取消、余额不足、空 Cancel、Pay Try/Confirm/Cancel 数据库故障、并发认领、User 响应丢失、载荷冲突和被拒第二分支安全回滚。日志与每笔 Pay/User 事实位于 `target/cm16b1-receipt/`；只在 TC 已结束且资金/receipt 已核对后清理随机 `cm16b1_*` 测试库，不改原业务数据。Pay 进程中断和自动主编排恢复不属于本次矩阵。
+
+16B2 coordinator 验收同样需要上述中间件和 User 启动包，单独启动测试 JVM：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayTccCoordinatorIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+13 项测试覆盖自动 begin/双资源决议、并发执行、User 响应丢失、commit/rollback 请求丢失、commit ACK 丢失、begin 响应未知、决议前中断、上下文/载荷冲突及 begin 等待期间的并发观察。另启动真实 Pay 子 JVM，在决议已落库或仅 XID 已落库的 barrier 终止进程，再以同 appId 和数据库重启：前者沿原 COMMIT 收敛，后者保留 UNKNOWN，不 begin/不 Try/不新增 decision。
+
+测试日志、原 XID、进程参数与两端快照保存在 `target/cm16b2-coordinator/`。测试注入器捕获的原 XID 只用于真实 TC 终态核验和现场清理，不会回填 execution 来伪造业务恢复；begin 未知或缺少分支事实的业务结果仍保持 UNKNOWN。所有测试库只在原 TC 已结束、冻结归零且无 TRYING receipt 后精确清理。真实环境缺少这些证据时必须保留原事实。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 
