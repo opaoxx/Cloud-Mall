@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS pay_tcc_delivery (
   updated_at DATETIME(3) NOT NULL,
   UNIQUE KEY uk_pay_tcc_delivery_pay(pay_no),
   UNIQUE KEY uk_pay_tcc_delivery_xid(xid),
-  UNIQUE KEY uk_pay_tcc_delivery_refund(refund_operation_key)
+  UNIQUE KEY uk_pay_tcc_delivery_refund(refund_operation_key),
+  KEY idx_pay_tcc_delivery_due(state,next_retry_at,lease_until)
 );
 ```
 
@@ -146,13 +147,15 @@ SELECT * FROM mall_user WHERE id=? FOR UPDATE;
 
 1. 两端 CONFIRMED、User APPLIED ledger、Order PAID+stock SUCCEEDED → SUCCESS。
 2. 两端 CONFIRMED、Order CANCELLED+stock rollback SUCCEEDED → 唯一 refund APPLIED → REFUNDED。
-3. 两端 ROLLEDBACK → ROLLEDBACK_SKIPPED，无 Order paid、无退款。
+3. 两端 ROLLEDBACK → 不创建 delivery job，不调用 Order.paid，不调用退款。
 4. User/Pay 任一端 UNKNOWN、Order/Stock UNKNOWN/CONFLICT/PENDING → 不交付、不退款。
 5. Order paid 响应丢失、重试和恢复 → 同 orderNo 幂等，最终只成功一次。
 6. 退款响应丢失、重复退款和进程重启 → `refund:<payNo>` 只产生一条 APPLIED REFUND。
 7. 禁用用户 TCC confirmed 退款 → 余额释放一次，退款账本 APPLIED，原 DEBIT 保留。
 8. 两个 delivery 实例竞争、旧 lease 迟到完成 → 状态 CAS 和唯一键阻止双交付/双退款。
 9. Legacy 支付、Legacy refund、PayConsistencyService 回归保持通过；公开入口仍不进入 TCC delivery。
+
+本批真实矩阵使用现有容器中的四个独立 MySQL 数据库、独立临时 Redis 容器、RabbitMQ vhost 和 Nacos 隔离组，覆盖写状态事务故障回滚及新 Pay 进程退款重放。公开 Pay 入口仍为 LEGACY。禁用用户的 Legacy 退款首次调用和重放继续返回 404；TCC confirmed 退款以独立 attempt/DEBIT/APPLIED 事实证明后允许释放。7 项四服务交付测试和 29 项 User 资金测试已通过；默认全量构建仍作为最终 gate。本批不宣称生产容量或全部网络故障组合已覆盖。
 
 ## 9. 边界
 
