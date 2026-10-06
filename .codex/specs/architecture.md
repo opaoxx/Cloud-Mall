@@ -194,3 +194,7 @@ COMMITTED execution 不接入 16E 无 execution cancel；failure 仅按持久 Pa
 ### CM-20261007-18 TCC delivery 调度公平与阶段隔离（16N）
 
 16N 保持 delivery scheduler 单实例 `running` 门、两阶段每阶段最多 20 条和整轮共享 10 秒预算。seed（`findMissing/ensure`）与 due（`findDue/deliver`）首轮 seed 优先，后续轮次交替首选；阶段查询或单条任务异常只隔离当前阶段/记录，预算未尽时另一阶段仍可执行。启动另一阶段查询或新任务前必须检查共享 deadline，预算耗尽后不再启动查询/任务且不强杀在途 RPC；`finally` 必须释放 running。生产预算使用单调 `System.nanoTime`，可通过 protected/package-private `LongSupplier` 注入测试而不改变现有 Spring public 构造/API。该轮不新增 schema/flag，不改变 TCC/Legacy、Order/Stock/User 或 TC 状态边界。
+
+### CM-20261007-18 COMMITTED TCC 未发起交付窗口取消（16O）
+
+16O 仅在原 execution 已 `COMMITTED/COMMIT`、Pay 为 `PENDING/ORDER_SYNC_UNKNOWN`，且 delivery 缺失或仍为 `READY + attempts=0 + 无 owner/lease` 时，复用 `tcc-cancel.enabled` 持久化 delivery `CANCEL_REQUESTED`；必须同时拒绝已存在的 16E `pay_tcc_cancel` 或 Legacy `pay_debit_intent`，不新增表/字段/flag/XID/branch/Try/退款键/公网 endpoint，不写 Pay FAILED，不调用 TC/Order/User。新增请求与 delivery worker 必须统一 `pay_record → pay_tcc_delivery` 锁序；claim 先显式锁两行再执行只更新 delivery 的 CAS，不能依赖未预锁定 JOIN UPDATE 的隐式锁顺序。`CANCEL_REQUESTED` worker 只能按 User 双端 confirmed、Order cancel、stock 最终状态和固定 refund key 清算，不能进入 paid；Order/资金未知保持该状态并退避，CANCELLED+stock SUCCEEDED 后才进入原 REFUND_PENDING/REFUNDED 链。已 claim 的 READY/ORDER_SYNC_UNKNOWN、已成功/已退款记录拒绝改向，既有事实继续按 16C/H/K 保守边界处理。取消意图持久化后即使关闭 cancel flag，delivery recovery 仍可继续清算；旧版本不认识该状态时只能停等，不能 paid；本轮不宣称全部 COMMITTED 主动取消。

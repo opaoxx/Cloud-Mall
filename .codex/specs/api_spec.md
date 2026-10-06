@@ -307,6 +307,14 @@ RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认�
 
 COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明确返回 `PAY_REFUND_PENDING`/202；Pay `PENDING`/`ORDER_SYNC_UNKNOWN` 返回 `PAY_ORDER_SYNC_UNKNOWN`/202；SUCCESS/REFUNDED/FAILED 保持既有 409/幂等。入口不调用 Order cancel/paid、User refund、TC/recover，不创建 16E cancel 台账，不生成新退款键；真正的 COMMITTED 取消与原 delivery 退款编排另行评审。
 
+### CM-20261007-18 COMMITTED TCC 未发起交付窗口取消（16O）
+
+16O 不新增公网路径，复用受保护的 `/{payNo}/mock-fail` 和 callback failure；仅在 `tcc-cancel.enabled=true` 且原 execution 为 `COMMITTED/COMMIT`、Pay 为 `PENDING/ORDER_SYNC_UNKNOWN`、delivery 尚未发起（无台账，或 `READY` 且 `attempts=0`、无 owner/lease）时，在短本地事务持久化 delivery `CANCEL_REQUESTED`，随后返回 `PAY_ORDER_SYNC_UNKNOWN`/202。该入口不调用 TC、Order、User，不写 Pay FAILED；已有 `CANCEL_REQUESTED` 只做 tuple 校验和幂等 202。已 claim、`ORDER_SYNC_UNKNOWN`、`REFUND_PENDING`、SUCCESS、REFUNDED 或与 16E `pay_tcc_cancel`/Legacy `pay_debit_intent` 冲突的记录保持原结果，不改向。
+
+`CANCEL_REQUESTED` 一旦持久化，即使随后关闭 cancel flag，仍由既有 delivery scheduler 恢复；新 failure 请求在 flag 关闭时继续保持 16H 的 202。delivery worker 必须在 claim 后重读状态，CANCEL_REQUESTED 只能 GET Order 并在 `PENDING_PAYMENT` 调用同一 orderNo 的 cancel，禁止调用 paid。Order/资金未知或 `CANCELLED` 但 stock 未 `SUCCEEDED` 时保持 CANCEL_REQUESTED 并退避；仅 `CANCELLED + SUCCEEDED` 才进入原 `REFUND_PENDING` 和固定 `refund:<payNo>` 唯一退款，最终沿原 `REFUNDED`/已处理 409 语义。Order `PAID/COMPLETED`、stock `CONFLICT` 或 User/Pay 证据冲突不退款、不 paid、不 FAILED。callback failure 保持 `RECEIVED_FAILURE`，不因取消意图伪造完成。
+
+取消请求与 delivery worker 统一使用 `pay_record → pay_tcc_delivery` 锁序；claim 先显式锁 Pay、delivery 再执行 delivery CAS，避免多表 JOIN UPDATE 隐式反向锁导致死锁。该范围不支持已发起交付、已成功、已退款或其他 COMMITTED 主动取消场景。
+
 ### CM-20261007-18 Legacy failure 结果语义（16I）
 
 Legacy `mock-fail`/callback failure 先按 Pay 持久状态和 debit intent 完整 tuple 分类：SUCCESS/REFUNDED 返回既有 409；REFUND_PENDING 在 intent 缺失或完整匹配时返回 `PAY_REFUND_PENDING`/202 且不 RPC/写入，intent 矛盾返回 503；FAILED 在 intent 缺失或匹配 `FAILED` 时幂等 200 且不重复 Order.cancel；PENDING 且 intent 缺失/FAILED、以及 ORDER_SYNC_UNKNOWN 且 intent 完整匹配 FAILED 时保留既有 Order.cancel+markFailed 基本路径，写 FAILED 后返回/complete 200；PENDING intent 非 FAILED/未知、ORDER_SYNC_UNKNOWN intent 缺失/非 FAILED 返回 202。notifyFailure 原有 BizException 与其他异常 500 映射保持不变，不新增取消未知台账。intent mode/tuple 矛盾或未知状态不得 complete/猜测失败，按既有 503/202 处理。TCC 契约不变。
