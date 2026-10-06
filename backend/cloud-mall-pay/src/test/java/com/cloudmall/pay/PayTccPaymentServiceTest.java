@@ -44,6 +44,8 @@ class PayTccPaymentServiceTest {
     orders = mock(OrderClient.class);
     users = mock(UserTccClient.class);
     service = new PayTccPaymentService(coordinator, delivery, states, orders, users, "token");
+    org.springframework.test.util.ReflectionTestUtils.setField(
+        service, "cancellations", mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
   }
 
   /** 已有 execution 时直接 recover，不重新预检订单或 begin。 */

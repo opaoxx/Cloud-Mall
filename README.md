@@ -321,7 +321,20 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
 
 公开成功请求按持久支付模式路由。TCC 首次核验待支付订单后认领唯一 execution；重放恢复原 XID，资金确认后经 delivery 完成订单与库存交付。双端取消及无扣款证据齐全才投影 FAILED。切换新建配置不改变旧支付模式，不得手动改库迁移历史支付。
 
-本批 TCC `mock-fail` 和失败 callback 对未决支付返回 202，明确表示取消未执行；不远程取消订单、改变全局决议或写 FAILED。主动取消仍待独立实现，CM-18 未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
+本批 TCC `mock-fail` 和失败 callback 对未决支付返回 202，明确表示取消未执行；不远程取消订单、改变全局决议或写 FAILED。16E 在独立开关下补充尚无资金执行的主动取消，已有 execution 的取消仍不接管，CM-18 未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
+
+### 未开始扣款的 TCC 主动取消（CM-18 第 16 轮 E）
+
+`cloudmall.pay.tcc-cancel.enabled=false` 默认关闭，是独立于 16D 的可选能力。开启时要求完整 TCC 公开入口已启用。`mock-fail` / 失败 callback 在同一支付行锁下确认不存在 execution、dispatch、receipt 或 Legacy 意图后，独立提交 `pay_tcc_cancel`；提交成功后才通过 Order 查询/取消，RPC 不持有本地事务。
+
+订单 `CANCELLED` 且库存动作 `SUCCEEDED` 后，取消台账 `COMPLETED` 与 Pay `FAILED` 在同一短事务提交；未知结果返回 202。已存在资金执行时继续保守 202，不改变 TCC 决议、不主动退款。台账在 Pay 启动时幂等建表，关闭取消开关仍保留 execution/bridge/receipt 的永久阻断检查，不能靠关闭功能重启扣款。
+
+恢复器每轮最多 20 条、10 秒启动预算，60 秒随机 token lease，失败退避 5–300 秒。原订单载荷矛盾、已支付或库存冲突停止自动取消并记录 `CONFLICT`。新旧数据库均提供幂等迁移：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_cancel.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
 
 ## 验证命令
 
@@ -466,6 +479,12 @@ mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccPublicEntryIT' '-Dsurefire
 ```
 
 该测试创建独立数据库、Redis、Rabbit vhost 和发现组；核对原库校验和、TC 终态、资金与库存后清理，存在未决事实时保留现场。
+
+16E 取消验收使用相同的隔离中间件夹具，覆盖取消响应丢失、库存延迟、并发首次支付、独立 Pay 进程接手和租约/原子写入失败：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
+```
 
 ## 项目结构
 

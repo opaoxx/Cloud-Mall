@@ -174,7 +174,7 @@ public class PayServiceImpl implements PayService {
     String mode = paymentMode(payNo);
     if (PayDebitModes.TCC.equals(mode)) {
       tccEntry().failure(p);
-      return ApiResponse.ok(find(payNo));
+      return ApiResponse.ok(p);
     }
     if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
     PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payNo);

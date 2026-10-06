@@ -13,6 +13,7 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.po.PayTccReceiptPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
@@ -36,6 +37,9 @@ class PayTccExecutionStoreTest {
   /** 旧 receipt Mapper。 */
   private PayTccReceiptMapper receipts;
 
+  /** 主动取消 gate Mapper。 */
+  private PayTccCancelMapper cancels;
+
   /** 被测 Store。 */
   private PayTccExecutionStore store;
 
@@ -46,7 +50,9 @@ class PayTccExecutionStoreTest {
     payments = mock(PayRecordMapper.class);
     dispatches = mock(PayTccDispatchMapper.class);
     receipts = mock(PayTccReceiptMapper.class);
-    store = new PayTccExecutionStore(executions, payments, dispatches, receipts);
+    cancels = mock(PayTccCancelMapper.class);
+    when(cancels.selectByPayNo(any())).thenReturn(null);
+    store = new PayTccExecutionStore(executions, payments, dispatches, receipts, cancels);
   }
 
   /** 相反 COMMIT/ROLLBACK 决议冲突，且不写决议 SQL。 */

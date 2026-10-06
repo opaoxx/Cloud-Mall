@@ -7,6 +7,7 @@ import com.cloudmall.pay.domain.po.PayTccDispatchPO;
 import com.cloudmall.pay.domain.po.PayTccReceiptPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
 import java.math.BigDecimal;
@@ -16,12 +17,14 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Pay receipt 的独立 CLAIMED 认领事务。 */
 @Service
+@DependsOn("payTccCancelTableInitializer")
 public class PayTccReceiptStore {
   /** 数据库时间采用上海时区。 */
   private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
@@ -35,14 +38,19 @@ public class PayTccReceiptStore {
   /** receipt 必须绑定真实存在的已提交派发锚点。 */
   private final PayTccDispatchMapper dispatches;
 
+  /** 主动取消 gate，阻止 receipt 与取消意图并存。 */
+  private final PayTccCancelMapper cancels;
+
   /** 创建 receipt 存储服务。 */
   public PayTccReceiptStore(
       PayTccReceiptMapper receiptMapper,
       PayRecordMapper payments,
-      PayTccDispatchMapper dispatches) {
+      PayTccDispatchMapper dispatches,
+      PayTccCancelMapper cancels) {
     this.receiptMapper = receiptMapper;
     this.payments = payments;
     this.dispatches = dispatches;
+    this.cancels = cancels;
   }
 
   /** 只允许完整不可变载荷的首个请求成为 winner。 */
@@ -52,6 +60,7 @@ public class PayTccReceiptStore {
     List<PayRecordPO> records = payments.selectForUpdate(dispatch.payNo);
     PayTccDispatchPO anchor = dispatches.selectForUpdate(dispatch.payNo);
     if (records.size() != 1 || anchor == null) throw conflict();
+    if (cancels.selectForUpdate(dispatch.payNo) != null) throw conflict();
     PayRecordPO payment = records.get(0);
     if (!"TCC".equals(payment.debitMode)
         || !Objects.equals(payment.userId, dispatch.userId)

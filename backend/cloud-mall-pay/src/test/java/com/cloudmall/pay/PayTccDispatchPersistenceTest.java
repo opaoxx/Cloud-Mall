@@ -12,6 +12,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.po.PayTccDispatchPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.service.impl.PayTccDispatchPersistence;
 import java.math.BigDecimal;
@@ -28,6 +29,9 @@ class PayTccDispatchPersistenceTest {
   /** 原支付事实 Mapper。 */
   private PayRecordMapper payRecordMapper;
 
+  /** 主动取消 gate Mapper。 */
+  private PayTccCancelMapper cancelMapper;
+
   /** 被测独立事务边界。 */
   private PayTccDispatchPersistence persistence;
 
@@ -36,7 +40,9 @@ class PayTccDispatchPersistenceTest {
   void setUp() {
     dispatchMapper = mock(PayTccDispatchMapper.class);
     payRecordMapper = mock(PayRecordMapper.class);
-    persistence = new PayTccDispatchPersistence(dispatchMapper, payRecordMapper);
+    cancelMapper = mock(PayTccCancelMapper.class);
+    when(cancelMapper.selectForUpdate(any())).thenReturn(null);
+    persistence = new PayTccDispatchPersistence(dispatchMapper, payRecordMapper, cancelMapper);
   }
 
   /** 已确认终态不能被 UNKNOWN 或 TRYING 倒退。 */

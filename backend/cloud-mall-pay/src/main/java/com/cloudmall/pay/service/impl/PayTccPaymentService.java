@@ -4,6 +4,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
+import com.cloudmall.pay.domain.po.PayTccCancelPO;
 import com.cloudmall.pay.domain.vo.PayTccDeliveryVO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
@@ -11,11 +12,13 @@ import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.domain.vo.UserTccStateVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserTccClient;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import java.math.BigDecimal;
 import java.util.Objects;
 import java.util.Set;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.DependsOn;
@@ -26,6 +29,13 @@ import org.springframework.stereotype.Service;
 @ConditionalOnProperty(name = "cloudmall.pay.tcc-entry.enabled", havingValue = "true")
 @DependsOn("payTccEntryConfiguration")
 public class PayTccPaymentService {
+  /** 取消功能关闭后仍必须保留的永久抢占事实。 */
+  @Autowired private PayTccCancelMapper cancellations;
+
+  /** 独立启用的主动取消编排，未启用时保持 16D 保守边界。 */
+  @Autowired(required = false)
+  private PayTccCancelService cancelService;
+
   /** 唯一一次 begin 和原执行恢复入口。 */
   private final PayTccCoordinatorService coordinator;
 
@@ -76,6 +86,14 @@ public class PayTccPaymentService {
     // 1. 已有执行不受后来订单取消阻断，仍必须清算原资金。
     if (states.execution(payment.payNo) != null) execution = coordinator.recover(payment.payNo);
     else {
+      PayTccCancelPO cancellation = cancellations.selectByPayNo(payment.payNo);
+      if (cancellation != null) {
+        if ("COMPLETED".equals(cancellation.state))
+          throw new BizException(ErrorCodes.PAY_DONE, "支付已取消", 409);
+        if ("CONFLICT".equals(cancellation.state))
+          throw new BizException("PAY_TCC_CANCEL_CONFLICT", "取消事实待核验", 409);
+        throw pending();
+      }
       ApiResponse<OrderClient.OrderView> response =
           orders.paymentState(payment.orderNo, payment.userId);
       if (response == null || !"0".equals(response.code) || response.data == null) throw pending();
@@ -127,11 +145,17 @@ public class PayTccPaymentService {
     return "UNKNOWN";
   }
 
-  /** 本批 TCC 主动失败不执行取消或相反决议，明确返回未处理的 202。 */
+  /** 独立启用取消时只处理尚无资金执行的支付，否则保持 16D 保守边界。 */
   public void failure(PayVO payment) {
     if ("SUCCESS".equals(payment.status) || "REFUNDED".equals(payment.status))
       throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
     if ("FAILED".equals(payment.status)) return;
+    if (cancelService != null) {
+      cancelService.request(payment);
+      // 已在独立事务核验并写入 FAILED；不要从挂起的旧 RR 快照重读。
+      payment.status = "FAILED";
+      return;
+    }
     throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "TCC 取消请求未执行，请通过订单取消并等待资金核验", 202);
   }
 

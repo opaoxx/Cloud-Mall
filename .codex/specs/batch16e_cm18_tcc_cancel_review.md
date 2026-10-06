@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS pay_tcc_cancel (
 ## 8. 最小验收矩阵
 
 1. 默认关闭；TCC 显式开启且缺任一依赖时启动失败，Legacy 创建/失败回归不触发 cancel 表。
-2. 无 execution 的 TCC cancel 只有一个唯一台账，Pay 仍 PENDING；重复请求按台账状态返回 202 或 `PAY_TCC_CANCELLED`/409。
+2. 无 execution 的 TCC cancel 只有一个唯一台账；取消仍在处理中时 Pay 保持 PENDING 并返回 `PAY_ORDER_SYNC_UNKNOWN`/202，完成时台账 `COMPLETED` 与 Pay `FAILED` 已同事务提交并返回 HTTP 200。
 3. cancel claim 与 coordinator execution claim 并发：同 pay_record 行锁下只有一个 winner；另一方不创建 execution/台账第二行。
 4. cancel 与 bridge.prepare、receipt.prepare 并发：旧入口检查 cancel gate，不产生独立 dispatch/receipt。
 5. Order.cancel 成功响应丢失、服务重启、库存动作延迟：恢复最终只在 CANCELLED + SUCCEEDED 且无 execution/dispatch/receipt 时同事务 `COMPLETED + Pay FAILED`，其他情况不改 Pay FAILED。

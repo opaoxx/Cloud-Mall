@@ -5,6 +5,7 @@ import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
@@ -15,12 +16,14 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 不可转移的执行权、原 XID 和单向决议各自独立提交。 */
 @Service
+@DependsOn("payTccCancelTableInitializer")
 public class PayTccExecutionStore {
   /** execution 持久化入口。 */
   private final PayTccExecutionMapper executions;
@@ -34,16 +37,21 @@ public class PayTccExecutionStore {
   /** 旧 Pay 分支不得取得新 XID。 */
   private final PayTccReceiptMapper receipts;
 
+  /** 主动取消 gate，阻止取消已提交后再次创建 execution。 */
+  private final PayTccCancelMapper cancels;
+
   /** 创建执行事实服务。 */
   public PayTccExecutionStore(
       PayTccExecutionMapper executions,
       PayRecordMapper payments,
       PayTccDispatchMapper dispatches,
-      PayTccReceiptMapper receipts) {
+      PayTccReceiptMapper receipts,
+      PayTccCancelMapper cancels) {
     this.executions = executions;
     this.payments = payments;
     this.dispatches = dispatches;
     this.receipts = receipts;
+    this.cancels = cancels;
   }
 
   /** 支付行锁保护首次插入，唯一胜者获得不可转移的一次性 begin 权。 */
@@ -64,6 +72,8 @@ public class PayTccExecutionStore {
       validate(existing, request);
       return false;
     }
+    if (cancels.selectForUpdate(request.payNo) != null)
+      throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "取消已持久受理，不能开始扣款", 202);
     // 2. 旧独立桥/receipt 尝试不得被隐式迁入新全局事务。
     if (!"PENDING".equals(payment.status)
         || dispatches.selectByPayNo(request.payNo) != null

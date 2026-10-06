@@ -4,14 +4,18 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.po.PayTccDispatchPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import java.time.LocalDateTime;
+import java.util.Objects;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Pay TCC 派发的独立本地事务边界，避免桥服务自调用失效。 */
 @Service
+@DependsOn("payTccCancelTableInitializer")
 public class PayTccDispatchPersistence {
   /** 派发事实的事务访问器。 */
   private final PayTccDispatchMapper dispatchMapper;
@@ -19,16 +23,34 @@ public class PayTccDispatchPersistence {
   /** POST 前再次锁定原支付状态。 */
   private final PayRecordMapper payRecordMapper;
 
+  /** 主动取消 gate，阻止旧 dispatch 与取消意图并存。 */
+  private final PayTccCancelMapper cancelMapper;
+
   /** 创建派发持久化边界。 */
   public PayTccDispatchPersistence(
-      PayTccDispatchMapper dispatchMapper, PayRecordMapper payRecordMapper) {
+      PayTccDispatchMapper dispatchMapper,
+      PayRecordMapper payRecordMapper,
+      PayTccCancelMapper cancelMapper) {
     this.dispatchMapper = dispatchMapper;
     this.payRecordMapper = payRecordMapper;
+    this.cancelMapper = cancelMapper;
   }
 
   /** 独立提交 PREPARED 事实。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccDispatchPO prepare(PayTccDispatchPO dispatch) {
+    java.util.List<PayRecordPO> records = payRecordMapper.selectForUpdate(dispatch.payNo);
+    if (records.size() != 1) throw conflict();
+    PayRecordPO payment = records.get(0);
+    if (!"TCC".equals(payment.debitMode)
+        || !"PENDING".equals(payment.status)
+        || !dispatch.payNo.equals(payment.payNo)
+        || !dispatch.orderNo.equals(payment.orderNo)
+        || !dispatch.userId.equals(payment.userId)
+        || dispatch.amount.compareTo(payment.amount) != 0
+        || !Objects.equals(dispatch.operationKey, "tcc-debit:" + dispatch.payNo)
+        || !Objects.equals(dispatch.ledgerKey, dispatch.payNo)) throw conflict();
+    if (cancelMapper.selectForUpdate(dispatch.payNo) != null) throw conflict();
     if (dispatchMapper.insert(dispatch) != 1) {
       throw new IllegalStateException("TCC 派发事实写入未影响唯一记录");
     }
@@ -50,7 +72,13 @@ public class PayTccDispatchPersistence {
         || dispatch.amount.compareTo(payment.amount) != 0) {
       return false;
     }
+    if (cancelMapper.selectForUpdate(dispatch.payNo) != null) return false;
     return dispatchMapper.markPostAttempted(dispatch.payNo, attemptedAt, attemptedAt) == 1;
+  }
+
+  /** 构造派发认领冲突异常。 */
+  private BizException conflict() {
+    return new BizException("PAY_TCC_DISPATCH_CONFLICT", "Pay dispatch 原支付或取消 gate 冲突", 409);
   }
 
   /** 独立提交 User 只读结果镜像。 */
