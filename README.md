@@ -378,6 +378,18 @@ User查询位于两段短事务之间，最终按Pay→execution锁序重新校�
 
 无XID、分支证据不足或已COMMIT仍保持原边界；已提交资金的订单取消不属于该功能。支付失败不替代订单/库存自身的生命周期处理。
 
+### TCC 交付扫描与租约保护（第16轮L）
+
+交付种子扫描在LIMIT前排除NULL、空串及仅含空格的XID，避免不可处理的旧记录占满批次。异常记录保留待核验，不补造XID。
+
+交付状态写入及重试元数据更新均要求原token精确匹配且租约尚未到期；过期但尚未被接手的执行者也不能写本地状态或延后重试。Pay与delivery状态仍在同一事务提交。已发出的远程请求不能撤回，订单和退款继续依赖原幂等键与事实核验。
+
+本轮不增加表或开关，不改变COMMITTED后主动取消的既有边界。隔离MySQL回归命令（不注册TC分支）：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccDeliveryRecoveryMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ## 验证命令
 
 ```bash

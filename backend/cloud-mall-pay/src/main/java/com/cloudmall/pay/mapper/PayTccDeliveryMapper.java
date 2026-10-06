@@ -43,7 +43,8 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
       "SELECT execution.* FROM pay_tcc_execution execution JOIN pay_record payment ON"
           + " payment.pay_no=execution.pay_no LEFT JOIN pay_tcc_delivery delivery ON"
           + " delivery.pay_no=execution.pay_no WHERE BINARY execution.state='COMMITTED' AND BINARY"
-          + " execution.decision='COMMIT' AND BINARY payment.debit_mode='TCC' AND BINARY"
+          + " execution.decision='COMMIT' AND execution.xid IS NOT NULL AND"
+          + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"
           + " payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id AND"
           + " BINARY payment.order_no=BINARY execution.order_no AND payment.amount=execution.amount"
           + " AND BINARY execution.operation_key=BINARY CONCAT('tcc-debit:',execution.pay_no) AND"
@@ -104,8 +105,9 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
   /** 以租约和当前状态为条件推进交付状态，不覆盖成功或已退款终态。 */
   @Update(
       "UPDATE pay_tcc_delivery SET state=#{targetState},last_error=#{error},updated_at=#{now}"
-          + " WHERE pay_no=#{payNo} AND lease_owner=#{token} AND state=#{expectedState} AND"
-          + " state NOT IN ('SUCCESS','REFUNDED')")
+          + " WHERE BINARY pay_no=BINARY #{payNo} AND BINARY lease_owner=BINARY #{token}"
+          + " AND lease_until IS NOT NULL AND lease_until>#{now} AND BINARY state=BINARY"
+          + " #{expectedState} AND state NOT IN ('SUCCESS','REFUNDED')")
   int updateState(
       @Param("payNo") String payNo,
       @Param("token") String token,
@@ -116,8 +118,10 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
 
   /** 释放租约并更新重试元数据，保持业务状态不变。 */
   @Update(
-      "UPDATE pay_tcc_delivery SET lease_owner=NULL,lease_until=NULL,next_retry_at=#{nextAt},"
-          + "last_error=#{error},updated_at=#{now} WHERE pay_no=#{payNo} AND lease_owner=#{token}")
+      "UPDATE pay_tcc_delivery SET"
+          + " lease_owner=NULL,lease_until=NULL,next_retry_at=#{nextAt},last_error=#{error},updated_at=#{now}"
+          + " WHERE BINARY pay_no=BINARY #{payNo} AND BINARY lease_owner=BINARY #{token} AND"
+          + " lease_until IS NOT NULL AND lease_until>#{now}")
   int finishAttempt(
       @Param("payNo") String payNo,
       @Param("token") String token,

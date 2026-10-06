@@ -471,7 +471,14 @@ class PayTccDeliveryIT {
     store.ensure(request.payNo);
     var first = store.claim(request.payNo, "old-token");
     assertNotNull(first);
-    payDb.update("UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 SECOND)");
+    payDb.update("UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY)");
+    // 过期但尚未被接手时同样失去本地写权限，不能写退款意图或延后恢复。
+    assertFalse(store.stage(request.payNo, "old-token", "REFUND_PENDING"));
+    assertEquals("PENDING", paymentState());
+    var expired = payDb.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no=?", request.payNo);
+    store.finish(request.payNo, "old-token", 1, "expired worker");
+    assertEquals(
+        expired, payDb.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no=?", request.payNo));
     var second = store.claim(request.payNo, "new-token");
     assertNotNull(second);
     assertFalse(store.stage(request.payNo, "old-token", "REFUND_PENDING"));
@@ -543,7 +550,7 @@ class PayTccDeliveryIT {
   /** 夹具明确置为过去，避开宿主机与容器毫秒时钟差。 */
   private void forceDue() {
     payDb.update(
-        "UPDATE pay_tcc_delivery SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 SECOND) WHERE"
+        "UPDATE pay_tcc_delivery SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
             + " pay_no=?",
         request.payNo);
   }

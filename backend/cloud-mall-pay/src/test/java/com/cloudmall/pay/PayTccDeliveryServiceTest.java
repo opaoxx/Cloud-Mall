@@ -211,6 +211,23 @@ class PayTccDeliveryServiceTest {
     verify(orders, never()).paid(any(), any());
   }
 
+  /** 租约失效导致退款意图未能提交时，不得发送退款或读取退款结果。 */
+  @Test
+  void rejectedRefundStageDoesNotCallRefund() {
+    PayTccDeliveryPO job = job("READY");
+    prepareJob(job);
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("CANCELLED", "SUCCEEDED")));
+    when(store.stage(eq(PAY_NO), any(), eq("REFUND_PENDING"))).thenReturn(false);
+
+    service.deliver(PAY_NO);
+
+    verify(users, never()).refund(any(), any(), any());
+    verify(users, never()).operation(USER_ID, REFUND_KEY, USER_ID);
+    verify(orders, never()).paid(any(), any());
+  }
+
   private PayTccDeliveryPO job(String state) {
     PayTccDeliveryPO job = new PayTccDeliveryPO();
     job.payNo = PAY_NO;

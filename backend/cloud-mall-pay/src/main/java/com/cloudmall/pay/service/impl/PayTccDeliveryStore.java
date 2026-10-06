@@ -114,7 +114,14 @@ public class PayTccDeliveryStore {
     // 1. 完整原载荷与 lease 再次核验。
     List<PayRecordPO> records = payments.selectForUpdate(payNo);
     PayTccDeliveryPO job = deliveries.selectForUpdate(payNo);
-    if (job == null || !Objects.equals(job.leaseOwner, token) || terminal(job.state)) return false;
+    LocalDateTime now = now();
+    if (job == null
+        || token == null
+        || job.leaseOwner == null
+        || !job.leaseOwner.equals(token)
+        || job.leaseUntil == null
+        || !job.leaseUntil.isAfter(now)
+        || terminal(job.state)) return false;
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
     requireJob(job, execution);
     if (records.size() != 1) throw conflict();
@@ -125,7 +132,6 @@ public class PayTccDeliveryStore {
         || ("REFUND_PENDING".equals(job.state)
             && Set.of("ORDER_SYNC_UNKNOWN", "SUCCESS").contains(target))
         || ("REFUNDED".equals(target) && !"REFUND_PENDING".equals(job.state))) throw conflict();
-    LocalDateTime now = now();
     int changed;
     if (target.equals(payment.status)) changed = 1;
     else if ("ORDER_SYNC_UNKNOWN".equals(target)) changed = payments.markOrderUnknown(payNo, now);
@@ -142,12 +148,13 @@ public class PayTccDeliveryStore {
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void finish(String payNo, String token, int attempts, String error) {
     if (error != null && error.length() > 512) error = error.substring(0, 512);
+    LocalDateTime now = now();
     deliveries.finishAttempt(
         payNo,
         token,
-        now().plusSeconds(PayTccRecoveryScheduler.retryDelaySeconds(attempts)),
+        now.plusSeconds(PayTccRecoveryScheduler.retryDelaySeconds(attempts)),
         error,
-        now());
+        now);
   }
 
   /** 读取原任务，不补建、扣款或调用远程资源。 */
