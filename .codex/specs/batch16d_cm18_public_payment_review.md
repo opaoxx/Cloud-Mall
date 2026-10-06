@@ -10,7 +10,7 @@
 
 1. `cloudmall.pay.debit-mode` 允许 `LEGACY`/`TCC`，默认 `LEGACY`；配置为 `TCC` 还必须校验独立 TCC entry、coordinator、receipt、User bridge、recovery、delivery、Seata 及未代理 DataSource 等既有前置开关。TCC entry Bean 使用可选注入，相关 flag 默认关闭；任一前置未开时启动失败。未知、空串、小写和尾随空格仍启动失败。
 2. 新建支付单把选择冻结到 `pay_record.debit_mode`。成功模拟和成功回调按持久模式路由：LEGACY 继续现有一致性服务；TCC 只走既有 coordinator `execute/recover`，执行已确认后只走既有 delivery `deliver`。
-3. TCC `fail`/`callback-failure` 本批保守返回结果未知（HTTP 202），只做本地读取/核验，不发任何 RPC、不调用 Order cancel、不写 `pay_record.FAILED`，不创建或补建 execution，不发送 Legacy debit/refund。仅在已经有完整 `ROLLEDBACK` 证据时允许按下文规则投影 FAILED。
+3. TCC `fail`/`callback-failure` 在 16D 默认边界下保守返回结果未知（HTTP 202），只做本地读取/核验，不发任何 RPC、不调用 Order cancel、不写 `pay_record.FAILED`，不创建或补建 execution，不发送 Legacy debit/refund。16E 的独立 cancel opt-in 允许无 execution 且完整 Order/Stock 取消证据下以取消台账同事务投影 FAILED；已有 execution 仍遵循本规格 202 边界。ROLLEDBACK 仍按下文规则投影 FAILED。
 4. 成功/失败回调的 `callbackId` 并发幂等必须先在独立 `REQUIRES_NEW` 事务 `INSERT IGNORE` 预绑定 `payNo/userId/amount/success` payload，状态为 `RECEIVED_SUCCESS`/`RECEIVED_FAILURE` 且 `processed_at=NULL`；重放仍执行/核对真实支付结果，不能仅凭日志返回 200。跨支付、成功/失败方向不同、金额或用户不一致均 409。
 5. 保持公开 API 的 Gateway Bearer/RedisToken 鉴权、金额字符串、时间和现有 202/409/503 语义；不新增公网接口、回调鉴权方式、数据库表或新的补偿主题。
 
@@ -47,7 +47,7 @@
 - 已 `SUCCESS`/`REFUNDED` 返回既有 409；已 `FAILED` 可按原幂等语义返回。
 - TCC callback-failure 先预绑定 `RECEIVED_FAILURE`，不把它当作处理终态；返回 202 时保持 `processed_at=NULL`，真实结果处理成功后才更新为 `FAILED` 并写 `processed_at`。
 
-此边界明确表示本批不提供“用户主动失败立即关单”的 TCC 业务能力。订单超时/既有订单恢复仍按其自身持久状态工作；本批不新增取消恢复链路。
+此边界明确表示 16D 默认不提供“用户主动失败立即关单”的 TCC 业务能力；16E 以独立 opt-in 取消台账补充无 execution 场景，订单超时/既有订单恢复仍按其自身持久状态工作。
 
 ### 4.2 并发安全要求
 

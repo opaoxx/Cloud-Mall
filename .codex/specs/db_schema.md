@@ -475,6 +475,8 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 第 16C `pay_tcc_delivery` 的 READY 只表示本地 COMMITTED execution 派生的待核验意图，不代表 User/Order 远程证据已完成；ROLLEDBACK execution 不建 job。每次 RPC 前重查本地 proof 和 User live TCC tuple；PayRecord 状态与 delivery 状态在同一 Pay 本地事务同向更新。User DEBIT 已有任何 refundOperationKey 时不能 paid，退款只能使用唯一 `refund:<payNo>` 并在 POST 后 GET 核验。
 
+第 16E 新增 `pay_tcc_cancel`：唯一 `pay_no`，冻结 user/order/amount，状态为 `REQUESTED/ORDER_CANCELLED/CANCEL_UNKNOWN/COMPLETED/CONFLICT`，并带 attempts、next_retry_at、随机 lease_owner/lease_until、last_error。取消表无条件初始化；`tcc-cancel.enabled` 只控制新取消入口和调度，不控制 execution/bridge/receipt 的 gate。`COMPLETED` 只允许在无 execution/dispatch/receipt、Order CANCELLED + stock SUCCEEDED 的短事务内与 Pay `PENDING→FAILED` 同步 CAS；台账不拥有 XID/decision。首次取消、TCC execution claim、bridge.prepare、receipt.claim 均先锁 `pay_record` 再检查该台账；已有台账永久阻止未来 begin。迁移与新 schema 必须保持上述唯一键和 due 索引，默认调度关闭。
+
 第 16B3 只增加恢复调度字段 `recovery_attempts、next_recovery_at、recovery_owner、recovery_lease_until、recovery_last_error`；这些字段不拥有 XID/branch/decision，不可接管一次性 Try。lease 使用随机 token，释放使用 token CAS；终态和业务状态不被调度迁移改写。
 
 恢复默认 lease 60 秒；旧 RPC 过期后可与新实例重叠，但只能同 decision 幂等执行。`next_recovery_at` 默认 CURRENT_TIMESTAMP(3)，新 execution claim 显式写入创建时间后 30 秒；历史迁移不改写原业务字段。调度器最多每轮 20 条，attempt 封顶 31，退避 5 秒指数增长至 300 秒。
