@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS balance_debit_attempt (
 );
 ```
 
-`mode` 为 `LEGACY` 或 `TCC`；`state` 为 `TRYING`、`CONFIRMED`、`CANCELLED`。余额不足的 Try 整笔本地事务回滚，不写失败归属。新 Legacy 扣款也必须在用户行锁后认领该表，避免同一 payNo 与 TCC 并发。Legacy 的 `operationKey` 不保证等于 `payNo`，因此互斥检查必须按 `pay_no` 查询 `balance_ledger` 的 DEBIT 事实，不能只查 `operation_key=payNo`。历史 `balance_ledger` 没有归属行时，读取阶段按 `pay_no` 查账本并视为既有 Legacy 事实；新请求必须先插入归属行，唯一键冲突时完整校验用户、订单、金额、模式和 operationKey。
+`mode` 为 `LEGACY` 或 `TCC`。Legacy 归属状态为 `APPLIED/REJECTED`，TCC 归属状态为 `TRYING/CONFIRMED/CANCELLED`；Legacy 不允许留下未完成 `TRYING`。余额不足的 TCC Try 整笔本地事务回滚，不写失败归属。新 Legacy 扣款也必须在用户行锁后认领该表，避免同一 payNo 与 TCC 并发。Legacy 的 `operationKey` 不保证等于 `payNo`，因此互斥检查必须按 `pay_no` 查询 `balance_ledger` 的 DEBIT 事实，不能只查 `operation_key=payNo`。历史 `balance_ledger` 没有归属行时，读取阶段按 `pay_no` 查账本并视为既有 Legacy 事实；新请求必须先插入归属行，唯一键冲突时完整校验用户、订单、金额、模式和 operationKey。
 
 ### 3.3 `balance_tcc_debit`
 
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS balance_tcc_debit (
 );
 ```
 
-`state` 只允许 `TRYING`、`CONFIRMED`、`CANCELLED`。`operation_key` 固定为 `tcc-debit:<payNo>`，重试不能生成新键。TCC 行和共享尝试行必须在同一 User 数据库事务内写入。
+`state` 只允许 `TRYING`、`CONFIRMED`、`CANCELLED`。`operation_key` 固定为 `tcc-debit:<payNo>`，重试不能生成新键。唯一 `xid`、唯一 `(xid,branch_id)` 和唯一 `pay_no` 刻意约束“一笔 User TCC 资金资源 = 一个 XID + 一个 branchId + 一个 payNo”；不同 XID 或 branchId 必须冲突。TCC 行和共享尝试行必须在同一 User 数据库事务内写入。
 
 ## 4. 锁顺序和互斥规则
 

@@ -29,6 +29,8 @@
 | `username` | VARCHAR(64) UNIQUE NOT NULL | 登录名 |
 | `password_hash` | VARCHAR(255) NOT NULL | 密码摘要，不存明文 |
 | `role` | VARCHAR(16) NOT NULL DEFAULT 'USER' | 用户角色，当前支持 `USER`、`ADMIN` |
+| `balance` | DECIMAL(18,2) NOT NULL DEFAULT 0.00 | Legacy 可用余额事实 |
+| `frozen_balance` | DECIMAL(18,2) NOT NULL DEFAULT 0.00 | 第 14 轮 User TCC 冻结额；不混入 Legacy 可用余额 |
 | `nickname` | VARCHAR(128) | 昵称 |
 | `phone` | VARCHAR(32) | 联系电话，脱敏展示 |
 | `avatar_url` | VARCHAR(512) | 头像地址 |
@@ -456,6 +458,10 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 | `created_at` | DATETIME(3) NOT NULL | 创建时间 |
 
 索引：`uk_balance_operation(operation_key)`、`idx_balance_order(order_no,created_at)`、`idx_balance_original(original_operation_key)`。退款操作必须以 `original_operation_key` 唯一对应已应用扣款，且退款总额不得超过原扣款；扣款与 `mall_user.balance` 条件更新在同一事务中完成。
+
+第 14 轮新增 `balance_debit_attempt` 和 `balance_tcc_debit` 只服务 User 本地 TCC 就绪状态机。Legacy 归属最终为 `APPLIED/REJECTED`，TCC 归属为 `TRYING/CONFIRMED/CANCELLED`；同一 `pay_no`、XID、branchId 的唯一约束防止 Legacy/TCC 互斥失败和同资源重复分支。余额不足的 TCC Try 整笔回滚，不写失败归属。Confirm/Cancel 目前是 User 内部本地事务方法，尚未接入 Seata Fence、Pay TCC 或 HTTP 编排。
+
+`balance_debit_attempt` 至少包含 `pay_no`、`operation_key`、`mode`、`xid`、`branch_id`、`user_id`、`order_no`、`amount`、`state` 和审计时间，唯一约束为 `pay_no`、`operation_key`、`(xid,branch_id)`。`balance_tcc_debit` 至少包含相同业务键、`balance_before`、`balance_after_try` 和状态，唯一约束为 `operation_key`、`xid`、`(xid,branch_id)`、`pay_no`。两表与 `mall_user` 使用同一 User 数据源和锁顺序；任何未来 Fence 表必须继续位于同一数据源。
 
 ### 7.4 `pay_debit_intent`
 
