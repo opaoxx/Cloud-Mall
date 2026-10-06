@@ -276,12 +276,29 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_receipt.sql |
 
 begin 响应丢失且 XID 未落库时保留 `BEGIN_UNKNOWN`；已有 XID 但没有 decision 时恢复只观察，不自动提交、不重做 Try。两个资源或其证据缺失时继续 UNKNOWN，TC Unknown 本身不能推断资金结果。原调用仍在等待 begin 响应时，其他线程的 UNKNOWN 观察不会剥夺它保存原 XID 的权限。
 
-`cloudmall.pay.tcc-coordinator.enabled=false` 默认关闭；启用要求 receipt、bridge、Seata 均启用且 AT 代理关闭。`cloudmall.pay.tcc-coordinator.timeout-ms` 默认 30000，允许范围为 1–120000 毫秒。execute/recover 拒绝继承外部 XID 或本地事务。当前仅提供内部 Java Service，没有新 HTTP 或定时扫描器，自动恢复扫描、Order/Stock/退款衔接和对外入口切换仍待后续批次。
+`cloudmall.pay.tcc-coordinator.enabled=false` 默认关闭；启用要求 receipt、bridge、Seata 均启用且 AT 代理关闭。`cloudmall.pay.tcc-coordinator.timeout-ms` 默认 30000，允许范围为 1–120000 毫秒。execute/recover 拒绝继承外部 XID 或本地事务。当前仅提供内部 Java Service，没有新 HTTP；16B3 已增加下述可选恢复扫描，Order/Stock/退款衔接和对外入口切换仍待后续批次。
 
 ```powershell
 Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_execution.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
+
+### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
+
+`cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。扫描器只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。`BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致的记录在 SQL 的 LIMIT 前排除，保留人工核验。
+
+默认每 5 秒扫描一次、每轮最多 20 条，开始下一条前检查 10 秒预算，不强杀在途 RPC。新 execution 首次调度在创建后 30 秒；每次恢复使用独立随机 token 和 60 秒租约，RPC 在认领事务提交后执行。租约过期后可能出现同方向 RPC 重叠，原 coordinator 保证幂等；旧 token 不能释放新租约或覆盖新重试时间。
+
+失败与尚未结束的结果按 5、10、20……秒退避，最大 300 秒。尝试计数饱和到 31 后仍继续低频恢复，不会永久停掉；调度器不把异常改写为支付失败。它只管理调度字段，交易结果仍由两端永久事实核对决定。
+
+可调整 `cloudmall.pay.tcc-recovery.interval-ms`、`batch-size`（1–20）、`lease-seconds`（1–300）和 `budget-ms`（1–10000）。已有 execution 表可重复执行下面的迁移；它只增加调度字段，不改 XID、原载荷、state 或 decision：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_recovery.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
+
+本阶段未切换公开支付入口，也未接入订单/库存/退款交付。查询限制的是返回批量和调度预算，尚未完成大表容量及新增索引的负载验收。
 
 ## 验证命令
 
@@ -377,6 +394,20 @@ mvn -pl backend/cloud-mall-pay -am test `
 13 项测试覆盖自动 begin/双资源决议、并发执行、User 响应丢失、commit/rollback 请求丢失、commit ACK 丢失、begin 响应未知、决议前中断、上下文/载荷冲突及 begin 等待期间的并发观察。另启动真实 Pay 子 JVM，在决议已落库或仅 XID 已落库的 barrier 终止进程，再以同 appId 和数据库重启：前者沿原 COMMIT 收敛，后者保留 UNKNOWN，不 begin/不 Try/不新增 decision。
 
 测试日志、原 XID、进程参数与两端快照保存在 `target/cm16b2-coordinator/`。测试注入器捕获的原 XID 只用于真实 TC 终态核验和现场清理，不会回填 execution 来伪造业务恢复；begin 未知或缺少分支事实的业务结果仍保持 UNKNOWN。所有测试库只在原 TC 已结束、冻结归零且无 TRYING receipt 后精确清理。真实环境缺少这些证据时必须保留原事实。
+
+16B3 的恢复 SQL/租约验证和真实自动恢复分别在独立 JVM 运行：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayTccRecoveryScanMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_pay?serverTimezone=Asia/Shanghai'
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayTccRecoveryAutomaticIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+前者在关闭 Seata 的随机 `cm16b3_scan_*` 库验证 8 项 SQL、租约竞争和旧数据迁移；后者用真实 Pay/User/TC 验证 5 项自动提交/取消、NONE 只读、未知 begin 不占窗口，以及 Pay 重启后的定时恢复，日志位于 `target/cm16b3-automatic/`。恢复 claim/RPC/release 各窗口的独立进程中断没有逐一演练；token 过期与迟到完成保护已有确定性 MySQL 验证。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 

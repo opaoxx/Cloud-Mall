@@ -80,6 +80,8 @@ public class PayTccExecutionStore {
     execution.decision = "NONE";
     execution.createdAt = now();
     execution.updatedAt = execution.createdAt;
+    execution.recoveryAttempts = 0;
+    execution.nextRecoveryAt = execution.createdAt.plusSeconds(30);
     // 3. 独立提交先于任何 TC 网络调用；失败不调用 begin。
     if (executions.insert(execution) != 1) throw new IllegalStateException("execution claim 未成功");
     return true;

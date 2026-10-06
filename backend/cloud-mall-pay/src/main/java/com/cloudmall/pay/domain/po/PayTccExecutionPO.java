@@ -55,4 +55,24 @@ public class PayTccExecutionPO {
   /** 更新时间。 */
   @TableField("updated_at")
   public LocalDateTime updatedAt;
+
+  /** 已执行恢复尝试次数，上限由恢复认领 SQL 强制为 31。 */
+  @TableField("recovery_attempts")
+  public Integer recoveryAttempts;
+
+  /** 下一次允许恢复的时间。 */
+  @TableField("next_recovery_at")
+  public LocalDateTime nextRecoveryAt;
+
+  /** 当前恢复 lease token。 */
+  @TableField("recovery_owner")
+  public String recoveryOwner;
+
+  /** 当前恢复 lease 到期时间。 */
+  @TableField("recovery_lease_until")
+  public LocalDateTime recoveryLeaseUntil;
+
+  /** 最近一次恢复错误摘要。 */
+  @TableField("recovery_last_error")
+  public String recoveryLastError;
 }
