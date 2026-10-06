@@ -204,7 +204,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_debit_mode.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-持久记录为 `TCC`、未知模式或支付单与意图模式不一致时，支付处理返回 `PAY_DEBIT_MODE_UNAVAILABLE`/503。恢复器保留原状态、租约、尝试次数和重试时间，不调用旧余额扣款或退款路径。排查时核对两张表的原始事实，不要手动改模式强行重试。
+持久记录为 `TCC`、未知模式或支付单与意图模式不一致时，支付处理返回 `PAY_DEBIT_MODE_UNAVAILABLE`/503。恢复器保留原状态、租约、尝试次数和重试时间，不调用旧余额扣款或退款路径。恢复扫描在 SQL 限制每批 50 条之前，仅选取支付单和意图均为精确 `LEGACY` 的记录，避免隔离记录占满扫描窗口；孤立意图、空串、小写及尾随空格模式也不进入窗口。排查时核对两张表的原始事实，不要手动改模式强行重试。
 
 本阶段尚未实现真实 Pay/User TCC 资金分支；CM-18 仍未闭环。Try/Confirm/Cancel、余额冻结和真实 TC 故障验收按后续评审阶段推进。
 
@@ -222,6 +222,16 @@ npm run build
 ```bash
 mvn test
 ```
+
+支付恢复扫描的 MySQL 集成测试需显式运行（先启动本地 MySQL 并完成支付模式迁移）：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayRecoveryScanMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_pay?serverTimezone=Asia/Shanghai'
+```
+
+该测试默认使用本地 `root/root`，可通过 `cloudmall.mysql.test.username/password` 覆盖。它复制现有表结构到当前连接的临时表，覆盖混合隔离记录、跨批恢复、到期/租约边界和领取前模式变化；连接关闭即清理，不写入持久化业务表。默认 `mvn test` 不运行 `*IT`，避免普通单元测试依赖本地 MySQL。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 

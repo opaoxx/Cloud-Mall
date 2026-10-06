@@ -78,13 +78,15 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 查找可恢复且没有有效租约的支付意图。 */
+  /** 先筛选两表均为 LEGACY 的到期意图再限制批量，避免隔离记录占满恢复窗口。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
-        "SELECT * FROM pay_debit_intent WHERE status IN"
-            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
-            + " AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<=?)"
-            + " ORDER BY next_retry_at,id LIMIT ?",
+        "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
+            + " payment.pay_no=intent.pay_no WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
+            + " payment.debit_mode='LEGACY' AND intent.status IN"
+            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
+            + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
+            + " ORDER BY intent.next_retry_at,intent.id LIMIT ?",
         ROW_MAPPER,
         now,
         now,
