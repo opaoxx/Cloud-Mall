@@ -467,6 +467,8 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 第 16A 新增 Pay `pay_tcc_dispatch` 和 User `user_tcc_receive` 作为跨服务一次性派发事实。Pay dispatch 只能绑定原 `pay_record` 中精确 `TCC + PENDING` 的 payNo/user/order/amount；User receive 以 payNo、XID、operationKey、ledgerKey 唯一认领，`CLAIMED` 写入后才允许进入 LocalTCC。两张表不替代资金事实，重复 POST 只读取它们和 User attempt/TCC/ledger，不能注册第二 branch。GET 状态必须由一致快照核对，`TRYING` 不等于已扣款，终态不得被未知结果覆盖。
 
+第 16B1 新增 Pay `pay_tcc_receipt`，为 Pay 自有 LocalTCC/Fence 事实，不是 User 状态镜像。表状态只允许 `CLAIMED/TRYING/CONFIRMED/CANCELLED`，唯一约束为 payNo、XID、operationKey、ledgerKey，branch_id 在 CLAIMED 时可空，绑定后不可变。`PayTccReceiptService.prepare` 先复用 dispatch anchor，再由唯一 winner 注册 action name `cloudmallPayDebitReceipt` 的 Pay branch；空 Cancel 对已存在 CLAIMED 行绑定原 branch 并写 CANCELLED，receipt 行不存在时不得凭空创建。配置默认关闭，Pay receipt 与 dispatch/Fence 必须使用同一 Pay DataSource，禁止 AT 自动代理。
+
 ### 7.4 `pay_debit_intent`
 
 支付服务在调用用户余额服务前，必须先在支付库独立提交扣款意图。该表覆盖进程在用户扣款提交后、`pay_record` 更新前退出的窗口；恢复任务扫描该表，而不能只扫描支付记录状态。

@@ -58,6 +58,8 @@ CM-18 第 12A 阶段完成支付路由的持久协议隔离：`pay_record.debit_
 
 第 16A 增加 Pay/User TCC 派发桥但不切换对外支付：Pay 先校验原支付单精确 `TCC + PENDING`，在一次性 dispatch 台账中提交 XID/载荷和 POST_ATTEMPTED，再通过 Nacos/Feign 调用 User Try；User 先写 `user_tcc_receive=CLAIMED`，唯一 winner 才进入 LocalTCC。POST 响应未知只能由原 payNo/XID GET 查询，禁止重发。Gateway/Auth 先阻断所有 `tcc-debits` 服务路径及编码/参数变体；Confirm/Cancel 仍只由 TC 回调。Pay receipt、主编排、Order/Stock 和 Pay 对外入口切换仍后置。
 
+第 16B1 增加 Pay 自有 `pay_tcc_receipt` LocalTCC 资源，action name 固定 `cloudmallPayDebitReceipt`，其状态 `CLAIMED/TRYING/CONFIRMED/CANCELLED` 是 Pay 侧事实，不是 User 镜像。receipt prepare 先复用 16A dispatch 的持久 anchor，再由唯一 CLAIMED winner 注册 Pay branch；User dispatch 由独立测试/后续编排以同一 XID 调用，不由 receipt Try 自动发起。资源默认 `cloudmall.pay.tcc-receipt.enabled=false`，开启时须启用 Pay bridge/Seata、关闭 AT 自动代理并复用同一 Pay DataSource Fence。Confirm/Cancel 只由 TC RM 回调，Pay 对外支付、Order/Stock、退款和主编排仍未接入。
+
 ### 4.3 超时关单
 
 order 创建待支付订单时，在保存订单的同一本地事务中写入 timeout outbox 记录；事务提交后由 dispatcher 以 publisher confirm 投递到现有 TTL + DLX 链路，并以同一 `eventId` 标记发送成功。dispatcher 对未发送或确认超时记录持续重试，不能在事务内直接依赖 `convertAndSend` 的返回值。若 RabbitMQ 已 confirm 但 outbox 更新失败，记录保持 `PENDING` 并重发同一 `eventId`；消费者按 `eventId`/订单 CAS 幂等处理。兼容存量 String 订单号消息：消费者将其转换为 `legacy-timeout:{orderNo}`，从订单读取 `expireAt` 后按相同 CAS 关单路径处理；新消息使用包含 `eventId`、`eventType`、`orderNo`、`expireAt`、`traceId` 的 JSON envelope。关单消费者检查订单号、事件号和过期时间，只有 CAS 成功取消待支付订单后通知 stock 回滚。

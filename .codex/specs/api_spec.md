@@ -191,6 +191,8 @@ CM-18 第 16A 只允许显式内部测试/迁移入口使用 TCC bridge。Pay �
 
 16A 的 User receive 只持久化不可变 `CLAIMED`；TRY_UNKNOWN、TRYING、CONFIRMED、CANCELLED 从 attempt/TCC/ledger/Fence 一致快照只读推导。余额不足 `PAYMENT_FAILED`、资金未知 `BALANCE_TCC_UNKNOWN` 和普通 HTTP 4xx 不能直接映射为支付拒绝；没有持久拒绝事实时 Pay 必须保持 `TRY_UNKNOWN`。Feign 专属错误解析仅将完整 JSON 中的 `IDEMPOTENCY_CONFLICT`、`USER_TCC_STATE_CONFLICT` 映射为派发冲突，不能按 HTTP 409 整体分类。
 
+CM-18 第 16B1 新增 Pay 自有 `pay_tcc_receipt` LocalTCC 资源，action name 固定为 `cloudmallPayDebitReceipt`，状态为 `CLAIMED/TRYING/CONFIRMED/CANCELLED`；它不是 User 状态镜像。`PayTccReceiptService.prepare(PayTccDispatchDTO)` 先调用 16A dispatch 的持久 anchor，再由 CLAIMED 唯一 winner 注册 Pay receipt branch；不自动调用 User、不创建新 XID。配置 `cloudmall.pay.tcc-receipt.enabled=false` 默认关闭，开启时必须同时启用 Pay bridge、Seata 并关闭 AT 自动数据源代理。Pay receipt Confirm/Cancel 没有 HTTP/Feign，Pay 对外支付仍为 LEGACY。
+
 支付服务与用户服务之间的内部接口契约：
 
 | 方法 | 路径 | 请求/响应 | 说明 |
