@@ -50,6 +50,15 @@ public interface PayTccExecutionMapper extends BaseMapper<PayTccExecutionPO> {
       @Param("state") String state,
       @Param("now") LocalDateTime now);
 
+  /** 仅将绑定 XID 且尚未选定方向的未决 execution CAS 为 ROLLBACK_REQUESTED。 */
+  @Update(
+      "UPDATE pay_tcc_execution SET"
+          + " decision='ROLLBACK',state='ROLLBACK_REQUESTED',updated_at=#{now},next_recovery_at=LEAST(next_recovery_at,#{now})"
+          + " WHERE BINARY pay_no=BINARY #{payNo} AND BINARY xid=BINARY #{xid} AND BINARY"
+          + " decision='NONE' AND BINARY state IN ('RUNNING','UNKNOWN')")
+  int requestRollback(
+      @Param("payNo") String payNo, @Param("xid") String xid, @Param("now") LocalDateTime now);
+
   /** 更新非终态观察结果，终态和冲突状态不可被回退。 */
   @Update(
       "UPDATE pay_tcc_execution SET state=#{state},last_error=#{lastError},updated_at=#{now} WHERE"

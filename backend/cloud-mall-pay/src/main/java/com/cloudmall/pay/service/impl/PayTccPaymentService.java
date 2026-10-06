@@ -34,6 +34,10 @@ public class PayTccPaymentService {
   @Autowired(required = false)
   private PayTccCancelService cancelService;
 
+  /** 显式开启取消后，完整双Try可竞争尚未选择的原回滚决议。 */
+  @Autowired(required = false)
+  private PayTccAbortService abortService;
+
   /** 唯一一次 begin 和原执行恢复入口。 */
   private final PayTccCoordinatorService coordinator;
 
@@ -126,7 +130,13 @@ public class PayTccPaymentService {
       // 已进入退款交付时保留明确的退款中语义；失败请求不推进交付或再次退款。
       if ("COMMITTED".equals(execution.state) && "REFUND_PENDING".equals(payment.status))
         throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
-      if (!"ROLLEDBACK".equals(execution.state)) throw pending();
+      if (!"ROLLEDBACK".equals(execution.state)) {
+        if (abortService != null && "NONE".equals(execution.decision)) {
+          abortService.requestRollback(payment);
+          throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "回滚请求已持久化，等待原资金结果", 202);
+        }
+        throw pending();
+      }
       try {
         // 2. 短事务投影成功后才更新返回视图，不读取外层旧 RR 快照。
         if (!"FAILED".equals(rollbackProjection.project(payment))) throw pending();

@@ -321,13 +321,13 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
 
 公开成功请求按持久支付模式路由。TCC 首次核验待支付订单后认领唯一 execution；重放恢复原 XID，资金确认后经 delivery 完成订单与库存交付。双端取消及无扣款证据齐全才投影 FAILED。切换新建配置不改变旧支付模式，不得手动改库迁移历史支付。
 
-TCC `mock-fail` 和失败 callback 对未决资金执行返回 202，不改变全局决议。16E 在独立开关下支持尚无资金执行的主动取消；16F 支持已经回滚且证明完整的失败收尾。其余已有 execution 的取消仍不接管，CM-18 未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
+TCC `mock-fail` 和失败 callback 对未决资金执行返回 202，取消开关关闭时不改变全局决议。16E 在独立开关下支持尚无资金执行的主动取消；16F 支持已经回滚且证明完整的失败收尾。16K在取消开关下支持完整双Try且尚未决议的原执行请求回滚；已COMMIT及其他证据不足场景仍不接管，CM-18未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
 
 ### 未开始扣款的 TCC 主动取消（CM-18 第 16 轮 E）
 
-`cloudmall.pay.tcc-cancel.enabled=false` 默认关闭，是独立于 16D 的可选能力。开启时要求完整 TCC 公开入口已启用。`mock-fail` / 失败 callback 在同一支付行锁下确认不存在 execution、dispatch、receipt 或 Legacy 意图后，独立提交 `pay_tcc_cancel`；提交成功后才通过 Order 查询/取消，RPC 不持有本地事务。
+`cloudmall.pay.tcc-cancel.enabled=false` 默认关闭，是独立于 16D 的可选能力。开启时要求完整 TCC 公开入口已启用。无execution时，`mock-fail` / 失败 callback 在同一支付行锁下确认不存在 execution、dispatch、receipt 或 Legacy 意图后，独立提交 `pay_tcc_cancel`；提交成功后才通过 Order 查询/取消，RPC 不持有本地事务。
 
-订单 `CANCELLED` 且库存动作 `SUCCEEDED` 后，取消台账 `COMPLETED` 与 Pay `FAILED` 在同一短事务提交；未知结果返回 202。尚未证明回滚的资金执行继续保守 202，不改变 TCC 决议、不主动退款；已回滚失败收尾见 16F。台账在 Pay 启动时幂等建表，关闭取消开关仍保留 execution/bridge/receipt 的永久阻断检查，不能靠关闭功能重启扣款。
+订单 `CANCELLED` 且库存动作 `SUCCEEDED` 后，取消台账 `COMPLETED` 与 Pay `FAILED` 在同一短事务提交；未知结果返回 202。已有资金执行不进入此取消台账；未决执行请求回滚见16K，已回滚失败收尾见16F。台账在 Pay 启动时幂等建表，关闭取消开关仍保留 execution/bridge/receipt 的永久阻断检查，不能靠关闭功能重启扣款。
 
 恢复器每轮最多 20 条、10 秒启动预算，60 秒随机 token lease，失败退避 5–300 秒。原订单载荷矛盾、已支付或库存冲突停止自动取消并记录 `CONFLICT`。新旧数据库均提供幂等迁移：
 
@@ -369,6 +369,14 @@ PENDING且无意图或已有FAILED意图保留原取消路径；ORDER_SYNC_UNKNO
 `mock-fail` 外层只做鉴权和路由，Legacy 失败服务在独立事务内重新核对当前事实、执行原 Order.cancel 和 FAILED CAS，并返回最新支付视图；失败 callback 也委托同一服务。意图先提交时失败请求保持202、不取消；失败先完成时旧成功请求不能新建意图。TCC 路径保持不变。
 
 本轮没有新增取消补偿或修改资金恢复流程。Order RPC 仍在 Legacy 失败事务内，保留原3/5秒Feign超时和异常语义；数据库锁等待使用既有数据库/事务机制，不承诺消除所有恢复场景的锁竞争。
+
+### TCC 已受理、未决议时请求回滚（第16轮K）
+
+复用默认关闭的 `cloudmall.pay.tcc-cancel.enabled`。当原execution已有XID、decision仍NONE，且Pay receipt/Fence与User当前事实均证明同一双分支TRYING、无扣款账本时，mock-fail/失败callback可持久选择原ROLLBACK决议。先COMMIT者不会被改向；回滚选择胜出时，迟到COMMIT不能覆盖。
+
+User查询位于两段短事务之间，最终按Pay→execution锁序重新校验原载荷与分支。只将decision/state推进为ROLLBACK/ROLLBACK_REQUESTED并提前恢复时间，不改原租约、不新建XID/分支/Try，不直接调用TC、Order或退款。选择成功后返回202，表示请求已持久化但尚未证明回滚完成；证据不足时也返回202，不能仅凭HTTP状态判断请求已受理。既有恢复器完成清算后，仍须16F/G的双端CANCELLED/no-ledger证明才写Pay FAILED。
+
+无XID、分支证据不足或已COMMIT仍保持原边界；已提交资金的订单取消不属于该功能。支付失败不替代订单/库存自身的生命周期处理。
 
 ## 验证命令
 
@@ -514,7 +522,7 @@ mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccPublicEntryIT' '-Dsurefire
 
 该测试创建独立数据库、Redis、Rabbit vhost 和发现组；核对原库校验和、TC 终态、资金与库存后清理，存在未决事实时保留现场。
 
-16E 取消验收使用相同的隔离中间件夹具，覆盖取消响应丢失、库存延迟、并发首次支付、独立 Pay 进程接手和租约/原子写入失败：
+16E/16K 取消验收使用相同隔离夹具，覆盖取消响应丢失、库存延迟、并发首次支付、独立Pay进程接手、租约/原子写入失败，以及原NONE决议的COMMIT/ROLLBACK竞争：
 
 ```powershell
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'

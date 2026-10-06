@@ -423,6 +423,34 @@ class PayTccRecoveryScanMySqlIT {
     assertEquals("PENDING", fixture.queryForObject("SELECT status FROM pay_record", String.class));
   }
 
+  @Test
+  void abortCasPreservesRecoveryLeaseAndNeverOverridesChosenCommit() {
+    insert(1, "abort-cas", "RUNNING", "NONE");
+    fixture.update(
+        "UPDATE pay_tcc_execution SET"
+            + " recovery_owner='existing-owner',recovery_lease_until=?,recovery_attempts=7,next_recovery_at=?",
+        NOW.plusSeconds(60),
+        NOW.plusMinutes(1));
+    var executions = application.getBean(PayTccExecutionMapper.class);
+    assertEquals(1, executions.requestRollback("abort-cas", "fixture-abort-cas", NOW));
+    var chosen = executions.selectByPayNo("abort-cas");
+    assertEquals("ROLLBACK", chosen.decision);
+    assertEquals("ROLLBACK_REQUESTED", chosen.state);
+    assertEquals("existing-owner", chosen.recoveryOwner);
+    assertEquals(NOW.plusSeconds(60), chosen.recoveryLeaseUntil);
+    assertEquals(7, chosen.recoveryAttempts);
+    assertEquals(NOW, chosen.nextRecoveryAt);
+    assertEquals(
+        0,
+        executions.setDecision(
+            "abort-cas", "fixture-abort-cas", "COMMIT", "COMMIT_REQUESTED", NOW));
+    assertEquals(0, executions.requestRollback("abort-cas", "fixture-abort-cas", NOW));
+    insert(2, "commit-first", "COMMIT_REQUESTED", "COMMIT");
+    assertEquals(0, executions.requestRollback("commit-first", "fixture-commit-first", NOW));
+    insert(3, "invalid-case", "RUNNING", "none");
+    assertEquals(0, executions.requestRollback("invalid-case", "fixture-invalid-case", NOW));
+  }
+
   /** 仅供隔离SQL测试的原载荷；不注册任何真实TC分支或写User资金。 */
   private void branches(String payNo) {
     fixture.update(

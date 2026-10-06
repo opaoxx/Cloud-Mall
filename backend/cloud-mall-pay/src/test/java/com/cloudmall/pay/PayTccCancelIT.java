@@ -497,15 +497,15 @@ class PayTccCancelIT {
       await(
           () -> {
             try {
-              return post("/api/payments/" + request.payNo + "/mock-success", Map.of(), Map.of())
-                      .status()
-                  == 200;
+              post("/api/payments/" + request.payNo + "/mock-success", Map.of(), Map.of());
+              return Set.of("SUCCESS", "FAILED").contains(paymentState());
             } catch (Exception failure) {
               throw new RuntimeException(failure);
             }
           },
           30);
-      assertFunds("90.00", 1, 0);
+      if ("FAILED".equals(paymentState())) assertFunds("100.00", 0, 0);
+      else assertFunds("90.00", 1, 0);
     }
   }
 
@@ -666,6 +666,251 @@ class PayTccCancelIT {
     assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
     assertEquals("PENDING_PAYMENT", orderState());
     assertFunds("1.00", 0, 0);
+  }
+
+  @Test
+  @Order(8)
+  void preparedUndecidedPaymentCanDurablyChooseRollback() throws Exception {
+    createPublic();
+    try (CommitPause pause = new CommitPause(false)) {
+      pause.start();
+      assertEquals("NONE", decision());
+      assertEquals(
+          "TRYING", payDb.queryForObject("SELECT state FROM pay_tcc_receipt", String.class));
+      assertEquals(
+          "TRY_ACCEPTED", payDb.queryForObject("SELECT state FROM pay_tcc_dispatch", String.class));
+      Response failure = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+      assertEquals(202, failure.status(), failure.body().toString());
+      assertEquals("ROLLBACK", decision());
+      assertEquals(
+          "ROLLBACK_REQUESTED",
+          payDb.queryForObject("SELECT state FROM pay_tcc_execution", String.class));
+      assertEquals("PENDING", paymentState());
+      pause.release.countDown();
+      assertEquals(202, pause.response.get(20, TimeUnit.SECONDS).status());
+      assertEquals(
+          202,
+          post(
+                  "/api/payments/callback",
+                  callback(false, "abort-before-decision"),
+                  callbackHeaders())
+              .status());
+      assertEquals(
+          1,
+          payDb.queryForObject(
+              "SELECT COUNT(*) FROM pay_callback_log WHERE callback_status='RECEIVED_FAILURE' AND"
+                  + " processed_at IS NULL",
+              Integer.class));
+      pause.resumeRecovery();
+      await(() -> "FAILED".equals(paymentState()), 30);
+      assertEquals(
+          200,
+          post(
+                  "/api/payments/callback",
+                  callback(false, "abort-before-decision"),
+                  callbackHeaders())
+              .status());
+      assertEquals("PENDING_PAYMENT", orderState());
+      assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
+      assertEquals(
+          1, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_execution", Integer.class));
+      assertEquals(1, proxies.get("user").postCount());
+      assertFunds("100.00", 0, 0);
+    }
+  }
+
+  @Test
+  @Order(9)
+  void commitDecisionWinnerCannotBeReversedByFailure() throws Exception {
+    createPublic();
+    try (CommitPause pause = new CommitPause(true)) {
+      pause.start();
+      assertEquals("COMMIT", decision());
+      int reads = proxies.get("user").getCount();
+      Response failure = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+      assertEquals(202, failure.status());
+      assertEquals("COMMIT", decision());
+      assertEquals(reads, proxies.get("user").getCount());
+      pause.release.countDown();
+      assertTrue(Set.of(200, 202).contains(pause.response.get(20, TimeUnit.SECONDS).status()));
+      await(
+          () -> {
+            forceDue();
+            try {
+              return post("/api/payments/" + request.payNo + "/mock-success", Map.of(), Map.of())
+                      .status()
+                  == 200;
+            } catch (Exception failureResult) {
+              throw new RuntimeException(failureResult);
+            }
+          },
+          30);
+      assertFunds("90.00", 1, 0);
+      assertEquals("PAID", orderState());
+    }
+  }
+
+  @Test
+  @Order(10)
+  void unavailableUserProofCannotChooseRollback() throws Exception {
+    createPublic();
+    try (CommitPause pause = new CommitPause(false)) {
+      pause.start();
+      proxies.get("user").setTccReadsUnavailable(true);
+      try {
+        assertEquals(
+            202,
+            post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
+        assertEquals("NONE", decision());
+        assertEquals("PENDING", paymentState());
+      } finally {
+        proxies.get("user").setTccReadsUnavailable(false);
+      }
+      pause.release.countDown();
+      assertTrue(Set.of(200, 202).contains(pause.response.get(20, TimeUnit.SECONDS).status()));
+      assertEquals("COMMIT", decision());
+    }
+  }
+
+  @Test
+  @Order(11)
+  void failureCallbackCanAbortPreparedExecutionAfterCallerExited() throws Exception {
+    createPublic();
+    Object coordinator =
+        org.springframework.test.util.AopTestUtils.getUltimateTargetObject(
+            application.getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class));
+    var original =
+        (com.cloudmall.pay.service.impl.PayTccExecutionStore)
+            ReflectionTestUtils.getField(coordinator, "executions");
+    var intercepted =
+        org.mockito.Mockito.mock(
+            com.cloudmall.pay.service.impl.PayTccExecutionStore.class,
+            org.mockito.AdditionalAnswers.delegatesTo(original));
+    org.mockito.Mockito.doThrow(new IllegalStateException("fixture caller exited before decision"))
+        .when(intercepted)
+        .decide(
+            org.mockito.ArgumentMatchers.eq(request.payNo),
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.eq("COMMIT"));
+    ReflectionTestUtils.setField(coordinator, "executions", intercepted);
+    try {
+      assertEquals(
+          202,
+          post("/api/payments/" + request.payNo + "/mock-success", Map.of(), Map.of()).status());
+    } finally {
+      ReflectionTestUtils.setField(coordinator, "executions", original);
+    }
+    assertEquals("NONE", decision());
+    Response cancelled =
+        post("/api/payments/callback", callback(false, "orphan-abort"), callbackHeaders());
+    assertEquals(202, cancelled.status(), cancelled.body().toString());
+    assertEquals("ROLLBACK", decision());
+    await(() -> "FAILED".equals(paymentState()), 30);
+    assertEquals(
+        200,
+        post("/api/payments/callback", callback(false, "orphan-abort"), callbackHeaders())
+            .status());
+    assertEquals("PENDING_PAYMENT", orderState());
+    assertFunds("100.00", 0, 0);
+  }
+
+  private String decision() {
+    return payDb.queryForObject(
+        "SELECT decision FROM pay_tcc_execution WHERE pay_no=?", String.class, request.payNo);
+  }
+
+  /** 只暂停成功线程的决议点；mock-fail不占成功/callback的同实例同步锁。 */
+  private final class CommitPause implements AutoCloseable {
+    /** 原协调器及独立事务Store代理。 */
+    private final Object coordinator;
+
+    private final com.cloudmall.pay.service.impl.PayTccExecutionStore original;
+
+    /** 测试持有恢复调度权时不让定时器提前清算。 */
+    private final AtomicBoolean recoveryRunning;
+
+    private boolean ownsRecovery = true;
+
+    /** 决议点与成功线程继续执行的屏障。 */
+    private final CountDownLatch ready = new CountDownLatch(1);
+
+    private final CountDownLatch release = new CountDownLatch(1);
+
+    /** 真实HTTP成功请求线程。 */
+    private final ExecutorService caller = Executors.newSingleThreadExecutor();
+
+    private Future<Response> response;
+
+    private CommitPause(boolean commitFirst) throws Exception {
+      coordinator =
+          org.springframework.test.util.AopTestUtils.getUltimateTargetObject(
+              application.getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class));
+      original =
+          (com.cloudmall.pay.service.impl.PayTccExecutionStore)
+              ReflectionTestUtils.getField(coordinator, "executions");
+      recoveryRunning =
+          (AtomicBoolean)
+              ReflectionTestUtils.getField(
+                  application.getBean(com.cloudmall.pay.service.impl.PayTccRecoveryScheduler.class),
+                  "running");
+      await(() -> recoveryRunning.compareAndSet(false, true), 10);
+      var intercepted =
+          org.mockito.Mockito.mock(
+              com.cloudmall.pay.service.impl.PayTccExecutionStore.class,
+              org.mockito.AdditionalAnswers.delegatesTo(original));
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                com.cloudmall.pay.domain.po.PayTccExecutionPO chosen =
+                    commitFirst
+                        ? original.decide(
+                            invocation.getArgument(0),
+                            invocation.getArgument(1),
+                            invocation.getArgument(2))
+                        : null;
+                ready.countDown();
+                if (!release.await(15, TimeUnit.SECONDS))
+                  throw new IllegalStateException("decision barrier timed out");
+                return commitFirst
+                    ? chosen
+                    : original.decide(
+                        invocation.getArgument(0),
+                        invocation.getArgument(1),
+                        invocation.getArgument(2));
+              })
+          .when(intercepted)
+          .decide(
+              org.mockito.ArgumentMatchers.eq(request.payNo),
+              org.mockito.ArgumentMatchers.anyString(),
+              org.mockito.ArgumentMatchers.eq("COMMIT"));
+      ReflectionTestUtils.setField(coordinator, "executions", intercepted);
+    }
+
+    private void start() throws Exception {
+      response =
+          caller.submit(
+              () -> post("/api/payments/" + request.payNo + "/mock-success", Map.of(), Map.of()));
+      assertTrue(ready.await(10, TimeUnit.SECONDS));
+    }
+
+    private void resumeRecovery() {
+      if (ownsRecovery) {
+        ownsRecovery = false;
+        recoveryRunning.set(false);
+      }
+    }
+
+    /** 无论断言/HTTP是否失败都恢复原Store并释放屏障，避免遗留未决事务。 */
+    @Override
+    public void close() throws Exception {
+      release.countDown();
+      try {
+        if (response != null) response.get(20, TimeUnit.SECONDS);
+      } finally {
+        ReflectionTestUtils.setField(coordinator, "executions", original);
+        resumeRecovery();
+        caller.shutdownNow();
+      }
+    }
   }
 
   private com.cloudmall.pay.domain.vo.PayVO paymentView() {

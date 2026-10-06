@@ -191,6 +191,17 @@ class PayTccRollbackFailureTest {
     verify(delivery, never()).deliver(any());
   }
 
+  @Test
+  void disabledAbortDoesNotChooseUndecidedExecution() {
+    PayVO payment = payment();
+    PayTccExecutionPO execution = execution("RUNNING");
+    execution.decision = "NONE";
+    when(states.execution(payment.payNo)).thenReturn(execution);
+    assertEquals(
+        202, assertThrows(BizException.class, () -> service.failure(payment)).getHttpStatus());
+    org.mockito.Mockito.verifyNoInteractions(coordinator, delivery, orders, users, cancelService);
+  }
+
   private PayVO payment() {
     return payment("PENDING");
   }
