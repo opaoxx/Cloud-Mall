@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -160,14 +161,113 @@ class PayTccCommittedCancelMySqlIT {
   }
 
   @Test
-  void attemptedOrLeasedDeliveryCannotBeReversed() {
+  void activeAttemptedOrLeasedDeliveryCannotBeReversed() {
     insertFacts("attempted");
-    insertDelivery("attempted", "READY", 1, "old-worker", DUE.minusMinutes(1), DUE.minusMinutes(1));
+    LocalDateTime hostNow = hostNow();
+    insertDelivery(
+        "attempted", "READY", 1, "active-worker", hostNow.plusDays(1), hostNow.minusMinutes(1));
     BizException error =
         assertThrows(BizException.class, () -> cancellations.request(payment("attempted")));
     assertEquals(202, error.getHttpStatus());
     assertEquals("READY", deliveryState("attempted"));
     assertEquals(1, attempts("attempted"));
+  }
+
+  @Test
+  void expiredReadyDeliveryCanBeRedirectedWithoutChangingLeaseMetadata() {
+    insertFacts("expired-ready");
+    LocalDateTime hostNow = hostNow();
+    insertDelivery(
+        "expired-ready",
+        "READY",
+        3,
+        "expired-worker",
+        hostNow.minusMinutes(1),
+        hostNow.plusDays(1));
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='expired-ready'");
+    cancellations.request(payment("expired-ready"));
+    Map<String, Object> after =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='expired-ready'");
+    assertEquals("CANCEL_REQUESTED", after.get("state"));
+    assertEquals(before.get("attempts"), after.get("attempts"));
+    assertEquals(before.get("lease_owner"), after.get("lease_owner"));
+    assertEquals(before.get("lease_until"), after.get("lease_until"));
+    assertEquals(before.get("refund_operation_key"), after.get("refund_operation_key"));
+    assertTrue(nextRetry("expired-ready").isBefore(hostNow.plusDays(1).minusSeconds(1)));
+  }
+
+  @Test
+  void releasedReadyDeliveryCanBeRedirectedAfterClaimFinish() {
+    insertFacts("released-ready");
+    insertDelivery("released-ready", "READY", 0, null, null, DUE.minusMinutes(1));
+    assertNotNull(deliveries.claim("released-ready", "released-worker"));
+    deliveries.finish("released-ready", "released-worker", 1, "temporary");
+    Map<String, Object> released =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='released-ready'");
+    assertEquals("READY", released.get("state"));
+    assertEquals(1, released.get("attempts"));
+    assertNull(released.get("lease_owner"));
+    assertNull(released.get("lease_until"));
+    cancellations.request(payment("released-ready"));
+    assertEquals("CANCEL_REQUESTED", deliveryState("released-ready"));
+    Map<String, Object> after =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='released-ready'");
+    assertEquals(released.get("attempts"), after.get("attempts"));
+    assertNull(after.get("lease_owner"));
+    assertNull(after.get("lease_until"));
+    assertTrue(nextRetry("released-ready").isBefore((LocalDateTime) released.get("next_retry_at")));
+  }
+
+  @Test
+  void orderSyncUnknownDeliveryIsNeverRedirected() {
+    insertFacts("unknown-delivery");
+    insertDelivery("unknown-delivery", "READY", 0, null, null, DUE.minusMinutes(1));
+    assertNotNull(deliveries.claim("unknown-delivery", "unknown-worker"));
+    assertTrue(deliveries.stage("unknown-delivery", "unknown-worker", "ORDER_SYNC_UNKNOWN"));
+    BizException error =
+        assertThrows(BizException.class, () -> cancellations.request(payment("unknown-delivery")));
+    assertEquals(202, error.getHttpStatus());
+    assertEquals("ORDER_SYNC_UNKNOWN", deliveryState("unknown-delivery"));
+  }
+
+  @Test
+  void requestCancellationCasUsesExactFixedTimeAndLeaseShape() {
+    insertFacts("sql-ready");
+    insertDelivery("sql-ready", "READY", 0, null, null, DUE.minusMinutes(1));
+    assertEquals(1, deliveryMapper.requestCancellation("sql-ready", DUE));
+
+    insertFacts("sql-active");
+    insertDelivery("sql-active", "READY", 0, "active", DUE.plusSeconds(1), DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-active", DUE));
+
+    insertFacts("sql-boundary");
+    insertDelivery("sql-boundary", "READY", 0, "expired", DUE, DUE.minusMinutes(1));
+    assertEquals(1, deliveryMapper.requestCancellation("sql-boundary", DUE));
+
+    insertFacts("sql-partial");
+    insertDelivery("sql-partial", "READY", 0, null, DUE.minusMinutes(1), DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-partial", DUE));
+
+    insertFacts("sql-partial-owner");
+    insertDelivery("sql-partial-owner", "READY", 0, "owner-only", null, DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-partial-owner", DUE));
+
+    insertFacts("sql-blank-owner");
+    insertDelivery("sql-blank-owner", "READY", 0, " ", DUE.minusMinutes(1), DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-blank-owner", DUE));
+
+    insertFacts("sql-negative-attempts");
+    insertDelivery("sql-negative-attempts", "READY", -1, null, null, DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-negative-attempts", DUE));
+
+    insertFacts("sql-case");
+    insertDelivery("sql-case", "ready", 0, null, null, DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-case", DUE));
+
+    insertFacts("sql-unknown");
+    insertDelivery("sql-unknown", "ORDER_SYNC_UNKNOWN", 0, null, null, DUE.minusMinutes(1));
+    assertEquals(0, deliveryMapper.requestCancellation("sql-unknown", DUE));
   }
 
   @Test
@@ -241,6 +341,68 @@ class PayTccCommittedCancelMySqlIT {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  @Test
+  void requestAndOldStageCompetitionHasNoDeadlockAndProtectsDirection() throws Exception {
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      for (int index = 0; index < 10; index++) {
+        String payNo = "stage-race-" + index;
+        String token = "stage-worker-" + index;
+        insertFacts(payNo);
+        insertDelivery(payNo, "READY", 0, null, null, DUE.minusMinutes(1));
+        CyclicBarrier start = new CyclicBarrier(2);
+        Callable<Boolean> requestTask =
+            () -> {
+              start.await(15, TimeUnit.SECONDS);
+              try {
+                cancellations.request(payment(payNo));
+                return true;
+              } catch (BizException expected) {
+                assertEquals(202, expected.getHttpStatus());
+                return false;
+              }
+            };
+        Callable<Boolean> stageTask =
+            () -> {
+              start.await(15, TimeUnit.SECONDS);
+              PayTccDeliveryPO claimed = deliveries.claim(payNo, token);
+              if (claimed == null) return false;
+              try {
+                return deliveries.stage(payNo, token, "ORDER_SYNC_UNKNOWN");
+              } catch (BizException expected) {
+                return false;
+              }
+            };
+        Future<Boolean> request = pool.submit(requestTask);
+        Future<Boolean> stage = pool.submit(stageTask);
+        boolean requestAccepted = request.get(15, TimeUnit.SECONDS);
+        boolean stageAccepted = stage.get(15, TimeUnit.SECONDS);
+        if (requestAccepted) {
+          assertFalse(stageAccepted);
+          assertEquals("CANCEL_REQUESTED", deliveryState(payNo));
+          assertEquals("PENDING", paymentState(payNo));
+        } else {
+          assertTrue(stageAccepted);
+          assertEquals("ORDER_SYNC_UNKNOWN", deliveryState(payNo));
+          assertEquals("ORDER_SYNC_UNKNOWN", paymentState(payNo));
+        }
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void staleStageCannotPaidAfterCancellationIntentAccepted() {
+    insertFacts("stale-stage");
+    cancellations.request(payment("stale-stage"));
+    assertNotNull(deliveries.claim("stale-stage", "stale-worker"));
+    assertThrows(
+        BizException.class, () -> deliveries.stage("stale-stage", "stale-worker", "SUCCESS"));
+    assertEquals("CANCEL_REQUESTED", deliveryState("stale-stage"));
+    assertEquals("PENDING", paymentState("stale-stage"));
   }
 
   @Test
@@ -384,6 +546,15 @@ class PayTccCommittedCancelMySqlIT {
   private String paymentState(String payNo) {
     return fixture.queryForObject(
         "SELECT status FROM pay_record WHERE pay_no=?", String.class, payNo);
+  }
+
+  private LocalDateTime hostNow() {
+    return LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+  }
+
+  private LocalDateTime nextRetry(String payNo) {
+    return fixture.queryForObject(
+        "SELECT next_retry_at FROM pay_tcc_delivery WHERE pay_no=?", LocalDateTime.class, payNo);
   }
 
   private int attempts(String payNo) {

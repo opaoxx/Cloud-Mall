@@ -512,8 +512,7 @@ class PayTccCancelIT {
 
   @Test
   @Order(3)
-  void previouslyClaimedCommittedDeliveryRejectsCancellationEvenAfterLeaseExpiry()
-      throws Exception {
+  void activeCommittedDeliveryLeaseRejectsCancellation() throws Exception {
     createPublic();
     assertEquals(
         "COMMITTED",
@@ -525,7 +524,6 @@ class PayTccCancelIT {
         application.getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class);
     deliveryStore.ensure(request.payNo);
     assertNotNull(deliveryStore.claim(request.payNo, "prior-delivery"));
-    payDb.update("UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY)");
     assertEquals(
         202, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
     assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
@@ -534,6 +532,7 @@ class PayTccCancelIT {
     assertEquals("PENDING_PAYMENT", orderState());
     assertEquals("READY", deliveryStore.read(request.payNo).state);
     assertFunds("90.00", 1, 0);
+    deliveryStore.finish(request.payNo, "prior-delivery", 1, null);
   }
 
   @Test
@@ -959,6 +958,81 @@ class PayTccCancelIT {
             request.payNo));
     assertEquals("COMMIT", decision());
     stopReplacement();
+  }
+
+  /** 旧worker尚未取得paid许可时，过期READY可改向，迟到stage不能再发送paid。 */
+  @Test
+  @Order(14)
+  void expiredReadyCancellationBlocksLatePaidWorkerAndRefunds() throws Exception {
+    createPublic();
+    assertEquals(
+        "COMMITTED",
+        application
+            .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
+            .execute(request)
+            .state);
+    Object worker = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(delivery);
+    var original =
+        (com.cloudmall.pay.service.impl.PayTccDeliveryStore)
+            ReflectionTestUtils.getField(worker, "store");
+    var paused =
+        org.mockito.Mockito.mock(
+            com.cloudmall.pay.service.impl.PayTccDeliveryStore.class,
+            org.mockito.AdditionalAnswers.delegatesTo(original));
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              entered.countDown();
+              if (!release.await(30, TimeUnit.SECONDS))
+                throw new IllegalStateException("fixture stage timeout");
+              return original.stage(
+                  invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2));
+            })
+        .when(paused)
+        .stage(
+            org.mockito.ArgumentMatchers.eq(request.payNo),
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.eq("ORDER_SYNC_UNKNOWN"));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    Future<PayTccDeliveryVO> oldWorker = null;
+    ReflectionTestUtils.setField(worker, "store", paused);
+    try {
+      oldWorker = pool.submit(() -> delivery.deliver(request.payNo));
+      assertTrue(entered.await(15, TimeUnit.SECONDS));
+      assertEquals("READY", original.read(request.payNo).state);
+      payDb.update(
+          "UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE pay_no=?",
+          request.payNo);
+      var expired = original.read(request.payNo);
+      Response result = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+      assertEquals(202, result.status(), result.body().toString());
+      var cancellation = original.read(request.payNo);
+      assertEquals("CANCEL_REQUESTED", cancellation.state);
+      assertEquals(expired.attempts, cancellation.attempts);
+      assertEquals(expired.leaseOwner, cancellation.leaseOwner);
+      assertEquals(expired.leaseUntil, cancellation.leaseUntil);
+      release.countDown();
+      assertEquals("CANCEL_REQUESTED", oldWorker.get(20, TimeUnit.SECONDS).state);
+      assertEquals(0, proxies.get("order").paidPostCount());
+      assertEquals("PENDING", paymentState());
+    } finally {
+      release.countDown();
+      try {
+        if (oldWorker != null) oldWorker.get(20, TimeUnit.SECONDS);
+      } finally {
+        ReflectionTestUtils.setField(worker, "store", original);
+        pool.shutdownNow();
+      }
+    }
+    parentRunning.set(false);
+    pauseOwned = false;
+    await(() -> "REFUNDED".equals(paymentState()), 40);
+    assertEquals("CANCELLED", orderState());
+    assertEquals(0, proxies.get("order").paidPostCount());
+    assertFunds("100.00", 1, 1);
+    assertStock(10, 0, 0);
+    assertEquals("COMMIT", decision());
   }
 
   private String decision() {

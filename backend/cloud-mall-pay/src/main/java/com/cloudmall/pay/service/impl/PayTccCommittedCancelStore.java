@@ -81,6 +81,7 @@ public class PayTccCommittedCancelStore {
     // 2. 永久 gate 与原 TCC 事实优先于任何改向。
     if (cancellations.selectForUpdate(payment.payNo) != null
         || intents.findByPayNo(payment.payNo) != null) throw pending("存在其他取消或 Legacy 意图");
+    LocalDateTime currentTime = now();
     PayTccExecutionPO execution = executions.selectForUpdate(payment.payNo);
     if (execution == null
         || !"COMMITTED".equals(execution.state)
@@ -90,18 +91,24 @@ public class PayTccCommittedCancelStore {
     if (dispatch == null
         || !"COMMITTED".equals(evidence.classify(execution, PayTccDispatchVO.from(dispatch))))
       throw pending("TCC 永久证据尚未确认");
-    // 3. 缺失台账创建取消状态；READY 初始台账只能由无尝试租约窗口 CAS 改向。
+    // 3. 缺失台账创建取消状态；READY在租约已释放或过期时可CAS改向，保留历史尝试事实。
     if (current == null) {
-      insertCancellation(execution);
+      insertCancellation(execution, currentTime);
       return;
     }
     validateDelivery(current, execution);
     if ("CANCEL_REQUESTED".equals(current.state)) return;
+    boolean noLease = current.leaseOwner == null && current.leaseUntil == null;
+    boolean expiredLease =
+        current.leaseOwner != null
+            && !current.leaseOwner.isBlank()
+            && current.leaseUntil != null
+            && !current.leaseUntil.isAfter(currentTime);
     if (!"READY".equals(current.state)
-        || !Integer.valueOf(0).equals(current.attempts)
-        || current.leaseOwner != null
-        || current.leaseUntil != null) throw pending("交付已经开始，保留原资金结果");
-    if (deliveries.requestCancellation(payment.payNo, now()) != 1) {
+        || current.attempts == null
+        || current.attempts < 0
+        || (!noLease && !expiredLease)) throw pending("交付已经开始，保留原资金结果");
+    if (deliveries.requestCancellation(payment.payNo, currentTime) != 1) {
       PayTccDeliveryPO observed = deliveries.selectForUpdate(payment.payNo);
       if (observed == null || !"CANCEL_REQUESTED".equals(observed.state))
         throw pending("取消与交付竞争失败");
@@ -109,8 +116,7 @@ public class PayTccCommittedCancelStore {
   }
 
   /** 插入 immutable 原载荷的取消交付台账。 */
-  private void insertCancellation(PayTccExecutionPO execution) {
-    LocalDateTime currentTime = now();
+  private void insertCancellation(PayTccExecutionPO execution, LocalDateTime currentTime) {
     PayTccDeliveryPO created = new PayTccDeliveryPO();
     created.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
     created.payNo = execution.payNo;
@@ -172,7 +178,8 @@ public class PayTccCommittedCancelStore {
   }
 
   private static LocalDateTime now() {
-    return LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+    LocalDateTime currentTime = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+    return currentTime.withNano((currentTime.getNano() / 1_000_000) * 1_000_000);
   }
 
   private BizException pending(String message) {

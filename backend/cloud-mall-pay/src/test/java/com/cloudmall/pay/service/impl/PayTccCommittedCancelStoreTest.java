@@ -83,6 +83,42 @@ class PayTccCommittedCancelStoreTest {
   }
 
   @Test
+  void readyExpiredClaimedDeliveryCanCasWithoutTakingItsOldLease() {
+    PayVO payment = payment();
+    PayTccExecutionPO execution = execution();
+    PayTccDeliveryPO expired =
+        delivery("READY", 3, "old-worker", java.time.LocalDateTime.now().minusSeconds(1));
+    prepare(payment, execution, expired);
+    when(deliveries.requestCancellation(eq(payment.payNo), any())).thenReturn(1);
+
+    store.request(payment);
+
+    verify(deliveries).requestCancellation(eq(payment.payNo), any());
+    verify(deliveries, never()).insert(any());
+  }
+
+  @Test
+  void readyPartialOrActiveLeaseAndNegativeAttemptsAreRejected() {
+    PayVO payment = payment();
+    PayTccExecutionPO execution = execution();
+    PayTccDeliveryPO missingAttempts = delivery("READY", 0, null, null);
+    missingAttempts.attempts = null;
+    for (PayTccDeliveryPO candidate :
+        List.of(
+            missingAttempts,
+            delivery("READY", -1, null, null),
+            delivery("READY", 1, "worker", null),
+            delivery("READY", 1, null, java.time.LocalDateTime.now().minusSeconds(1)),
+            delivery("READY", 1, " ", java.time.LocalDateTime.now().minusSeconds(1)),
+            delivery("READY", 1, "worker", java.time.LocalDateTime.now().plusMinutes(1)))) {
+      prepare(payment, execution, candidate);
+      assertThrows(BizException.class, () -> store.request(payment));
+      verify(deliveries, never()).requestCancellation(any(), any());
+      reset(deliveries);
+    }
+  }
+
+  @Test
   void existingCancellationRequestIsIdempotentWithoutLeaseMutation() {
     PayVO payment = payment();
     PayTccExecutionPO execution = execution();
