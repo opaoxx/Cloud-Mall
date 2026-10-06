@@ -294,3 +294,7 @@ RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认�
 ### CM-20261007-18 TCC 主动取消（16E）
 
 新增独立 opt-in 开关 `cloudmall.pay.tcc-cancel.enabled=false`，不属于 16D TCC 创建必需依赖；不新增公网路径，复用受保护 `/{payNo}/mock-fail` 与 callback failure。取消表无条件初始化，所有 execution/bridge/receipt 入口即使开关关闭也必须查询 gate。仅当持久模式为 TCC、支付仍 PENDING 且无 execution/dispatch/receipt 时，先在独立本地事务持久化取消台账，再在事务外调用 Order cancel。Order 明确 `CANCELLED` 且库存 `SUCCEEDED` 后，若再次短事务确认无 execution/dispatch/receipt，台账 `COMPLETED` 与 Pay `FAILED` 同一 CAS 提交，主动失败返回 HTTP 200/FAILED；处理中/未知返回 `PAY_ORDER_SYNC_UNKNOWN`/202。已有 execution 统一 202，不 recover、不改 decision。Legacy fail 保持原事务语义，TCC cancel 使用 `NOT_SUPPORTED` 外层 + 短 `REQUIRES_NEW` 台账事务，所有 Order RPC 在本地事务提交后执行。
+
+### CM-20261007-18 TCC 已回滚失败入口收尾（16F）
+
+已有 TCC execution 为 `ROLLEDBACK` 时，`mock-fail`/callback failure 可在 `NOT_SUPPORTED` 边界读取 Pay receipt/Fence 快照并调用 User live GET，完整证明同一 XID/branch 的 `CANCELLED` 与 no-ledger 后，以短事务 CAS Pay `PENDING|ORDER_SYNC_UNKNOWN→FAILED`；成功返回 HTTP 200/FAILED，callback 同步完成 `RECEIVED_FAILURE→FAILED`。缺证据、未知 execution、TC Unknown、COMMITTED 或其他非 ROLLEDBACK 状态均返回 202，不 recover、不 begin、不调用 TC/Order/User 写接口、不创建 cancel 台账、不改 decision；本轮不加自动投影 scanner。

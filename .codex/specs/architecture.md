@@ -166,3 +166,7 @@ Compose 至少应提供统一的本地开发网络、持久化数据卷、健康
 ### CM-20261007-18 TCC 主动取消（16E）
 
 TCC 主动取消使用独立 `pay_tcc_cancel` 台账和 `cloudmall.pay.tcc-cancel.enabled=false` opt-in 开关；该开关不属于 16D TCC 创建必需依赖，取消表无条件初始化，入口 gate 始终生效。首次无 execution 的取消在 pay_record 行锁下持久抢占，并与 coordinator execution claim、bridge.prepare、receipt.claim 共用 cancel gate；提交后才调用 Order.cancel。只有 Order `CANCELLED`、stock action `SUCCEEDED` 且再次确认无 execution/dispatch/receipt 时，才在短事务内将台账 `COMPLETED` 与 Pay `FAILED` 同步 CAS；未知/库存未完成进入有界恢复。已有 execution 不改 decision、不主动 recover。Legacy fail 事务保持不变，TCC cancel 通过 `NOT_SUPPORTED` 入口确保远程 RPC 在本地事务外。
+
+### CM-20261007-18 TCC 已回滚失败入口收尾（16F）
+
+16F 只补已有 `ROLLEDBACK` execution 的公开 failure 收尾：在 `NOT_SUPPORTED` 边界核对 Pay receipt/Fence 与 User live TCC 的同 XID/branch `CANCELLED`、no-ledger 证据，再由短事务 CAS Pay FAILED；callback 同步完成失败回调日志。非 ROLLEDBACK、证据未知或冲突均保留 202，不主动 recover/TC/Order/User 写入，不创建取消台账、不改 decision，不增加自动投影 scanner。无 execution 的主动取消继续由 16E 独立 opt-in 负责。
