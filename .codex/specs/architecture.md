@@ -207,3 +207,7 @@ COMMITTED execution 不接入 16E 无 execution cancel；failure 仅按持久 Pa
 ### CM-20261007-18 有效 lease READY 的 COMMITTED TCC 取消（16Q）
 
 16Q 在 16P 之上允许 READY 且仍持有有效 lease 的 delivery CAS 为 `CANCEL_REQUESTED`；保留 attempts、owner、lease_until 和 immutable tuple，不接管或清除有效 lease，next_retry_at 仅按同一 DATETIME(3) now 使用 LEAST 提前。该安全性依赖所有正常 TCC paid 先以 READY→ORDER_SYNC_UNKNOWN stage 获得写许可，之后才调用 Order.paid；取消先提交时旧 stage 必须失败且不得 paid，旧 worker 可 finish 自己的 lease，新 worker 等释放/过期后执行 cancel/唯一退款；旧 worker 先 stage 时取消拒绝。CANCELLED+stock SUCCEEDED 才退款，PAID/COMPLETED/stock CONFLICT 保守保留并告警，不 paid、不 refund、不 FAILED。真实验收覆盖有效 lease 保留、旧 worker finish 后接管、stage 先赢、无死锁和唯一退款；不处理 ORDER_SYNC_UNKNOWN、REFUND_PENDING、SUCCESS、REFUNDED 或其他已取得交付写许可的 COMMITTED 取消。
+
+### CM-20261007-18 ORDER_SYNC_UNKNOWN TCC 取消重协调（16R）
+
+16R 将严格 `CANCEL_REQUESTED` 与已取得交付尝试的 `CANCEL_RECONCILING` 分离。ORDER_SYNC_UNKNOWN 只在完整 TCC 证据和 Pay→delivery 锁内改为 CANCEL_RECONCILING；不调用远程写接口，不写 FAILED。Order cancel/paid 依赖现有 PENDING_PAYMENT CAS 与同事务唯一 stock action 作为最终仲裁。CANCEL_RECONCILING 只能按最终 Order/Stock 事实走 cancel+refund 或 paid+SUCCESS，未知/冲突退避，不猜测方向；旧 worker 不能以 ORDER_SYNC_UNKNOWN 覆盖取消意图，迟到 paid 由 Order CAS 拒绝。该轮不修改 Order 状态机，不处理售后 SUCCESS 取消或 BEGIN_UNKNOWN。
