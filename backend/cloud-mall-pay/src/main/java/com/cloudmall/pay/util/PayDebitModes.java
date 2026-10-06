@@ -7,6 +7,9 @@ public final class PayDebitModes {
   /** 当前唯一已经完成业务接入的余额账本扣款协议。 */
   public static final String LEGACY = "LEGACY";
 
+  /** 仅由独立 TCC 公开入口和已评审资源处理的协议。 */
+  public static final String TCC = "TCC";
+
   /** 工具类禁止实例化。 */
   private PayDebitModes() {}
 

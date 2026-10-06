@@ -19,6 +19,7 @@ cloudmall.pay.tcc-recovery.lease-seconds: 60
 cloudmall.pay.tcc-recovery.budget-ms: 10000
 cloudmall.pay.tcc-delivery.enabled: false
 cloudmall.pay.tcc-delivery.interval-ms: 5000
+cloudmall.pay.tcc-entry.enabled: false
 management.endpoints.web.exposure.include: health,info,prometheus
 feign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
 spring.cloud.nacos.discovery.server-addr: localhost:18848

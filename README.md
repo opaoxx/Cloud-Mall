@@ -195,7 +195,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_product_hot_source.sql 
 
 ### 支付扣款模式隔离（CM-18 阶段 12A）
 
-支付记录和扣款意图现在持久化 `debit_mode`。新支付在创建时固定模式，后续恢复只读取原记录；当前仅支持 `LEGACY`。将 `cloudmall.pay.debit-mode` 配置为 `TCC` 或未知值会阻止 Pay 启动。
+支付记录和扣款意图现在持久化 `debit_mode`。新支付在创建时固定模式，后续恢复只读取原记录；默认仍为 `LEGACY`。第 16D 轮允许显式 TCC 试用，必须同时开启下文列出的完整依赖；未知模式或 TCC 依赖未开启会阻止 Pay 启动。
 
 已有数据卷可先执行可重复迁移，存量记录默认归入 `LEGACY`，不改变金额或支付状态：
 
@@ -204,7 +204,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_debit_mode.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-持久记录为 `TCC`、未知模式或支付单与意图模式不一致时，支付处理返回 `PAY_DEBIT_MODE_UNAVAILABLE`/503。恢复器保留原状态、租约、尝试次数和重试时间，不调用旧余额扣款或退款路径。恢复扫描在 SQL 限制每批 50 条之前，仅选取支付单和意图均为精确 `LEGACY` 的记录，避免隔离记录占满扫描窗口；孤立意图、空串、小写及尾随空格模式也不进入窗口。排查时核对两张表的原始事实，不要手动改模式强行重试。
+持久记录为 `TCC` 但入口未启用、未知模式或支付单与意图模式不一致时，支付处理返回 `PAY_DEBIT_MODE_UNAVAILABLE`/503。恢复器保留原状态、租约、尝试次数和重试时间，不调用旧余额扣款或退款路径。恢复扫描在 SQL 限制每批 50 条之前，仅选取支付单和意图均为精确 `LEGACY` 的记录，避免隔离记录占满扫描窗口；孤立意图、空串、小写及尾随空格模式也不进入窗口。排查时核对两张表的原始事实，不要手动改模式强行重试。
 
 12A 只负责 Pay 路由隔离。第 14 轮增加的 User 本地资金状态机见下节；真实 Pay/User TCC 回调与 TC 故障验收仍待后续阶段，CM-18 尚未闭环。
 
@@ -298,7 +298,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_recovery.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-查询限制的是返回批量和调度预算，尚未完成大表容量及新增索引的负载验收。16C 已增加下面的独立交付任务，公开支付入口尚未切换。
+查询限制的是返回批量和调度预算，尚未完成大表容量及新增索引的负载验收。16C 已增加下面的独立交付任务，16D 接入显式开启的公开支付入口。
 
 ### TCC 订单交付与取消退款（CM-18 第 16 轮 C）
 
@@ -308,12 +308,20 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_recovery.sql |
 
 User 退款现在允许禁用账户清算已确认的 TCC 扣款，前提是匹配的 CONFIRMED attempt 和原 DEBIT/APPLIED 均存在；不依赖账户总冻结额为零。禁用 Legacy 账户退款仍为 404，active Legacy 行为不变。Pay 入站余额响应兼容实际退款字段 `refundOperationKey`，避免退款到账后因读取到空 operationKey 而一直待恢复。
 
-`cloudmall.pay.tcc-delivery.enabled=false` 默认关闭；启用要求 coordinator 及其依赖已启用。默认每 5 秒执行两阶段扫描，每阶段最多 20 条、总预算 10 秒，随机 60 秒 token lease 与 5–300 秒退避。旧 token 不能写本地支付终态或释放新租约；RPC 在本地事务外执行。公开 `/api/payments` 的新建模式仍为 LEGACY，TCC 公开入口和失败状态衔接留待下一批。
+`cloudmall.pay.tcc-delivery.enabled=false` 默认关闭；启用要求 coordinator 及其依赖已启用。默认每 5 秒执行两阶段扫描，每阶段最多 20 条、总预算 10 秒，随机 60 秒 token lease 与 5–300 秒退避。旧 token 不能写本地支付终态或释放新租约；RPC 在本地事务外执行。公开 `/api/payments` 默认新建模式仍为 LEGACY；16D 的显式 TCC 接入见下节。
 
 ```powershell
 Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
+
+### 公开支付 TCC 路由（CM-18 第 16 轮 D）
+
+新支付可显式选择 `cloudmall.pay.debit-mode=TCC`，并同时启用 Pay 的 `tcc-entry`、`tcc-coordinator`、`tcc-receipt`、`tcc-bridge`、`tcc-recovery`、`tcc-delivery` 六个 `.enabled=true` 开关；Seata 必须启用且 AT 自动数据源代理关闭。User 沿用上文 TCC 本地资金、资源和 HTTP 桥开关。仓库默认仍为 LEGACY，所有 Pay TCC 功能开关默认关闭。
+
+公开成功请求按持久支付模式路由。TCC 首次核验待支付订单后认领唯一 execution；重放恢复原 XID，资金确认后经 delivery 完成订单与库存交付。双端取消及无扣款证据齐全才投影 FAILED。切换新建配置不改变旧支付模式，不得手动改库迁移历史支付。
+
+本批 TCC `mock-fail` 和失败 callback 对未决支付返回 202，明确表示取消未执行；不远程取消订单、改变全局决议或写 FAILED。主动取消仍待独立实现，CM-18 未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
 
 ## 验证命令
 
@@ -450,6 +458,14 @@ jmeter -n -t backend/loadtest/seckill-ladder.jmx `
 测试后同时核对 HTTP 受理、MySQL 秒杀受理/outbox/订单、Redis 配额及 RabbitMQ 死信；`409/429` 业务拒绝应与系统错误分开统计。
 
 部分旧测试依赖的 Mockito/Byte Buddy 版本不支持 JDK 21，推荐使用 JDK 17 运行完整测试集。
+
+16D 公开入口验收沿用上述中间件环境，额外启动隔离 Gateway，以真实 Redis Bearer token 调用公开接口。先构建全仓 Jar，再运行：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccPublicEntryIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
+```
+
+该测试创建独立数据库、Redis、Rabbit vhost 和发现组；核对原库校验和、TC 终态、资金与库存后清理，存在未决事实时保留现场。
 
 ## 项目结构
 

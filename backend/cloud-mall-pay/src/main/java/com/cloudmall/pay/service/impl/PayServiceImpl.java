@@ -7,7 +7,6 @@ import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
-import com.cloudmall.pay.domain.po.PayCallbackLogPO;
 import com.cloudmall.pay.domain.po.PayDebitIntentPO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
@@ -25,6 +24,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,6 +46,12 @@ public class PayServiceImpl implements PayService {
 
   /** 跨用户账本和订单服务的持久支付恢复编排。 */
   @Autowired private PayConsistencyService payConsistencyService;
+
+  /** 显式启用后才提供的 TCC 公开支付编排。 */
+  @Autowired private ObjectProvider<PayTccPaymentService> tccPaymentService;
+
+  /** 在远程副作用前独立提交回调绑定。 */
+  @Autowired private PayCallbackReceiptService callbackReceipts;
 
   /** 判断失败回调能否安全取消订单的持久意图 Mapper。 */
   @Autowired private PayDebitIntentMapper payDebitIntentMapper;
@@ -149,11 +155,11 @@ public class PayServiceImpl implements PayService {
     // 2. 执行 success 的核心业务校验与状态处理。
     // 3. 返回 success 的处理结果。
     PayVO payment = owned(payNo);
-    requireSupportedMode(payNo);
+    String mode = paymentMode(payNo);
     if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
     if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
       throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
-    String outcome = payConsistencyService.initiate(payment);
+    String outcome = initiate(payment, mode);
     return responseForOutcome(payNo, outcome);
   }
 
@@ -165,7 +171,11 @@ public class PayServiceImpl implements PayService {
     // 2. 执行 fail 的核心业务校验与状态处理。
     // 3. 返回 fail 的处理结果。
     PayVO p = owned(payNo);
-    requireSupportedMode(payNo);
+    String mode = paymentMode(payNo);
+    if (PayDebitModes.TCC.equals(mode)) {
+      tccEntry().failure(p);
+      return ApiResponse.ok(find(payNo));
+    }
     if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
     PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payNo);
     if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
@@ -199,21 +209,21 @@ public class PayServiceImpl implements PayService {
             ? callback.payNo
             : callback.callbackId;
     PayVO payment = ownedForUser(callback.payNo, callback.userId);
-    requireSupportedMode(callback.payNo);
+    String mode = paymentMode(callback.payNo);
     if (payment.amount.compareTo(callback.amount) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
-    if (!payCallbackLogMapper.selectByCallbackId(callbackId).isEmpty()) {
-      return ApiResponse.ok(payment);
-    }
+    callbackReceipts.claim(payment, callback, callbackId);
     if (callback.success) {
       if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
         throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
       if (!"SUCCESS".equals(payment.status)) {
-        String outcome = payConsistencyService.initiate(payment);
+        String outcome = initiate(payment, mode);
         if (!"SUCCESS".equals(outcome)) return responseForOutcome(payment.payNo, outcome);
       }
+    } else if (PayDebitModes.TCC.equals(mode)) {
+      tccEntry().failure(payment);
     } else {
-      if ("SUCCESS".equals(payment.status))
+      if ("SUCCESS".equals(payment.status) || "REFUNDED".equals(payment.status))
         throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
       PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payment.payNo);
       if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
@@ -229,15 +239,7 @@ public class PayServiceImpl implements PayService {
             != 1) throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
       }
     }
-    PayCallbackLogPO callbackLog = new PayCallbackLogPO();
-    callbackLog.id = id();
-    callbackLog.payNo = payment.payNo;
-    callbackLog.callbackId = callbackId;
-    callbackLog.callbackStatus = callback.success ? "SUCCESS" : "FAILED";
-    callbackLog.payload = "{}";
-    callbackLog.processedAt = java.time.LocalDateTime.now();
-    callbackLog.createdAt = callbackLog.processedAt;
-    payCallbackLogMapper.insert(callbackLog);
+    callbackReceipts.complete(payment, callback, callbackId);
     return ApiResponse.ok(find(payment.payNo));
   }
 
@@ -252,12 +254,32 @@ public class PayServiceImpl implements PayService {
   }
 
   /** 在回调、模拟成功或失败产生副作用前核验原支付协议。 */
-  private void requireSupportedMode(String payNo) {
+  private String paymentMode(String payNo) {
     List<PayRecordPO> records = payRecordMapper.selectByPayNo(payNo);
     if (records.size() != 1) throw PayDebitModes.unavailable();
-    PayDebitModes.requireSupported(records.get(0).debitMode);
+    String mode = records.get(0).debitMode;
     PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
+    if (PayDebitModes.TCC.equals(mode)) {
+      if (intent != null) throw PayDebitModes.unavailable();
+      return mode;
+    }
+    PayDebitModes.requireSupported(mode);
     if (intent != null) PayDebitModes.requireSupported(intent.debitMode);
+    return PayDebitModes.LEGACY;
+  }
+
+  /** 依据持久协议选择唯一的资金编排入口。 */
+  private String initiate(PayVO payment, String mode) {
+    return PayDebitModes.TCC.equals(mode)
+        ? tccEntry().pay(payment)
+        : payConsistencyService.initiate(payment);
+  }
+
+  /** 缺失显式入口依赖时关闭 TCC 路由，不降级为 Legacy。 */
+  private PayTccPaymentService tccEntry() {
+    PayTccPaymentService entry = tccPaymentService.getIfAvailable();
+    if (entry == null) throw PayDebitModes.unavailable();
+    return entry;
   }
 
   /** 执行 notifyFailure 相关操作。 */
