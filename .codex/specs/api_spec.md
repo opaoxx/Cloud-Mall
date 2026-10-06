@@ -315,6 +315,14 @@ COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明
 
 取消请求与 delivery worker 统一使用 `pay_record → pay_tcc_delivery` 锁序；claim 先显式锁 Pay、delivery 再执行 delivery CAS，避免多表 JOIN UPDATE 隐式反向锁导致死锁。该范围不支持已发起交付、已成功、已退款或其他 COMMITTED 主动取消场景。
 
+### CM-20261007-18 已 claim READY 的 COMMITTED TCC 取消（16P）
+
+16P 将 16O 的取消窗口扩展到 delivery 仍为 `READY`、但 worker 已正常释放 lease（owner/lease_until 均为空）或 lease 已明确过期（owner 与 lease_until 同时存在且 `lease_until<=now`）的记录；保留 `attempts`、旧 owner 和旧 lease 时间，不接管有效 lease。owner/lease 只有一侧存在、有效 lease、`ORDER_SYNC_UNKNOWN`、`REFUND_PENDING`、SUCCESS、REFUNDED 或其他状态均拒绝改向。所有正常 TCC paid 必须先完成 READY→ORDER_SYNC_UNKNOWN 本地 stage，再调用 Order.paid；取消先获 Pay→delivery 锁时，旧 worker 的 READY stage 必须失败且不得 paid；旧 worker 先 stage 时，取消请求拒绝。
+
+16P 继续复用 `/{payNo}/mock-fail` 与 callback failure，无新增 endpoint；接受取消只返回 `PAY_ORDER_SYNC_UNKNOWN`/202，不调用 TC/Order/User、不写 Pay FAILED。`CANCEL_REQUESTED` 由 delivery recovery 继续处理，即使 cancel flag 后续关闭；worker 只能调用 Order.cancel，待 `CANCELLED+stock SUCCEEDED` 后进入既有 `REFUND_PENDING`/固定 refund key/REFUNDED 链。该扩展不处理已取得 ORDER_SYNC_UNKNOWN、已退款、已成功或仍有有效 lease 的 COMMITTED 记录。
+
+16P 补充约束：attempts 必须非空且不小于 0；owner 与 lease_until 只有同时为空，或 owner 去空白后非空且 lease_until 已到期时才可接受。接受改向仅以同一 DATETIME(3) 精度的 now 将 next_retry_at 提前为 LEAST(原值,now)，保留 attempts、旧 owner 和旧 expiry；已有 CANCEL_REQUESTED 重放不得修改 metadata。部分 lease、空白 owner、null/负 attempts 和有效 lease 均拒绝改向。Java 条件、CAS 与 LEAST 必须使用同一次 now。
+
 ### CM-20261007-18 Legacy failure 结果语义（16I）
 
 Legacy `mock-fail`/callback failure 先按 Pay 持久状态和 debit intent 完整 tuple 分类：SUCCESS/REFUNDED 返回既有 409；REFUND_PENDING 在 intent 缺失或完整匹配时返回 `PAY_REFUND_PENDING`/202 且不 RPC/写入，intent 矛盾返回 503；FAILED 在 intent 缺失或匹配 `FAILED` 时幂等 200 且不重复 Order.cancel；PENDING 且 intent 缺失/FAILED、以及 ORDER_SYNC_UNKNOWN 且 intent 完整匹配 FAILED 时保留既有 Order.cancel+markFailed 基本路径，写 FAILED 后返回/complete 200；PENDING intent 非 FAILED/未知、ORDER_SYNC_UNKNOWN intent 缺失/非 FAILED 返回 202。notifyFailure 原有 BizException 与其他异常 500 映射保持不变，不新增取消未知台账。intent mode/tuple 矛盾或未知状态不得 complete/猜测失败，按既有 503/202 处理。TCC 契约不变。
