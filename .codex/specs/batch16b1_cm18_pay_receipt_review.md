@@ -16,6 +16,8 @@ Pay 对外支付入口、Legacy 余额主路由、Order/Stock、Pay receipt 主�
 
 `PayTccReceiptService.prepare` 先调用 16A bridge 的 anchor prepare/Store.claim，仅独立持久化 `pay_tcc_dispatch`，不调用 User、不注册 branch；随后 receipt CLAIMED 的唯一 winner 才调用 Pay LocalTCC `prepare` 注册 branch。并发或重放 receipt prepare 只返回既有事实，永不注册第二 Pay branch。Pay Try 注册前崩溃会永久保留 CLAIMED，后续不能换 XID 或新 receipt 猜测恢复。
 
+新 receipt 只能绑定原 Pay `pay_record` 的精确 `payNo/userId/orderNo/amount`、`debit_mode=TCC`、`status=PENDING`，并且必须绑定同 XID 的 `pay_tcc_dispatch(state=PREPARED)`；已有 receipt 重放只核对这些事实，不重新派发或创建新 XID。
+
 本轮不新增 User Confirm/Cancel HTTP，不新增第二张 dispatch 表，不修改 Pay `/api/payments`。16A 的 User POST/GET、内部认证和 Gateway 隔离继续适用。
 
 ## 3. `pay_tcc_receipt` 契约
@@ -69,6 +71,8 @@ Pay receipt 的 Fence、receipt 表和 Pay dispatch 使用同一个 Pay DataSour
 2. User dispatch 仍通过 `user_tcc_receive(CLAIMED)` 唯一认领，User LocalTCC 注册唯一 User branch。
 3. Pay receipt Confirm/Cancel 和 User Confirm/Cancel 都由同一 TC 决议，任何一方 callback false 或异常都回滚各自本地事务并等待 TC 重试。
 4. 已有 CLAIMED receipt 但 branch 仍为空时，TC 空 Cancel 可以绑定当前原分支并永久写 `CANCELLED`；receipt 行完全不存在时返回 false，不得凭空创建 receipt 或支付事实。CLAIMED 本身不证明 branch 尚未注册，必须读取 branch/资金事实。
+
+被拒第二 Pay branch 只有在 Fence 明确为 `SUSPENDED`、当前 branch 没有 receipt 行、且存在另一 branch 的确定永久 receipt owner 时才允许无资金副作用 ACK；不得取消或覆盖原 branch。Fence 清理后没有本 branch 终态证据时返回 false，交 TC 重试。
 
 ## 6. 状态和异常规则
 
