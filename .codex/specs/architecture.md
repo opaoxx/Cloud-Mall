@@ -62,6 +62,8 @@ CM-18 第 12A 阶段完成支付路由的持久协议隔离：`pay_record.debit_
 
 第 16B2 增加内部 Pay coordinator Service：一次性 execution claim 后只能 begin 一个 XID，并在同一 XID 下协调 Pay receipt/User 两个 RM。execution 的 decision 单向 NONE→COMMIT/ROLLBACK；recover 不接管 Try、不创建新 XID，只重试原 decision RPC。没有 XID、没有 decision 或任一端持久事实未知时不猜资金结论；配置 `cloudmall.pay.tcc-coordinator.enabled=false` 默认关闭，超时上限 120000ms，Pay 公网入口仍为 LEGACY。
 
+第 16C 增加内部 TCC delivery worker：READY 仅由本地 COMMITTED execution 种子生成，不能当作远程 User 证据。每次调用 Order 或退款前重新读取本地 Pay proof 和 User live TCC 状态；User DEBIT 已有退款事实时禁止 paid，只能在 Order CANCELLED 且库存回滚 SUCCEEDED 后用固定退款键核验。ROLLEDBACK 直接不建 job；PayRecord 终态与 delivery 台账在同一 Pay 本地事务更新，Legacy PayConsistencyService 继续隔离。
+
 第 16B3 只增加 coordinator 有界恢复扫描：每实例单线程、每批最多 20 条，SQL 先精确筛选 TCC 且 tuple 一致、已知 XID、到期且无有效恢复 lease 的 execution。调度器只调用原 `recover`，不调用 execute/begin/Try；decision NONE 只读观察，BEGIN_UNKNOWN/xid NULL 跳过，已有 decision 只重试同向原 XID。随机 token lease 和 5–300 秒退避防止坏记录占满窗口；Pay 对外入口、Order/Stock 和退款不变。
 
 恢复 lease 默认 60 秒，过期后允许旧 RPC 与新实例同向重叠；token CAS 只保护调度字段完成，不能修改 execution decision/state。冲突只记录 recovery_last_error 和退避，不由扫描器写 CONFLICT；每轮 10 秒预算且不强杀在途 RPC，UNKNOWN 保留人工核验，不产生热循环告警。

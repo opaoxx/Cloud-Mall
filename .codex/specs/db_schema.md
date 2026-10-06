@@ -473,6 +473,8 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 第 16B2 `pay_tcc_execution` 的唯一键为 `pay_no、xid、operation_key、ledger_key`，不设置 lease/attempts；INSERT winner 的执行权不可转移。`xid` 可空只表示 begin 未确认，必须保留 BEGIN_UNKNOWN，不能新建 XID。decision 只能 NONE/COMMIT/ROLLBACK 单向推进，recover 不能新增 decision。
 
+第 16C `pay_tcc_delivery` 的 READY 只表示本地 COMMITTED execution 派生的待核验意图，不代表 User/Order 远程证据已完成；ROLLEDBACK execution 不建 job。每次 RPC 前重查本地 proof 和 User live TCC tuple；PayRecord 状态与 delivery 状态在同一 Pay 本地事务同向更新。User DEBIT 已有任何 refundOperationKey 时不能 paid，退款只能使用唯一 `refund:<payNo>` 并在 POST 后 GET 核验。
+
 第 16B3 只增加恢复调度字段 `recovery_attempts、next_recovery_at、recovery_owner、recovery_lease_until、recovery_last_error`；这些字段不拥有 XID/branch/decision，不可接管一次性 Try。lease 使用随机 token，释放使用 token CAS；终态和业务状态不被调度迁移改写。
 
 恢复默认 lease 60 秒；旧 RPC 过期后可与新实例重叠，但只能同 decision 幂等执行。`next_recovery_at` 默认 CURRENT_TIMESTAMP(3)，新 execution claim 显式写入创建时间后 30 秒；历史迁移不改写原业务字段。调度器最多每轮 20 条，attempt 封顶 31，退避 5 秒指数增长至 300 秒。

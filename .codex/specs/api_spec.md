@@ -195,6 +195,8 @@ CM-18 第 16B1 新增 Pay 自有 `pay_tcc_receipt` LocalTCC 资源，action name
 
 CM-18 第 16B2 只提供内部 `execute/recover` Service，配置 `cloudmall.pay.tcc-coordinator.enabled=false` 默认关闭；一次性 execution 以 payNo、XID、operationKey、ledgerKey 唯一绑定，超时上限 120000ms。已有 dispatch/receipt 但无 execution 时禁止新 begin；XID 丢失时保持 BEGIN_UNKNOWN。recover 不新增 decision、不接管 Try，只能使用原 XID 重试同一 COMMIT/ROLLBACK；终态必须同时有 Pay receipt 与 User 完整持久事实，TC Unknown 不能作为结论。
 
+CM-18 第 16C 只提供内部 `PayTccDeliveryService.deliver(String payNo)` 和 `PayTccDeliveryScheduler.recoverDue()`，配置 `cloudmall.pay.tcc-delivery.enabled=false` 默认关闭。READY 只表示从本地 COMMITTED execution 派生的待核验意图；每次 Order/退款 RPC 前必须重新核对 Pay proof 与 User live TCC GET。ROLLEDBACK 不建 job；User DEBIT 已有任何 refundOperationKey 时禁止再次 paid，只能在 CANCELLED+库存回滚成功后用固定 `refund:<payNo>` POST/GET 结清。
+
 支付服务与用户服务之间的内部接口契约：
 
 | 方法 | 路径 | 请求/响应 | 说明 |
