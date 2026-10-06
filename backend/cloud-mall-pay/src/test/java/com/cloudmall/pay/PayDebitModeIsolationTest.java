@@ -109,10 +109,11 @@ class PayDebitModeIsolationTest {
     payment.userId = 7L;
     payment.amount = new BigDecimal("10.00");
     payment.debitMode = "LEGACY";
-    when(records.selectByPayNo(payment.payNo)).thenReturn(List.of(payment));
+    payment.status = "PENDING";
+    when(records.selectForUpdate(payment.payNo)).thenReturn(List.of(payment));
     java.util.concurrent.atomic.AtomicReference<PayDebitIntentPO> saved =
         new java.util.concurrent.atomic.AtomicReference<>();
-    when(intents.findByPayNo(payment.payNo)).thenAnswer(invocation -> saved.get());
+    when(intents.findByPayNoForUpdate(payment.payNo)).thenAnswer(invocation -> saved.get());
     when(intents.insertIfAbsent(any()))
         .thenAnswer(
             invocation -> {
@@ -141,11 +142,12 @@ class PayDebitModeIsolationTest {
     payment.userId = 7L;
     payment.amount = new BigDecimal("10.00");
     payment.debitMode = "LEGACY";
+    payment.status = "PENDING";
     PayDebitIntentPO stored = new PayDebitIntentPO();
     stored.payNo = payment.payNo;
     stored.debitMode = "TCC";
-    when(records.selectByPayNo(payment.payNo)).thenReturn(List.of(payment));
-    when(intents.findByPayNo(payment.payNo)).thenReturn(stored);
+    when(records.selectForUpdate(payment.payNo)).thenReturn(List.of(payment));
+    when(intents.findByPayNoForUpdate(payment.payNo)).thenReturn(stored);
     PayVO view = new PayVO();
     view.payNo = payment.payNo;
     view.orderNo = payment.orderNo;

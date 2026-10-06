@@ -362,6 +362,14 @@ Legacy `mock-fail` 和失败 callback 共用持久状态分类：REFUND_PENDING 
 
 PENDING且无意图或已有FAILED意图保留原取消路径；ORDER_SYNC_UNKNOWN只有完整匹配FAILED意图才能继续取消，其余保持未知。失败callback只在Pay实际FAILED后完成日志；退款中和未知状态不调用complete。本轮不改变TCC，也不增加资金补偿。
 
+### Legacy 首次意图与失败请求互斥（第16轮J）
+
+首次扣款意图与失败请求统一先锁 Pay、再锁定读取 intent。只有当前 Pay 为 PENDING 且无意图时才能新建 INIT；已有意图只完整核对并重放，不能由旧 PENDING 视图重新发起已失败支付。
+
+`mock-fail` 外层只做鉴权和路由，Legacy 失败服务在独立事务内重新核对当前事实、执行原 Order.cancel 和 FAILED CAS，并返回最新支付视图；失败 callback 也委托同一服务。意图先提交时失败请求保持202、不取消；失败先完成时旧成功请求不能新建意图。TCC 路径保持不变。
+
+本轮没有新增取消补偿或修改资金恢复流程。Order RPC 仍在 Legacy 失败事务内，保留原3/5秒Feign超时和异常语义；数据库锁等待使用既有数据库/事务机制，不承诺消除所有恢复场景的锁竞争。
+
 ## 验证命令
 
 ```bash

@@ -851,6 +851,178 @@ class PayTccPublicEntryIT {
     assertFunds("100.00", 0, 0);
   }
 
+  @Test
+  @Order(12)
+  void legacyFailureCannotMissIntentCommittedAfterItsOldSnapshot() throws Exception {
+    createLegacyPublic();
+    Object controller =
+        org.springframework.test.util.AopTestUtils.getUltimateTargetObject(
+            application.getBean(com.cloudmall.pay.controller.PayController.class));
+    var original =
+        (com.cloudmall.pay.mapper.PayRecordMapper)
+            ReflectionTestUtils.getField(controller, "payRecordMapper");
+    CountDownLatch snapshotRead = new CountDownLatch(1), resumeFailure = new CountDownLatch(1);
+    AtomicBoolean held = new AtomicBoolean();
+    var intercepted =
+        (com.cloudmall.pay.mapper.PayRecordMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                com.cloudmall.pay.mapper.PayRecordMapper.class.getClassLoader(),
+                new Class[] {com.cloudmall.pay.mapper.PayRecordMapper.class},
+                (proxy, method, arguments) -> {
+                  Object result;
+                  try {
+                    result = method.invoke(original, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException failure) {
+                    throw failure.getCause();
+                  }
+                  var attributes =
+                      org.springframework.web.context.request.RequestContextHolder
+                          .getRequestAttributes();
+                  if (method.getName().equals("selectByPayNo")
+                      && attributes
+                          instanceof
+                          org.springframework.web.context.request.ServletRequestAttributes servlet
+                      && servlet.getRequest().getRequestURI().endsWith("/mock-fail")
+                      && held.compareAndSet(false, true)) {
+                    snapshotRead.countDown();
+                    if (!resumeFailure.await(10, TimeUnit.SECONDS))
+                      throw new IllegalStateException("failure snapshot barrier timeout");
+                  }
+                  return result;
+                });
+    ReflectionTestUtils.setField(controller, "payRecordMapper", intercepted);
+    ExecutorService callers = Executors.newSingleThreadExecutor();
+    try {
+      Future<Response> failed =
+          callers.submit(
+              () -> post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()));
+      assertTrue(snapshotRead.await(10, TimeUnit.SECONDS));
+      application
+          .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+          .ensureIntent(legacyPaymentView());
+      assertEquals(
+          "INIT",
+          payDb.queryForObject(
+              "SELECT status FROM pay_debit_intent WHERE pay_no=?", String.class, request.payNo));
+      resumeFailure.countDown();
+      Response response = failed.get(15, TimeUnit.SECONDS);
+      Files.writeString(
+          artifacts.resolve("legacy-old-snapshot.json"),
+          JSON.writeValueAsString(
+              Map.of(
+                  "response",
+                  response.body(),
+                  "payment",
+                  payDb.queryForList("SELECT * FROM pay_record"),
+                  "intent",
+                  payDb.queryForList("SELECT * FROM pay_debit_intent"),
+                  "orderStatus",
+                  orderState())));
+      assertEquals(202, response.status(), response.body().toString());
+      assertEquals("PENDING", paymentState());
+      assertEquals("PENDING_PAYMENT", orderState());
+      assertEquals(0, proxies.get("order").cancelPostCount());
+      // 失败入口拒绝接管后，原INIT仍可真实扣款并完成订单。
+      await(
+          () -> {
+            payDb.update(
+                "UPDATE pay_debit_intent SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+                    + " pay_no=?",
+                request.payNo);
+            return "SUCCESS"
+                .equals(
+                    application
+                        .getBean(com.cloudmall.pay.service.impl.PayConsistencyService.class)
+                        .process(request.payNo));
+          },
+          30);
+      assertFunds("90.00", 1, 0);
+    } finally {
+      resumeFailure.countDown();
+      ReflectionTestUtils.setField(controller, "payRecordMapper", original);
+      callers.shutdownNow();
+      if (!"SUCCESS".equals(paymentState())
+          && payDb.queryForObject(
+                  "SELECT COUNT(*) FROM pay_debit_intent WHERE pay_no=?",
+                  Integer.class,
+                  request.payNo)
+              > 0) {
+        if ("PENDING_PAYMENT".equals(orderState()))
+          call("order", "/api/orders/" + request.orderNo + "/cancel", Map.of());
+        await(
+            () ->
+                "SUCCEEDED"
+                    .equals(
+                        orderDb.queryForObject(
+                            "SELECT status FROM order_stock_action WHERE order_no=?",
+                            String.class,
+                            request.orderNo)),
+            30);
+        payDb.update(
+            "UPDATE pay_debit_intent SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+                + " pay_no=?",
+            request.payNo);
+        application
+            .getBean(com.cloudmall.pay.service.impl.PayConsistencyService.class)
+            .process(request.payNo);
+      }
+    }
+  }
+
+  @Test
+  @Order(13)
+  void legacyFailureWinnerRejectsAStaleSuccessIntent() throws Exception {
+    createLegacyPublic();
+    var staleSuccess = legacyPaymentView();
+    assertEquals(
+        200, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
+    assertEquals("FAILED", paymentState());
+    assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () ->
+            application
+                .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+                .ensureIntent(staleSuccess));
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+    assertFunds("100.00", 0, 0);
+  }
+
+  @Test
+  @Order(14)
+  void legacyFailureCallbackWinnerAlsoPreventsNewIntent() throws Exception {
+    createLegacyPublic();
+    var staleSuccess = legacyPaymentView();
+    Response failed =
+        post("/api/payments/callback", callback(false, "callback-claim-winner"), callbackHeaders());
+    assertEquals(200, failed.status(), failed.body().toString());
+    assertEquals("FAILED", failed.body().path("data").path("status").asText());
+    assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () ->
+            application
+                .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+                .ensureIntent(staleSuccess));
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+    assertEquals(
+        1,
+        payDb.queryForObject(
+            "SELECT COUNT(*) FROM pay_callback_log WHERE callback_status='FAILED' AND processed_at"
+                + " IS NOT NULL",
+            Integer.class));
+    assertFunds("100.00", 0, 0);
+  }
+
+  /** 模拟成功线程已经保存的原支付不可变载荷，不能用其旧状态授权新扣款。 */
+  private com.cloudmall.pay.domain.vo.PayVO legacyPaymentView() {
+    var payment = new com.cloudmall.pay.domain.vo.PayVO();
+    payment.payNo = request.payNo;
+    payment.orderNo = request.orderNo;
+    payment.userId = request.userId;
+    payment.amount = request.amount;
+    payment.status = "PENDING";
+    return payment;
+  }
+
   /** 当前配置仅影响新建支付，旧单始终按持久 LEGACY 模式处理。 */
   private void createLegacyPublic() throws Exception {
     var configuration =

@@ -73,8 +73,15 @@ public class PayDebitIntentMapper {
   /** 按支付号读取持久化意图。 */
   public PayDebitIntentPO findByPayNo(String payNo) {
     List<PayDebitIntentPO> rows =
+        jdbcTemplate.query("SELECT * FROM pay_debit_intent WHERE pay_no=?", ROW_MAPPER, payNo);
+    return rows.isEmpty() ? null : rows.get(0);
+  }
+
+  /** 按支付号执行当前锁定读，供首次意图与失败授权使用同一锁序。 */
+  public PayDebitIntentPO findByPayNoForUpdate(String payNo) {
+    List<PayDebitIntentPO> rows =
         jdbcTemplate.query(
-            "SELECT * FROM pay_debit_intent WHERE pay_no=?", ROW_MAPPER, payNo);
+            "SELECT * FROM pay_debit_intent WHERE pay_no=? FOR UPDATE", ROW_MAPPER, payNo);
     return rows.isEmpty() ? null : rows.get(0);
   }
 

@@ -44,6 +44,9 @@ public class PayServiceImpl implements PayService {
   /** 支付回调日志 Mapper。 */
   @Autowired private PayCallbackLogMapper payCallbackLogMapper;
 
+  /** Legacy失败授权在独立事务中重读并锁定当前事实。 */
+  @Autowired private PayLegacyFailureService legacyFailureService;
+
   /** 跨用户账本和订单服务的持久支付恢复编排。 */
   @Autowired private PayConsistencyService payConsistencyService;
 
@@ -163,7 +166,6 @@ public class PayServiceImpl implements PayService {
     return responseForOutcome(payNo, outcome);
   }
 
-  @Transactional
   @PostMapping("/{payNo}/mock-fail")
   /** 按持久协议处理失败请求，已失败重放和退款中状态不重复取消订单。 */
   public ApiResponse<?> fail(@PathVariable String payNo) {
@@ -174,14 +176,8 @@ public class PayServiceImpl implements PayService {
       tccEntry().failure(payment);
       return ApiResponse.ok(payment);
     }
-    // 2. 先分类 Legacy 已知结果；只有允许的未处理状态才能继续。
-    if (legacyFailureCompleted(payment)) return ApiResponse.ok(payment);
-    // 3. 沿原取消路径调用订单，CAS 成功后返回最新支付状态。
-    notifyFailure(payment);
-    if (payRecordMapper.markFailed(payNo, java.time.LocalDateTime.now()) != 1) {
-      throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
-    }
-    return ApiResponse.ok(find(payNo));
+    // 2. 独立当前读事务负责授权和取消；不使用外层旧视图决定无意图。
+    return ApiResponse.ok(legacyFailureService.fail(payment));
   }
 
   @PostMapping("/callback")
@@ -219,38 +215,11 @@ public class PayServiceImpl implements PayService {
       }
     } else if (PayDebitModes.TCC.equals(mode)) {
       tccEntry().failure(payment);
-    } else if (!legacyFailureCompleted(payment)) {
-      notifyFailure(payment);
-      if (payRecordMapper.markFailed(payment.payNo, java.time.LocalDateTime.now()) != 1)
-        throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
+    } else {
+      payment = legacyFailureService.fail(payment);
     }
     callbackReceipts.complete(payment, callback, callbackId);
     return ApiResponse.ok(find(payment.payNo));
-  }
-
-  /** 只读分类 Legacy 失败请求；true 表示已失败，false 才可进入原订单取消流程。 */
-  private boolean legacyFailureCompleted(PayVO payment) {
-    // 1. 存在意图时核对完整原载荷和模式，不能只凭 FAILED 字串复用别的请求。
-    PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payment.payNo);
-    if (intent != null) {
-      PayDebitModes.requireSupported(intent.debitMode);
-      if (!Objects.equals(intent.payNo, payment.payNo)
-          || !Objects.equals(intent.orderNo, payment.orderNo)
-          || !Objects.equals(intent.userId, payment.userId)
-          || intent.amount == null
-          || intent.amount.compareTo(payment.amount) != 0) throw PayDebitModes.unavailable();
-    }
-    // 2. 已成功、已退款与退款中均不进入取消，也不驱动任何资金恢复。
-    if ("SUCCESS".equals(payment.status) || "REFUNDED".equals(payment.status))
-      throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
-    if ("REFUND_PENDING".equals(payment.status))
-      throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
-    // 3. 既有 FAILED 可幂等读取；其余仅保留原明确允许的待处理路径。
-    boolean failedIntent = intent != null && "FAILED".equals(intent.status);
-    if ("FAILED".equals(payment.status) && (intent == null || failedIntent)) return true;
-    if ("PENDING".equals(payment.status) && (intent == null || failedIntent)) return false;
-    if ("ORDER_SYNC_UNKNOWN".equals(payment.status) && failedIntent) return false;
-    throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "支付结果正在确认，不能取消订单", 202);
   }
 
   /** 将可恢复中的支付结果映射为明确的 HTTP 业务状态。 */
@@ -290,22 +259,6 @@ public class PayServiceImpl implements PayService {
     PayTccPaymentService entry = tccPaymentService.getIfAvailable();
     if (entry == null) throw PayDebitModes.unavailable();
     return entry;
-  }
-
-  /** 执行 notifyFailure 相关操作。 */
-  private void notifyFailure(PayVO p) {
-    // 1. 接收并整理 notifyFailure 的业务请求。
-    // 2. 执行 notifyFailure 的核心业务校验与状态处理。
-    // 3. 返回 notifyFailure 的处理结果。
-    try {
-      ApiResponse<?> response = orders.cancel(p.orderNo, p.userId);
-      if (response == null || !"0".equals(response.code))
-        throw new BizException(ErrorCodes.INTERNAL, "订单失败回滚未确认", 500);
-    } catch (BizException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new BizException(ErrorCodes.INTERNAL, "订单失败回滚失败", 500);
-    }
   }
 
   /** 执行 order 相关操作。 */
@@ -395,16 +348,7 @@ public class PayServiceImpl implements PayService {
 
   /** 将支付记录持久化对象转换为响应视图。 */
   private static PayVO toView(PayRecordPO paymentRecord) {
-    PayVO payment = new PayVO();
-    payment.payNo = paymentRecord.payNo;
-    payment.orderNo = paymentRecord.orderNo;
-    payment.userId = paymentRecord.userId;
-    payment.amount = paymentRecord.amount;
-    payment.status = paymentRecord.status;
-    if (paymentRecord.paidAt != null) {
-      payment.paidAt = paymentRecord.paidAt.atOffset(ZoneOffset.ofHours(8)).toString();
-    }
-    return payment;
+    return com.cloudmall.pay.util.PayRecordViews.toView(paymentRecord);
   }
 
   /** 执行 now 相关操作。 */

@@ -56,6 +56,10 @@ class PayLegacyFailureOutcomeTest {
     ReflectionTestUtils.setField(service, "payDebitIntentMapper", intents);
     ReflectionTestUtils.setField(service, "callbackReceipts", receipts);
     ReflectionTestUtils.setField(service, "callbackToken", "token");
+    ReflectionTestUtils.setField(
+        service,
+        "legacyFailureService",
+        new com.cloudmall.pay.service.impl.PayLegacyFailureService(payments, intents, orders));
     payment = new PayRecordPO();
     payment.payNo = "legacy-pay";
     payment.orderNo = "legacy-order";
@@ -63,6 +67,7 @@ class PayLegacyFailureOutcomeTest {
     payment.amount = BigDecimal.TEN;
     payment.debitMode = "LEGACY";
     when(payments.selectByPayNo(payment.payNo)).thenReturn(List.of(payment));
+    when(payments.selectForUpdate(payment.payNo)).thenReturn(List.of(payment));
     when(orders.cancel(any(), any())).thenReturn(ApiResponse.ok(null));
     AuthContext.set(7L, "USER");
   }
@@ -173,6 +178,7 @@ class PayLegacyFailureOutcomeTest {
       intent.status = intentStatus;
     }
     when(intents.findByPayNo(payment.payNo)).thenReturn(intent);
+    when(intents.findByPayNoForUpdate(payment.payNo)).thenReturn(intent);
     return intent;
   }
 
