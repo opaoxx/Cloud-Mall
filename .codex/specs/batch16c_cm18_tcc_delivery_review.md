@@ -106,6 +106,14 @@ CREATE TABLE IF NOT EXISTS pay_tcc_delivery (
 
 ## 6. User TCC 退款前置修复
 
+### 6.0 退款响应字段兼容阻断
+
+当前 User `BalanceRefundVO` 的 JSON 字段为 `refundOperationKey`，而 Pay `UserClient.refund` 沿用 `BalanceView.operationKey` 反序列化。退款写入可能已经成功，但 Pay 因 `refund.data.operationKey()` 为空而持续保持 `REFUND_PENDING`，阻断后续 delivery 收敛。
+
+最小修复：在 Pay `UserClient.BalanceView` 的 `operationKey` record component 上增加 Jackson `@JsonAlias("refundOperationKey")`，同时兼容原扣款响应的 `operationKey` 和退款响应的 `refundOperationKey`，不改变任何线上 JSON 输出字段和 Legacy 业务线路。补充真实 JSON 反序列化契约测试，至少覆盖两个字段名、APPLIED 状态和金额。
+
+修复后必须使用原 payNo、原 `refund:<payNo>` 键重新调用真实退款恢复链路，验证 Pay 读到同一退款操作键、状态 APPLIED、delivery 进入 REFUNDED，再检查余额/账本并清理隔离测试库。禁止手工改资金或账本绕过该契约。
+
 现有 User `refundInternal` 的锁用户步骤必须针对匹配的 TCC confirmed 账本允许锁定存在用户，因为已确认资金必须支持账户被禁用后的退款释放：
 
 ```sql
