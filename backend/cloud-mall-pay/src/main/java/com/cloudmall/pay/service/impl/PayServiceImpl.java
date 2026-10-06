@@ -165,22 +165,19 @@ public class PayServiceImpl implements PayService {
 
   @Transactional
   @PostMapping("/{payNo}/mock-fail")
-  /** 执行 fail 相关操作。 */
+  /** 按持久协议处理失败请求，已失败重放和退款中状态不重复取消订单。 */
   public ApiResponse<?> fail(@PathVariable String payNo) {
-    // 1. 接收并整理 fail 的业务请求。
-    // 2. 执行 fail 的核心业务校验与状态处理。
-    // 3. 返回 fail 的处理结果。
-    PayVO p = owned(payNo);
+    // 1. 读取当前用户支付并核验不可变协议。
+    PayVO payment = owned(payNo);
     String mode = paymentMode(payNo);
     if (PayDebitModes.TCC.equals(mode)) {
-      tccEntry().failure(p);
-      return ApiResponse.ok(p);
+      tccEntry().failure(payment);
+      return ApiResponse.ok(payment);
     }
-    if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
-    PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payNo);
-    if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
-      throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "支付结果正在确认，不能取消订单", 202);
-    notifyFailure(p);
+    // 2. 先分类 Legacy 已知结果；只有允许的未处理状态才能继续。
+    if (legacyFailureCompleted(payment)) return ApiResponse.ok(payment);
+    // 3. 沿原取消路径调用订单，CAS 成功后返回最新支付状态。
+    notifyFailure(payment);
     if (payRecordMapper.markFailed(payNo, java.time.LocalDateTime.now()) != 1) {
       throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
     }
@@ -222,25 +219,38 @@ public class PayServiceImpl implements PayService {
       }
     } else if (PayDebitModes.TCC.equals(mode)) {
       tccEntry().failure(payment);
-    } else {
-      if ("SUCCESS".equals(payment.status) || "REFUNDED".equals(payment.status))
-        throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
-      PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payment.payNo);
-      if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
-        throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "支付结果正在确认，不能取消订单", 202);
-      if ("PENDING".equals(payment.status)) {
-        notifyFailure(payment);
-        if (payRecordMapper.markCallback(
-                payment.payNo,
-                "FAILED",
-                false,
-                java.time.LocalDateTime.now(),
-                java.time.LocalDateTime.now())
-            != 1) throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
-      }
+    } else if (!legacyFailureCompleted(payment)) {
+      notifyFailure(payment);
+      if (payRecordMapper.markFailed(payment.payNo, java.time.LocalDateTime.now()) != 1)
+        throw new BizException(ErrorCodes.PAY_DONE, "支付状态已被处理", 409);
     }
     callbackReceipts.complete(payment, callback, callbackId);
     return ApiResponse.ok(find(payment.payNo));
+  }
+
+  /** 只读分类 Legacy 失败请求；true 表示已失败，false 才可进入原订单取消流程。 */
+  private boolean legacyFailureCompleted(PayVO payment) {
+    // 1. 存在意图时核对完整原载荷和模式，不能只凭 FAILED 字串复用别的请求。
+    PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payment.payNo);
+    if (intent != null) {
+      PayDebitModes.requireSupported(intent.debitMode);
+      if (!Objects.equals(intent.payNo, payment.payNo)
+          || !Objects.equals(intent.orderNo, payment.orderNo)
+          || !Objects.equals(intent.userId, payment.userId)
+          || intent.amount == null
+          || intent.amount.compareTo(payment.amount) != 0) throw PayDebitModes.unavailable();
+    }
+    // 2. 已成功、已退款与退款中均不进入取消，也不驱动任何资金恢复。
+    if ("SUCCESS".equals(payment.status) || "REFUNDED".equals(payment.status))
+      throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
+    if ("REFUND_PENDING".equals(payment.status))
+      throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
+    // 3. 既有 FAILED 可幂等读取；其余仅保留原明确允许的待处理路径。
+    boolean failedIntent = intent != null && "FAILED".equals(intent.status);
+    if ("FAILED".equals(payment.status) && (intent == null || failedIntent)) return true;
+    if ("PENDING".equals(payment.status) && (intent == null || failedIntent)) return false;
+    if ("ORDER_SYNC_UNKNOWN".equals(payment.status) && failedIntent) return false;
+    throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "支付结果正在确认，不能取消订单", 202);
   }
 
   /** 将可恢复中的支付结果映射为明确的 HTTP 业务状态。 */

@@ -741,6 +741,128 @@ class PayTccPublicEntryIT {
     assertFunds("100.00", 1, 1);
   }
 
+  @Test
+  @Order(10)
+  void legacyRefundFailureReportsPendingAndRefundedWithoutNewWrites() throws Exception {
+    createLegacyPublic();
+    var payment = new com.cloudmall.pay.domain.vo.PayVO();
+    payment.payNo = request.payNo;
+    payment.userId = request.userId;
+    payment.orderNo = request.orderNo;
+    payment.amount = request.amount;
+    payment.status = "PENDING";
+    application
+        .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+        .ensureIntent(payment);
+    var users = application.getBean(com.cloudmall.pay.feign.UserClient.class);
+    assertEquals(
+        "0",
+        users.debit(
+                7L,
+                7L,
+                new com.cloudmall.pay.feign.UserClient.DebitRequest(
+                    request.payNo, request.payNo, request.orderNo, request.amount))
+            .code);
+    assertFunds("90.00", 1, 0);
+    assertEquals(
+        200, call("order", "/api/orders/" + request.orderNo + "/cancel", Map.of()).statusCode());
+    await(
+        () ->
+            "SUCCEEDED"
+                .equals(
+                    orderDb.queryForObject(
+                        "SELECT status FROM order_stock_action WHERE order_no=?",
+                        String.class,
+                        request.orderNo)),
+        30);
+    proxies.get("user").dropNextPostBodyForPath("/refunds");
+    var consistency =
+        application.getBean(com.cloudmall.pay.service.impl.PayConsistencyService.class);
+    assertEquals("REFUND_PENDING", consistency.process(request.payNo));
+    // 只暂停本条意图的恢复时钟，防止后台与响应断言竞争。
+    payDb.update(
+        "UPDATE pay_debit_intent SET next_retry_at=DATE_ADD(NOW(3),INTERVAL 1 HOUR) WHERE pay_no=?",
+        request.payNo);
+    try {
+      int refunds = proxies.get("user").refundPostCount();
+      int cancellations = proxies.get("order").cancelPostCount();
+      for (int attempt = 0; attempt < 2; attempt++) {
+        Response failed = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+        assertEquals(202, failed.status());
+        assertEquals("PAY_REFUND_PENDING", failed.body().path("code").asText());
+        Response notified =
+            post("/api/payments/callback", callback(false, "legacy-refund"), callbackHeaders());
+        assertEquals(202, notified.status());
+        assertEquals("PAY_REFUND_PENDING", notified.body().path("code").asText());
+      }
+      assertEquals("REFUND_PENDING", paymentState());
+      assertEquals(refunds, proxies.get("user").refundPostCount());
+      assertEquals(cancellations, proxies.get("order").cancelPostCount());
+      assertEquals(
+          1,
+          payDb.queryForObject(
+              "SELECT COUNT(*) FROM pay_callback_log WHERE callback_status='RECEIVED_FAILURE' AND"
+                  + " processed_at IS NULL",
+              Integer.class));
+      assertFunds("100.00", 1, 1);
+    } finally {
+      payDb.update(
+          "UPDATE pay_debit_intent SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+              + " pay_no=?",
+          request.payNo);
+      assertEquals("REFUNDED", consistency.process(request.payNo));
+    }
+    int completedRefunds = proxies.get("user").refundPostCount();
+    assertEquals(
+        409, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
+    assertEquals(
+        409,
+        post("/api/payments/callback", callback(false, "legacy-refund"), callbackHeaders())
+            .status());
+    assertEquals(completedRefunds, proxies.get("user").refundPostCount());
+    assertFunds("100.00", 1, 1);
+  }
+
+  @Test
+  @Order(11)
+  void legacyFailedReplayDoesNotCancelOrderAgain() throws Exception {
+    createLegacyPublic();
+    Response first = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+    assertEquals(200, first.status(), first.body().toString());
+    assertEquals("FAILED", first.body().path("data").path("status").asText());
+    int cancellations = proxies.get("order").cancelPostCount();
+    assertEquals(1, cancellations);
+    for (int attempt = 0; attempt < 2; attempt++) {
+      assertEquals(
+          200, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
+      assertEquals(
+          200,
+          post("/api/payments/callback", callback(false, "legacy-failed"), callbackHeaders())
+              .status());
+    }
+    assertEquals(cancellations, proxies.get("order").cancelPostCount());
+    assertEquals(
+        1,
+        payDb.queryForObject(
+            "SELECT COUNT(*) FROM pay_callback_log WHERE callback_status='FAILED' AND processed_at"
+                + " IS NOT NULL",
+            Integer.class));
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+    assertFunds("100.00", 0, 0);
+  }
+
+  /** 当前配置仅影响新建支付，旧单始终按持久 LEGACY 模式处理。 */
+  private void createLegacyPublic() throws Exception {
+    var configuration =
+        application.getBean(com.cloudmall.pay.config.PayDebitModeConfiguration.class);
+    ReflectionTestUtils.setField(configuration, "configuredMode", "LEGACY");
+    try {
+      createPublic();
+    } finally {
+      ReflectionTestUtils.setField(configuration, "configuredMode", "TCC");
+    }
+  }
+
   private void createPublic() throws Exception {
     Response response =
         post(
@@ -893,6 +1015,8 @@ class PayTccPublicEntryIT {
   private static String[] payArguments() {
     return new String[] {
       "--server.port=0",
+      // 本夹具显式驱动 Legacy 意图，避免后台和响应副作用断言竞争；TCC扫描照常。
+      "--cloudmall.pay.recovery-interval-ms=3600000",
       "--cloudmall.pay.debit-mode=TCC",
       "--cloudmall.pay.tcc-entry.enabled=true",
       "--cloudmall.pay.tcc-recovery.enabled=true",

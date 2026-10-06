@@ -356,6 +356,12 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_cancel.sql |
 
 COMMITTED 但 Pay 仍 PENDING/ORDER_SYNC_UNKNOWN 时继续返回普通未知202；SUCCESS/REFUNDED 的409和FAILED幂等保持不变。此修复只校正结果分类，不提供已提交资金的主动取消能力。
 
+### Legacy 失败与退款结果（第16轮I）
+
+Legacy `mock-fail` 和失败 callback 共用持久状态分类：REFUND_PENDING 返回 `PAY_REFUND_PENDING`/202，SUCCESS/REFUNDED 返回409；FAILED在无意图或完整匹配FAILED意图时幂等返回200，不重复Order.cancel。存在意图时必须匹配原支付号、用户、订单、金额和Legacy模式，矛盾时503，未知结果保持202。
+
+PENDING且无意图或已有FAILED意图保留原取消路径；ORDER_SYNC_UNKNOWN只有完整匹配FAILED意图才能继续取消，其余保持未知。失败callback只在Pay实际FAILED后完成日志；退款中和未知状态不调用complete。本轮不改变TCC，也不增加资金补偿。
+
 ## 验证命令
 
 ```bash

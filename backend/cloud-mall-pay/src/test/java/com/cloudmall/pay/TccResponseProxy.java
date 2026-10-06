@@ -58,6 +58,9 @@ public final class TccResponseProxy implements AutoCloseable {
   /** 退款请求次数，验证重放未换键。 */
   private final AtomicInteger refundPosts = new AtomicInteger();
 
+  /** 订单 cancel 请求次数，用于验证失败重放不重复调用。 */
+  private final AtomicInteger cancelPosts = new AtomicInteger();
+
   /** 订单 paid 请求次数。 */
   private final AtomicInteger paidPosts = new AtomicInteger();
 
@@ -129,12 +132,18 @@ public final class TccResponseProxy implements AutoCloseable {
     return paidPosts.get();
   }
 
+  /** 读取真实订单取消 POST 数量。 */
+  public int cancelPostCount() {
+    return cancelPosts.get();
+  }
+
   /** 清零 POST/GET 统计计数。 */
   public void resetCounters() {
     postRequestCount.set(0);
     getRequestCount.set(0);
     refundPosts.set(0);
     paidPosts.set(0);
+    cancelPosts.set(0);
   }
 
   /** 幂等停止 HTTP 服务和 daemon 工作线程。 */
@@ -152,6 +161,8 @@ public final class TccResponseProxy implements AutoCloseable {
     String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
     if ("POST".equals(method) && exchange.getRequestURI().getPath().endsWith("/refunds"))
       refundPosts.incrementAndGet();
+    if ("POST".equals(method) && exchange.getRequestURI().getPath().endsWith("/cancel"))
+      cancelPosts.incrementAndGet();
     if ("POST".equals(method) && exchange.getRequestURI().getPath().endsWith("/paid"))
       paidPosts.incrementAndGet();
     if (tccPath && "POST".equals(method)) {
