@@ -123,6 +123,9 @@ public class PayTccPaymentService {
     // 1. 外层事务已暂停，只有原 execution 明确回滚才可读取 User 永久事实。
     PayTccExecutionPO execution = states.execution(payment.payNo);
     if (execution != null) {
+      // 已进入退款交付时保留明确的退款中语义；失败请求不推进交付或再次退款。
+      if ("COMMITTED".equals(execution.state) && "REFUND_PENDING".equals(payment.status))
+        throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
       if (!"ROLLEDBACK".equals(execution.state)) throw pending();
       try {
         // 2. 短事务投影成功后才更新返回视图，不读取外层旧 RR 快照。

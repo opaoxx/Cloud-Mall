@@ -350,6 +350,12 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_cancel.sql |
 
 本阶段不调用 TC、Order 或 User 写入，不改变 execution state/decision，不自动完成 callback 日志；回调重放仍按原入口核验。缺失/矛盾事实继续保留待核验，不能由超时推断回滚。
 
+### 已提交 TCC 的退款中响应（CM-18 第16轮H）
+
+当 execution 已 COMMITTED、Pay 已处于 REFUND_PENDING 时，`mock-fail` 和失败 callback 返回 `PAY_REFUND_PENDING`/202，明确余额退款处理中。重复请求不触发 delivery、Order cancel/paid、TC 或 User refund，失败 callback 保持 RECEIVED_FAILURE，不能提前伪造 FAILED。
+
+COMMITTED 但 Pay 仍 PENDING/ORDER_SYNC_UNKNOWN 时继续返回普通未知202；SUCCESS/REFUNDED 的409和FAILED幂等保持不变。此修复只校正结果分类，不提供已提交资金的主动取消能力。
+
 ## 验证命令
 
 ```bash

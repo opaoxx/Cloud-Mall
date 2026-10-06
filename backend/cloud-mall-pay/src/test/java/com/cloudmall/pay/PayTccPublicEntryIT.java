@@ -688,6 +688,59 @@ class PayTccPublicEntryIT {
     assertEquals("PENDING_PAYMENT", orderState());
   }
 
+  @Test
+  @Order(9)
+  void committedRefundPendingFailureReportsRefundWithoutRetryingIt() throws Exception {
+    createPublic();
+    assertEquals(
+        "COMMITTED",
+        application
+            .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
+            .execute(request)
+            .state);
+    assertEquals(
+        200, call("order", "/api/orders/" + request.orderNo + "/cancel", Map.of()).statusCode());
+    await(
+        () ->
+            "SUCCEEDED"
+                .equals(
+                    orderDb.queryForObject(
+                        "SELECT status FROM order_stock_action WHERE order_no=?",
+                        String.class,
+                        request.orderNo)),
+        30);
+    proxies.get("user").dropNextPostBodyForPath("/refunds");
+    assertEquals("REFUND_PENDING", delivery.deliver(request.payNo).state);
+    assertEquals("REFUND_PENDING", paymentState());
+    assertFunds("100.00", 1, 1);
+    int refundPosts = proxies.get("user").refundPostCount();
+    int userReads = proxies.get("user").getCount();
+    for (int attempt = 0; attempt < 2; attempt++) {
+      Response failed = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+      assertEquals(202, failed.status());
+      assertEquals("PAY_REFUND_PENDING", failed.body().path("code").asText());
+      Response callbackResult =
+          post(
+              "/api/payments/callback",
+              callback(false, "committed-refund-failure"),
+              callbackHeaders());
+      assertEquals(202, callbackResult.status());
+      assertEquals("PAY_REFUND_PENDING", callbackResult.body().path("code").asText());
+    }
+    assertEquals(refundPosts, proxies.get("user").refundPostCount());
+    assertEquals(userReads, proxies.get("user").getCount());
+    assertEquals(0, proxies.get("order").paidPostCount());
+    assertEquals("REFUND_PENDING", paymentState());
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
+    assertEquals(
+        1,
+        payDb.queryForObject(
+            "SELECT COUNT(*) FROM pay_callback_log WHERE callback_id='committed-refund-failure' AND"
+                + " callback_status='RECEIVED_FAILURE' AND processed_at IS NULL",
+            Integer.class));
+    assertFunds("100.00", 1, 1);
+  }
+
   private void createPublic() throws Exception {
     Response response =
         post(
@@ -793,7 +846,7 @@ class PayTccPublicEntryIT {
 
   private void forceDue() {
     payDb.update(
-        "UPDATE pay_tcc_delivery SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 SECOND) WHERE"
+        "UPDATE pay_tcc_delivery SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
             + " pay_no=?",
         request.payNo);
   }
