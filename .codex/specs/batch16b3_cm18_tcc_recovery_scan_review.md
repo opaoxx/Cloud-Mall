@@ -100,8 +100,8 @@ lease 默认 60 秒；旧 RPC 过期后仍可能运行，允许与新实例重�
 4. decision NONE/RUNNING：扫描只读观察，绝不新增 rollback/commit。
 5. BEGIN_UNKNOWN/xid NULL：不发任何 RPC、不 begin、不占用其他合法记录窗口。
 6. 20 条批量中混入长期失败/冲突/终态：合法执行不会饥饿，失败记录按退避跳过。
-7. 进程在 claim、RPC、release 各窗口退出：新实例只能凭 token/lease 调用原 recover，迟到实例不能清理新 lease。
-8. 终态证据不足、TC Unknown、Fence 已清理：保留 UNKNOWN，测试数据库和 TC 事实不清理。
+7. 用确定性 SQL/两实例边界验证 claim、过期 lease、旧 token 完成 CAS 和逐 payNo 认领；B2 已有决议 RPC 窗口进程退出/重启证据。本轮不宣称 recovery claim、RPC、release 各窗口独立进程退出均已验收，后续可补专门进程矩阵。
+8. 终态证据不足、TC Unknown、Fence 已清理且缺少永久业务终态：保留 UNKNOWN，测试数据库和 TC 事实不清理；若 Pay/User 两端已有完整永久终态证据，则按 B2 规则完成核对，不因 Fence 清理本身强制保持 UNKNOWN。
 9. 自动 scheduler 从已有 COMMIT_REQUESTED/ROLLBACK_REQUESTED 恢复；NONE 不新增 decision；历史 nextRecoveryAt、60 秒过期 lease、10 秒预算和退避上限行为正确。
 
 ## 8. 边界
