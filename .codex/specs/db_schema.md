@@ -461,7 +461,7 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 第 14 轮新增 `balance_debit_attempt` 和 `balance_tcc_debit` 只服务 User 本地 TCC 就绪状态机。Legacy 归属最终为 `APPLIED/REJECTED`，TCC 归属为 `TRYING/CONFIRMED/CANCELLED`；同一 `pay_no`、XID、branchId 的唯一约束防止 Legacy/TCC 互斥失败和同资源重复分支。余额不足的 TCC Try 整笔回滚，不写失败归属。Confirm/Cancel 目前是 User 内部本地事务方法，尚未接入 Seata Fence、Pay TCC 或 HTTP 编排。
 
-`balance_debit_attempt` 至少包含 `pay_no`、`operation_key`、`mode`、`xid`、`branch_id`、`user_id`、`order_no`、`amount`、`state` 和审计时间，唯一约束为 `pay_no`、`operation_key`、`xid`、`(xid,branch_id)`；Legacy 的 XID 为 NULL，MySQL 唯一索引允许多个 NULL。`balance_tcc_debit` 至少包含相同业务键、`balance_before`、`balance_after_try` 和状态，唯一约束为 `operation_key`、`xid`、`(xid,branch_id)`、`pay_no`。两表与 `mall_user` 使用同一 User 数据源和锁顺序；任何未来 Fence 表必须继续位于同一数据源。
+`balance_debit_attempt` 至少包含 `pay_no`、`operation_key`、`ledger_key`、`mode`、`xid`、`branch_id`、`user_id`、`order_no`、`amount`、`state` 和审计时间，唯一约束为 `pay_no`、`operation_key`、`ledger_key`、`xid`、`(xid,branch_id)`；Legacy 的 XID 为 NULL，MySQL 唯一索引允许多个 NULL。TCC 的 `operation_key=tcc-debit:<payNo>`，但 `ledger_key=payNo`；Legacy 的 `ledger_key` 等于请求 operationKey，Confirm 只能使用归属行的不可变 ledger_key。`balance_tcc_debit` 至少包含相同业务键、`balance_before`、`balance_after_try` 和状态，唯一约束为 `operation_key`、`xid`、`(xid,branch_id)`、`pay_no`。两表与 `mall_user` 使用同一 User 数据源和锁顺序；任何未来 Fence 表必须继续位于同一数据源。
 
 ### 7.4 `pay_debit_intent`
 

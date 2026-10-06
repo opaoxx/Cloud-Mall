@@ -52,7 +52,7 @@ CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一�
 
 CM-18 第 12A 阶段完成支付路由的持久协议隔离：`pay_record.debit_mode` 在创建时冻结，`pay_debit_intent.debit_mode` 从原支付记录复制；数据库迁移把历史行写为 `LEGACY`，Java 旧对象的 null 只作兼容，持久化空串、小写值、尾随空格和未知值均不支持。当前运行配置仅允许 `LEGACY`，`TCC` 或未知配置启动失败。恢复器在 claim 前以及调用 User/Order 前双重校验记录与意图模式；模式为 TCC、未知或不一致时返回 `PAY_DEBIT_MODE_UNAVAILABLE`（503），不把未实现 TCC 意图降级到普通余额扣款，也不修改租约或状态。恢复扫描必须在 SQL 层 JOIN 两表并以 `BINARY debit_mode='LEGACY'` 精确筛选，不能先取固定窗口再在 Java 过滤。12A 不接入 Pay TCC、Seata TCC 分支或支付 TCC HTTP 接口。
 
-第 14 轮在此基础上只批准 User 侧本地 TCC 就绪状态机：`mall_user.frozen_balance`、共享 `balance_debit_attempt` 和 `balance_tcc_debit` 负责冻结、Confirm/Cancel 和 Legacy/TCC 的 payNo 互斥。Legacy 归属最终只能为 `APPLIED/REJECTED`，TCC 归属只能为 `TRYING/CONFIRMED/CANCELLED`；一个 User 资金资源固定绑定一个 XID、一个 branchId 和一个 payNo。Confirm/Cancel 仍是内部本地事务方法，没有 HTTP/Feign 入口；Pay 继续只走 LEGACY。Fence、真实 Seata RM 回调、Pay 编排和 Order/Stock 联动仍未接入，CM-18 整体未闭环。
+第 14 轮在此基础上只批准 User 侧本地 TCC 就绪状态机：`mall_user.frozen_balance`、共享 `balance_debit_attempt` 和 `balance_tcc_debit` 负责冻结、Confirm/Cancel 和 Legacy/TCC 的 payNo 互斥。Legacy 归属最终只能为 `APPLIED/REJECTED`，TCC 归属只能为 `TRYING/CONFIRMED/CANCELLED`；归属同时冻结最终 `balance_ledger.operation_key`，TCC 使用 `ledgerKey=payNo`，Legacy 使用请求 operationKey，Confirm 禁止重新推导账本键。一个 User 资金资源固定绑定一个 XID、一个 branchId 和一个 payNo。Confirm/Cancel 仍是内部本地事务方法，没有 HTTP/Feign 入口；Pay 继续只走 LEGACY。Fence、真实 Seata RM 回调、Pay 编排和 Order/Stock 联动仍未接入，CM-18 整体未闭环。
 
 ### 4.3 超时关单
 

@@ -183,7 +183,7 @@ MySQL 事实；只有 MySQL 事实也不可用时返回 `STOCK_SERVICE_UNAVAILAB
 
 支付记录和扣款意图都持久化 `debit_mode`，取值为 `LEGACY` 或未来实现的 `TCC`；数据库迁移把历史行写为 `LEGACY`，由创建支付记录时的配置冻结，后续配置变化不得改写既有意图。Java 旧对象的 null 只作 LEGACY 兼容；持久化列为 `NOT NULL`，空串、小写值、尾随空格和未知模式均不支持。当前阶段运行配置只允许 `LEGACY`；`TCC` 或未知模式必须启动失败。支付恢复器在 claim 前以及调用 User/Order 前都要校验支付记录与意图的模式一致性。模式为 `TCC`、未知或不一致时返回 `PAY_DEBIT_MODE_UNAVAILABLE`（HTTP 503），不调用 LEGACY 扣款/退款，也不更新租约、尝试次数或状态；调用方必须继续使用原 `payNo` 等待后续恢复，不能换新的 `Idempotency-Key`。恢复扫描在 SQL 层以两表 `BINARY debit_mode='LEGACY'` 精确筛选，不能先取固定窗口再在 Java 过滤，否则隔离记录会造成合法支付饥饿。
 
-CM-18 第 14 轮只批准 User 侧本地 TCC 就绪状态机：新增冻结余额和不可变 `payNo` 尝试归属，Legacy 归属最终只能为 `APPLIED/REJECTED`，TCC 归属只能为 `TRYING/CONFIRMED/CANCELLED`。同一 User 资金资源固定为一个 XID、一个 branchId 和一个 payNo；余额不足的 TCC Try 整笔回滚且不写失败归属。Confirm/Cancel 是 User 内部事务方法，当前没有 HTTP/Feign 入口；Pay 仍只使用 LEGACY，Seata Fence 和真实 TCC 编排待后续评审。
+CM-18 第 14 轮只批准 User 侧本地 TCC 就绪状态机：新增冻结余额和不可变 `payNo` 尝试归属，Legacy 归属最终只能为 `APPLIED/REJECTED`，TCC 归属只能为 `TRYING/CONFIRMED/CANCELLED`。归属同时冻结最终 `balance_ledger.operation_key`：TCC 使用 `ledgerKey=payNo`，Legacy 使用请求 operationKey；Confirm 只能使用归属行的不可变 ledgerKey，防止不同 payNo 抢占同一账本键。同一 User 资金资源固定为一个 XID、一个 branchId 和一个 payNo；余额不足的 TCC Try 整笔回滚且不写失败归属。Confirm/Cancel 是 User 内部事务方法，当前没有 HTTP/Feign 入口；Pay 仍只使用 LEGACY，Seata Fence 和真实 TCC 编排待后续评审。
 
 支付服务与用户服务之间的内部接口契约：
 

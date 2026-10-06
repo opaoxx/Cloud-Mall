@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS balance_debit_attempt (
   id BIGINT PRIMARY KEY,
   pay_no VARCHAR(64) NOT NULL,
   operation_key VARCHAR(128) NOT NULL,
+  ledger_key VARCHAR(128) NOT NULL,
   mode VARCHAR(16) NOT NULL,
   xid VARCHAR(128),
   branch_id BIGINT,
@@ -56,13 +57,14 @@ CREATE TABLE IF NOT EXISTS balance_debit_attempt (
   updated_at DATETIME(3) NOT NULL,
   UNIQUE KEY uk_balance_attempt_pay_no(pay_no),
   UNIQUE KEY uk_balance_attempt_operation(operation_key),
+  UNIQUE KEY uk_balance_attempt_ledger(ledger_key),
   UNIQUE KEY uk_balance_attempt_xid(xid),
   UNIQUE KEY uk_balance_attempt_branch(xid,branch_id),
   KEY idx_balance_attempt_user_state(user_id,state,updated_at)
 );
 ```
 
-`mode` 为 `LEGACY` 或 `TCC`。Legacy 归属状态为 `APPLIED/REJECTED`，TCC 归属状态为 `TRYING/CONFIRMED/CANCELLED`；Legacy 不允许留下未完成 `TRYING`。余额不足的 TCC Try 整笔本地事务回滚，不写失败归属。新 Legacy 扣款也必须在用户行锁后认领该表，避免同一 payNo 与 TCC 并发。Legacy 的 `operationKey` 不保证等于 `payNo`，因此互斥检查必须按 `pay_no` 查询 `balance_ledger` 的 DEBIT 事实，不能只查 `operation_key=payNo`。历史 `balance_ledger` 没有归属行时，读取阶段按 `pay_no` 查账本并视为既有 Legacy 事实；新请求必须先插入归属行，唯一键冲突时完整校验用户、订单、金额、模式和 operationKey。`uk_balance_attempt_xid(xid)` 与 TCC 表的 `uk_balance_tcc_xid(xid)` 共同冻结“一 XID 只能有一笔 User TCC 资金资源”；Legacy 的 XID 为 NULL，MySQL 唯一索引允许多个 NULL，不影响 Legacy。
+`mode` 为 `LEGACY` 或 `TCC`。Legacy 归属状态为 `APPLIED/REJECTED`，TCC 归属状态为 `TRYING/CONFIRMED/CANCELLED`；Legacy 不允许留下未完成 `TRYING`。`ledger_key` 是最终 `balance_ledger.operation_key` 的不可变归属：TCC 固定为 `payNo`，Legacy 固定为请求的 operationKey。TCC 的 `operation_key=tcc-debit:<payNo>` 与最终账本键不同，Confirm 必须使用归属行的 `ledger_key`，不能重新推导。`uk_balance_attempt_ledger(ledger_key)` 防止不同 payNo 或不同模式抢占同一账本键。余额不足的 TCC Try 整笔本地事务回滚，不写失败归属。新 Legacy 扣款也必须在用户行锁后认领该表，避免同一 payNo 与 TCC 并发。Legacy 的 `operationKey` 不保证等于 `payNo`，因此互斥检查必须按 `pay_no` 查询 `balance_ledger` 的 DEBIT 事实，不能只查 `operation_key=payNo`；同时必须核对将要使用的 `ledger_key`。历史 `balance_ledger` 没有归属行时，读取阶段按 `pay_no` 和 `ledger_key` 双重核对并视为既有 Legacy 事实；新请求必须先插入归属行，唯一键冲突时完整校验用户、订单、金额、模式、operationKey 和 ledgerKey。`uk_balance_attempt_xid(xid)` 与 TCC 表的 `uk_balance_tcc_xid(xid)` 共同冻结“一 XID 只能有一笔 User TCC 资金资源”；Legacy 的 XID 为 NULL，MySQL 唯一索引允许多个 NULL，不影响 Legacy。
 
 ### 3.3 `balance_tcc_debit`
 
@@ -102,7 +104,7 @@ CREATE TABLE IF NOT EXISTS balance_tcc_debit (
 
 禁止先锁 TCC 行再锁用户行，也禁止 Confirm/Cancel 与 Legacy refund 使用相反顺序。不同用户使用相同 payNo 时，唯一键冲突必须转为明确冲突；不能因为用户行不同而产生两笔资金事实。
 
-同一 payNo 的 Legacy 归属会阻止 TCC Try；同一 payNo 的 TCC 归属会阻止 Legacy debit。载荷中 userId、orderNo、amount、operationKey、mode、xid 任一不一致返回 409，不能复用已有扣款。
+同一 payNo 的 Legacy 归属会阻止 TCC Try；同一 payNo 的 TCC 归属会阻止 Legacy debit。载荷中 userId、orderNo、amount、operationKey、ledgerKey、mode、xid 任一不一致返回 409，不能复用已有扣款。归属行必须在任何余额或冻结变化前成功唯一认领。
 
 ## 5. User 内部状态机契约
 
@@ -113,7 +115,7 @@ Java 内部方法建议为 `tryDebit(BalanceTccDebitTryDTO request)`，不暴露
 1. 校验正金额、用户状态、payNo、operationKey、XID 和 branchId 非空；本轮本地可信方法接受并持久化 XID/branchId，下一轮再绑定 Seata 上下文。
 2. 若 `tcc-debit.enabled=false`，对新请求返回 `PAY_DEBIT_MODE_UNAVAILABLE`，不写任何资金数据。
 3. 锁用户 → 共享归属 → Legacy DEBIT 事实 → TCC 行。已有同键 `TRYING` 返回幂等成功；`CONFIRMED/CANCELLED` 返回当前终态；不同载荷/XID/branchId 返回冲突。
-4. 发现 Legacy 账本或 Legacy 尝试归属时拒绝 TCC Try；发现同 payNo 不同 XID 时拒绝。
+4. 发现 Legacy 账本或 Legacy 尝试归属时拒绝 TCC Try；发现同 payNo 不同 XID，或 `ledger_key` 已属于其他 payNo 时拒绝。
 5. 只有 `status=1` 且 `balance >= amount` 时，执行 `balance -= amount`、`frozen_balance += amount`，插入 `balance_debit_attempt(mode=TCC,state=TRYING)` 和 `balance_tcc_debit(state=TRYING)`；XID/branchId 在两份归属事实中不可变。
 6. 余额不足返回 409，并使整笔本地事务回滚；不写归属、不改变余额/冻结额、不写 APPLIED ledger，余额变化后可用相同 operationKey 重试。
 
@@ -125,7 +127,7 @@ Try 成功只表示冻结成功；不能写 `balance_ledger(DEBIT,APPLIED)`，�
 
 1. 不受 `tcc-debit.enabled` 开关阻断，允许清算已存在的 TCC 冻结。
 2. 使用用户行 → 归属行 → TCC 行锁序。
-3. 仅 `TRYING` 可确认：减少 `frozen_balance`，不再次减少 `balance`，写一条 `balance_ledger(DEBIT,APPLIED)`，再将 TCC 和归属状态都设为 `CONFIRMED`；`APPLIED` 只属于 `balance_ledger` 的 state，不属于 TCC 归属表。
+3. 仅 `TRYING` 可确认：减少 `frozen_balance`，不再次减少 `balance`，以归属行不可变的 `ledger_key` 写一条 `balance_ledger(DEBIT,APPLIED)`，再将 TCC 和归属状态都设为 `CONFIRMED`；`APPLIED` 只属于 `balance_ledger` 的 state，不属于 TCC 归属表。
 4. 已 `CONFIRMED` 的重复确认只返回原事实；账本已存在时完整核验载荷，不能重复插入或减少余额。
 5. TCC 行缺失、归属缺失或状态不明时返回未知/冲突，不能凭请求体创建 APPLIED 账本。
 
@@ -151,10 +153,10 @@ Try 成功只表示冻结成功；不能写 `balance_ledger(DEBIT,APPLIED)`，�
 
 ## 7. PO、DTO、Mapper 和 Service 范围
 
-- `BalanceDebitAttemptPO`：映射共享归属表，包含 payNo、operationKey、mode、xid、branchId、userId、orderNo、amount、state 和时间字段。
+- `BalanceDebitAttemptPO`：映射共享归属表，包含 payNo、operationKey、ledgerKey、mode、xid、branchId、userId、orderNo、amount、state 和时间字段。
 - `BalanceTccDebitPO`：映射冻结状态表，包含 operationKey、xid、branchId、业务载荷、冻结前/冻结后余额和状态。
-- `BalanceTccDebitTryDTO`：只承载 userId、payNo、orderNo、operationKey、xid、branchId、amount；Confirm/Cancel DTO 只供本地资源契约使用，不能作为 HTTP 请求 DTO。
-- `BalanceTccDebitFinalizeDTO`：承载同一完整载荷和目标回调类型；只能由本地资源适配器构造，不能从 HTTP body 绑定。
+- `BalanceTccDebitTryDTO`：只承载 userId、payNo、orderNo、operationKey、ledgerKey、xid、branchId、amount；Confirm/Cancel DTO 只供本地资源契约使用，不能作为 HTTP 请求 DTO。
+- `BalanceTccDebitFinalizeDTO`：承载同一完整载荷（含 ledgerKey）和目标回调类型；只能由本地资源适配器构造，不能从 HTTP body 绑定。
 - `BalanceTccDebitVO`：只返回 state、operationKey、payNo、xid 脱敏摘要和 branchId，不返回 PO 或余额内部快照。
 - `BalanceTccDebitService`：固定提供 `tryDebit(BalanceTccDebitTryDTO)`, `confirmDebit(BalanceTccDebitFinalizeDTO)`, `cancelDebit(BalanceTccDebitFinalizeDTO)`；三方法均使用 `REQUIRED` 本地事务，Confirm/Cancel 不受 enabled 开关阻断。
 - Mapper 提供锁用户、锁归属、锁 TCC 行、按 Legacy payNo 查询、插入唯一归属、条件 Try/Confirm/Cancel、插入/核验 APPLIED ledger 等语义方法；SQL 不进入 Service。
