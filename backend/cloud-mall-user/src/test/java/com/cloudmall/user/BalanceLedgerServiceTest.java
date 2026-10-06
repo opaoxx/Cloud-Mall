@@ -13,6 +13,7 @@ import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
 import com.cloudmall.user.domain.po.BalanceLedgerPO;
 import com.cloudmall.user.domain.po.UserPO;
+import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.service.impl.UserServiceImpl;
@@ -29,6 +30,7 @@ class BalanceLedgerServiceTest {
   private UserServiceImpl userService;
   private UserMapper userMapper;
   private BalanceLedgerMapper balanceLedgerMapper;
+  private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
   private ValueOperations<String, String> valueOperations;
 
   @BeforeEach
@@ -36,11 +38,16 @@ class BalanceLedgerServiceTest {
     userService = new UserServiceImpl();
     userMapper = mock(UserMapper.class);
     balanceLedgerMapper = mock(BalanceLedgerMapper.class);
+    balanceDebitAttemptMapper = mock(BalanceDebitAttemptMapper.class);
+    when(balanceDebitAttemptMapper.insert(any())).thenReturn(1);
+    when(balanceLedgerMapper.insert(any())).thenReturn(1);
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
     valueOperations = mock(ValueOperations.class);
     when(redisTemplate.opsForValue()).thenReturn(valueOperations);
     ReflectionTestUtils.setField(userService, "userMapper", userMapper);
     ReflectionTestUtils.setField(userService, "balanceLedgerMapper", balanceLedgerMapper);
+    ReflectionTestUtils.setField(
+        userService, "balanceDebitAttemptMapper", balanceDebitAttemptMapper);
     ReflectionTestUtils.setField(userService, "redis", redisTemplate);
   }
 

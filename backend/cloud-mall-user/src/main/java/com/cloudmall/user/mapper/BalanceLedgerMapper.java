@@ -13,14 +13,13 @@ import org.apache.ibatis.annotations.Update;
 public interface BalanceLedgerMapper extends BaseMapper<BalanceLedgerPO> {
   /** 为已有本地数据库幂等创建余额账本。 */
   @Update(
-      "CREATE TABLE IF NOT EXISTS balance_ledger ("
-          + "id BIGINT PRIMARY KEY,user_id BIGINT NOT NULL,operation_key VARCHAR(128) NOT NULL UNIQUE,"
-          + "operation_type VARCHAR(16) NOT NULL,original_operation_key VARCHAR(128),"
-          + "pay_no VARCHAR(64) NOT NULL,order_no VARCHAR(64) NOT NULL,amount DECIMAL(18,2) NOT NULL,"
-          + "state VARCHAR(16) NOT NULL,balance_before DECIMAL(18,2) NOT NULL,"
-          + "balance_after DECIMAL(18,2) NOT NULL,created_at DATETIME(3) NOT NULL,"
-          + "KEY idx_balance_order(order_no,created_at),"
-          + "KEY idx_balance_original(original_operation_key))")
+      "CREATE TABLE IF NOT EXISTS balance_ledger (id BIGINT PRIMARY KEY,user_id BIGINT NOT"
+          + " NULL,operation_key VARCHAR(128) NOT NULL UNIQUE,operation_type VARCHAR(16) NOT"
+          + " NULL,original_operation_key VARCHAR(128),pay_no VARCHAR(64) NOT NULL,order_no"
+          + " VARCHAR(64) NOT NULL,amount DECIMAL(18,2) NOT NULL,state VARCHAR(16) NOT"
+          + " NULL,balance_before DECIMAL(18,2) NOT NULL,balance_after DECIMAL(18,2) NOT"
+          + " NULL,created_at DATETIME(3) NOT NULL,KEY idx_balance_order(order_no,created_at),KEY"
+          + " idx_balance_original(original_operation_key))")
   void ensureTable();
 
   /** 按唯一操作键读取账本记录。 */
@@ -40,9 +39,20 @@ public interface BalanceLedgerMapper extends BaseMapper<BalanceLedgerPO> {
           + " and operation_type='DEBIT' for update")
   BalanceLedgerPO selectDebitForUpdate(@Param("operationKey") String operationKey);
 
+  /** 按支付号读取 Legacy 扣款事实，不对不存在的唯一值申请间隙锁。 */
+  @Select(
+      "select * from balance_ledger where pay_no=#{payNo} and operation_type='DEBIT' and"
+          + " state='APPLIED'")
+  BalanceLedgerPO selectAppliedDebitByPayNo(@Param("payNo") String payNo);
+
+  /** 按支付号读取任意状态的 Legacy 扣款事实。 */
+  @Select("select * from balance_ledger where pay_no=#{payNo} and operation_type='DEBIT'")
+  BalanceLedgerPO selectDebitByPayNo(@Param("payNo") String payNo);
+
   /** 查询退款操作关联的原扣款键。 */
   @Select(
-      "select operation_key from balance_ledger where original_operation_key=#{originalOperationKey}"
-          + " and operation_type='REFUND' and state='APPLIED' limit 1")
+      "select operation_key from balance_ledger where"
+          + " original_operation_key=#{originalOperationKey} and operation_type='REFUND' and"
+          + " state='APPLIED' limit 1")
   String selectFirstRefundOperationKey(@Param("originalOperationKey") String originalOperationKey);
 }

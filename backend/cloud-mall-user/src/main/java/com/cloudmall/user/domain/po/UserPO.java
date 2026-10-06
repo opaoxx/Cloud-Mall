@@ -27,6 +27,10 @@ public class UserPO {
   /** 用户余额。 */
   public BigDecimal balance;
 
+  /** TCC 冻结余额。 */
+  @TableField("frozen_balance")
+  public BigDecimal frozenBalance;
+
   /** 用户昵称。 */
   public String nickname;
 

@@ -1,0 +1,25 @@
+-- CloudMall User TCC state migration; safe to execute repeatedly on an existing database.
+USE cloudmall_user;
+SET @frozen_balance_column_exists := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='mall_user' AND column_name='frozen_balance');
+SET @frozen_balance_migration := IF(@frozen_balance_column_exists=0,'ALTER TABLE mall_user ADD COLUMN frozen_balance DECIMAL(18,2) NOT NULL DEFAULT 0.00 AFTER balance','SELECT 1');
+PREPARE frozen_balance_migration_statement FROM @frozen_balance_migration;
+EXECUTE frozen_balance_migration_statement;
+DEALLOCATE PREPARE frozen_balance_migration_statement;
+CREATE TABLE IF NOT EXISTS balance_debit_attempt (id BIGINT PRIMARY KEY,pay_no VARCHAR(64) NOT NULL,operation_key VARCHAR(128) NOT NULL,ledger_key VARCHAR(128) NOT NULL,mode VARCHAR(16) NOT NULL,xid VARCHAR(128),branch_id BIGINT,user_id BIGINT NOT NULL,order_no VARCHAR(64) NOT NULL,amount DECIMAL(18,2) NOT NULL,state VARCHAR(16) NOT NULL,created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,UNIQUE KEY uk_balance_attempt_pay_no(pay_no),UNIQUE KEY uk_balance_attempt_operation(operation_key),UNIQUE KEY uk_balance_attempt_xid(xid),UNIQUE KEY uk_balance_attempt_branch(xid,branch_id),UNIQUE KEY uk_balance_attempt_ledger(ledger_key),KEY idx_balance_attempt_user_state(user_id,state,updated_at));
+CREATE TABLE IF NOT EXISTS balance_tcc_debit (id BIGINT PRIMARY KEY,operation_key VARCHAR(128) NOT NULL,xid VARCHAR(128) NOT NULL,branch_id BIGINT NOT NULL,user_id BIGINT NOT NULL,pay_no VARCHAR(64) NOT NULL,order_no VARCHAR(64) NOT NULL,amount DECIMAL(18,2) NOT NULL,state VARCHAR(16) NOT NULL,balance_before DECIMAL(18,2) NOT NULL,balance_after_try DECIMAL(18,2) NOT NULL,created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,UNIQUE KEY uk_balance_tcc_operation(operation_key),UNIQUE KEY uk_balance_tcc_xid(xid),UNIQUE KEY uk_balance_tcc_branch(xid,branch_id),UNIQUE KEY uk_balance_tcc_pay_no(pay_no),KEY idx_balance_tcc_user_state(user_id,state,updated_at));
+SET @attempt_ledger_column_exists := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='balance_debit_attempt' AND column_name='ledger_key');
+SET @attempt_ledger_column_migration := IF(@attempt_ledger_column_exists=0,'ALTER TABLE balance_debit_attempt ADD COLUMN ledger_key VARCHAR(128) NOT NULL DEFAULT '''' AFTER operation_key','SELECT 1');
+PREPARE attempt_ledger_column_statement FROM @attempt_ledger_column_migration;
+EXECUTE attempt_ledger_column_statement;
+DEALLOCATE PREPARE attempt_ledger_column_statement;
+UPDATE balance_debit_attempt SET ledger_key=CASE WHEN mode='TCC' THEN pay_no ELSE operation_key END WHERE ledger_key='';
+SET @attempt_ledger_index_exists := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='balance_debit_attempt' AND index_name='uk_balance_attempt_ledger');
+SET @attempt_ledger_index_migration := IF(@attempt_ledger_index_exists=0,'ALTER TABLE balance_debit_attempt ADD UNIQUE KEY uk_balance_attempt_ledger(ledger_key)','SELECT 1');
+PREPARE attempt_ledger_index_statement FROM @attempt_ledger_index_migration;
+EXECUTE attempt_ledger_index_statement;
+DEALLOCATE PREPARE attempt_ledger_index_statement;
+SET @attempt_xid_index_exists := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='balance_debit_attempt' AND index_name='uk_balance_attempt_xid');
+SET @attempt_xid_index_migration := IF(@attempt_xid_index_exists=0,'ALTER TABLE balance_debit_attempt ADD UNIQUE KEY uk_balance_attempt_xid(xid)','SELECT 1');
+PREPARE attempt_xid_index_statement FROM @attempt_xid_index_migration;
+EXECUTE attempt_xid_index_statement;
+DEALLOCATE PREPARE attempt_xid_index_statement;

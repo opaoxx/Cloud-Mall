@@ -7,19 +7,21 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.user.domain.dto.AddressRequestDTO;
-import com.cloudmall.user.domain.dto.CredentialsDTO;
-import com.cloudmall.user.domain.dto.DebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
-import com.cloudmall.user.domain.po.BalanceLedgerPO;
+import com.cloudmall.user.domain.dto.CredentialsDTO;
+import com.cloudmall.user.domain.dto.DebitRequestDTO;
 import com.cloudmall.user.domain.dto.ProfileDTO;
+import com.cloudmall.user.domain.po.BalanceDebitAttemptPO;
+import com.cloudmall.user.domain.po.BalanceLedgerPO;
 import com.cloudmall.user.domain.po.UserAddressPO;
 import com.cloudmall.user.domain.po.UserPO;
-import com.cloudmall.user.domain.vo.UserAddressVO;
-import com.cloudmall.user.domain.vo.UserVO;
 import com.cloudmall.user.domain.vo.BalanceDebitVO;
 import com.cloudmall.user.domain.vo.BalanceOperationVO;
 import com.cloudmall.user.domain.vo.BalanceRefundVO;
+import com.cloudmall.user.domain.vo.UserAddressVO;
+import com.cloudmall.user.domain.vo.UserVO;
+import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
@@ -33,13 +35,14 @@ import java.util.Objects;
 import java.util.UUID;
 import javax.annotation.PostConstruct;
 import javax.validation.Valid;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DataAccessException;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 /** 用户领域业务实现，负责用户、地址、登录态和余额业务。 */
@@ -56,6 +59,9 @@ public class UserServiceImpl implements UserService {
 
   /** 用户余额账本 Mapper。 */
   @Autowired private BalanceLedgerMapper balanceLedgerMapper;
+
+  /** LEGACY/TCC 共享扣款归属，所有扣款入口必须核对该事实。 */
+  @Autowired private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
 
   /** 用户地址数据 Mapper。 */
   @Autowired private UserAddressMapper userAddressMapper;
@@ -82,6 +88,7 @@ public class UserServiceImpl implements UserService {
       administrator.passwordHash = ENCODER.encode("admin123");
       administrator.role = "ADMIN";
       administrator.balance = new BigDecimal("10000.00");
+      administrator.frozenBalance = BigDecimal.ZERO;
       administrator.status = 1;
       administrator.createdAt = currentTime;
       administrator.updatedAt = currentTime;
@@ -115,6 +122,7 @@ public class UserServiceImpl implements UserService {
     user.passwordHash = ENCODER.encode(credentials.password);
     user.role = "USER";
     user.balance = new BigDecimal("10000.00");
+    user.frozenBalance = BigDecimal.ZERO;
     user.status = 1;
     user.createdAt = currentTime;
     user.updatedAt = currentTime;
@@ -282,59 +290,103 @@ public class UserServiceImpl implements UserService {
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
   }
 
-  /** 在用户行锁保护下执行扣款及账本写入。 */
+  /** 在用户行锁保护下认领唯一归属，再同事务执行扣款与账本写入。 */
   private ApiResponse<?> debitFromLedger(
       Long userId, Long callerId, BalanceDebitRequestDTO request) {
+    // 1. 校验载荷并锁定用户，保持现有 Legacy 对启用用户的要求。
     assertInternalCaller(userId, callerId);
     if (request == null
         || request.operationKey == null
         || request.operationKey.isBlank()
         || request.payNo == null
-        || request.orderNo == null) {
+        || request.payNo.isBlank()
+        || request.orderNo == null
+        || request.orderNo.isBlank()) {
       throw new BizException(ErrorCodes.INVALID, "扣款参数不完整", 400);
     }
     validateMoney(request.amount, "扣款金额不合法");
     UserPO user = userMapper.selectActiveForUpdate(userId);
-    if (user == null) {
-      throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
-    }
+    if (user == null) throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
+
+    // 2. 先核对共享归属和历史账本；历史自定义 operationKey 也按 payNo 互斥。
+    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+    if (attempt != null) ensureLegacyAttemptMatches(attempt, userId, request);
+    BalanceLedgerPO historical = balanceLedgerMapper.selectDebitByPayNo(request.payNo);
+    if (historical != null && !Objects.equals(historical.operationKey, request.operationKey))
+      throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已绑定其他扣款操作", 409);
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.operationKey);
     if (existing != null) {
       ensureDebitMatches(existing, userId, request);
-      if ("REJECTED".equals(existing.state)) {
-        throw new BizException("PAYMENT_FAILED", "余额不足", 409);
-      }
+      if (attempt != null && !Objects.equals(attempt.state, existing.state))
+        throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属与账本状态待核对", 409);
+      if ("REJECTED".equals(existing.state)) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
+      if (!"APPLIED".equals(existing.state))
+        throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款账本状态待核对", 409);
       cacheDebitResult(userId, existing);
       return ApiResponse.ok(
           BalanceDebitVO.from(existing.operationKey, existing.state, existing.balanceAfter));
     }
-    LocalDateTime currentTime = LocalDateTime.now();
-    BigDecimal balanceBefore = user.balance;
+    if (attempt != null || historical != null)
+      throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属缺少对应账本事实", 409);
+
+    // 3. 在任何余额变化之前用唯一键认领最终账本键，避免跨用户或协议并发双扣。
+    LocalDateTime currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+    boolean rejected = user.balance.compareTo(request.amount) < 0;
+    attempt = new BalanceDebitAttemptPO();
+    attempt.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
+    attempt.payNo = request.payNo;
+    attempt.operationKey = request.operationKey;
+    attempt.ledgerKey = request.operationKey;
+    attempt.mode = "LEGACY";
+    attempt.userId = userId;
+    attempt.orderNo = request.orderNo;
+    attempt.amount = request.amount;
+    attempt.state = rejected ? "REJECTED" : "APPLIED";
+    attempt.createdAt = currentTime;
+    attempt.updatedAt = currentTime;
+    try {
+      if (balanceDebitAttemptMapper.insert(attempt) != 1)
+        throw new IllegalStateException("扣款归属写入未影响唯一记录");
+    } catch (DuplicateKeyException duplicate) {
+      // 该异常发生在本事务资金写入之前；noRollbackFor 不会留下已扣余额。
+      throw new BizException("IDEMPOTENCY_CONFLICT", "支付号或账本键已被其他扣款占用", 409);
+    }
+
+    // 4. 余额和账本一起提交；意外条件更新失败抛可回滚异常，不保留半完成归属。
     BalanceLedgerPO debit = new BalanceLedgerPO();
-    debit.id = Math.abs(UUID.randomUUID().getMostSignificantBits());
+    debit.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
     debit.userId = userId;
     debit.operationKey = request.operationKey;
     debit.operationType = "DEBIT";
     debit.payNo = request.payNo;
     debit.orderNo = request.orderNo;
     debit.amount = request.amount;
-    debit.balanceBefore = balanceBefore;
+    debit.balanceBefore = user.balance;
+    debit.balanceAfter = rejected ? user.balance : user.balance.subtract(request.amount);
+    debit.state = attempt.state;
     debit.createdAt = currentTime;
-    if (balanceBefore.compareTo(request.amount) < 0) {
-      debit.state = "REJECTED";
-      debit.balanceAfter = balanceBefore;
-      balanceLedgerMapper.insert(debit);
-      throw new BizException("PAYMENT_FAILED", "余额不足", 409);
-    }
-    if (userMapper.debitBalance(userId, request.amount, currentTime) != 1) {
-      throw new BizException("PAYMENT_FAILED", "余额不足", 409);
-    }
-    debit.state = "APPLIED";
-    debit.balanceAfter = balanceBefore.subtract(request.amount);
-    balanceLedgerMapper.insert(debit);
+    if (!rejected && userMapper.debitBalance(userId, request.amount, currentTime) != 1)
+      throw new IllegalStateException("扣款条件更新未影响唯一用户");
+    if (balanceLedgerMapper.insert(debit) != 1) throw new IllegalStateException("余额账本写入未影响唯一记录");
+    if (rejected) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
     cacheDebitResult(userId, debit);
-    return ApiResponse.ok(
-        BalanceDebitVO.from(debit.operationKey, debit.state, debit.balanceAfter));
+    return ApiResponse.ok(BalanceDebitVO.from(debit.operationKey, debit.state, debit.balanceAfter));
+  }
+
+  /** 校验原归属模式和全部不可变字段，不能因当前开关关闭而绕过 TCC 归属。 */
+  private void ensureLegacyAttemptMatches(
+      BalanceDebitAttemptPO attempt, Long userId, BalanceDebitRequestDTO request) {
+    if (!"LEGACY".equals(attempt.mode)
+        || !Objects.equals(attempt.userId, userId)
+        || !Objects.equals(attempt.payNo, request.payNo)
+        || !Objects.equals(attempt.orderNo, request.orderNo)
+        || !Objects.equals(attempt.operationKey, request.operationKey)
+        || !Objects.equals(attempt.ledgerKey, request.operationKey)
+        || attempt.xid != null
+        || attempt.branchId != null
+        || attempt.amount.compareTo(request.amount) != 0) {
+      throw new BizException("IDEMPOTENCY_CONFLICT", "扣款归属对应的请求不一致", 409);
+    }
   }
 
   /** 校验内部调用者身份。 */
