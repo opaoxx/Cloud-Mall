@@ -306,3 +306,7 @@ RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认�
 ### CM-20261007-18 COMMITTED TCC failure 结果语义（16H）
 
 COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明确返回 `PAY_REFUND_PENDING`/202；Pay `PENDING`/`ORDER_SYNC_UNKNOWN` 返回 `PAY_ORDER_SYNC_UNKNOWN`/202；SUCCESS/REFUNDED/FAILED 保持既有 409/幂等。入口不调用 Order cancel/paid、User refund、TC/recover，不创建 16E cancel 台账，不生成新退款键；真正的 COMMITTED 取消与原 delivery 退款编排另行评审。
+
+### CM-20261007-18 Legacy failure 结果语义（16I）
+
+Legacy `mock-fail`/callback failure 先按 Pay 持久状态和 debit intent 完整 tuple 分类：SUCCESS/REFUNDED 返回既有 409；REFUND_PENDING 在 intent 缺失或完整匹配时返回 `PAY_REFUND_PENDING`/202 且不 RPC/写入，intent 矛盾返回 503；FAILED 在 intent 缺失或匹配 `FAILED` 时幂等 200 且不重复 Order.cancel；PENDING 且 intent 缺失/FAILED、以及 ORDER_SYNC_UNKNOWN 且 intent 完整匹配 FAILED 时保留既有 Order.cancel+markFailed 基本路径，写 FAILED 后返回/complete 200；PENDING intent 非 FAILED/未知、ORDER_SYNC_UNKNOWN intent 缺失/非 FAILED 返回 202。notifyFailure 原有 BizException 与其他异常 500 映射保持不变，不新增取消未知台账。intent mode/tuple 矛盾或未知状态不得 complete/猜测失败，按既有 503/202 处理。TCC 契约不变。
