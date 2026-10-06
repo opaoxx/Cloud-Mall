@@ -189,6 +189,8 @@ CM-18 第 15A 只接入 User `service.BalanceTccDebitLocalResource` 的真实 Lo
 
 CM-18 第 16A 只允许显式内部测试/迁移入口使用 TCC bridge。Pay 必须先核对原 `pay_record` 的 payNo、userId、orderNo、amount、`debit_mode=TCC` 和 `status=PENDING`；公开支付创建仍只产生 LEGACY。Pay `dispatch(PayTccDispatchDTO)` 从 RootContext 读取 XID，POST 只允许一次；响应未知后只能调用 User GET。User 通过 `X-Internal-Service`、`X-User-Id`、现有 callback token 和 `TX_XID` 校验内部请求，并用 `user_tcc_receive` 唯一认领。Gateway/Auth 必须阻断包含 `tcc-debits` 的服务前缀、编码和路径参数变体。GET 返回精确 XID/branchId 供内部机器核验，`TRYING` 不表示支付成功；Confirm/Cancel 没有 HTTP/Feign 接口。
 
+16A 的 User receive 只持久化不可变 `CLAIMED`；TRY_UNKNOWN、TRYING、CONFIRMED、CANCELLED 从 attempt/TCC/ledger/Fence 一致快照只读推导。余额不足 `PAYMENT_FAILED`、资金未知 `BALANCE_TCC_UNKNOWN` 和普通 HTTP 4xx 不能直接映射为支付拒绝；没有持久拒绝事实时 Pay 必须保持 `TRY_UNKNOWN`。Feign 专属错误解析仅将完整 JSON 中的 `IDEMPOTENCY_CONFLICT`、`USER_TCC_STATE_CONFLICT` 映射为派发冲突，不能按 HTTP 409 整体分类。
+
 支付服务与用户服务之间的内部接口契约：
 
 | 方法 | 路径 | 请求/响应 | 说明 |

@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS pay_tcc_dispatch (
 
 1. Pay 事务创建全局 XID 后，先锁定并核对原 `pay_record`：payNo、userId、orderNo、amount 完全一致，`debit_mode` 精确为 `TCC` 且状态为 `PENDING`；再以独立本地事务插入 `PREPARED`，保存 XID、payNo、用户、订单、金额、operationKey、ledgerKey。
 2. 以条件更新将 `PREPARED → POST_ATTEMPTED`，提交后才发出一次 User Try POST。只有持有该派发记录且状态为 PREPARED 的实例可以执行这次转换。
-3. POST 返回明确成功时更新为 `TRY_ACCEPTED`；只有响应中的 User 持久化拒绝事实明确存在时才更新为 `REJECTED`；余额不足等本地事务回滚且没有拒绝行时保持 `TRY_UNKNOWN`。连接断开、超时、空响应、响应解析失败同样更新为 `TRY_UNKNOWN`。
+3. POST 返回明确成功时更新为 `TRY_ACCEPTED`；只有响应中的 User 持久化拒绝事实明确存在时才更新为 `REJECTED`；余额不足的 `PAYMENT_FAILED`、资金未知的 `BALANCE_TCC_UNKNOWN`，以及普通 HTTP 4xx/Feign 异常在没有完整持久拒绝事实时都保持 `TRY_UNKNOWN`。连接断开、超时、空响应、响应解析失败同样更新为 `TRY_UNKNOWN`。
 4. `POST_ATTEMPTED/TRY_ACCEPTED/TRY_UNKNOWN` 永久禁止再次 POST。恢复只能 GET `/tcc-debits/{operationKey}`，使用同一 payNo/XID 读取 User 持久事实。
 5. GET 返回 `TRYING/CONFIRMED/CANCELLED` 等业务事实时更新本地镜像；若 User receive 为 `CLAIMED` 且没有 branch 事实，GET 返回 UNKNOWN 且不修改 receive。返回 404、空结果或服务不可达只能保持 `TRY_UNKNOWN`，不能解释为未执行并重发 POST。已确认的 `CONFIRMED/CANCELLED` 不得被迟到 TRYING/UNKNOWN 覆盖。
 6. Pay 不依据 TC `getStatus=Unknown` 推测资金状态；没有 User 持久事实时保持未知并告警，等待后续恢复批处理。
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS user_tcc_receive (
 );
 ```
 
-接收状态至少包含 `CLAIMED`、`TRY_UNKNOWN`、`TRYING`、`CONFIRMED`、`CANCELLED`。`CLAIMED` 必须在进入 LocalTCC 代理前独立提交；如果 branch 尚未注册即进程退出，保持未知并阻断重发。接收台账与 attempt/TCC 事实按完整 user/pay/order/amount/XID/branch/operationKey/ledgerKey 校验，任何不一致只返回 409，不能覆盖原事实。
+接收状态只持久化不可变的 `CLAIMED`；`TRY_UNKNOWN/TRYING/CONFIRMED/CANCELLED` 不写入 receive，而由 attempt/TCC/ledger/Fence 一致快照只读推导。`CLAIMED` 必须在进入 LocalTCC 代理前独立提交；如果 branch 尚未注册即进程退出，保持未知并阻断重发。接收台账与 attempt/TCC 事实按完整 user/pay/order/amount/XID/branch/operationKey/ledgerKey 校验，任何不一致只返回 409，不能覆盖原事实。
 
 ## 5. Pay → User API/Feign 契约
 
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS user_tcc_receive (
 - 接收台账写入后进程在 branch 注册前退出，记录保持 `CLAIMED/UNKNOWN`；后续 POST 仍禁止重发，Pay 只能 GET 原 operationKey，直到 TC/业务事实明确收敛或人工核验。
 - User 在同一个请求内调用 LocalTCC 代理的 Try；不直接调用 raw implementation，不手工生成 branchId。
 - Gateway/Auth 必须最先阻断包含 `tcc-debits` 路径段的新内部命名空间及其编码、路径参数变体，不经 Nacos discovery 转发；即使通用 `cloud-mall-user` discovery route 为 enabled，也不能绕过。该规则不修改其它内部路由。User Controller 只允许来自服务内 Feign 的认证上下文。
-- POST 禁止 Feign 自动重试；任何响应未知由 Pay 标记 TRY_UNKNOWN。
+- POST 禁止 Feign 自动重试；任何响应未知由 Pay 标记 TRY_UNKNOWN。Pay 的 Feign 专属 ErrorDecoder 只在完整可信 JSON 错误体中把 `IDEMPOTENCY_CONFLICT` 或 `USER_TCC_STATE_CONFLICT` 映射为 `PAY_TCC_DISPATCH_CONFLICT`；`PAYMENT_FAILED`、`BALANCE_TCC_UNKNOWN` 和其他 4xx 继续按结果未知处理，不能按 HTTP 409 整体分类。
 
 ### 5.2 Read-only GET
 
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS user_tcc_receive (
 
 - 只读 `balance_debit_attempt`、`balance_tcc_debit`、`balance_ledger` 和必要 Fence 事实。
 - 返回完整载荷摘要、状态、精确 XID、branchId、ledgerKey 和是否存在 APPLIED 账本；精确 XID 只供 Pay 内部机器校验，不返回前端。
-- 状态来自同一读取快照的一致核对：`CLAIMED/UNKNOWN` 只表示请求已认领，`TRYING` 表示冻结存在但未最终确认，`CONFIRMED` 必须同时存在 APPLIED ledger，`CANCELLED` 必须有取消归属且无冻结；`TRYING` 不能作为已扣款或支付成功。
+- 状态来自同一读取快照的一致核对：receive 为 `CLAIMED` 且没有资金分支时返回 UNKNOWN，`TRYING` 表示冻结存在但未最终确认，`CONFIRMED` 必须同时存在 APPLIED ledger，`CANCELLED` 必须有取消归属且无冻结；`TRYING` 不能作为已扣款或支付成功。GET 不更新 receive 状态。
 - 404 只表示未观察到 User 持久事实；不能直接作为“未执行”结论。
 - GET 可按现有 Feign 有限重试策略调用；重试只读，不注册分支、不改变状态。
 - Feign `UserTccClient.state(userId,operationKey,callerId,service,token,xidParam)` 使用 `?xid=` 原值核对派发绑定，但 GET 不绑定 RootContext。
