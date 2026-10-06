@@ -1,0 +1,69 @@
+package com.cloudmall.user.service.impl;
+
+import com.cloudmall.common.error.BizException;
+import com.cloudmall.user.domain.dto.UserTccTryDTO;
+import com.cloudmall.user.domain.po.UserTccReceivePO;
+import com.cloudmall.user.mapper.UserTccReceiveMapper;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.Objects;
+import java.util.UUID;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+/** LocalTCC 分支登记前独立提交一次性接收事实。 */
+public class UserTccReceiveStore {
+  /** 接收台账访问器。 */
+  private final UserTccReceiveMapper mapper;
+
+  /** 创建接收事务服务。 */
+  public UserTccReceiveStore(UserTccReceiveMapper mapper) {
+    this.mapper = mapper;
+  }
+
+  /** 返回 true 的唯一调用者才允许进入 LocalTCC 代理。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean claim(Long userId, UserTccTryDTO request) {
+    // 1. 固定全部载荷并认领数据库唯一键。
+    UserTccReceivePO receipt = new UserTccReceivePO();
+    receipt.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
+    receipt.userId = userId;
+    receipt.payNo = request.payNo;
+    receipt.orderNo = request.orderNo;
+    receipt.amount = request.amount;
+    receipt.xid = request.xid;
+    receipt.operationKey = request.operationKey;
+    receipt.ledgerKey = request.ledgerKey;
+    receipt.createdAt = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+    receipt.updatedAt = receipt.createdAt;
+    int inserted = mapper.claim(receipt);
+    // 2. 唯一键冲突不得换用户、金额、事务或操作键。
+    UserTccReceivePO stored = mapper.lockByPayNo(request.payNo);
+    if (stored == null
+        || !Objects.equals(stored.userId, userId)
+        || !Objects.equals(stored.payNo, request.payNo)
+        || !Objects.equals(stored.orderNo, request.orderNo)
+        || !Objects.equals(stored.xid, request.xid)
+        || !Objects.equals(stored.operationKey, request.operationKey)
+        || !Objects.equals(stored.ledgerKey, request.ledgerKey)
+        || stored.amount.compareTo(request.amount) != 0) throw conflict();
+    // 3. 重放只读，不取得第二次派发权。
+    return inserted == 1;
+  }
+
+  /** POST 成功后补记首次观察分支，既有分支不能被覆盖。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public void bindBranch(String payNo, String xid, Long branchId) {
+    if (branchId == null) return;
+    mapper.bindBranch(payNo, xid, branchId, LocalDateTime.now(ZoneId.of("Asia/Shanghai")));
+    UserTccReceivePO stored = mapper.lockByPayNo(payNo);
+    if (stored == null
+        || !Objects.equals(stored.xid, xid)
+        || !Objects.equals(stored.branchId, branchId)) throw conflict();
+  }
+
+  /** 冲突不改变原接收事实。 */
+  private BizException conflict() {
+    return new BizException("IDEMPOTENCY_CONFLICT", "TCC 接收载荷不一致", 409);
+  }
+}

@@ -8,6 +8,7 @@ spring:
   task.scheduling.pool.size: 2
 cloudmall.pay.recovery-interval-ms: 5000
 cloudmall.pay.debit-mode: LEGACY
+cloudmall.pay.tcc-bridge.enabled: false
 management.endpoints.web.exposure.include: health,info,prometheus
 feign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
 spring.cloud.nacos.discovery.server-addr: localhost:18848
@@ -15,6 +16,7 @@ spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 seata:
   enabled: true
+  enable-auto-data-source-proxy: false
   client.mode: AT
   registry.type: file
   config.type: file

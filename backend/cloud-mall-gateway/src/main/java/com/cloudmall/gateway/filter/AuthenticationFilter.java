@@ -12,6 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.util.UriUtils;
 import reactor.core.publisher.Mono;
 
 @Component
@@ -34,6 +35,11 @@ public class AuthenticationFilter implements GlobalFilter, Ordered {
   /** 执行 filter 相关操作。 */
   public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
     String path = exchange.getRequest().getURI().getPath();
+    // TCC 桥只能由服务直连。重写前的发现路由前缀、编码和路径参数也不得绕过。
+    if (isTccInternalPath(path)) {
+      exchange.getResponse().getHeaders().setCacheControl("no-store");
+      return error(exchange, HttpStatus.FORBIDDEN, "COMMON_FORBIDDEN", "内部接口不允许通过网关访问");
+    }
     if (path.startsWith("/api/stock/")) return unauthorized(exchange);
     if (isPublic(exchange.getRequest().getMethod(), path)) return chain.filter(exchange);
     String authorization = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
@@ -66,6 +72,21 @@ public class AuthenticationFilter implements GlobalFilter, Ordered {
                       .build();
               return chain.filter(forwarded);
             });
+  }
+
+  /** 检查服务前缀和至多两层额外 URL 编码，不改变实际转发路径。 */
+  private boolean isTccInternalPath(String path) {
+    String decodedPath = path;
+    for (int depth = 0; depth <= 2; depth++) {
+      if (decodedPath.contains("tcc-debits")) return true;
+      if (!decodedPath.contains("%")) return false;
+      try {
+        decodedPath = UriUtils.decode(decodedPath, StandardCharsets.UTF_8);
+      } catch (IllegalArgumentException malformedEncoding) {
+        return false;
+      }
+    }
+    return false;
   }
 
   /** 执行 isPublic 相关操作。 */

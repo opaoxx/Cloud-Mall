@@ -1,0 +1,3 @@
+-- One-time User TCC HTTP receive claims; no funding data is changed.
+USE cloudmall_user;
+CREATE TABLE IF NOT EXISTS user_tcc_receive (id BIGINT PRIMARY KEY,pay_no VARCHAR(64) NOT NULL,xid VARCHAR(128) NOT NULL,branch_id BIGINT,user_id BIGINT NOT NULL,order_no VARCHAR(64) NOT NULL,amount DECIMAL(18,2) NOT NULL,operation_key VARCHAR(128) NOT NULL,ledger_key VARCHAR(128) NOT NULL,state VARCHAR(16) NOT NULL,created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,UNIQUE KEY uk_user_tcc_receive_pay(pay_no),UNIQUE KEY uk_user_tcc_receive_xid(xid),UNIQUE KEY uk_user_tcc_receive_operation(operation_key),UNIQUE KEY uk_user_tcc_receive_ledger(ledger_key));

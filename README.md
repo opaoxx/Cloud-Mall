@@ -219,7 +219,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_state.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-这些本地方法没有 TCC HTTP/Feign 入口。公开余额字段继续表示可用余额；Pay 仍只使用 LEGACY。
+这些本地方法由 User RM 调用；第 16A 轮另增受认证的内部 Try/查询桥。公开余额字段继续表示可用余额；对外支付仍只使用 LEGACY。
 
 ### User Seata RM/Fence（CM-18 第 15 轮 A）
 
@@ -234,7 +234,24 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_fence.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-15A 验证 User RM 与真实 TC 的提交、取消和重试；15B 使用独立 RM JVM 验证提交前中断、提交后 ACK 丢失、重启及客户端 TC 连接暂失。Pay 尚未接入 TCC，不能只打开 User 开关就宣称支付已完成分布式事务改造。
+15A 验证 User RM 与真实 TC 的提交、取消和重试；15B 使用独立 RM JVM 验证提交前中断、提交后 ACK 丢失、重启及客户端 TC 连接暂失。第 16A 轮只完成下述内部桥，对外支付入口与主编排尚未迁入 TCC。
+
+### Pay → User 内部 TCC 桥（CM-18 第 16 轮 A）
+
+Pay 在 `pay_tcc_dispatch` 中独立提交不可变载荷与一次性 POST 权限，再通过 Nacos/Feign 调用 User。User 在进入 LocalTCC 代理前独立提交 `user_tcc_receive=CLAIMED`；并发请求只允许一个实例注册分支。响应丢失后 Pay 仅 GET 核对原 XID、branch 和资金账本，不重发 Try。GET 不改变 User 接收或资金事实。
+
+余额不足的 HTTP 409 不代表事务已取消；无持久拒绝事实时仍为 `TRY_UNKNOWN`，待 TC Cancel 后核对取消归属。只有完整的身份/持久事实冲突错误码返回明确派发冲突。Gateway 在鉴权前阻断新内部命名空间，包括 discovery 服务前缀、编码和路径参数变体；Confirm/Cancel 只接受 TC 回调。
+
+`cloudmall.pay.tcc-bridge.enabled=false`、`cloudmall.user.tcc-http.enabled=false` 默认关闭。启用隔离验收还需要真实 Seata、User RM/本地 Try 开关和未被 AT 代理的同库事务管理器。内部认证复用 `cloudmall.internal.callback-token`，Pay 服务标识固定为 `cloud-mall-pay`。已有数据卷可幂等执行：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_dispatch.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_receive.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
+
+若进程在独立认领后、发送 POST 或注册分支前退出，原请求保持未知且禁止重发，需进一步核验；本轮不提供自动清算此窗口的编排。Pay receipt、支付主编排、Order/Stock 联动和入口切换留待 16B，**CM-18 尚未整体闭环**。
 
 ## 验证命令
 
@@ -294,6 +311,18 @@ mvn -pl backend/cloud-mall-user -am test `
 测试自动启动、终止并重启自己创建的 RM 子 JVM，使用 `cm15b_rm_it_*` 隔离库和稳定 appId。父 TM 不注册资金 RM；子进程通过专用 loopback TCP 代理连接真实 TC，断连仅影响该测试客户端，不停止 Seata 容器。故障 barrier 同时记录事务是否活跃、XID/branchId，并核对外部可见资金事实；所有控制接口和故障装饰器均位于测试源码，不进入业务 Jar。
 
 验收日志、JVM 参数和资金快照保存在 User 模块 `target/cm15b_rm_it_*/`。只有 TC 已结束且资金终态核对通过才删除测试库；未决时保留库和恢复元数据。清理此类现场前应先用原 appId/XID/branch 恢复，不能通过删除 Fence、换键重试或手工改余额绕过。
+
+16A 跨进程桥验收需本地 MySQL、Nacos、Redis 与 Seata，先构建 User 启动包，再单独执行：
+
+```powershell
+mvn -pl backend/cloud-mall-user -am package -DskipTests
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayUserTccBridgeIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+该测试启动实际 Pay Spring 上下文和两个独立 User JVM，使用随机 `cm16_*` 数据库/Nacos 分组，不覆盖默认服务实例。九项验收覆盖提交、取消、响应截断、余额不足、并发入站、认证、载荷冲突、并发派发、User 重启及服务重选；同时核对一次 POST、唯一分支、冻结、账本和 TC 终态。原业务表 checksum 必须不变。日志与每笔事实保存在 Pay 模块 `target/cm16-bridge/`；未决时保留隔离库，先恢复真实事务后再清理。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 
