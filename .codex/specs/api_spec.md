@@ -323,6 +323,10 @@ COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明
 
 16P 补充约束：attempts 必须非空且不小于 0；owner 与 lease_until 只有同时为空，或 owner 去空白后非空且 lease_until 已到期时才可接受。接受改向仅以同一 DATETIME(3) 精度的 now 将 next_retry_at 提前为 LEAST(原值,now)，保留 attempts、旧 owner 和旧 expiry；已有 CANCEL_REQUESTED 重放不得修改 metadata。部分 lease、空白 owner、null/负 attempts 和有效 lease 均拒绝改向。Java 条件、CAS 与 LEAST 必须使用同一次 now。
 
+### CM-20261007-18 有效 lease READY 的 COMMITTED TCC 取消（16Q）
+
+16Q 在 16P 之上允许 READY delivery 仍持有有效 lease 时改向 `CANCEL_REQUESTED`；要求 attempts 非空且非负、owner 去空白后非空、lease_until 非空。取消 CAS 只改 state 并用同一 DATETIME(3) now 将 next_retry_at 提前为 LEAST，保留 attempts/owner/lease_until，不重领、不清除、不接管有效 lease；重复 CANCEL_REQUESTED 不改 metadata。取消先提交时旧 worker 的 READY stage 必须失败且不得 paid，旧 worker 可用自己的 token finish；新 worker 等 lease 释放或过期后再执行 cancel/退款。旧 worker 先 stage 则取消拒绝。所有正常 TCC paid 仍须先 READY→ORDER_SYNC_UNKNOWN 再 Order.paid；CANCELLED+stock SUCCEEDED 才进入唯一退款链，PAID/COMPLETED/stock CONFLICT 不退款、不 paid、不 FAILED。复用现有 failure/callback 返回 202，无新增 endpoint。
+
 ### CM-20261007-18 Legacy failure 结果语义（16I）
 
 Legacy `mock-fail`/callback failure 先按 Pay 持久状态和 debit intent 完整 tuple 分类：SUCCESS/REFUNDED 返回既有 409；REFUND_PENDING 在 intent 缺失或完整匹配时返回 `PAY_REFUND_PENDING`/202 且不 RPC/写入，intent 矛盾返回 503；FAILED 在 intent 缺失或匹配 `FAILED` 时幂等 200 且不重复 Order.cancel；PENDING 且 intent 缺失/FAILED、以及 ORDER_SYNC_UNKNOWN 且 intent 完整匹配 FAILED 时保留既有 Order.cancel+markFailed 基本路径，写 FAILED 后返回/complete 200；PENDING intent 非 FAILED/未知、ORDER_SYNC_UNKNOWN intent 缺失/非 FAILED 返回 202。notifyFailure 原有 BizException 与其他异常 500 映射保持不变，不新增取消未知台账。intent mode/tuple 矛盾或未知状态不得 complete/猜测失败，按既有 503/202 处理。TCC 契约不变。
