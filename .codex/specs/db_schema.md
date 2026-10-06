@@ -463,6 +463,8 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 `balance_debit_attempt` 至少包含 `pay_no`、`operation_key`、`ledger_key`、`mode`、`xid`、`branch_id`、`user_id`、`order_no`、`amount`、`state` 和审计时间，唯一约束为 `pay_no`、`operation_key`、`ledger_key`、`xid`、`(xid,branch_id)`；Legacy 的 XID 为 NULL，MySQL 唯一索引允许多个 NULL。TCC 的 `operation_key=tcc-debit:<payNo>`，但 `ledger_key=payNo`；Legacy 的 `ledger_key` 等于请求 operationKey，Confirm 只能使用归属行的不可变 ledger_key。`balance_tcc_debit` 至少包含相同业务键、`balance_before`、`balance_after_try` 和状态，唯一约束为 `operation_key`、`xid`、`(xid,branch_id)`、`pay_no`。两表与 `mall_user` 使用同一 User 数据源和锁顺序；任何未来 Fence 表必须继续位于同一数据源。
 
+第 15A 使用 Seata 1.5.2 官方 `tcc_fence_log` 作为唯一 Fence 事实来源；不复制其表结构、不建立第二张 Fence 表。`tcc_fence_log` 与 `mall_user`、`balance_debit_attempt`、`balance_tcc_debit` 必须在同一 User 数据源和本地事务中写入。资源适配器使用 `useTCCFence=false`，由适配器显式调用官方 Fence API；空回滚的 Fence `SUSPENDED` 与业务 `CANCELLED` tombstone 一起提交。进程中断和 TC 暂失不属于 15A，后置 15B。
+
 ### 7.4 `pay_debit_intent`
 
 支付服务在调用用户余额服务前，必须先在支付库独立提交扣款意图。该表覆盖进程在用户扣款提交后、`pay_record` 更新前退出的窗口；恢复任务扫描该表，而不能只扫描支付记录状态。

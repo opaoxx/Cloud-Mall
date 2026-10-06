@@ -54,6 +54,8 @@ CM-18 第 12A 阶段完成支付路由的持久协议隔离：`pay_record.debit_
 
 第 14 轮在此基础上只批准 User 侧本地 TCC 就绪状态机：`mall_user.frozen_balance`、共享 `balance_debit_attempt` 和 `balance_tcc_debit` 负责冻结、Confirm/Cancel 和 Legacy/TCC 的 payNo 互斥。Legacy 归属最终只能为 `APPLIED/REJECTED`，TCC 归属只能为 `TRYING/CONFIRMED/CANCELLED`；归属同时冻结最终 `balance_ledger.operation_key`，TCC 使用 `ledgerKey=payNo`，Legacy 使用请求 operationKey，Confirm 禁止重新推导账本键。一个 User 资金资源固定绑定一个 XID、一个 branchId 和一个 payNo。Confirm/Cancel 仍是内部本地事务方法，没有 HTTP/Feign 入口；Pay 继续只走 LEGACY。Fence、真实 Seata RM 回调、Pay 编排和 Order/Stock 联动仍未接入，CM-18 整体未闭环。
 
+第 15A 将 User 资金资源接入真实 `service.BalanceTccDebitLocalResource` LocalTCC RM，固定 `prepare(BusinessActionContext,@BusinessActionContextParameter(paramName="request") BalanceTccBranchDTO) boolean`、`commit(BusinessActionContext) boolean`、`rollback(BusinessActionContext) boolean`。资源关闭自动 Fence（`useTCCFence=false`），在同一 User `REQUIRED` 本地事务中显式调用官方 `TCCFenceHandler` 和业务 callback；Fence `SUSPENDED` 与业务 Cancel tombstone 一起提交，防止 Fence 清理后迟到 Try 复活。资源默认关闭 `cloudmall.user.tcc-resource.enabled=false`、`seata.enabled=false`、`enable-auto-data-source-proxy=false`；Pay 继续 LEGACY。第 15B 再验证进程中断和 TC 暂失，CM-18 仍未闭环。
+
 ### 4.3 超时关单
 
 order 创建待支付订单时，在保存订单的同一本地事务中写入 timeout outbox 记录；事务提交后由 dispatcher 以 publisher confirm 投递到现有 TTL + DLX 链路，并以同一 `eventId` 标记发送成功。dispatcher 对未发送或确认超时记录持续重试，不能在事务内直接依赖 `convertAndSend` 的返回值。若 RabbitMQ 已 confirm 但 outbox 更新失败，记录保持 `PENDING` 并重发同一 `eventId`；消费者按 `eventId`/订单 CAS 幂等处理。兼容存量 String 订单号消息：消费者将其转换为 `legacy-timeout:{orderNo}`，从订单读取 `expireAt` 后按相同 CAS 关单路径处理；新消息使用包含 `eventId`、`eventType`、`orderNo`、`expireAt`、`traceId` 的 JSON envelope。关单消费者检查订单号、事件号和过期时间，只有 CAS 成功取消待支付订单后通知 stock 回滚。
