@@ -121,6 +121,21 @@ class PayTccCancelStoreTest {
     verify(cancels, never()).updateState(any(), any(), any(), any(), any());
   }
 
+  /** owner本身异常为空时也不能凭相同的空token推进支付。 */
+  @Test
+  void nullAndBlankStageTokensAreRejected() {
+    when(payments.selectForUpdate(payment().payNo))
+        .thenReturn(List.of(paymentRecord("TCC", "PENDING")));
+    for (String token : java.util.Arrays.asList(null, "", " ")) {
+      PayTccCancelPO requested = cancel("REQUESTED", token);
+      requested.leaseUntil = LocalDateTime.now().plusMinutes(1);
+      when(cancels.selectForUpdate(payment().payNo)).thenReturn(requested);
+      assertFalse(store.stage(payment().payNo, token, "COMPLETED", null));
+    }
+    verify(payments, never()).markFailed(any(), any());
+    verify(cancels, never()).updateState(any(), any(), any(), any(), any());
+  }
+
   /** Pay FAILED 成功但取消台账 CAS=0 时必须抛异常触发事务回滚。 */
   @Test
   void failedPaymentProjectionRequiresCancelCas() {

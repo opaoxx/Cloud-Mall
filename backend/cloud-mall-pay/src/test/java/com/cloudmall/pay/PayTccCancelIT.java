@@ -580,6 +580,13 @@ class PayTccCancelIT {
     payDb.update(
         "UPDATE pay_tcc_cancel SET lease_until=DATE_SUB(NOW(3),INTERVAL 1"
             + " DAY),next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY)");
+    // 尚未被新实例接手时，过期owner也不能清除租约或延后恢复。
+    var expiredCancel =
+        payDb.queryForMap("SELECT * FROM pay_tcc_cancel WHERE pay_no=?", request.payNo);
+    cancelStore.finish(request.payNo, "old-token", 1, "expired worker");
+    assertEquals(
+        expiredCancel,
+        payDb.queryForMap("SELECT * FROM pay_tcc_cancel WHERE pay_no=?", request.payNo));
     assertNotNull(cancelStore.claimRecovery(request.payNo, "new-token"));
     assertFalse(cancelStore.stage(request.payNo, "old-token", "COMPLETED", null));
     cancelStore.finish(request.payNo, "old-token", 1, null);

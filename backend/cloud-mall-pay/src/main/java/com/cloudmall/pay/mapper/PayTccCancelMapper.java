@@ -81,8 +81,9 @@ public interface PayTccCancelMapper extends BaseMapper<PayTccCancelPO> {
 
   /** 仅由当前状态和 lease token 共同允许推进取消台账。 */
   @Update(
-      "UPDATE pay_tcc_cancel SET state=#{state},last_error=#{error},updated_at=#{now} WHERE"
-          + " pay_no=#{payNo} AND lease_owner=#{token} AND state NOT IN ('COMPLETED','CONFLICT')")
+      "UPDATE pay_tcc_cancel SET state=#{state},last_error=#{error},updated_at=#{now} WHERE BINARY"
+          + " pay_no=BINARY #{payNo} AND BINARY lease_owner=BINARY #{token} AND lease_until IS NOT"
+          + " NULL AND lease_until>#{now} AND state NOT IN ('COMPLETED','CONFLICT')")
   int updateState(
       @Param("payNo") String payNo,
       @Param("token") String token,
@@ -92,8 +93,10 @@ public interface PayTccCancelMapper extends BaseMapper<PayTccCancelPO> {
 
   /** 释放取消恢复 lease 并写入退避信息，不改变取消业务状态。 */
   @Update(
-      "UPDATE pay_tcc_cancel SET lease_owner=NULL,lease_until=NULL,next_retry_at=#{nextAt},"
-          + "last_error=#{error},updated_at=#{now} WHERE pay_no=#{payNo} AND lease_owner=#{token}")
+      "UPDATE pay_tcc_cancel SET"
+          + " lease_owner=NULL,lease_until=NULL,next_retry_at=#{nextAt},last_error=#{error},updated_at=#{now}"
+          + " WHERE BINARY pay_no=BINARY #{payNo} AND BINARY lease_owner=BINARY #{token} AND"
+          + " lease_until IS NOT NULL AND lease_until>#{now}")
   int finish(
       @Param("payNo") String payNo,
       @Param("token") String token,

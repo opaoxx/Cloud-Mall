@@ -390,6 +390,16 @@ User查询位于两段短事务之间，最终按Pay→execution锁序重新校�
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccDeliveryRecoveryMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### TCC 取消恢复租约保护（第16轮M）
+
+取消台账与支付失败投影要求非空白token精确匹配、租约尚未到期；SQL状态更新与结束本次尝试也验证有效租约。过期执行者即使尚未被接手，也不能释放租约或修改退避时间；新执行者仍可认领到期任务。Pay FAILED与取消COMPLETED保持同一事务。
+
+不改变16E的资金互斥与Order/Stock事实核验，不新增表、开关或远程调用。隔离MySQL回归命令：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelLeaseMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ## 验证命令
 
 ```bash

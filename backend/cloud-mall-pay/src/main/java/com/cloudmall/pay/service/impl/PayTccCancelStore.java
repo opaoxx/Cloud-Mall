@@ -124,11 +124,15 @@ public class PayTccCancelStore {
     // 1. 重新锁定支付和取消行，防止旧 lease 覆盖新业务事实。
     List<PayRecordPO> records = payments.selectForUpdate(payNo);
     PayTccCancelPO current = cancels.selectForUpdate(payNo);
+    LocalDateTime currentTime = now();
     if (records.size() != 1
         || current == null
-        || !Objects.equals(current.leaseOwner, token)
+        || token == null
+        || token.isBlank()
+        || current.leaseOwner == null
+        || !current.leaseOwner.equals(token)
         || current.leaseUntil == null
-        || !current.leaseUntil.isAfter(now())
+        || !current.leaseUntil.isAfter(currentTime)
         || java.util.Set.of("COMPLETED", "CONFLICT").contains(current.state)) return false;
     PayRecordPO payment = records.get(0);
     validateCancel(current, payment);
@@ -140,12 +144,12 @@ public class PayTccCancelStore {
         || intents.findByPayNo(payNo) != null) throw conflict("取消期间支付或资金事实冲突");
     if (!SetOfStates.allowed(state)) throw conflict("取消状态非法");
     // 2. COMPLETED 必须同时满足无任何 TCC 事实和 Pay PENDING→FAILED。
-    if ("COMPLETED".equals(state) && payments.markFailed(payNo, now()) != 1)
+    if ("COMPLETED".equals(state) && payments.markFailed(payNo, currentTime) != 1)
       throw new IllegalStateException("支付取消投影未成功");
     if ("ORDER_CANCELLED".equals(current.state) && "CANCEL_UNKNOWN".equals(state))
       state = "ORDER_CANCELLED";
     // 3. 台账 CAS 失败时让本地事务回滚 Pay FAILED，避免半完成。
-    if (cancels.updateState(payNo, token, state, truncate(error), now()) != 1)
+    if (cancels.updateState(payNo, token, state, truncate(error), currentTime) != 1)
       throw new IllegalStateException("取消台账状态未更新，回滚支付投影");
     return true;
   }
@@ -155,8 +159,13 @@ public class PayTccCancelStore {
   public void finish(String payNo, String token, int attempts, String error) {
     int boundedAttempts = Math.max(1, Math.min(31, attempts));
     long seconds = 5L * (1L << Math.min(6, boundedAttempts - 1));
+    LocalDateTime currentTime = now();
     cancels.finish(
-        payNo, token, now().plusSeconds(Math.min(300L, seconds)), truncate(error), now());
+        payNo,
+        token,
+        currentTime.plusSeconds(Math.min(300L, seconds)),
+        truncate(error),
+        currentTime);
   }
 
   /** 读取取消事实，不创建新台账。 */
