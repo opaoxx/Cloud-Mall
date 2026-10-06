@@ -56,12 +56,13 @@ CREATE TABLE IF NOT EXISTS balance_debit_attempt (
   updated_at DATETIME(3) NOT NULL,
   UNIQUE KEY uk_balance_attempt_pay_no(pay_no),
   UNIQUE KEY uk_balance_attempt_operation(operation_key),
+  UNIQUE KEY uk_balance_attempt_xid(xid),
   UNIQUE KEY uk_balance_attempt_branch(xid,branch_id),
   KEY idx_balance_attempt_user_state(user_id,state,updated_at)
 );
 ```
 
-`mode` 为 `LEGACY` 或 `TCC`。Legacy 归属状态为 `APPLIED/REJECTED`，TCC 归属状态为 `TRYING/CONFIRMED/CANCELLED`；Legacy 不允许留下未完成 `TRYING`。余额不足的 TCC Try 整笔本地事务回滚，不写失败归属。新 Legacy 扣款也必须在用户行锁后认领该表，避免同一 payNo 与 TCC 并发。Legacy 的 `operationKey` 不保证等于 `payNo`，因此互斥检查必须按 `pay_no` 查询 `balance_ledger` 的 DEBIT 事实，不能只查 `operation_key=payNo`。历史 `balance_ledger` 没有归属行时，读取阶段按 `pay_no` 查账本并视为既有 Legacy 事实；新请求必须先插入归属行，唯一键冲突时完整校验用户、订单、金额、模式和 operationKey。
+`mode` 为 `LEGACY` 或 `TCC`。Legacy 归属状态为 `APPLIED/REJECTED`，TCC 归属状态为 `TRYING/CONFIRMED/CANCELLED`；Legacy 不允许留下未完成 `TRYING`。余额不足的 TCC Try 整笔本地事务回滚，不写失败归属。新 Legacy 扣款也必须在用户行锁后认领该表，避免同一 payNo 与 TCC 并发。Legacy 的 `operationKey` 不保证等于 `payNo`，因此互斥检查必须按 `pay_no` 查询 `balance_ledger` 的 DEBIT 事实，不能只查 `operation_key=payNo`。历史 `balance_ledger` 没有归属行时，读取阶段按 `pay_no` 查账本并视为既有 Legacy 事实；新请求必须先插入归属行，唯一键冲突时完整校验用户、订单、金额、模式和 operationKey。`uk_balance_attempt_xid(xid)` 与 TCC 表的 `uk_balance_tcc_xid(xid)` 共同冻结“一 XID 只能有一笔 User TCC 资金资源”；Legacy 的 XID 为 NULL，MySQL 唯一索引允许多个 NULL，不影响 Legacy。
 
 ### 3.3 `balance_tcc_debit`
 
@@ -144,7 +145,7 @@ Try 成功只表示冻结成功；不能写 `balance_ledger(DEBIT,APPLIED)`，�
 
 - Cancel 先到：没有业务行时写入完整载荷 tombstone，不能产生余额回加；下一轮 Fence 会以 `SUSPENDED` 记录空回滚，后续 Try 必须看到两份事实并拒绝冻结。
 - Cancel 后迟到 Try：持久化的 `CANCELLED` 归属或 Fence `SUSPENDED` 阻止 Try；不能创建新的 operationKey。
-- 同 XID 重入：唯一 `(xid,branch_id)` 和 `(pay_no)` 归属阻止第二个分支；下一轮必须把 Seata branch 回调幂等映射到同一 operationKey。
+- 同 XID 重入：唯一 `xid`、`(xid,branch_id)` 和 `pay_no` 归属阻止第二笔资金；空 Cancel tombstone 即使只写 attempt，也会阻止同 XID 换 branchId/payNo 再 Try。下一轮必须把 Seata branch 回调幂等映射到同一 operationKey。
 - 同 payNo 换 XID：返回冲突，不能以新 XID 重新 Try。
 - Fence 未来回收：Fence 的 `SUSPENDED` 是空回滚证据，但不是永久业务状态；业务归属行仍必须持久化 Cancelled/拒绝状态，防止 Fence 历史清理后旧 Try 复活。
 
