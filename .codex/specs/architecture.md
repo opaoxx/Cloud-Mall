@@ -190,3 +190,7 @@ COMMITTED execution 不接入 16E 无 execution cancel；failure 仅按持久 Pa
 ### CM-20261007-18 TCC cancel 恢复租约保护（16M）
 
 16M 沿用 16L 的本地恢复 CAS 口径保护 `pay_tcc_cancel`。`PayTccCancelStore.stage` 锁定 Pay 与 cancel 行后只采样一次当前时间，必须拒绝 null/空白 token、大小写不完全匹配 owner、缺失或已过期 lease；过期直接返回 false，不得更新 Pay。`COMPLETED` 的 Pay `PENDING→FAILED` 与 cancel 状态必须在同一事务提交，cancel CAS 失败回滚 Pay FAILED。Mapper 的 `updateState`/`finish` 以精确 `BINARY pay_no`、`BINARY lease_owner` 和 `lease_until > now` 兜底，迟到 worker 不得推进业务状态、释放新 owner lease 或覆盖退避。`finish` 使用同一 now 计算重试时间和更新时间。继承 16E 资金互斥与事务外 Order.cancel 边界，不新增 schema/flag，不实现 COMMITTED 主动取消。
+
+### CM-20261007-18 TCC delivery 调度公平与阶段隔离（16N）
+
+16N 保持 delivery scheduler 单实例 `running` 门、两阶段每阶段最多 20 条和整轮共享 10 秒预算。seed（`findMissing/ensure`）与 due（`findDue/deliver`）首轮 seed 优先，后续轮次交替首选；阶段查询或单条任务异常只隔离当前阶段/记录，预算未尽时另一阶段仍可执行。启动另一阶段查询或新任务前必须检查共享 deadline，预算耗尽后不再启动查询/任务且不强杀在途 RPC；`finally` 必须释放 running。生产预算使用单调 `System.nanoTime`，可通过 protected/package-private `LongSupplier` 注入测试而不改变现有 Spring public 构造/API。该轮不新增 schema/flag，不改变 TCC/Legacy、Order/Stock/User 或 TC 状态边界。
