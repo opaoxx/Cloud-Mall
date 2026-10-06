@@ -175,6 +175,10 @@ TCC 主动取消使用独立 `pay_tcc_cancel` 台账和 `cloudmall.pay.tcc-cance
 
 16G 在既有 recovery scheduler 中增加第二阶段，复用 `tcc-recovery.enabled`、recovery_attempts/next_recovery_at/随机 lease 和有界预算；独立 projection service 不依赖公开 PaymentService。整轮最多 20 条、共享启动后 10 秒预算，首轮旧 recovery 优先、后续轮次交替优先，两阶段候选 LIMIT 使用剩余额度；阶段异常隔离且失败/未知独立退避，避免长期饥饿。SQL 在 LIMIT 前过滤 ROLLEDBACK、决议/XID/原 tuple、TCC、Pay 未失败、dispatch/receipt 存在及 cancel/Legacy intent 缺失。User live CANCELLED/no-ledger 证明后，以 token/lease 校验的 Pay+execution 短事务 CAS FAILED；不改 decision、不调用 TC/Order/User 写入、不自动完成 callback。
 
+### CM-20261007-18 TCC inflight abort（16K）
+
+16K 复用 `tcc-cancel.enabled`，仅允许完整原双分支 TRYING/no-ledger 证明的 decision NONE execution 通过 `PayTccAbortProofVO` 竞争同一 execution 行锁选择 ROLLBACK；CAS 可提前 `next_recovery_at` 但保留 owner/lease/attempts。不创建新 execution/XID/branch/Try，不接管 COMMIT，不处理 COMMITTED 订单取消。初次/最终本地快照复用 Evidence 一致读，User live GET 位于两事务之间，最终不锁 receipt/Fence 形成与 RM 相反锁序。ROLLBACK_REQUESTED 沿既有 recovery，TC 超时并发不在 16K 判定 FAILED，Pay FAILED 仍由 16F/G 永久双端取消证明投影。
+
 ### CM-20261007-18 COMMITTED TCC failure 结果语义（16H）
 
 COMMITTED execution 不接入 16E 无 execution cancel；failure 仅按持久 Pay 状态准确分类：REFUND_PENDING 返回退款处理中 202，PENDING/ORDER_SYNC_UNKNOWN 返回普通结果未知 202，SUCCESS/REFUNDED/FAILED 沿用既有终态语义。不得从 failure 入口调用 Order/TC/User 写入或直接驱动 delivery refund；COMMITTED 用户取消另行设计持久意图与交付互斥。

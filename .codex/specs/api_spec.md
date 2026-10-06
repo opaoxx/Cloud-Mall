@@ -314,3 +314,7 @@ Legacy `mock-fail`/callback failure 先按 Pay 持久状态和 debit intent 完�
 ### CM-20261007-18 Legacy intent/failure 竞态（16J）
 
 Legacy 首次 intent 与 failure 统一使用独立当前读和 Pay→intent 锁序：ensureIntent 先锁 Pay，再锁已有 intent；仅锁内 Pay `PENDING` 且无 intent 才插入 INIT。mock-fail 与 callback failure 委托共同的 `PayLegacyFailureService.fail(PayVO)`，在 `REQUIRES_NEW` 内锁内重读并返回最新 PayVO，不能使用外层旧快照授权取消；PayServiceImpl.fail 移除外层 `@Transactional`，只保留鉴权、模式读取和委托，TCC failure 的 `NOT_SUPPORTED` 保持不变。success 已提交 INIT 时 failure 不 cancel/FAILED，failure 先完成时 success 不新建扣款意图。PENDING 允许状态沿原 Order.cancel+markFailed，ORDER_SYNC_UNKNOWN 仅完整 FAILED intent 允许该路径；数据库锁等待沿既有 MySQL/事务机制，Order RPC 沿现有 Feign 超时和异常契约。
+
+### CM-20261007-18 TCC inflight abort（16K）
+
+复用 `cloudmall.pay.tcc-cancel.enabled=false`，仅对原 execution 已绑定 XID、decision NONE、Pay receipt/Fence TRYING 与 User live TRYING/no-ledger 完整匹配的 failure 请求，使用内部 `PayTccAbortProofVO` 竞争同一 execution 行锁 CAS `NONE→ROLLBACK_REQUESTED`；CAS 可将 `next_recovery_at` 提前至当前时间但保留 owner/lease/attempts。不 begin、不补 Try、不 recover、不调用 COMMIT/Order/User 写接口；初次/最终本地 TRYING 快照复用 Evidence 一致读，User live GET 位于两事务之间，最终不锁 receipt/Fence 形成反向锁序。COMMIT 先选则拒绝改向，ROLLBACK 先选则由既有 recovery 重试。TC 超时并发不在本入口判 FAILED，最终 Pay FAILED 仍由 16F/G 双端永久取消证明投影。
