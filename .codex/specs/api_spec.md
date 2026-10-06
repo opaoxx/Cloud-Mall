@@ -310,3 +310,7 @@ COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明
 ### CM-20261007-18 Legacy failure 结果语义（16I）
 
 Legacy `mock-fail`/callback failure 先按 Pay 持久状态和 debit intent 完整 tuple 分类：SUCCESS/REFUNDED 返回既有 409；REFUND_PENDING 在 intent 缺失或完整匹配时返回 `PAY_REFUND_PENDING`/202 且不 RPC/写入，intent 矛盾返回 503；FAILED 在 intent 缺失或匹配 `FAILED` 时幂等 200 且不重复 Order.cancel；PENDING 且 intent 缺失/FAILED、以及 ORDER_SYNC_UNKNOWN 且 intent 完整匹配 FAILED 时保留既有 Order.cancel+markFailed 基本路径，写 FAILED 后返回/complete 200；PENDING intent 非 FAILED/未知、ORDER_SYNC_UNKNOWN intent 缺失/非 FAILED 返回 202。notifyFailure 原有 BizException 与其他异常 500 映射保持不变，不新增取消未知台账。intent mode/tuple 矛盾或未知状态不得 complete/猜测失败，按既有 503/202 处理。TCC 契约不变。
+
+### CM-20261007-18 Legacy intent/failure 竞态（16J）
+
+Legacy 首次 intent 与 failure 统一使用独立当前读和 Pay→intent 锁序：ensureIntent 先锁 Pay，再锁已有 intent；仅锁内 Pay `PENDING` 且无 intent 才插入 INIT。mock-fail 与 callback failure 委托共同的 `PayLegacyFailureService.fail(PayVO)`，在 `REQUIRES_NEW` 内锁内重读并返回最新 PayVO，不能使用外层旧快照授权取消；PayServiceImpl.fail 移除外层 `@Transactional`，只保留鉴权、模式读取和委托，TCC failure 的 `NOT_SUPPORTED` 保持不变。success 已提交 INIT 时 failure 不 cancel/FAILED，failure 先完成时 success 不新建扣款意图。PENDING 允许状态沿原 Order.cancel+markFailed，ORDER_SYNC_UNKNOWN 仅完整 FAILED intent 允许该路径；数据库锁等待沿既有 MySQL/事务机制，Order RPC 沿现有 Feign 超时和异常契约。
