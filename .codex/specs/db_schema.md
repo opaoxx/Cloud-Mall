@@ -432,7 +432,7 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 ### 7.1 `pay_record`
 
-`id BIGINT PK`、`pay_no VARCHAR(64) UNIQUE NOT NULL`、`order_no VARCHAR(64) UNIQUE NOT NULL`、`user_id BIGINT NOT NULL`、`amount DECIMAL(18,2) NOT NULL`、`status VARCHAR(32) NOT NULL`（PENDING/ORDER_SYNC_UNKNOWN/SUCCESS/REFUND_PENDING/REFUNDED/FAILED/CLOSED）、`paid_at DATETIME(3)`、`created_at DATETIME(3)`、`updated_at DATETIME(3)`。订单号唯一保证同一订单只有一个有效支付记录，重复支付/回调按幂等规则安全返回。
+`id BIGINT PK`、`pay_no VARCHAR(64) UNIQUE NOT NULL`、`order_no VARCHAR(64) UNIQUE NOT NULL`、`user_id BIGINT NOT NULL`、`amount DECIMAL(18,2) NOT NULL`、`status VARCHAR(32) NOT NULL`（PENDING/ORDER_SYNC_UNKNOWN/SUCCESS/REFUND_PENDING/REFUNDED/FAILED/CLOSED）、`debit_mode VARCHAR(16) NOT NULL DEFAULT 'LEGACY'`（LEGACY/TCC）、`paid_at DATETIME(3)`、`created_at DATETIME(3)`、`updated_at DATETIME(3)`。订单号唯一保证同一订单只有一个有效支付记录，重复支付/回调按幂等规则安全返回。`debit_mode` 在支付记录创建时冻结；历史行和缺失值按 LEGACY 处理，后续配置变化不得改写。
 
 ### 7.2 `pay_callback_log`
 
@@ -469,6 +469,7 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 | `user_id` | BIGINT NOT NULL | 用户 |
 | `amount` | DECIMAL(18,2) NOT NULL | 扣款金额 |
 | `status` | VARCHAR(32) NOT NULL | `INIT`/`DEBITED`/`ORDER_SYNC_UNKNOWN`/`SUCCESS`/`REFUND_PENDING`/`REFUNDED`/`FAILED` |
+| `debit_mode` | VARCHAR(16) NOT NULL DEFAULT `LEGACY` | 从原 `pay_record` 复制的不可变扣款路由；历史/缺失值为 LEGACY |
 | `attempts` | INT NOT NULL DEFAULT 0 | 恢复尝试次数 |
 | `next_retry_at` | DATETIME(3) NOT NULL | 下次恢复时间 |
 | `lease_owner` | VARCHAR(128) | 当前恢复任务实例标识 |
@@ -476,7 +477,9 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 | `last_error` | VARCHAR(512) | 最近错误 |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | Asia/Shanghai 语义 |
 
-索引：`uk_pay_debit_intent_pay(pay_no)`、`idx_pay_debit_recovery(status,next_retry_at,lease_until)`、`idx_pay_debit_order(order_no)`。创建意图与支付请求幂等键绑定，并在调用 user 前独立提交。恢复任务先查询用户账本操作：不存在则用同一 `payNo` 重试扣款；存在已应用扣款则进入订单状态查询；存在拒绝记录则进入 `FAILED`。恢复任务使用数据库租约和退避字段，超过阈值进入告警状态并继续可重入扫描，不能因扫描不到 `ORDER_SYNC_UNKNOWN` 的 `pay_record` 而遗漏已扣余额。
+索引：`uk_pay_debit_intent_pay(pay_no)`、`idx_pay_debit_recovery(status,next_retry_at,lease_until)`、`idx_pay_debit_order(order_no)`。创建意图与支付请求幂等键绑定，并在调用 user 前独立提交；意图的 `debit_mode` 必须从对应 `pay_record` 复制并与其一致，不得从当前运行配置重新推导。恢复任务在 claim 前和任何 User/Order 调用前校验模式；只有 LEGACY 才执行现有账本恢复，TCC/未知/不一致返回 `PAY_DEBIT_MODE_UNAVAILABLE`（HTTP 503），不修改租约、尝试次数和状态，也不能退回 LEGACY 扣款。恢复任务先查询用户账本操作：不存在则用同一 `payNo` 重试扣款；存在已应用扣款则进入订单状态查询；存在拒绝记录则进入 `FAILED`。恢复任务使用数据库租约和退避字段，超过阈值进入告警状态并继续可重入扫描，不能因扫描不到 `ORDER_SYNC_UNKNOWN` 的 `pay_record` 而遗漏已扣余额。
+
+12A 只增加上述两列及路由隔离保护，不新增 TCC receipt、余额冻结字段或 TCC HTTP 接口；这些只能在真实 Seata TCC Try/Confirm/Cancel 回调契约评审后落地。`TCC` 值在当前阶段只能作为被拒绝的持久协议状态，不能默默降级为 LEGACY。
 
 ## 8. 购物车 Redis 逻辑结构
 

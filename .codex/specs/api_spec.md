@@ -181,6 +181,8 @@ MySQL 事实；只有 MySQL 事实也不可用时返回 `STOCK_SERVICE_UNAVAILAB
 
 支付金额必须与订单应付金额一致。支付成功流程必须先以 `payNo` 作为唯一操作键完成用户余额扣款，再同步订单；扣款已完成而订单同步结果未知时，支付记录进入 `ORDER_SYNC_UNKNOWN`，由查询/重试/对账任务继续处理。只有确认订单处于 `CANCELLED` 且没有 `PAID` 成功事实时，才允许发起退款。不得因为一次 Feign 超时直接退款；若订单状态仍未知，必须保持扣款并继续对账。真实第三方支付和售后不在本期范围，但模拟余额退款属于本批一致性闭环。
 
+支付记录和扣款意图都持久化 `debit_mode`，取值为 `LEGACY` 或未来实现的 `TCC`；历史记录和缺失值均按 `LEGACY` 解释，且由创建支付记录时的配置冻结，后续配置变化不得改写既有意图。当前阶段运行配置只允许 `LEGACY`；`TCC` 或未知模式必须启动失败。支付恢复器在 claim 前以及调用 User/Order 前都要校验支付记录与意图的模式一致性。模式为 `TCC`、未知或不一致时返回 `PAY_DEBIT_MODE_UNAVAILABLE`（HTTP 503），不调用 LEGACY 扣款/退款，也不更新租约、尝试次数或状态；调用方必须继续使用原 `payNo` 等待后续恢复，不能换新的 `Idempotency-Key`。
+
 支付服务与用户服务之间的内部接口契约：
 
 | 方法 | 路径 | 请求/响应 | 说明 |
@@ -235,6 +237,7 @@ MySQL 事实；只有 MySQL 事实也不可用时返回 `STOCK_SERVICE_UNAVAILAB
 | `PAYMENT_FAILED` | 模拟支付失败 | 409 |
 | `PAY_ORDER_SYNC_UNKNOWN` | 扣款已持久化，订单支付结果未知 | 202 |
 | `PAY_REFUND_PENDING` | 已确认需要退款，退款处理中 | 202 |
+| `PAY_DEBIT_MODE_UNAVAILABLE` | 持久化扣款模式为未实现/未知值或支付记录与意图不一致，支付结果待恢复 | 503 |
 | `ORDER_RESERVATION_UNKNOWN` | 库存预扣结果未知，等待按原订单号查询 | 202 |
 | `ORDER_RESERVATION_KEY_REUSED` | 同一订单号携带了不同的库存快照 | 409 |
 | `ORDER_STOCK_RESERVATION_REJECTED` | 库存预扣已持久化拒绝 | 409 |

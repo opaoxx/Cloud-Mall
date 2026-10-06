@@ -50,6 +50,8 @@ CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一�
 
 `pay` 校验模拟支付请求并记录支付结果，以 `payNo` 作为唯一操作键调用 user 的余额扣款；扣款和 `balance_ledger` 在 user 本地事务内完成。扣款成功后向 order 发起幂等支付同步。order 在本地事务中把订单 CAS 为 `PAID` 并写入 `order_stock_action(CONFIRM)`，提交后才调用 stock.confirm；调用超时只把动作置为 `UNKNOWN`，不会回滚已提交的 `PAID`。恢复任务查询 stock 最终状态并重试同一操作键。同步超时/断连时进入 `ORDER_SYNC_UNKNOWN`，由支付恢复任务查询订单状态；只有查询明确得到 `CANCELLED`/未支付终态才创建唯一退款操作，未知期间不得退款。回调、扣款、退款、库存确认均按操作键幂等。
 
+CM-18 第 12A 阶段只完成支付路由的持久协议隔离：`pay_record.debit_mode` 在创建时冻结，`pay_debit_intent.debit_mode` 从原支付记录复制；历史和缺失值使用 `LEGACY`。当前运行配置仅允许 `LEGACY`，`TCC` 或未知配置启动失败。恢复器在 claim 前以及调用 User/Order 前双重校验记录与意图模式；模式为 TCC、未知或不一致时返回 `PAY_DEBIT_MODE_UNAVAILABLE`（503），不把未实现 TCC 意图降级到普通余额扣款，也不修改租约或状态。12A 不接入 TCC、Seata TCC 分支、余额冻结、receipt 表或 TCC HTTP 接口；CM-18 整体仍未闭环。未来 12B 必须重新评审真实 Try/Confirm/Cancel 回调和 Fence 语义后，才允许改变支付资金事务边界。
+
 ### 4.3 超时关单
 
 order 创建待支付订单时，在保存订单的同一本地事务中写入 timeout outbox 记录；事务提交后由 dispatcher 以 publisher confirm 投递到现有 TTL + DLX 链路，并以同一 `eventId` 标记发送成功。dispatcher 对未发送或确认超时记录持续重试，不能在事务内直接依赖 `convertAndSend` 的返回值。若 RabbitMQ 已 confirm 但 outbox 更新失败，记录保持 `PENDING` 并重发同一 `eventId`；消费者按 `eventId`/订单 CAS 幂等处理。兼容存量 String 订单号消息：消费者将其转换为 `legacy-timeout:{orderNo}`，从订单读取 `expireAt` 后按相同 CAS 关单路径处理；新消息使用包含 `eventId`、`eventType`、`orderNo`、`expireAt`、`traceId` 的 JSON envelope。关单消费者检查订单号、事件号和过期时间，只有 CAS 成功取消待支付订单后通知 stock 回滚。
