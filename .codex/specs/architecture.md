@@ -50,7 +50,7 @@ CloudMall 采用 Spring Boot + Spring Cloud Alibaba 微服务架构，按单一�
 
 `pay` 校验模拟支付请求并记录支付结果，以 `payNo` 作为唯一操作键调用 user 的余额扣款；扣款和 `balance_ledger` 在 user 本地事务内完成。扣款成功后向 order 发起幂等支付同步。order 在本地事务中把订单 CAS 为 `PAID` 并写入 `order_stock_action(CONFIRM)`，提交后才调用 stock.confirm；调用超时只把动作置为 `UNKNOWN`，不会回滚已提交的 `PAID`。恢复任务查询 stock 最终状态并重试同一操作键。同步超时/断连时进入 `ORDER_SYNC_UNKNOWN`，由支付恢复任务查询订单状态；只有查询明确得到 `CANCELLED`/未支付终态才创建唯一退款操作，未知期间不得退款。回调、扣款、退款、库存确认均按操作键幂等。
 
-CM-18 第 12A 阶段只完成支付路由的持久协议隔离：`pay_record.debit_mode` 在创建时冻结，`pay_debit_intent.debit_mode` 从原支付记录复制；历史和缺失值使用 `LEGACY`。当前运行配置仅允许 `LEGACY`，`TCC` 或未知配置启动失败。恢复器在 claim 前以及调用 User/Order 前双重校验记录与意图模式；模式为 TCC、未知或不一致时返回 `PAY_DEBIT_MODE_UNAVAILABLE`（503），不把未实现 TCC 意图降级到普通余额扣款，也不修改租约或状态。12A 不接入 TCC、Seata TCC 分支、余额冻结、receipt 表或 TCC HTTP 接口；CM-18 整体仍未闭环。未来 12B 必须重新评审真实 Try/Confirm/Cancel 回调和 Fence 语义后，才允许改变支付资金事务边界。
+CM-18 第 12A 阶段只完成支付路由的持久协议隔离：`pay_record.debit_mode` 在创建时冻结，`pay_debit_intent.debit_mode` 从原支付记录复制；数据库迁移把历史行写为 `LEGACY`，Java 旧对象的 null 只作兼容，持久化空串、小写值、尾随空格和未知值均不支持。当前运行配置仅允许 `LEGACY`，`TCC` 或未知配置启动失败。恢复器在 claim 前以及调用 User/Order 前双重校验记录与意图模式；模式为 TCC、未知或不一致时返回 `PAY_DEBIT_MODE_UNAVAILABLE`（503），不把未实现 TCC 意图降级到普通余额扣款，也不修改租约或状态。恢复扫描必须在 SQL 层 JOIN 两表并以 `BINARY debit_mode='LEGACY'` 精确筛选，不能先取固定窗口再在 Java 过滤。12A 不接入 TCC、Seata TCC 分支、余额冻结、receipt 表或 TCC HTTP 接口；CM-18 整体仍未闭环。未来 12B 必须重新评审真实 Try/Confirm/Cancel 回调和 Fence 语义后，才允许改变支付资金事务边界。
 
 ### 4.3 超时关单
 
