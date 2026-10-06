@@ -438,7 +438,7 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 ### 7.2 `pay_callback_log`
 
-`id BIGINT PK`、`pay_no VARCHAR(64) NOT NULL`、`callback_id VARCHAR(128) UNIQUE NOT NULL`、`callback_status VARCHAR(32) NOT NULL`、`payload JSON`、`processed_at DATETIME(3)`、`created_at DATETIME(3) NOT NULL`。用于模拟回调幂等和审计；不得保存真实支付敏感数据。
+`id BIGINT PK`、`pay_no VARCHAR(64) NOT NULL`、`callback_id VARCHAR(128) UNIQUE NOT NULL`、`callback_status VARCHAR(32) NOT NULL`、`payload JSON`、`processed_at DATETIME(3)`、`created_at DATETIME(3) NOT NULL`。`callback_status` 冻结 `RECEIVED_SUCCESS`/`RECEIVED_FAILURE` 为仅收到未处理状态（`processed_at=NULL`），处理完成后使用 `SUCCESS`/`FAILED`；并发首次请求通过独立事务 `INSERT IGNORE` 认领同一 callbackId。payload 保存不可变 payNo/userId/amount/success；旧 `{}` 仅在同 payNo、同方向且当前 Pay 字段已校验时兼容。用于模拟回调幂等和审计；不得保存真实支付敏感数据。
 
 ### 7.3 `balance_ledger`（用户库）
 

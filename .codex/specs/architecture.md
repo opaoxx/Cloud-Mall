@@ -158,3 +158,7 @@ Compose 至少应提供统一的本地开发网络、持久化数据卷、健康
 ## 9. 设计冻结说明
 
 本轮已冻结 OpenFeign + Nacos 服务通信、3 秒连接超时、5 秒读取超时、仅幂等 GET 有限重试、RabbitMQ TTL + DLX 延迟关单、Seata file 模式、RabbitMQ 商品索引异步同步、Micrometer Tracing Trace ID 透传、Spring Actuator 指标端点、Docker Compose 本地编排范围以及 IDEA/Vite 本地端口。Docker Compose 的具体容器名、网络/卷名称、镜像构建细节和生产化安全不属于本地代码实现契约。
+
+### CM-20261007-18 公开支付协议选择（16D）
+
+新建支付单的 `pay_record.debit_mode` 可由显式配置选择 `LEGACY` 或已接入的 `TCC`，默认仍为 `LEGACY`；历史支付、扣款意图和 TCC execution 始终按持久模式路由。TCC 成功只走既有 coordinator → delivery，禁止进入 Legacy debit/refund。TCC 主动失败本轮只读本地事实并保守返回 202，不做远程 RPC/cancel 或 FAILED 投影；只有完整 `ROLLEDBACK` 双端 live 证据才可将 Pay 本地状态 CAS 为 FAILED，且不改既有 decision。该边界不新增表、不改变 Order/Stock 模型；callbackId 先以独立事务预绑定 payload，`RECEIVED_SUCCESS/RECEIVED_FAILURE` 配合 `processed_at=NULL` 表示未处理，跨支付复用返回 409。

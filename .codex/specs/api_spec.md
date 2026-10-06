@@ -252,6 +252,7 @@ CM-18 第 16C 只提供内部 `PayTccDeliveryService.deliver(String payNo)` 和 
 | `PAY_ORDER_SYNC_UNKNOWN` | 扣款已持久化，订单支付结果未知 | 202 |
 | `PAY_REFUND_PENDING` | 已确认需要退款，退款处理中 | 202 |
 | `PAY_DEBIT_MODE_UNAVAILABLE` | 持久化扣款模式为未实现/未知值或支付记录与意图不一致，支付结果待恢复 | 503 |
+| `PAY_CALLBACK_CONFLICT` | callbackId 已绑定其他支付单或相反回调方向/载荷，不能静默复用 | 409 |
 | `ORDER_RESERVATION_UNKNOWN` | 库存预扣结果未知，等待按原订单号查询 | 202 |
 | `ORDER_RESERVATION_KEY_REUSED` | 同一订单号携带了不同的库存快照 | 409 |
 | `ORDER_STOCK_RESERVATION_REJECTED` | 库存预扣已持久化拒绝 | 409 |
@@ -285,3 +286,7 @@ RabbitMQ 事件至少包括：订单创建/超时、库存预扣/回滚/确认�
 ## 13. 契约冻结说明
 
 本轮已冻结 `/api` 前缀及本地端口、Redis 不透明 Token 与 2 小时 TTL、Bearer 认证、金额/时间格式、`Idempotency-Key`、库存内部接口边界、管理员角色、秒杀活动归属、RabbitMQ TTL + DLX、OpenFeign 超时/重试和错误 HTTP 映射。所有错误统一使用 200/400/401/403/404/409/429/500；回调为内部受控入口，服务必须执行幂等和归属校验。
+
+### CM-20261007-18 公开支付 TCC 路由（16D）
+
+`POST /api/payments`、`/{payNo}/mock-success`、`/{payNo}/mock-fail` 和 `/callback` 的公网路径、Gateway Bearer 鉴权、字段和 Idempotency-Key 不变。新支付显式配置 TCC 时，success/callback-success 仅经已有 coordinator → delivery；首次无 execution 时先核验订单 `PENDING_PAYMENT`，已有 execution 直接 recover。fail/callback-failure 在本轮对 TCC 只本地读取并保守返回 `PAY_ORDER_SYNC_UNKNOWN`/202，不发任何 RPC、不 cancel、不写 FAILED。callback 首次并发使用独立事务 `INSERT IGNORE` 预绑定原 payload，`callback_status=RECEIVED_SUCCESS|RECEIVED_FAILURE` 且 `processed_at=NULL`；只有真实处理完成才转 `SUCCESS|FAILED`。旧 `payload={}` 仅 same payNo、same 方向且当前 Pay 字段已校验时兼容；重放仍走真实结果，不能凭日志 200。跨 payNo 或方向冲突返回 `PAY_CALLBACK_CONFLICT`/409。`ROLLEDBACK` 在 decision 为 NONE/COMMIT/ROLLBACK 均可，仅凭本地快照 + User live GET 的完整 CANCELLED/no-ledger 证据在短事务 CAS FAILED，不改 decision。
