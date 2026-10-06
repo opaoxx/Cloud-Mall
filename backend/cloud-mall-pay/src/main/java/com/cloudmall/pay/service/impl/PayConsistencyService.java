@@ -10,6 +10,7 @@ import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.util.PayDebitModes;
 import feign.FeignException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -88,14 +89,27 @@ public class PayConsistencyService {
 
   /** 返回支付意图的当前状态，必要时执行一次可恢复处理。 */
   public String process(String payNo) {
+    // 1. 原意图与支付单模式先核对，再领取租约；拒绝路径不修改任何恢复字段。
+    PayDebitIntentPO pending = payDebitIntentMapper.findByPayNo(payNo);
+    if (pending != null) requireLegacyRoute(pending);
     LocalDateTime currentTime = now();
     if (payDebitIntentMapper.claim(payNo, owner, currentTime.plusSeconds(30), currentTime) != 1) {
       PayDebitIntentPO existing = payDebitIntentMapper.findByPayNo(payNo);
+      if (existing != null) requireLegacyRoute(existing);
       return existing == null ? "INIT" : existing.status;
     }
     PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
     if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
+    requireLegacyRoute(intent);
     return processClaimed(intent);
+  }
+
+  /** 已存模式不受当前开关影响，未知协议和孤立意图不得进入旧资金调用。 */
+  private void requireLegacyRoute(PayDebitIntentPO intent) {
+    PayDebitModes.requireSupported(intent.debitMode);
+    List<PayRecordPO> records = payRecordMapper.selectByPayNo(intent.payNo);
+    if (records.size() != 1) throw PayDebitModes.unavailable();
+    PayDebitModes.requireSupported(records.get(0).debitMode);
   }
 
   /** 先核对用户账本，再按订单确定成功、等待或唯一退款。 */

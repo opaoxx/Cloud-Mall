@@ -73,9 +73,9 @@ CREATE TABLE IF NOT EXISTS seckill_quota_settlement (
   KEY idx_seckill_settlement_activity(activity_id,sku_id,status)
 );
 USE cloudmall_pay;
-CREATE TABLE IF NOT EXISTS pay_record (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL UNIQUE, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, status VARCHAR(32) NOT NULL, paid_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL);
+CREATE TABLE IF NOT EXISTS pay_record (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL UNIQUE, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, status VARCHAR(32) NOT NULL, debit_mode VARCHAR(16) NOT NULL DEFAULT 'LEGACY', paid_at DATETIME(3), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL);
 CREATE TABLE IF NOT EXISTS pay_callback_log (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL, callback_id VARCHAR(128) NOT NULL UNIQUE, callback_status VARCHAR(32) NOT NULL, payload JSON, processed_at DATETIME(3), created_at DATETIME(3) NOT NULL);
-CREATE TABLE IF NOT EXISTS pay_debit_intent (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL UNIQUE, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, status VARCHAR(32) NOT NULL, attempts INT NOT NULL DEFAULT 0, next_retry_at DATETIME(3) NOT NULL, lease_owner VARCHAR(128), lease_until DATETIME(3), last_error VARCHAR(512), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_pay_debit_recovery(status,next_retry_at,lease_until), KEY idx_pay_debit_order(order_no));
+CREATE TABLE IF NOT EXISTS pay_debit_intent (id BIGINT PRIMARY KEY, pay_no VARCHAR(64) NOT NULL UNIQUE, order_no VARCHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, status VARCHAR(32) NOT NULL, debit_mode VARCHAR(16) NOT NULL DEFAULT 'LEGACY', attempts INT NOT NULL DEFAULT 0, next_retry_at DATETIME(3) NOT NULL, lease_owner VARCHAR(128), lease_until DATETIME(3), last_error VARCHAR(512), created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, KEY idx_pay_debit_recovery(status,next_retry_at,lease_until), KEY idx_pay_debit_order(order_no));
 USE cloudmall_order;
 CREATE TABLE IF NOT EXISTS undo_log (
   branch_id BIGINT NOT NULL,

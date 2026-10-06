@@ -193,6 +193,21 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_product_hot_source.sql 
 
 迁移只给仍与 `hm-item.item` 源商品数值逐行一致、来源仍为 `UNKNOWN` 的记录标记 `LEGACY_IMPORT/hm-item.item`；无法确认来源的行保持 `UNKNOWN` 并由只读审计告警。`GET /api/products/{id}/hot-stat` 的 `sourceType/sourceRef` 会说明来源。指标新鲜度审计每 5 分钟只读核对 MySQL 和 ES，历史快照超过 24 小时会告警；它不会自行增加浏览、搜索或销量。
 
+### 支付扣款模式隔离（CM-18 阶段 12A）
+
+支付记录和扣款意图现在持久化 `debit_mode`。新支付在创建时固定模式，后续恢复只读取原记录；当前仅支持 `LEGACY`。将 `cloudmall.pay.debit-mode` 配置为 `TCC` 或未知值会阻止 Pay 启动。
+
+已有数据卷可先执行可重复迁移，存量记录默认归入 `LEGACY`，不改变金额或支付状态：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_debit_mode.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
+
+持久记录为 `TCC`、未知模式或支付单与意图模式不一致时，支付处理返回 `PAY_DEBIT_MODE_UNAVAILABLE`/503。恢复器保留原状态、租约、尝试次数和重试时间，不调用旧余额扣款或退款路径。排查时核对两张表的原始事实，不要手动改模式强行重试。
+
+本阶段尚未实现真实 Pay/User TCC 资金分支；CM-18 仍未闭环。Try/Confirm/Cancel、余额冻结和真实 TC 故障验收按后续评审阶段推进。
+
 ## 验证命令
 
 ```bash

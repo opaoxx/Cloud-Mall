@@ -32,6 +32,10 @@ public class PayRecordPO {
   /** 支付状态。 */
   public String status;
 
+  /** 创建支付单时固定的扣款协议，存量记录为 LEGACY。 */
+  @TableField("debit_mode")
+  public String debitMode;
+
   /** 支付完成时间。 */
   @TableField("paid_at")
   public LocalDateTime paidAt;

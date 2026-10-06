@@ -27,23 +27,44 @@ public class PayDebitIntentMapper {
             + "id BIGINT PRIMARY KEY,pay_no VARCHAR(64) NOT NULL UNIQUE,"
             + "order_no VARCHAR(64) NOT NULL UNIQUE,user_id BIGINT NOT NULL,"
             + "amount DECIMAL(18,2) NOT NULL,status VARCHAR(32) NOT NULL,"
+            + "debit_mode VARCHAR(16) NOT NULL DEFAULT 'LEGACY',"
             + "attempts INT NOT NULL DEFAULT 0,next_retry_at DATETIME(3) NOT NULL,"
             + "lease_owner VARCHAR(128),lease_until DATETIME(3),last_error VARCHAR(512),"
             + "created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,"
             + "KEY idx_pay_debit_recovery(status,next_retry_at,lease_until),"
             + "KEY idx_pay_debit_order(order_no))");
+    ensureDebitModeColumn("pay_record");
+    ensureDebitModeColumn("pay_debit_intent");
+  }
+
+  /** 只允许固定的两张 Pay 表进行幂等模式迁移，既有行由默认值归入 LEGACY。 */
+  private void ensureDebitModeColumn(String table) {
+    if (!java.util.Set.of("pay_record", "pay_debit_intent").contains(table))
+      throw new IllegalArgumentException("未允许的支付模式迁移表");
+    String query =
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()"
+            + " AND table_name=? AND column_name='debit_mode'";
+    if (jdbcTemplate.queryForObject(query, Integer.class, table) > 0) return;
+    try {
+      jdbcTemplate.execute(
+          "ALTER TABLE " + table + " ADD COLUMN debit_mode VARCHAR(16) NOT NULL DEFAULT 'LEGACY'");
+    } catch (org.springframework.dao.DataAccessException migrationFailure) {
+      if (jdbcTemplate.queryForObject(query, Integer.class, table) == 0) throw migrationFailure;
+    }
   }
 
   /** 在远程扣款之前写入不可变 INIT 意图。 */
   public int insertIfAbsent(PayDebitIntentPO intent) {
     return jdbcTemplate.update(
-        "INSERT IGNORE INTO pay_debit_intent(id,pay_no,order_no,user_id,amount,status,attempts,"
-            + "next_retry_at,created_at,updated_at) VALUES(?,?,?,?,?,'INIT',0,?,?,?)",
+        "INSERT IGNORE INTO"
+            + " pay_debit_intent(id,pay_no,order_no,user_id,amount,debit_mode,status,attempts,next_retry_at,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?,'INIT',0,?,?,?)",
         intent.id,
         intent.payNo,
         intent.orderNo,
         intent.userId,
         intent.amount,
+        intent.debitMode,
         intent.nextRetryAt,
         intent.createdAt,
         intent.updatedAt);
@@ -70,11 +91,14 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 使用条件更新领取一条支付恢复任务。 */
+  /** 仅在支付单与意图均为 LEGACY 时条件领取恢复任务。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
-            + " WHERE pay_no=? AND status IN"
+            + " WHERE pay_no=? AND BINARY debit_mode='LEGACY'"
+            + " AND EXISTS (SELECT 1 FROM pay_record"
+            + " WHERE pay_record.pay_no=pay_debit_intent.pay_no"
+            + " AND BINARY pay_record.debit_mode='LEGACY') AND status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
             + " AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<=?)",
         owner,
@@ -138,6 +162,7 @@ public class PayDebitIntentMapper {
         intent.userId = resultSet.getLong("user_id");
         intent.amount = resultSet.getObject("amount", BigDecimal.class);
         intent.status = resultSet.getString("status");
+        intent.debitMode = resultSet.getString("debit_mode");
         intent.attempts = resultSet.getInt("attempts");
         intent.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
         intent.leaseOwner = resultSet.getString("lease_owner");

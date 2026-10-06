@@ -71,6 +71,10 @@ class BalancePaymentContractTest {
             payRecordMapper,
             mock(PayCallbackLogMapper.class));
     ReflectionTestUtils.setField(payService, "payConsistencyService", consistencyService);
+    ReflectionTestUtils.setField(
+        payService,
+        "payDebitIntentMapper",
+        mock(com.cloudmall.pay.mapper.PayDebitIntentMapper.class));
     return payService;
   }
 

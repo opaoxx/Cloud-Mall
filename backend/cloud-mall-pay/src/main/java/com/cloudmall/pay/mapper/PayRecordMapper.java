@@ -13,26 +13,27 @@ import org.apache.ibatis.annotations.Update;
 public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
   /** 查询用户订单的支付记录。 */
   @Select(
-      "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where"
+      "select pay_no,order_no,user_id,amount,status,debit_mode,paid_at from pay_record where"
           + " order_no=#{orderNo} and user_id=#{userId}")
   List<PayRecordPO> selectByOrderNoAndUserId(
       @Param("orderNo") String orderNo, @Param("userId") Long userId);
 
   /** 按支付单号查询并锁定支付记录。 */
   @Select(
-      "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where pay_no=#{payNo}"
-          + " for update")
+      "select pay_no,order_no,user_id,amount,status,debit_mode,paid_at from pay_record where"
+          + " pay_no=#{payNo} for update")
   List<PayRecordPO> selectForUpdate(@Param("payNo") String payNo);
 
   /** 按订单号查询支付记录。 */
   @Select(
-      "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where"
+      "select pay_no,order_no,user_id,amount,status,debit_mode,paid_at from pay_record where"
           + " order_no=#{orderNo}")
   List<PayRecordPO> selectByOrderNo(@Param("orderNo") String orderNo);
 
   /** 按支付单号查询支付记录。 */
   @Select(
-      "select pay_no,order_no,user_id,amount,status,paid_at from pay_record where pay_no=#{payNo}")
+      "select pay_no,order_no,user_id,amount,status,debit_mode,paid_at from pay_record where"
+          + " pay_no=#{payNo}")
   List<PayRecordPO> selectByPayNo(@Param("payNo") String payNo);
 
   /** 将待支付记录更新为成功。 */

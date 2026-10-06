@@ -4,6 +4,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.po.PayCallbackLogPO;
@@ -16,6 +17,7 @@ import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayService;
+import com.cloudmall.pay.util.PayDebitModes;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.OffsetDateTime;
@@ -47,6 +49,9 @@ public class PayServiceImpl implements PayService {
 
   /** 判断失败回调能否安全取消订单的持久意图 Mapper。 */
   @Autowired private PayDebitIntentMapper payDebitIntentMapper;
+
+  /** 只为新支付单选择协议；既有记录从持久字段核验。 */
+  @Autowired private PayDebitModeConfiguration debitModeConfiguration;
 
   @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}")
   /** 保存 callbackToken 的业务状态或配置。 */
@@ -115,6 +120,7 @@ public class PayServiceImpl implements PayService {
     paymentRecord.userId = userId;
     paymentRecord.amount = req.payAmount;
     paymentRecord.status = "PENDING";
+    paymentRecord.debitMode = debitModeConfiguration.newPaymentMode();
     paymentRecord.createdAt = now.toLocalDateTime();
     paymentRecord.updatedAt = now.toLocalDateTime();
     payRecordMapper.insert(paymentRecord);
@@ -143,6 +149,7 @@ public class PayServiceImpl implements PayService {
     // 2. 执行 success 的核心业务校验与状态处理。
     // 3. 返回 success 的处理结果。
     PayVO payment = owned(payNo);
+    requireSupportedMode(payNo);
     if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
     if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
       throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
@@ -158,6 +165,7 @@ public class PayServiceImpl implements PayService {
     // 2. 执行 fail 的核心业务校验与状态处理。
     // 3. 返回 fail 的处理结果。
     PayVO p = owned(payNo);
+    requireSupportedMode(payNo);
     if ("SUCCESS".equals(p.status)) throw new BizException(ErrorCodes.PAY_DONE, "支付已成功", 409);
     PayDebitIntentPO paymentIntent = payDebitIntentMapper.findByPayNo(payNo);
     if (paymentIntent != null && !"FAILED".equals(paymentIntent.status))
@@ -190,12 +198,13 @@ public class PayServiceImpl implements PayService {
         callback.callbackId == null || callback.callbackId.isBlank()
             ? callback.payNo
             : callback.callbackId;
-    if (!payCallbackLogMapper.selectByCallbackId(callbackId).isEmpty()) {
-      return ApiResponse.ok(find(callback.payNo));
-    }
     PayVO payment = ownedForUser(callback.payNo, callback.userId);
+    requireSupportedMode(callback.payNo);
     if (payment.amount.compareTo(callback.amount) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
+    if (!payCallbackLogMapper.selectByCallbackId(callbackId).isEmpty()) {
+      return ApiResponse.ok(payment);
+    }
     if (callback.success) {
       if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
         throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
@@ -240,6 +249,15 @@ public class PayServiceImpl implements PayService {
     if ("REFUND_PENDING".equals(outcome))
       throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
     throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "扣款或订单结果待确认", 202);
+  }
+
+  /** 在回调、模拟成功或失败产生副作用前核验原支付协议。 */
+  private void requireSupportedMode(String payNo) {
+    List<PayRecordPO> records = payRecordMapper.selectByPayNo(payNo);
+    if (records.size() != 1) throw PayDebitModes.unavailable();
+    PayDebitModes.requireSupported(records.get(0).debitMode);
+    PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
+    if (intent != null) PayDebitModes.requireSupported(intent.debitMode);
   }
 
   /** 执行 notifyFailure 相关操作。 */

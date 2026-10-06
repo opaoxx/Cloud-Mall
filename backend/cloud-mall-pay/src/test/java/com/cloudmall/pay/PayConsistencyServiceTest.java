@@ -49,8 +49,15 @@ class PayConsistencyServiceTest {
             orderClient);
     when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(1);
     when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
-    when(userClient.operation(7L, "pay-1", 7L))
-        .thenReturn(ApiResponse.ok(appliedDebit()));
+    com.cloudmall.pay.domain.po.PayRecordPO payment = new com.cloudmall.pay.domain.po.PayRecordPO();
+    payment.payNo = "pay-1";
+    payment.orderNo = "order-1";
+    payment.userId = 7L;
+    payment.amount = new BigDecimal("10.00");
+    payment.status = "PENDING";
+    payment.debitMode = "LEGACY";
+    when(payRecordMapper.selectByPayNo("pay-1")).thenReturn(java.util.List.of(payment));
+    when(userClient.operation(7L, "pay-1", 7L)).thenReturn(ApiResponse.ok(appliedDebit()));
   }
 
   @Test

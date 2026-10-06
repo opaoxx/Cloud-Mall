@@ -27,6 +27,10 @@ public class PayDebitIntentPO {
   /** INIT、DEBITED、ORDER_SYNC_UNKNOWN、SUCCESS、REFUND_PENDING、REFUNDED 或 FAILED。 */
   public String status;
 
+  /** 从原支付单复制的不可变扣款协议，恢复时不得读取当前开关重新选择。 */
+  @TableField("debit_mode")
+  public String debitMode;
+
   /** 已执行的恢复次数。 */
   public Integer attempts;
 
