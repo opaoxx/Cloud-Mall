@@ -251,7 +251,22 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_receive.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-若进程在独立认领后、发送 POST 或注册分支前退出，原请求保持未知且禁止重发，需进一步核验；本轮不提供自动清算此窗口的编排。Pay receipt、支付主编排、Order/Stock 联动和入口切换留待 16B，**CM-18 尚未整体闭环**。
+若进程在独立认领后、发送 POST 或注册分支前退出，原请求保持未知且禁止重发，需进一步核验。16B1 已补下述 Pay receipt 资源；支付主编排、Order/Stock 联动和入口切换仍后置，**CM-18 尚未整体闭环**。
+
+### Pay LocalTCC 接收记录（CM-18 第 16 轮 B1）
+
+`pay_tcc_receipt` 是 Pay 自身的事务资源。先由 `bridge.prepare` 独立保存原 XID/载荷，再独立认领 receipt `CLAIMED`，唯一胜者进入 Pay LocalTCC 代理注册分支。新认领必须绑定原 `TCC + PENDING` 支付和 `PREPARED` 派发记录；重复调用只读取原 receipt。
+
+Pay 的 Try/Confirm/Cancel 仅修改本库 receipt，与官方 `tcc_fence_log` 在同一本地事务提交。空 Cancel 也保存永久 `CANCELLED`；Fence 清理后仍阻止迟到 Try 和相反终态。User 的 Try 由调用方在同一 XID 下单独派发，Pay receipt 回调不调用 User、Order 或退款。两个资源均确认也只说明扣款切片已确认，不会将公开支付状态直接改成 SUCCESS。
+
+`cloudmall.pay.tcc-receipt.enabled=false` 默认关闭；开启时要求 bridge/Seata 启用、AT 自动代理关闭，Fence 与 receipt 使用同一裸数据源和事务管理器。JDK 17 仍需上节的 `--add-opens` 参数。已有数据卷可重复执行：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_receipt.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
+
+本阶段没有自动开启全局事务、提交决议或扫描未知 receipt 的主编排。CLAIMED 后、分支注册前退出的窗口仍保持未知；禁止换 XID 或重注册来猜测恢复。后续需补主编排、Pay 进程故障验收及 Order/Stock 交付。
 
 ## 验证命令
 
@@ -323,6 +338,17 @@ mvn -pl backend/cloud-mall-pay -am test `
 ```
 
 该测试启动实际 Pay Spring 上下文和两个独立 User JVM，使用随机 `cm16_*` 数据库/Nacos 分组，不覆盖默认服务实例。九项验收覆盖提交、取消、响应截断、余额不足、并发入站、认证、载荷冲突、并发派发、User 重启及服务重选；同时核对一次 POST、唯一分支、冻结、账本和 TC 终态。原业务表 checksum 必须不变。日志与每笔事实保存在 Pay 模块 `target/cm16-bridge/`；未决时保留隔离库，先恢复真实事务后再清理。
+
+16B1 双资源验收使用同样的基础设施和 User 启动包；另开 Maven 测试 JVM，避免 Seata 静态资源跨测试类复用：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayReceiptTccIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+11 项验收覆盖双资源提交/取消、余额不足、空 Cancel、Pay Try/Confirm/Cancel 数据库故障、并发认领、User 响应丢失、载荷冲突和被拒第二分支安全回滚。日志与每笔 Pay/User 事实位于 `target/cm16b1-receipt/`；只在 TC 已结束且资金/receipt 已核对后清理随机 `cm16b1_*` 测试库，不改原业务数据。Pay 进程中断和自动主编排恢复不属于本次矩阵。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 

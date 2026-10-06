@@ -74,6 +74,16 @@ class PayTccBridgeServiceTest {
     RootContext.unbind();
   }
 
+  /** 在 Pay 分支注册前保存锚点不会提前派发 User。 */
+  @Test
+  void prepareOnlyPersistsAnchorWithoutUserCallOrPostPermission() {
+    when(payRecordMapper.selectByPayNo("pay-test")).thenReturn(List.of(payment("TCC", "PENDING")));
+    org.junit.jupiter.api.Assertions.assertEquals("PREPARED", service.prepare(request()).state);
+    verify(persistence).prepare(any());
+    verify(persistence, never()).markPostAttempted(any(), any());
+    org.mockito.Mockito.verifyNoInteractions(userTccClient);
+  }
+
   /** POST 响应丢失后恢复只能 GET，不能再次注册 User 分支。 */
   @Test
   void lostPostResponseThenRecoverDoesNotPostAgain() {

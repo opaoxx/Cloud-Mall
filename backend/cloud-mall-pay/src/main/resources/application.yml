@@ -9,6 +9,7 @@ spring:
 cloudmall.pay.recovery-interval-ms: 5000
 cloudmall.pay.debit-mode: LEGACY
 cloudmall.pay.tcc-bridge.enabled: false
+cloudmall.pay.tcc-receipt.enabled: false
 management.endpoints.web.exposure.include: health,info,prometheus
 feign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
 spring.cloud.nacos.discovery.server-addr: localhost:18848

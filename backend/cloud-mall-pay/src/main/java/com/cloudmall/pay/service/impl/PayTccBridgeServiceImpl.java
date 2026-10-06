@@ -71,6 +71,20 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
   /** 校验原支付事实、提交 PREPARED 并唯一发出 User Try。 */
   @Override
   public PayTccDispatchVO dispatch(PayTccDispatchDTO request) {
+    // 1. 保存或核对不可变锚点，只有 PREPARED 可竞争一次性 POST 权限。
+    PayTccDispatchPO dispatch = prepareDispatch(request);
+    // 2. 已消费权限的请求只能查询，不能注册第二 User 分支。
+    return "PREPARED".equals(dispatch.state) ? postOnce(dispatch) : recover(dispatch.payNo);
+  }
+
+  /** 在注册 Pay 分支前持久保存 XID，绝不调用 User 或消费 POST 权限。 */
+  @Override
+  public PayTccDispatchVO prepare(PayTccDispatchDTO request) {
+    return PayTccDispatchVO.from(prepareDispatch(request));
+  }
+
+  /** 持久锚点独立于后续 Pay/User 分支，本方法任何重入不得改变原 XID。 */
+  private PayTccDispatchPO prepareDispatch(PayTccDispatchDTO request) {
     // 1. 校验开关、RootContext XID 和原支付记录的不可变载荷。
     validateRequest(request);
     String xid = RootContext.getXID();
@@ -81,11 +95,10 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
     if (existing != null) {
       validatePayment(payment, request, false);
       validateDispatch(existing, request, xid);
-      if ("PREPARED".equals(existing.state)) return postOnce(existing);
-      return recover(existing.payNo);
+      return existing;
     }
     validatePayment(payment, request, true);
-    // 2. 独立提交不可变 PREPARED 事实，再执行 POST_ATTEMPTED CAS。
+    // 2. 独立提交不可变 PREPARED；唯一键竞争者只核对原事实。
     PayTccDispatchPO prepared = prepared(request, payment, xid);
     try {
       persistence.prepare(prepared);
@@ -93,9 +106,9 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
       PayTccDispatchPO concurrent = dispatchMapper.selectByPayNo(request.payNo);
       if (concurrent == null) throw duplicateDispatch;
       validateDispatch(concurrent, request, xid);
-      return "PREPARED".equals(concurrent.state) ? postOnce(concurrent) : recover(concurrent.payNo);
+      return concurrent;
     }
-    return postOnce(prepared);
+    return prepared;
   }
 
   /** 只读 User 状态并更新 Pay 镜像，绝不重新发送 POST。 */

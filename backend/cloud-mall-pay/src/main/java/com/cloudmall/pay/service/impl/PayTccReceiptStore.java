@@ -1,0 +1,149 @@
+package com.cloudmall.pay.service.impl;
+
+import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
+import com.cloudmall.pay.domain.po.PayRecordPO;
+import com.cloudmall.pay.domain.po.PayTccDispatchPO;
+import com.cloudmall.pay.domain.po.PayTccReceiptPO;
+import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
+import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccDispatchMapper;
+import com.cloudmall.pay.mapper.PayTccReceiptMapper;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+/** Pay receipt 的独立 CLAIMED 认领事务。 */
+@Service
+public class PayTccReceiptStore {
+  /** 数据库时间采用上海时区。 */
+  private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
+
+  /** receipt 唯一数据库访问入口。 */
+  private final PayTccReceiptMapper receiptMapper;
+
+  /** 原支付行作为同 payNo 认领的互斥锁。 */
+  private final PayRecordMapper payments;
+
+  /** receipt 必须绑定真实存在的已提交派发锚点。 */
+  private final PayTccDispatchMapper dispatches;
+
+  /** 创建 receipt 存储服务。 */
+  public PayTccReceiptStore(
+      PayTccReceiptMapper receiptMapper,
+      PayRecordMapper payments,
+      PayTccDispatchMapper dispatches) {
+    this.receiptMapper = receiptMapper;
+    this.payments = payments;
+    this.dispatches = dispatches;
+  }
+
+  /** 只允许完整不可变载荷的首个请求成为 winner。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean claim(PayTccDispatchVO dispatch) {
+    // 1. 固定锁顺序：原支付→派发→receipt，避免并发首次认领的间隙锁升级。
+    List<PayRecordPO> records = payments.selectForUpdate(dispatch.payNo);
+    PayTccDispatchPO anchor = dispatches.selectForUpdate(dispatch.payNo);
+    if (records.size() != 1 || anchor == null) throw conflict();
+    PayRecordPO payment = records.get(0);
+    if (!"TCC".equals(payment.debitMode)
+        || !Objects.equals(payment.userId, dispatch.userId)
+        || !Objects.equals(payment.orderNo, dispatch.orderNo)
+        || payment.amount.compareTo(new BigDecimal(dispatch.amount)) != 0
+        || !Objects.equals(anchor.xid, dispatch.xid)
+        || !Objects.equals(anchor.userId, dispatch.userId)
+        || !Objects.equals(anchor.orderNo, dispatch.orderNo)
+        || anchor.amount.compareTo(new BigDecimal(dispatch.amount)) != 0
+        || !Objects.equals(anchor.operationKey, dispatch.operationKey)
+        || !Objects.equals(anchor.ledgerKey, dispatch.ledgerKey)
+        || !Objects.equals(dispatch.operationKey, "tcc-debit:" + dispatch.payNo)
+        || !Objects.equals(dispatch.ledgerKey, dispatch.payNo)) throw conflict();
+    PayTccReceiptPO existing = receiptMapper.selectByPayNoForUpdate(dispatch.payNo);
+    if (existing != null) {
+      validate(existing, dispatch);
+      return false;
+    }
+    if (!"PENDING".equals(payment.status) || !"PREPARED".equals(anchor.state)) throw conflict();
+    // 2. 独立提交唯一认领，只有插入胜者才可在事务外注册 Seata 分支。
+    PayTccReceiptPO candidate = toReceipt(dispatch);
+    int inserted = receiptMapper.claim(candidate);
+    PayTccReceiptPO stored = receiptMapper.selectByPayNoForUpdate(dispatch.payNo);
+    validate(stored, dispatch);
+    return inserted == 1;
+  }
+
+  /** 返回当前 receipt 的最新状态。 */
+  public PayTccReceiptPO read(String payNo) {
+    return receiptMapper.selectByPayNo(payNo);
+  }
+
+  /** 锁定当前 receipt，供 Fence callback 做完整载荷核验。 */
+  public PayTccReceiptPO lock(String payNo) {
+    return receiptMapper.selectByPayNoForUpdate(payNo);
+  }
+
+  /** 将 CLAIMED receipt 绑定首个 Pay branch 并推进目标状态。 */
+  @Transactional
+  public int transitionClaimed(
+      PayTccDispatchDTO request, String xid, Long branchId, String targetState) {
+    return receiptMapper.bindAndTransition(
+        request.payNo, xid, branchId, "CLAIMED", targetState, LocalDateTime.now(BUSINESS_ZONE));
+  }
+
+  /** 按既有分支 CAS 推进 receipt 状态。 */
+  @Transactional
+  public int transition(
+      PayTccDispatchDTO request,
+      String xid,
+      Long branchId,
+      String expectedState,
+      String targetState) {
+    return receiptMapper.transitionState(
+        request.payNo, xid, branchId, expectedState, targetState, LocalDateTime.now(BUSINESS_ZONE));
+  }
+
+  /** 从已校验的原锚点构造一次性认领，不推断资金结果。 */
+  private PayTccReceiptPO toReceipt(PayTccDispatchVO dispatch) {
+    PayTccReceiptPO receipt = new PayTccReceiptPO();
+    receipt.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
+    receipt.payNo = dispatch.payNo;
+    receipt.xid = dispatch.xid;
+    receipt.userId = dispatch.userId;
+    receipt.orderNo = dispatch.orderNo;
+    receipt.amount = new BigDecimal(dispatch.amount);
+    receipt.operationKey = dispatch.operationKey;
+    receipt.ledgerKey = dispatch.ledgerKey;
+    receipt.state = "CLAIMED";
+    receipt.createdAt = LocalDateTime.now(BUSINESS_ZONE);
+    receipt.updatedAt = receipt.createdAt;
+    return receipt;
+  }
+
+  /** 重放必须匹配全部不可变字段和有效状态，未知分支不获得新认领权。 */
+  private void validate(PayTccReceiptPO stored, PayTccDispatchVO dispatch) {
+    if (stored == null
+        || !Objects.equals(stored.payNo, dispatch.payNo)
+        || !Objects.equals(stored.xid, dispatch.xid)
+        || !Objects.equals(stored.userId, dispatch.userId)
+        || !Objects.equals(stored.orderNo, dispatch.orderNo)
+        || stored.amount.compareTo(new BigDecimal(dispatch.amount)) != 0
+        || !Objects.equals(stored.operationKey, dispatch.operationKey)
+        || !Objects.equals(stored.ledgerKey, dispatch.ledgerKey)) {
+      throw new BizException("PAY_TCC_RECEIPT_CONFLICT", "Pay receipt 载荷不一致", 409);
+    }
+    if (!Set.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED").contains(stored.state)
+        || (stored.branchId == null && !"CLAIMED".equals(stored.state))) throw conflict();
+  }
+
+  /** 锚点不完整或原身份冲突时不创建 receipt。 */
+  private BizException conflict() {
+    return new BizException("PAY_TCC_RECEIPT_CONFLICT", "Pay receipt 原事实不一致", 409);
+  }
+}
