@@ -46,12 +46,48 @@ class PayTccPublicStateStoreTest {
     verify(payments, never()).markFailed(any(), any());
   }
 
+  @org.junit.jupiter.api.Test
+  void cancellationLedgerCannotCoexistWithRollbackProjection() {
+    PayRecordMapper payments = mock(PayRecordMapper.class);
+    PayTccExecutionMapper executions = mock(PayTccExecutionMapper.class);
+    var cancellations = mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class);
+    when(payments.selectByPayNo("pay")).thenReturn(List.of(record("PENDING")));
+    when(payments.selectForUpdate("pay")).thenReturn(List.of(record("PENDING")));
+    when(executions.selectByPayNo("pay")).thenReturn(execution("ROLLBACK"));
+    when(cancellations.selectByPayNo("pay"))
+        .thenReturn(new com.cloudmall.pay.domain.po.PayTccCancelPO());
+    when(cancellations.selectForUpdate("pay"))
+        .thenReturn(new com.cloudmall.pay.domain.po.PayTccCancelPO());
+    var store =
+        new PayTccPublicStateStore(
+            payments,
+            executions,
+            mock(PayTccDispatchMapper.class),
+            mock(PayTccExecutionEvidence.class),
+            cancellations);
+    assertThrows(BizException.class, () -> store.cancelledProof(payment()));
+    assertThrows(BizException.class, () -> store.projectFailed(payment(), "xid"));
+    verify(payments, never()).markFailed(any(), any());
+  }
+
+  @org.junit.jupiter.api.Test
+  void proofReadsStoredPaymentModeBeforeUsingCancellationEvidence() {
+    PayRecordMapper payments = mock(PayRecordMapper.class);
+    PayRecordPO payment = record("PENDING");
+    payment.debitMode = "LEGACY";
+    when(payments.selectByPayNo("pay")).thenReturn(List.of(payment));
+    PayTccExecutionMapper executions = mock(PayTccExecutionMapper.class);
+    assertThrows(BizException.class, () -> store(payments, executions).cancelledProof(payment()));
+    verify(executions, never()).selectByPayNo(any());
+  }
+
   private PayTccPublicStateStore store(PayRecordMapper payments, PayTccExecutionMapper executions) {
     return new PayTccPublicStateStore(
         payments,
         executions,
         mock(PayTccDispatchMapper.class),
-        mock(PayTccExecutionEvidence.class));
+        mock(PayTccExecutionEvidence.class),
+        mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
   }
 
   private PayVO payment() {

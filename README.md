@@ -321,13 +321,13 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
 
 公开成功请求按持久支付模式路由。TCC 首次核验待支付订单后认领唯一 execution；重放恢复原 XID，资金确认后经 delivery 完成订单与库存交付。双端取消及无扣款证据齐全才投影 FAILED。切换新建配置不改变旧支付模式，不得手动改库迁移历史支付。
 
-本批 TCC `mock-fail` 和失败 callback 对未决支付返回 202，明确表示取消未执行；不远程取消订单、改变全局决议或写 FAILED。16E 在独立开关下补充尚无资金执行的主动取消，已有 execution 的取消仍不接管，CM-18 未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
+TCC `mock-fail` 和失败 callback 对未决资金执行返回 202，不改变全局决议。16E 在独立开关下支持尚无资金执行的主动取消；16F 支持已经回滚且证明完整的失败收尾。其余已有 execution 的取消仍不接管，CM-18 未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
 
 ### 未开始扣款的 TCC 主动取消（CM-18 第 16 轮 E）
 
 `cloudmall.pay.tcc-cancel.enabled=false` 默认关闭，是独立于 16D 的可选能力。开启时要求完整 TCC 公开入口已启用。`mock-fail` / 失败 callback 在同一支付行锁下确认不存在 execution、dispatch、receipt 或 Legacy 意图后，独立提交 `pay_tcc_cancel`；提交成功后才通过 Order 查询/取消，RPC 不持有本地事务。
 
-订单 `CANCELLED` 且库存动作 `SUCCEEDED` 后，取消台账 `COMPLETED` 与 Pay `FAILED` 在同一短事务提交；未知结果返回 202。已存在资金执行时继续保守 202，不改变 TCC 决议、不主动退款。台账在 Pay 启动时幂等建表，关闭取消开关仍保留 execution/bridge/receipt 的永久阻断检查，不能靠关闭功能重启扣款。
+订单 `CANCELLED` 且库存动作 `SUCCEEDED` 后，取消台账 `COMPLETED` 与 Pay `FAILED` 在同一短事务提交；未知结果返回 202。尚未证明回滚的资金执行继续保守 202，不改变 TCC 决议、不主动退款；已回滚失败收尾见 16F。台账在 Pay 启动时幂等建表，关闭取消开关仍保留 execution/bridge/receipt 的永久阻断检查，不能靠关闭功能重启扣款。
 
 恢复器每轮最多 20 条、10 秒启动预算，60 秒随机 token lease，失败退避 5–300 秒。原订单载荷矛盾、已支付或库存冲突停止自动取消并记录 `CONFLICT`。新旧数据库均提供幂等迁移：
 
@@ -335,6 +335,12 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
 Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_cancel.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
+
+### 已回滚 TCC 的失败入口收尾（CM-18 第 16 轮 F）
+
+原 execution 已为 `ROLLEDBACK` 时，`mock-fail` 和失败 callback 复用成功入口的双端回滚证明：先在 Pay 本地快照核对原支付、execution、receipt/Fence 与 dispatch，再在事务外读取 User 当前 `CANCELLED`、无扣款账本及原 XID/branch/完整载荷。证明齐全后，短事务将 Pay 投影为 FAILED，失败入口返回 200，失败 callback 才完成日志。
+
+此路径不依赖取消开关，不创建取消台账、不调用 coordinator/recover、TC 或 Order，不改变原 decision；User 证明不足继续 202，原有持久冲突错误保持不变。无 execution 仍按 16E 开关处理。未新增后台自动失败投影，默认新支付模式仍为 LEGACY。
 
 ## 验证命令
 
@@ -472,7 +478,7 @@ jmeter -n -t backend/loadtest/seckill-ladder.jmx `
 
 部分旧测试依赖的 Mockito/Byte Buddy 版本不支持 JDK 21，推荐使用 JDK 17 运行完整测试集。
 
-16D 公开入口验收沿用上述中间件环境，额外启动隔离 Gateway，以真实 Redis Bearer token 调用公开接口。先构建全仓 Jar，再运行：
+16D/16F 公开入口及回滚失败收尾验收沿用上述中间件环境，额外启动隔离 Gateway，以真实 Redis Bearer token 调用公开接口。先构建全仓 Jar，再运行：
 
 ```powershell
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccPublicEntryIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'

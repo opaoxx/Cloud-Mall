@@ -20,7 +20,7 @@
 
 1. 在短只读本地事务取得原 Pay/execution/receipt/dispatch 一致快照，核对 payNo、userId、orderNo、amount、XID、operationKey、ledgerKey、`debit_mode=TCC`；复用 `PayTccPublicStateStore.cancelledProof`，不能从当前配置推导。
 2. 事务外调用 User live TCC GET，核对同一 XID、原 User branchId、完整 operation/ledger/pay/order/amount，且 `state=CANCELLED`、无 `ledgerApplied`。bridge 镜像或 TC/RPC 返回本身不能替代 User live 证据。
-3. 任一查询失败、TC Unknown、证据缺失、载荷/branch 冲突或 ledger 未知均保持原 Pay 状态并返回 202；不写 FAILED。
+3. `PayTccPublicStateStore` 自身的 Pay/execution/receipt/dispatch 缺失或守卫不通过继续沿用既有 `PAY_ORDER_SYNC_UNKNOWN`/202，不新增错误映射。只有既有 `PayTccExecutionEvidence.classify` 明确抛出的 `PAY_TCC_EXECUTION_CONFLICT` 等本地证据矛盾保留 409。User live GET 不可达、响应缺失、状态未收敛、远端 ledger 未知或远端 tuple 尚不能证明回滚时保持原 Pay 状态并返回 202；不把远端未知猜成失败。
 
 ### 3.2 短事务投影
 
@@ -44,7 +44,7 @@
 
 1. ROLLEDBACK + Pay/User 双端永久 CANCELLED/no-ledger：mock-fail 返回 200/FAILED，Pay 短事务 CAS 成功。
 2. 同上 callback failure：RECEIVED_FAILURE 最终转 FAILED/processedAt，返回 200；重复 callback 仍先核对真实 Pay 状态。
-3. ROLLEDBACK 但 User live UNKNOWN、branch/载荷冲突、ledger 已应用或查询失败：202，Pay 不变。
+3. ROLLEDBACK 但 Store 守卫缺失/不通过、User live UNKNOWN、远端 branch/载荷尚不能证明、ledger 已应用或查询失败：202，Pay 不变；仅 Evidence.classify 已明确抛出的既有冲突保持 409。
 4. `decision=NONE/COMMIT/ROLLBACK` 均可投影，不改 decision；TC 不可达也不能单独证明回滚。
 5. CLAIMED/BEGIN_UNKNOWN/RUNNING/UNKNOWN/REQUESTED/COMMITTED/CONFLICT：不 recover、不发 TC/Order/User 写 RPC，返回 202/既有 409。
 6. Pay 已 SUCCESS/REFUNDED/FAILED 或并发状态变化：按既有 409/幂等语义返回，不覆盖状态。

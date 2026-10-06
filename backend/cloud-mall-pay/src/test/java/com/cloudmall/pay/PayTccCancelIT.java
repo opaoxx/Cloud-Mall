@@ -648,6 +648,26 @@ class PayTccCancelIT {
     completeCancellation();
   }
 
+  @Test
+  @Order(7)
+  void rolledBackFailureDoesNotCreateCancelIntentWhenCancelIsEnabled() throws Exception {
+    userDb.update("UPDATE mall_user SET balance=1 WHERE id=7");
+    createPublic();
+    assertEquals(
+        "ROLLEDBACK",
+        application
+            .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
+            .execute(request)
+            .state);
+    assertEquals("PENDING", paymentState());
+    Response result = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+    assertEquals(200, result.status(), result.body().toString());
+    assertEquals("FAILED", result.body().path("data").path("status").asText());
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
+    assertEquals("PENDING_PAYMENT", orderState());
+    assertFunds("1.00", 0, 0);
+  }
+
   private com.cloudmall.pay.domain.vo.PayVO paymentView() {
     var payment = new com.cloudmall.pay.domain.vo.PayVO();
     payment.payNo = request.payNo;

@@ -568,6 +568,54 @@ class PayTccPublicEntryIT {
     assertFunds("90.00", 1, 0);
   }
 
+  @Test
+  @Order(5)
+  void failedEndpointFinishesAlreadyRolledBackPayment() throws Exception {
+    userDb.update("UPDATE mall_user SET balance=1 WHERE id=7");
+    createPublic();
+    rollBackFundsWithoutPublicProjection();
+    Response result = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+    assertEquals(200, result.status(), result.body().toString());
+    assertEquals("FAILED", result.body().path("data").path("status").asText());
+    assertEquals("FAILED", paymentState());
+    assertEquals("PENDING_PAYMENT", orderState());
+    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
+    assertFunds("1.00", 0, 0);
+  }
+
+  @Test
+  @Order(6)
+  void receivedFailureCallbackCompletesAfterRealRollback() throws Exception {
+    userDb.update("UPDATE mall_user SET balance=1 WHERE id=7");
+    createPublic();
+    Map<String, Object> failure = callback(false, "rollback-failure");
+    assertEquals(202, post("/api/payments/callback", failure, callbackHeaders()).status());
+    rollBackFundsWithoutPublicProjection();
+    Response response = post("/api/payments/callback", failure, callbackHeaders());
+    assertEquals(200, response.status(), response.body().toString());
+    assertEquals("FAILED", response.body().path("data").path("status").asText());
+    assertEquals(200, post("/api/payments/callback", failure, callbackHeaders()).status());
+    assertEquals(
+        1,
+        payDb.queryForObject(
+            "SELECT COUNT(*) FROM pay_callback_log WHERE callback_id='rollback-failure' AND"
+                + " callback_status='FAILED' AND processed_at IS NOT NULL",
+            Integer.class));
+    assertEquals("PENDING_PAYMENT", orderState());
+    assertFunds("1.00", 0, 0);
+  }
+
+  /** 真实 TC 两端取消已完成，但未调用公开成功入口，不提前投影 Pay。 */
+  private void rollBackFundsWithoutPublicProjection() {
+    var coordinator = application.getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class);
+    assertEquals("ROLLEDBACK", coordinator.execute(request).state);
+    assertEquals("PENDING", paymentState());
+    assertEquals(
+        "ROLLBACK",
+        payDb.queryForObject(
+            "SELECT decision FROM pay_tcc_execution WHERE pay_no=?", String.class, request.payNo));
+  }
+
   private void createPublic() throws Exception {
     Response response =
         post(

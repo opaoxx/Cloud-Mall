@@ -7,6 +7,7 @@ import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import java.time.LocalDateTime;
@@ -22,6 +23,9 @@ import org.springframework.transaction.annotation.Transactional;
 /** 只把已经证明的资金回滚投影为公开失败，不主动发起取消或全局决议。 */
 @Service
 public class PayTccPublicStateStore {
+  /** 无执行取消与已回滚 execution 不得共存。 */
+  private final PayTccCancelMapper cancellations;
+
   /** 原支付模式与状态的持久入口。 */
   private final PayRecordMapper payments;
 
@@ -39,7 +43,9 @@ public class PayTccPublicStateStore {
       PayRecordMapper payments,
       PayTccExecutionMapper executions,
       PayTccDispatchMapper dispatches,
-      PayTccExecutionEvidence evidence) {
+      PayTccExecutionEvidence evidence,
+      PayTccCancelMapper cancellations) {
+    this.cancellations = cancellations;
     this.payments = payments;
     this.executions = executions;
     this.dispatches = dispatches;
@@ -54,6 +60,14 @@ public class PayTccPublicStateStore {
   /** 用 Pay 本地快照获取原取消证明，User 当前证明在事务外另行核对。 */
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public PayTccDispatchVO cancelledProof(PayVO payment) {
+    List<PayRecordPO> records = payments.selectByPayNo(payment.payNo);
+    if (records.size() != 1 || cancellations.selectByPayNo(payment.payNo) != null) throw pending();
+    PayRecordPO record = records.get(0);
+    if (!"TCC".equals(record.debitMode)
+        || !Objects.equals(record.payNo, payment.payNo)
+        || !Objects.equals(record.userId, payment.userId)
+        || !Objects.equals(record.orderNo, payment.orderNo)
+        || record.amount.compareTo(payment.amount) != 0) throw pending();
     PayTccExecutionPO execution = executions.selectByPayNo(payment.payNo);
     validate(payment, execution);
     PayTccDispatchPO dispatch = dispatches.selectByPayNo(payment.payNo);
@@ -70,7 +84,9 @@ public class PayTccPublicStateStore {
     List<PayRecordPO> records = payments.selectForUpdate(payment.payNo);
     PayTccExecutionPO execution = executions.selectByPayNo(payment.payNo);
     validate(payment, execution);
-    if (records.size() != 1 || !Objects.equals(xid, execution.xid)) throw pending();
+    if (records.size() != 1
+        || !Objects.equals(xid, execution.xid)
+        || cancellations.selectForUpdate(payment.payNo) != null) throw pending();
     PayRecordPO record = records.get(0);
     if (!"TCC".equals(record.debitMode)
         || !Objects.equals(record.payNo, payment.payNo)
