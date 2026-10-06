@@ -23,6 +23,7 @@ import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.impl.PayTccCancelService;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.PayTccPublicStateStore;
+import com.cloudmall.pay.service.impl.PayTccRollbackProjectionService;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
@@ -52,7 +53,13 @@ class PayTccRollbackFailureTest {
     orders = mock(OrderClient.class);
     users = mock(UserTccClient.class);
     cancelService = mock(PayTccCancelService.class);
-    service = new PayTccPaymentService(coordinator, delivery, states, orders, users, "token");
+    service =
+        new PayTccPaymentService(
+            coordinator,
+            delivery,
+            states,
+            orders,
+            new PayTccRollbackProjectionService(states, users, "token"));
     ReflectionTestUtils.setField(service, "cancelService", cancelService);
     ReflectionTestUtils.setField(service, "cancellations", mock(PayTccCancelMapper.class));
   }

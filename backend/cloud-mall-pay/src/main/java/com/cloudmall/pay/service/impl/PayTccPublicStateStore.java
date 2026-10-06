@@ -6,6 +6,7 @@ import com.cloudmall.pay.domain.po.PayTccDispatchPO;
 import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayVO;
+import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
@@ -23,6 +24,9 @@ import org.springframework.transaction.annotation.Transactional;
 /** 只把已经证明的资金回滚投影为公开失败，不主动发起取消或全局决议。 */
 @Service
 public class PayTccPublicStateStore {
+  /** Legacy 意图不得与 TCC 投影共用同一支付事实。 */
+  private final PayDebitIntentMapper intents;
+
   /** 无执行取消与已回滚 execution 不得共存。 */
   private final PayTccCancelMapper cancellations;
 
@@ -44,7 +48,9 @@ public class PayTccPublicStateStore {
       PayTccExecutionMapper executions,
       PayTccDispatchMapper dispatches,
       PayTccExecutionEvidence evidence,
-      PayTccCancelMapper cancellations) {
+      PayTccCancelMapper cancellations,
+      PayDebitIntentMapper intents) {
+    this.intents = intents;
     this.cancellations = cancellations;
     this.payments = payments;
     this.executions = executions;
@@ -61,7 +67,9 @@ public class PayTccPublicStateStore {
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public PayTccDispatchVO cancelledProof(PayVO payment) {
     List<PayRecordPO> records = payments.selectByPayNo(payment.payNo);
-    if (records.size() != 1 || cancellations.selectByPayNo(payment.payNo) != null) throw pending();
+    if (records.size() != 1
+        || cancellations.selectByPayNo(payment.payNo) != null
+        || intents.findByPayNo(payment.payNo) != null) throw pending();
     PayRecordPO record = records.get(0);
     if (!"TCC".equals(record.debitMode)
         || !Objects.equals(record.payNo, payment.payNo)
@@ -80,13 +88,34 @@ public class PayTccPublicStateStore {
   /** 原公开支付行与 execution 再核对，CAS 不得覆盖成功/退款或其他终态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public String projectFailed(PayVO payment, String xid) {
+    return projectLocked(payment, xid, null);
+  }
+
+  /** 后台投影必须仍持有有效随机租约，旧工作者不得通过公开投影绕开认领。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public String projectFailedClaimed(PayVO payment, String xid, String token) {
+    if (token == null || token.isBlank()) throw pending();
+    return projectLocked(payment, xid, token);
+  }
+
+  /** Pay→execution锁内核验所有事实，公开投影无租约，后台投影强制验证原token。 */
+  private String projectLocked(PayVO payment, String xid, String token) {
     // 1. 支付行锁与一次性 begin 使用相同互斥边界。
     List<PayRecordPO> records = payments.selectForUpdate(payment.payNo);
-    PayTccExecutionPO execution = executions.selectByPayNo(payment.payNo);
+    PayTccExecutionPO execution =
+        token == null
+            ? executions.selectByPayNo(payment.payNo)
+            : executions.selectForUpdate(payment.payNo);
     validate(payment, execution);
+    if (token != null
+        && (!Objects.equals(token, execution.recoveryOwner)
+            || execution.recoveryLeaseUntil == null
+            || !execution.recoveryLeaseUntil.isAfter(
+                LocalDateTime.now(ZoneId.of("Asia/Shanghai"))))) throw pending();
     if (records.size() != 1
         || !Objects.equals(xid, execution.xid)
-        || cancellations.selectForUpdate(payment.payNo) != null) throw pending();
+        || cancellations.selectForUpdate(payment.payNo) != null
+        || intents.findByPayNo(payment.payNo) != null) throw pending();
     PayRecordPO record = records.get(0);
     if (!"TCC".equals(record.debitMode)
         || !Objects.equals(record.payNo, payment.payNo)

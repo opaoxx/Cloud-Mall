@@ -146,7 +146,13 @@ class PayTccRecoverySchedulerTest {
   }
 
   private PayTccRecoveryScheduler scheduler(int batchSize, int leaseSeconds, long budgetMillis) {
-    return new PayTccRecoveryScheduler(store, coordinator, batchSize, leaseSeconds, budgetMillis);
+    return new PayTccRecoveryScheduler(
+        store,
+        coordinator,
+        mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+        batchSize,
+        leaseSeconds,
+        budgetMillis);
   }
 
   private PayTccExecutionPO candidate() {

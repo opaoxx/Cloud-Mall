@@ -7,20 +7,15 @@ import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.po.PayTccCancelPO;
 import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccDeliveryVO;
-import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
 import com.cloudmall.pay.domain.vo.PayVO;
-import com.cloudmall.pay.domain.vo.UserTccStateVO;
 import com.cloudmall.pay.feign.OrderClient;
-import com.cloudmall.pay.feign.UserTccClient;
 import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
-import java.math.BigDecimal;
 import java.util.Objects;
 import java.util.Set;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Service;
@@ -48,14 +43,11 @@ public class PayTccPaymentService {
   /** 本地取消证据及支付状态投影。 */
   private final PayTccPublicStateStore states;
 
+  /** Pay/User 回滚证据和 FAILED 投影服务。 */
+  private final PayTccRollbackProjectionService rollbackProjection;
+
   /** 首次扣款前读取当前订单。 */
   private final OrderClient orders;
-
-  /** 不以镜像缓存替代当前 User 取消证明。 */
-  private final UserTccClient users;
-
-  /** 内部 User 凭证，不对前端返回。 */
-  private final String token;
 
   /** 创建独立 TCC 公开路由。 */
   public PayTccPaymentService(
@@ -63,14 +55,12 @@ public class PayTccPaymentService {
       PayTccDeliveryService delivery,
       PayTccPublicStateStore states,
       OrderClient orders,
-      UserTccClient users,
-      @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}") String token) {
+      PayTccRollbackProjectionService rollbackProjection) {
     this.coordinator = coordinator;
     this.delivery = delivery;
     this.states = states;
     this.orders = orders;
-    this.users = users;
-    this.token = token;
+    this.rollbackProjection = rollbackProjection;
   }
 
   /** 只有新 execution 校验待支付后 begin；既有执行永远只恢复原事务。 */
@@ -120,30 +110,8 @@ public class PayTccPaymentService {
       return result == null ? "UNKNOWN" : result.state;
     }
     // 3. 回滚 RPC/本地镜像不是单独依据；两端取消证据完整才投影 FAILED。
-    if ("ROLLEDBACK".equals(execution.state)) return projectVerifiedRollback(payment);
+    if ("ROLLEDBACK".equals(execution.state)) return rollbackProjection.project(payment);
     return "UNKNOWN";
-  }
-
-  /** 成功与失败入口共用同一双端回滚证明，不能从请求方向推断资金结论。 */
-  private String projectVerifiedRollback(PayVO payment) {
-    PayTccDispatchVO proof = states.cancelledProof(payment);
-    ApiResponse<UserTccStateVO> response =
-        users.state(
-            payment.userId, proof.operationKey, payment.userId, "cloud-mall-pay", token, proof.xid);
-    if (response == null || !"0".equals(response.code) || response.data == null) throw pending();
-    UserTccStateVO user = response.data;
-    if (!"CANCELLED".equals(user.state)
-        || user.ledgerApplied
-        || !Objects.equals(user.payNo, payment.payNo)
-        || !Objects.equals(user.orderNo, payment.orderNo)
-        || !Objects.equals(user.userId, payment.userId)
-        || !Objects.equals(user.xid, proof.xid)
-        || !Objects.equals(user.branchId, proof.userBranchId)
-        || !Objects.equals(user.operationKey, proof.operationKey)
-        || !Objects.equals(user.ledgerKey, proof.ledgerKey)
-        || user.amount == null
-        || !sameAmount(user.amount, payment.amount)) throw pending();
-    return states.projectFailed(payment, proof.xid);
   }
 
   /** 已回滚执行只核验原事实；其余已有执行不接管，无执行沿用独立取消开关。 */
@@ -158,7 +126,7 @@ public class PayTccPaymentService {
       if (!"ROLLEDBACK".equals(execution.state)) throw pending();
       try {
         // 2. 短事务投影成功后才更新返回视图，不读取外层旧 RR 快照。
-        if (!"FAILED".equals(projectVerifiedRollback(payment))) throw pending();
+        if (!"FAILED".equals(rollbackProjection.project(payment))) throw pending();
         payment.status = "FAILED";
         return;
       } catch (feign.FeignException unavailable) {
@@ -173,15 +141,6 @@ public class PayTccPaymentService {
       return;
     }
     throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "TCC 取消请求未执行，请通过订单取消并等待资金核验", 202);
-  }
-
-  /** 非法远端金额只表示证明不足，不得转成失败或漏出解析异常。 */
-  private boolean sameAmount(String amount, BigDecimal expected) {
-    try {
-      return new BigDecimal(amount).compareTo(expected) == 0;
-    } catch (NumberFormatException invalidAmount) {
-      return false;
-    }
   }
 
   private BizException pending() {

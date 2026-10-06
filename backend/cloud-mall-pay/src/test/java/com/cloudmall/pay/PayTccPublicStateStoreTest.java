@@ -64,7 +64,8 @@ class PayTccPublicStateStoreTest {
             executions,
             mock(PayTccDispatchMapper.class),
             mock(PayTccExecutionEvidence.class),
-            cancellations);
+            cancellations,
+            mock(com.cloudmall.pay.mapper.PayDebitIntentMapper.class));
     assertThrows(BizException.class, () -> store.cancelledProof(payment()));
     assertThrows(BizException.class, () -> store.projectFailed(payment(), "xid"));
     verify(payments, never()).markFailed(any(), any());
@@ -87,7 +88,8 @@ class PayTccPublicStateStoreTest {
         executions,
         mock(PayTccDispatchMapper.class),
         mock(PayTccExecutionEvidence.class),
-        mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
+        mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class),
+        mock(com.cloudmall.pay.mapper.PayDebitIntentMapper.class));
   }
 
   private PayVO payment() {

@@ -27,6 +27,12 @@ public class PayTccRecoveryScheduler {
   /** 只记录调度失败，不打印内部凭证或完整载荷。 */
   private static final Logger LOG = LoggerFactory.getLogger(PayTccRecoveryScheduler.class);
 
+  /** 回滚证明与带租约的支付投影，不依赖公开入口。 */
+  private final PayTccRollbackProjectionService projections;
+
+  /** 持有 running 权限的线程轮换阶段优先级，避免一类任务长期占满预算。 */
+  private boolean rollbackFirst;
+
   /** 本实例只允许一轮调度运行，不因手动重入堆积 RPC。 */
   private final AtomicBoolean running = new AtomicBoolean();
 
@@ -49,6 +55,7 @@ public class PayTccRecoveryScheduler {
   public PayTccRecoveryScheduler(
       PayTccExecutionRecoveryStore store,
       PayTccCoordinatorService coordinator,
+      PayTccRollbackProjectionService projections,
       @Value("${cloudmall.pay.tcc-recovery.batch-size:20}") int batchSize,
       @Value("${cloudmall.pay.tcc-recovery.lease-seconds:60}") int leaseSeconds,
       @Value("${cloudmall.pay.tcc-recovery.budget-ms:10000}") long budgetMillis) {
@@ -60,6 +67,7 @@ public class PayTccRecoveryScheduler {
         || budgetMillis > 10000) throw new IllegalArgumentException("TCC 恢复配置超出有界范围");
     this.store = store;
     this.coordinator = coordinator;
+    this.projections = projections;
     this.batchSize = batchSize;
     this.leaseSeconds = leaseSeconds;
     this.budgetNanos = TimeUnit.MILLISECONDS.toNanos(budgetMillis);
@@ -75,32 +83,63 @@ public class PayTccRecoveryScheduler {
       throw new IllegalStateException("恢复扫描不得继承事务上下文");
     if (!running.compareAndSet(false, true)) return;
     long start = System.nanoTime();
+    boolean firstPhase = rollbackFirst;
+    rollbackFirst = !rollbackFirst;
     try {
-      // 1. SQL 在 LIMIT 前过滤模式、载荷、状态、决议、XID 与到期时间。
-      for (PayTccExecutionPO candidate : store.findDue(now(), batchSize)) {
-        if (System.nanoTime() - start >= budgetNanos) break;
+      // 1. 两阶段共享批量和启动时间预算，轮换优先级保证跨轮公平。
+      int consumed = runPhase(firstPhase, batchSize, start);
+      if (consumed < batchSize && System.nanoTime() - start < budgetNanos)
+        runPhase(!firstPhase, batchSize - consumed, start);
+    } finally {
+      running.set(false);
+    }
+  }
+
+  /** 单阶段查询失败不挡住另一阶段；每个候选（包括认领失败）均消耗工作配额。 */
+  private int runPhase(boolean rollback, int capacity, long start) {
+    int consumed = 0;
+    try {
+      var candidates =
+          rollback
+              ? store.findDueRollbackProjection(now(), capacity)
+              : store.findDue(now(), capacity);
+      for (PayTccExecutionPO candidate : candidates) {
+        if (consumed >= capacity || System.nanoTime() - start >= budgetNanos) break;
+        consumed++;
         String token = UUID.randomUUID().toString();
         LocalDateTime claimedAt = now();
         try {
-          // 2. 随机 token 独立提交后才调用 RPC；失败或失去认领时跳过。
+          // 2. 随机 token 独立提交后才读远端证明或恢复原决议。
           PayTccExecutionPO claimed =
-              store.claimRecovery(
-                  candidate.payNo, token, claimedAt.plusSeconds(leaseSeconds), claimedAt);
+              rollback
+                  ? store.claimRollbackProjection(
+                      candidate.payNo, token, claimedAt.plusSeconds(leaseSeconds), claimedAt)
+                  : store.claimRecovery(
+                      candidate.payNo, token, claimedAt.plusSeconds(leaseSeconds), claimedAt);
           if (claimed == null) continue;
           String error = null;
           try {
-            PayTccExecutionVO observed = coordinator.recover(claimed.payNo);
-            if (observed == null) error = "恢复未返回可核验结果";
-            else if (!PayTccExecutionStore.terminal(observed.state))
-              error = observed.lastError == null ? "原事务仍待核对" : observed.lastError;
-            else if ("CONFLICT".equals(observed.state)) error = "两端永久事实冲突，待人工核验";
+            if (rollback) {
+              var payment = new com.cloudmall.pay.domain.vo.PayVO();
+              payment.payNo = claimed.payNo;
+              payment.userId = claimed.userId;
+              payment.orderNo = claimed.orderNo;
+              payment.amount = claimed.amount;
+              if (!"FAILED".equals(projections.projectClaimed(payment, token))) error = "回滚投影尚未完成";
+            } else {
+              PayTccExecutionVO observed = coordinator.recover(claimed.payNo);
+              if (observed == null) error = "恢复未返回可核验结果";
+              else if (!PayTccExecutionStore.terminal(observed.state))
+                error = observed.lastError == null ? "原事务仍待核对" : observed.lastError;
+              else if ("CONFLICT".equals(observed.state)) error = "两端永久事实冲突，待人工核验";
+            }
           } catch (RuntimeException failure) {
             error =
                 failure instanceof BizException business
                     ? business.getCode()
                     : failure.getClass().getSimpleName();
           }
-          // 3. 只写调度字段；旧 token 不能释放接班者的租约或改写其重试时间。
+          // 3. 只有原 token 能释放自己的租约；资金终态由投影短事务额外核验 token。
           store.finishRecovery(
               claimed.payNo,
               token,
@@ -111,10 +150,9 @@ public class PayTccRecoveryScheduler {
         }
       }
     } catch (RuntimeException scanFailure) {
-      LOG.warn("TCC 恢复候选查询失败，保留原事实等待下轮", scanFailure);
-    } finally {
-      running.set(false);
+      LOG.warn("TCC 恢复候选查询失败，rollbackPhase={}", rollback, scanFailure);
     }
+    return consumed;
   }
 
   /** 尝试次数封顶后仍每 300 秒重查，避免整数溢出或忙循环。 */

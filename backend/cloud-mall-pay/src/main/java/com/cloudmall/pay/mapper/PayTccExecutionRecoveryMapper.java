@@ -28,6 +28,37 @@ public interface PayTccExecutionRecoveryMapper {
           + " execution.next_recovery_at,execution.id LIMIT #{limit}")
   List<PayTccExecutionPO> findDue(@Param("now") LocalDateTime now, @Param("limit") int limit);
 
+  /** 按完整双端 TCC 事实筛选可投影 ROLLEDBACK execution，LIMIT 在全部过滤后执行。 */
+  @Select(
+      "SELECT execution.* FROM pay_tcc_execution execution JOIN pay_record payment ON"
+          + " payment.pay_no=execution.pay_no JOIN pay_tcc_dispatch dispatch ON"
+          + " dispatch.pay_no=execution.pay_no JOIN pay_tcc_receipt receipt ON"
+          + " receipt.pay_no=execution.pay_no LEFT JOIN pay_tcc_cancel cancel ON"
+          + " cancel.pay_no=execution.pay_no LEFT JOIN pay_debit_intent intent ON"
+          + " intent.pay_no=execution.pay_no WHERE BINARY execution.state='ROLLEDBACK' AND BINARY"
+          + " execution.decision IN ('NONE','COMMIT','ROLLBACK') AND execution.xid IS NOT NULL AND"
+          + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"
+          + " payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id AND"
+          + " BINARY payment.order_no=BINARY execution.order_no AND payment.amount=execution.amount"
+          + " AND BINARY payment.status IN ('PENDING','ORDER_SYNC_UNKNOWN') AND BINARY"
+          + " execution.operation_key=BINARY CONCAT('tcc-debit:',execution.pay_no) AND BINARY"
+          + " execution.ledger_key=BINARY execution.pay_no AND BINARY dispatch.pay_no=BINARY"
+          + " execution.pay_no AND BINARY receipt.pay_no=BINARY execution.pay_no AND"
+          + " dispatch.user_id=execution.user_id AND BINARY dispatch.order_no=BINARY"
+          + " execution.order_no AND dispatch.amount=execution.amount AND BINARY"
+          + " dispatch.xid=BINARY execution.xid AND BINARY dispatch.operation_key=BINARY"
+          + " CONCAT('tcc-debit:',execution.pay_no) AND BINARY dispatch.ledger_key=BINARY"
+          + " execution.pay_no AND receipt.user_id=execution.user_id AND BINARY"
+          + " receipt.order_no=BINARY execution.order_no AND receipt.amount=execution.amount AND"
+          + " BINARY receipt.xid=BINARY execution.xid AND BINARY receipt.operation_key=BINARY"
+          + " CONCAT('tcc-debit:',execution.pay_no) AND BINARY receipt.ledger_key=BINARY"
+          + " execution.pay_no AND cancel.pay_no IS NULL AND intent.pay_no IS NULL AND"
+          + " execution.next_recovery_at<=#{now} AND (execution.recovery_lease_until IS NULL OR"
+          + " execution.recovery_lease_until<=#{now}) ORDER BY"
+          + " execution.next_recovery_at,execution.id LIMIT #{limit}")
+  List<PayTccExecutionPO> findDueRollbackProjection(
+      @Param("now") LocalDateTime now, @Param("limit") int limit);
+
   /** 原 tuple、状态、决议和 lease 到期条件全部满足时认领恢复任务。 */
   @Update(
       "UPDATE pay_tcc_execution execution JOIN pay_record payment ON payment.pay_no ="
@@ -47,6 +78,41 @@ public interface PayTccExecutionRecoveryMapper {
           + " execution.recovery_lease_until <= #{now}) AND execution.pay_no=#{payNo} AND BINARY"
           + " execution.pay_no=BINARY #{payNo}")
   int claimRecovery(
+      @Param("payNo") String payNo,
+      @Param("token") String token,
+      @Param("leaseUntil") LocalDateTime leaseUntil,
+      @Param("now") LocalDateTime now);
+
+  /** 仅在 ROLLEDBACK 双端事实、互斥门和到期 lease 条件均满足时认领投影任务。 */
+  @Update(
+      "UPDATE pay_tcc_execution execution JOIN pay_record payment ON"
+          + " payment.pay_no=execution.pay_no JOIN pay_tcc_dispatch dispatch ON"
+          + " dispatch.pay_no=execution.pay_no JOIN pay_tcc_receipt receipt ON"
+          + " receipt.pay_no=execution.pay_no LEFT JOIN pay_tcc_cancel cancel ON"
+          + " cancel.pay_no=execution.pay_no LEFT JOIN pay_debit_intent intent ON"
+          + " intent.pay_no=execution.pay_no SET execution.recovery_owner=#{token},"
+          + " execution.recovery_lease_until=#{leaseUntil},execution.recovery_attempts=LEAST(execution.recovery_attempts+1,31)"
+          + " WHERE execution.pay_no=#{payNo} AND BINARY execution.state='ROLLEDBACK' AND BINARY"
+          + " execution.decision IN ('NONE','COMMIT','ROLLBACK') AND execution.xid IS NOT NULL AND"
+          + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"
+          + " payment.pay_no=BINARY execution.pay_no AND payment.user_id=execution.user_id AND"
+          + " BINARY payment.order_no=BINARY execution.order_no AND payment.amount=execution.amount"
+          + " AND BINARY payment.status IN ('PENDING','ORDER_SYNC_UNKNOWN') AND BINARY"
+          + " execution.operation_key=BINARY CONCAT('tcc-debit:',execution.pay_no) AND BINARY"
+          + " execution.ledger_key=BINARY execution.pay_no AND BINARY dispatch.pay_no=BINARY"
+          + " execution.pay_no AND BINARY receipt.pay_no=BINARY execution.pay_no AND"
+          + " dispatch.user_id=execution.user_id AND BINARY dispatch.order_no=BINARY"
+          + " execution.order_no AND dispatch.amount=execution.amount AND BINARY"
+          + " dispatch.xid=BINARY execution.xid AND BINARY dispatch.operation_key=BINARY"
+          + " CONCAT('tcc-debit:',execution.pay_no) AND BINARY dispatch.ledger_key=BINARY"
+          + " execution.pay_no AND receipt.user_id=execution.user_id AND BINARY"
+          + " receipt.order_no=BINARY execution.order_no AND receipt.amount=execution.amount AND"
+          + " BINARY receipt.xid=BINARY execution.xid AND BINARY receipt.operation_key=BINARY"
+          + " CONCAT('tcc-debit:',execution.pay_no) AND BINARY receipt.ledger_key=BINARY"
+          + " execution.pay_no AND cancel.pay_no IS NULL AND intent.pay_no IS NULL AND"
+          + " execution.next_recovery_at<=#{now} AND (execution.recovery_lease_until IS NULL OR"
+          + " execution.recovery_lease_until<=#{now}) AND BINARY execution.pay_no=BINARY #{payNo}")
+  int claimRollbackProjection(
       @Param("payNo") String payNo,
       @Param("token") String token,
       @Param("leaseUntil") LocalDateTime leaseUntil,

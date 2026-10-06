@@ -22,6 +22,7 @@ import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.PayTccPublicStateStore;
+import com.cloudmall.pay.service.impl.PayTccRollbackProjectionService;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,7 +44,13 @@ class PayTccPaymentServiceTest {
     states = mock(PayTccPublicStateStore.class);
     orders = mock(OrderClient.class);
     users = mock(UserTccClient.class);
-    service = new PayTccPaymentService(coordinator, delivery, states, orders, users, "token");
+    service =
+        new PayTccPaymentService(
+            coordinator,
+            delivery,
+            states,
+            orders,
+            new PayTccRollbackProjectionService(states, users, "token"));
     org.springframework.test.util.ReflectionTestUtils.setField(
         service, "cancellations", mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
   }

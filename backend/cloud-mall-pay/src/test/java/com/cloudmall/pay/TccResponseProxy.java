@@ -40,6 +40,9 @@ public final class TccResponseProxy implements AutoCloseable {
   /** daemon HTTP 工作线程池。 */
   private final ExecutorService workerPool;
 
+  /** 只阻断 TCC GET 的可恢复故障，不影响既有资金写入。 */
+  private final AtomicBoolean readsUnavailable = new AtomicBoolean();
+
   /** TCC POST 计数器。 */
   private final AtomicInteger postRequestCount = new AtomicInteger();
 
@@ -84,6 +87,11 @@ public final class TccResponseProxy implements AutoCloseable {
     return server.getAddress().getPort();
   }
 
+  /** 控制 TCC 只读查询故障，供真实后台证据恢复测试。 */
+  public void setTccReadsUnavailable(boolean unavailable) {
+    readsUnavailable.set(unavailable);
+  }
+
   /** 返回已转发的 TCC POST 请求数。 */
   public int postCount() {
     return postRequestCount.get();
@@ -103,6 +111,7 @@ public final class TccResponseProxy implements AutoCloseable {
   public void clearFault() {
     dropNextPostResponse.set(false);
     dropPostSuffix.set(null);
+    readsUnavailable.set(false);
   }
 
   /** 在指定业务路径已处理后截断下一次 POST 响应。 */
@@ -149,6 +158,10 @@ public final class TccResponseProxy implements AutoCloseable {
       postRequestCount.incrementAndGet();
     } else if (tccPath && "GET".equals(method)) {
       getRequestCount.incrementAndGet();
+    }
+    if (tccPath && "GET".equals(method) && readsUnavailable.get()) {
+      replyBadGateway(exchange);
+      return;
     }
     try {
       byte[] requestBody = exchange.getRequestBody().readAllBytes();

@@ -77,6 +77,7 @@ class PayTccRecoveryScanMySqlIT {
                 "--cloudmall.pay.tcc-coordinator.enabled=false",
                 "--cloudmall.pay.tcc-recovery.enabled=false");
     application.getBean(PayTccExecutionMapper.class).ensureTable();
+    application.getBean(com.cloudmall.pay.mapper.PayTccReceiptMapper.class).ensureTable();
     mapper = application.getBean(PayTccExecutionRecoveryMapper.class);
     mapper.ensureSchema();
     store = application.getBean(PayTccExecutionRecoveryStore.class);
@@ -92,6 +93,10 @@ class PayTccRecoveryScanMySqlIT {
 
   @BeforeEach
   void clear() {
+    fixture.update("DELETE FROM pay_tcc_cancel");
+    fixture.update("DELETE FROM pay_tcc_dispatch");
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    fixture.update("DELETE FROM pay_debit_intent");
     fixture.update("DELETE FROM pay_tcc_execution");
     fixture.update("DELETE FROM pay_record");
   }
@@ -228,8 +233,22 @@ class PayTccRecoveryScanMySqlIT {
               view.state = "COMMIT_REQUESTED";
               return view;
             });
-    PayTccRecoveryScheduler first = new PayTccRecoveryScheduler(store, coordinator, 20, 60, 10000);
-    PayTccRecoveryScheduler second = new PayTccRecoveryScheduler(store, coordinator, 20, 60, 10000);
+    PayTccRecoveryScheduler first =
+        new PayTccRecoveryScheduler(
+            store,
+            coordinator,
+            mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+            20,
+            60,
+            10000);
+    PayTccRecoveryScheduler second =
+        new PayTccRecoveryScheduler(
+            store,
+            coordinator,
+            mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+            20,
+            60,
+            10000);
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try {
       Future<?> active = pool.submit(first::recoverDue);
@@ -262,7 +281,14 @@ class PayTccRecoveryScanMySqlIT {
               calls.incrementAndGet();
               throw new BizException("PAY_TCC_EXECUTION_CONFLICT", "fixture", 409);
             });
-    PayTccRecoveryScheduler worker = new PayTccRecoveryScheduler(store, coordinator, 20, 60, 10000);
+    PayTccRecoveryScheduler worker =
+        new PayTccRecoveryScheduler(
+            store,
+            coordinator,
+            mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+            20,
+            60,
+            10000);
     worker.recoverDue();
     assertEquals(20, calls.get());
     worker.recoverDue();
@@ -305,6 +331,114 @@ class PayTccRecoveryScanMySqlIT {
     assertEquals(
         0,
         fixture.queryForObject("SELECT recovery_attempts FROM pay_tcc_execution", Integer.class));
+  }
+
+  @Test
+  void rollbackProjectionFiltersBeforeLimitAndDrainsMultipleBatches() {
+    for (int index = 0; index < 24; index++) {
+      String key = "excluded-rollback-" + index;
+      insert(100 + index, key, "ROLLEDBACK", "ROLLBACK");
+      branches(key);
+      switch (index % 6) {
+        case 0 -> fixture.update("UPDATE pay_record SET debit_mode='LEGACY' WHERE pay_no=?", key);
+        case 1 -> fixture.update("DELETE FROM pay_tcc_dispatch WHERE pay_no=?", key);
+        case 2 -> fixture.update("UPDATE pay_tcc_receipt SET amount=11 WHERE pay_no=?", key);
+        case 3 ->
+            fixture.update(
+                "INSERT INTO"
+                    + " pay_tcc_cancel(id,pay_no,user_id,order_no,amount,state,next_retry_at,created_at,updated_at)"
+                    + " SELECT"
+                    + " id,pay_no,user_id,order_no,amount,'CONFLICT',created_at,created_at,updated_at"
+                    + " FROM pay_tcc_execution WHERE pay_no=?",
+                key);
+        case 4 ->
+            fixture.update(
+                "INSERT INTO"
+                    + " pay_debit_intent(id,pay_no,user_id,order_no,amount,status,next_retry_at,created_at,updated_at)"
+                    + " SELECT"
+                    + " id,pay_no,user_id,order_no,amount,'FAILED',created_at,created_at,updated_at"
+                    + " FROM pay_tcc_execution WHERE pay_no=?",
+                key);
+        default -> fixture.update("UPDATE pay_record SET status='SUCCESS' WHERE pay_no=?", key);
+      }
+      assertNull(store.claimRollbackProjection(key, "invalid-owner", NOW.plusSeconds(60), NOW));
+    }
+    for (int index = 0; index < 21; index++) {
+      String key = "valid-rollback-" + index;
+      insert(
+          200 + index, key, "ROLLEDBACK", new String[] {"NONE", "COMMIT", "ROLLBACK"}[index % 3]);
+      branches(key);
+    }
+    var first = store.findDueRollbackProjection(NOW, 20);
+    assertEquals(20, first.size());
+    assertEquals("valid-rollback-0", first.get(0).payNo);
+    for (var row : first)
+      assertNotNull(
+          store.claimRollbackProjection(row.payNo, "claim-" + row.payNo, NOW.plusSeconds(60), NOW));
+    assertEquals(List.of("valid-rollback-20"), names(store.findDueRollbackProjection(NOW, 20)));
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_tcc_execution WHERE id<200 AND recovery_attempts<>0",
+            Integer.class));
+  }
+
+  @Test
+  void oldRecoveryTokenCannotProjectAfterRollbackLeaseTakeover() {
+    LocalDateTime current = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+    insert(1, "rollback-lease", "ROLLBACK_REQUESTED", "ROLLBACK");
+    assertNotNull(
+        store.claimRecovery("rollback-lease", "old-recovery", current.plusSeconds(60), current));
+    branches("rollback-lease");
+    fixture.update(
+        "UPDATE pay_tcc_execution SET state='ROLLEDBACK',recovery_lease_until=?",
+        current.minusSeconds(1));
+    assertNotNull(
+        store.claimRollbackProjection(
+            "rollback-lease", "new-projection", current.plusSeconds(60), current));
+    var payment = new com.cloudmall.pay.domain.vo.PayVO();
+    payment.payNo = "rollback-lease";
+    payment.userId = 7L;
+    payment.orderNo = "order-rollback-lease";
+    payment.amount = java.math.BigDecimal.TEN;
+    var projectionStore =
+        application.getBean(com.cloudmall.pay.service.impl.PayTccPublicStateStore.class);
+    assertThrows(
+        BizException.class,
+        () ->
+            projectionStore.projectFailedClaimed(
+                payment, "fixture-rollback-lease", "old-recovery"));
+    assertFalse(
+        store.finishRecovery("rollback-lease", "old-recovery", current.plusDays(1), "late"));
+    assertEquals("PENDING", fixture.queryForObject("SELECT status FROM pay_record", String.class));
+    assertEquals(
+        "new-projection",
+        fixture.queryForObject("SELECT recovery_owner FROM pay_tcc_execution", String.class));
+    fixture.update("UPDATE pay_tcc_execution SET recovery_lease_until=?", current.minusSeconds(1));
+    assertThrows(
+        BizException.class,
+        () ->
+            projectionStore.projectFailedClaimed(
+                payment, "fixture-rollback-lease", "new-projection"));
+    assertEquals("PENDING", fixture.queryForObject("SELECT status FROM pay_record", String.class));
+  }
+
+  /** 仅供隔离SQL测试的原载荷；不注册任何真实TC分支或写User资金。 */
+  private void branches(String payNo) {
+    fixture.update(
+        "INSERT INTO"
+            + " pay_tcc_dispatch(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,state,user_branch_id,created_at,updated_at)"
+            + " SELECT"
+            + " id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,'CANCELLED',id*2+1,created_at,updated_at"
+            + " FROM pay_tcc_execution WHERE pay_no=?",
+        payNo);
+    fixture.update(
+        "INSERT INTO"
+            + " pay_tcc_receipt(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,state,branch_id,created_at,updated_at)"
+            + " SELECT"
+            + " id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,'CANCELLED',id*2+2,created_at,updated_at"
+            + " FROM pay_tcc_execution WHERE pay_no=?",
+        payNo);
   }
 
   /** 所有模拟 execution 仅存在于 Seata 关闭的独立测试库。 */

@@ -285,11 +285,11 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_execution.sql |
 
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
-`cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。扫描器只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。`BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致的记录在 SQL 的 LIMIT 前排除，保留人工核验。
+`cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
 
 默认每 5 秒扫描一次、每轮最多 20 条，开始下一条前检查 10 秒预算，不强杀在途 RPC。新 execution 首次调度在创建后 30 秒；每次恢复使用独立随机 token 和 60 秒租约，RPC 在认领事务提交后执行。租约过期后可能出现同方向 RPC 重叠，原 coordinator 保证幂等；旧 token 不能释放新租约或覆盖新重试时间。
 
-失败与尚未结束的结果按 5、10、20……秒退避，最大 300 秒。尝试计数饱和到 31 后仍继续低频恢复，不会永久停掉；调度器不把异常改写为支付失败。它只管理调度字段，交易结果仍由两端永久事实核对决定。
+失败与尚未结束的结果按 5、10、20……秒退避，最大 300 秒。尝试计数饱和到 31 后仍继续低频恢复，不会永久停掉；调度器不把异常改写为支付失败。原 decision recovery 只管理调度字段；16G 回滚投影经过两端永久事实核验后才更新 Pay 状态。
 
 可调整 `cloudmall.pay.tcc-recovery.interval-ms`、`batch-size`（1–20）、`lease-seconds`（1–300）和 `budget-ms`（1–10000）。已有 execution 表可重复执行下面的迁移；它只增加调度字段，不改 XID、原载荷、state 或 decision：
 
@@ -340,7 +340,15 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_cancel.sql |
 
 原 execution 已为 `ROLLEDBACK` 时，`mock-fail` 和失败 callback 复用成功入口的双端回滚证明：先在 Pay 本地快照核对原支付、execution、receipt/Fence 与 dispatch，再在事务外读取 User 当前 `CANCELLED`、无扣款账本及原 XID/branch/完整载荷。证明齐全后，短事务将 Pay 投影为 FAILED，失败入口返回 200，失败 callback 才完成日志。
 
-此路径不依赖取消开关，不创建取消台账、不调用 coordinator/recover、TC 或 Order，不改变原 decision；User 证明不足继续 202，原有持久冲突错误保持不变。无 execution 仍按 16E 开关处理。未新增后台自动失败投影，默认新支付模式仍为 LEGACY。
+此路径不依赖取消开关，不创建取消台账、不调用 coordinator/recover、TC 或 Order，不改变原 decision；User 证明不足继续 202，原有持久冲突错误保持不变。无 execution 仍按 16E 开关处理。16G 补充下述后台自动失败投影；默认新支付模式仍为 LEGACY。
+
+### TCC 回滚结果后台投影（CM-18 第 16 轮 G）
+
+复用 `cloudmall.pay.tcc-recovery.enabled` 与 execution 的 recovery 元数据，不新增表或开关。原 decision recovery 与 ROLLEDBACK 投影分阶段查询，共享每轮最多20条、10秒启动预算；首轮旧恢复优先，之后轮换优先级。后台不依赖公开 entry Bean，启用原 recovery 及其 coordinator/receipt 依赖即可运行。
+
+只有原支付为 TCC 且仍 PENDING/ORDER_SYNC_UNKNOWN、原 execution 已 ROLLEDBACK、完整派发/receipt 存在、无 cancel/Legacy 意图的记录才参与候选。读取 User 当前同分支 CANCELLED/no-ledger 证明后，最终短事务按 Pay→execution 锁顺序再次验证原载荷和未过期租约，才写 Pay FAILED。旧 token 不能写终态或释放新租约；查询未知继续按5–300秒退避。
+
+本阶段不调用 TC、Order 或 User 写入，不改变 execution state/decision，不自动完成 callback 日志；回调重放仍按原入口核验。缺失/矛盾事实继续保留待核验，不能由超时推断回滚。
 
 ## 验证命令
 
@@ -478,7 +486,7 @@ jmeter -n -t backend/loadtest/seckill-ladder.jmx `
 
 部分旧测试依赖的 Mockito/Byte Buddy 版本不支持 JDK 21，推荐使用 JDK 17 运行完整测试集。
 
-16D/16F 公开入口及回滚失败收尾验收沿用上述中间件环境，额外启动隔离 Gateway，以真实 Redis Bearer token 调用公开接口。先构建全仓 Jar，再运行：
+16D/16F/16G 公开入口、回滚失败收尾及后台投影验收沿用上述中间件环境，额外启动隔离 Gateway，以真实 Redis Bearer token 调用公开接口。先构建全仓 Jar，再运行：
 
 ```powershell
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccPublicEntryIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'

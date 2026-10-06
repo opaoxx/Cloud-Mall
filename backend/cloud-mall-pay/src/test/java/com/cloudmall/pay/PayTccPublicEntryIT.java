@@ -616,6 +616,78 @@ class PayTccPublicEntryIT {
             "SELECT decision FROM pay_tcc_execution WHERE pay_no=?", String.class, request.payNo));
   }
 
+  @Test
+  @Order(7)
+  void rolledBackPaymentConvergesWithoutAnotherClientRequest() throws Exception {
+    userDb.update("UPDATE mall_user SET balance=1 WHERE id=7");
+    createPublic();
+    assertEquals(
+        202,
+        post("/api/payments/callback", callback(false, "auto-failed-receipt"), callbackHeaders())
+            .status());
+    rollBackFundsWithoutPublicProjection();
+    payDb.update(
+        "UPDATE pay_tcc_execution SET next_recovery_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+            + " pay_no=?",
+        request.payNo);
+    // 只读数据库等待后台扫描，不再调用公开成功、失败或 coordinator。
+    await(() -> "FAILED".equals(paymentState()), 15);
+    assertEquals(
+        "ROLLEDBACK",
+        payDb.queryForObject(
+            "SELECT state FROM pay_tcc_execution WHERE pay_no=?", String.class, request.payNo));
+    assertEquals(
+        "ROLLBACK",
+        payDb.queryForObject(
+            "SELECT decision FROM pay_tcc_execution WHERE pay_no=?", String.class, request.payNo));
+    assertEquals("PENDING_PAYMENT", orderState());
+    assertEquals(
+        1,
+        payDb.queryForObject(
+            "SELECT COUNT(*) FROM pay_callback_log WHERE callback_status='RECEIVED_FAILURE' AND"
+                + " processed_at IS NULL",
+            Integer.class));
+    assertFunds("1.00", 0, 0);
+  }
+
+  @Test
+  @Order(8)
+  void automaticRollbackWaitsForLiveUserEvidenceAndRetries() throws Exception {
+    userDb.update("UPDATE mall_user SET balance=1 WHERE id=7");
+    createPublic();
+    rollBackFundsWithoutPublicProjection();
+    proxies.get("user").setTccReadsUnavailable(true);
+    try {
+      payDb.update(
+          "UPDATE pay_tcc_execution SET next_recovery_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+              + " pay_no=?",
+          request.payNo);
+      await(
+          () ->
+              payDb.queryForObject(
+                          "SELECT recovery_attempts FROM pay_tcc_execution WHERE pay_no=?",
+                          Integer.class,
+                          request.payNo)
+                      > 0
+                  && payDb.queryForObject(
+                          "SELECT recovery_last_error FROM pay_tcc_execution WHERE pay_no=?",
+                          String.class,
+                          request.payNo)
+                      != null,
+          15);
+      assertEquals("PENDING", paymentState());
+      assertFunds("1.00", 0, 0);
+    } finally {
+      proxies.get("user").setTccReadsUnavailable(false);
+    }
+    payDb.update(
+        "UPDATE pay_tcc_execution SET next_recovery_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+            + " pay_no=?",
+        request.payNo);
+    await(() -> "FAILED".equals(paymentState()), 15);
+    assertEquals("PENDING_PAYMENT", orderState());
+  }
+
   private void createPublic() throws Exception {
     Response response =
         post(
