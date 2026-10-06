@@ -53,13 +53,15 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
           + " execution.created_at,execution.id LIMIT #{limit}")
   List<PayTccExecutionPO> findMissing(@Param("limit") int limit);
 
-  /** 仅改变尚未取得paid写许可的READY方向，保留原有效或过期租约。 */
+  /** 仅按当前状态改变取消方向，保留原租约、尝试次数和 immutable tuple。 */
   @Update(
-      "UPDATE pay_tcc_delivery SET state='CANCEL_REQUESTED',next_retry_at=LEAST(next_retry_at,"
-          + "#{now}),updated_at=#{now} WHERE BINARY pay_no=BINARY #{payNo} AND BINARY state='READY'"
-          + " AND attempts IS NOT NULL AND attempts>=0 AND ((lease_owner IS NULL AND"
-          + " lease_until IS NULL) OR (lease_owner IS NOT NULL AND TRIM(lease_owner)<>'' AND"
-          + " lease_until IS NOT NULL))")
+      "UPDATE pay_tcc_delivery SET state=CASE WHEN BINARY state='READY' THEN 'CANCEL_REQUESTED'"
+          + " WHEN BINARY state='ORDER_SYNC_UNKNOWN' THEN 'CANCEL_RECONCILING'"
+          + " END,next_retry_at=LEAST(next_retry_at,#{now}),updated_at=#{now} WHERE BINARY"
+          + " pay_no=BINARY #{payNo} AND BINARY state IN ('READY','ORDER_SYNC_UNKNOWN') AND"
+          + " attempts IS NOT NULL AND attempts>=0 AND ((lease_owner IS NULL AND lease_until IS"
+          + " NULL) OR (lease_owner IS NOT NULL AND TRIM(lease_owner)<>'' AND lease_until IS NOT"
+          + " NULL))")
   int requestCancellation(@Param("payNo") String payNo, @Param("now") LocalDateTime now);
 
   /** 找出状态可恢复、重试到期且租约已释放的交付台账。 */
@@ -67,8 +69,8 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
       "SELECT delivery.* FROM pay_tcc_delivery delivery JOIN pay_tcc_execution execution ON"
           + " execution.pay_no=delivery.pay_no JOIN pay_record payment ON"
           + " payment.pay_no=execution.pay_no WHERE BINARY delivery.state IN"
-          + " ('READY','CANCEL_REQUESTED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-          + " delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
+          + " ('READY','CANCEL_REQUESTED','CANCEL_RECONCILING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
+          + " AND delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
           + " delivery.lease_until<=#{now}) AND BINARY execution.state='COMMITTED' AND BINARY"
           + " execution.decision='COMMIT' AND execution.xid IS NOT NULL AND"
           + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"
@@ -92,8 +94,8 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
           + " payment.pay_no=execution.pay_no SET delivery.lease_owner=#{token},"
           + "delivery.lease_until=#{leaseUntil},delivery.attempts=LEAST(delivery.attempts+1,31),delivery.updated_at=#{now}"
           + " WHERE delivery.pay_no=#{payNo} AND BINARY delivery.state IN"
-          + " ('READY','CANCEL_REQUESTED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-          + " delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
+          + " ('READY','CANCEL_REQUESTED','CANCEL_RECONCILING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
+          + " AND delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
           + " delivery.lease_until<=#{now}) AND BINARY execution.state='COMMITTED' AND BINARY"
           + " execution.decision='COMMIT' AND execution.xid IS NOT NULL AND"
           + " LENGTH(TRIM(execution.xid))>0 AND BINARY payment.debit_mode='TCC' AND BINARY"

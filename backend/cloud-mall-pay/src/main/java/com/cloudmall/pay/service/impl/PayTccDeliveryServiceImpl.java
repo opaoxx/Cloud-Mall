@@ -72,14 +72,14 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
       // 2. 当前两个资源证据完整后才允许订单动作，退款也不省略此核对。
       UserClient.BalanceOperationView debit = verifyMoney(job);
       OrderClient.OrderView order = readOrder(job);
-      boolean cancelRequested = "CANCEL_REQUESTED".equals(job.state);
-      if (cancelRequested) requireCancellableOrder(order);
+      boolean reconcileCancellation = "CANCEL_RECONCILING".equals(job.state);
+      boolean cancelRequested = "CANCEL_REQUESTED".equals(job.state) || reconcileCancellation;
+      if (cancelRequested) requireCancellableOrder(order, reconcileCancellation);
       if ("PENDING_PAYMENT".equals(order.status())) {
         if (debit.refundOperationKey() != null || "REFUND_PENDING".equals(job.state))
           throw conflict("存在退款事实或意图，禁止再次支付订单");
         // 取消方向持久化后只允许cancel；RPC前再次以当前租约核验原方向。
-        if (!store.stage(
-            job.payNo, token, cancelRequested ? "CANCEL_REQUESTED" : "ORDER_SYNC_UNKNOWN"))
+        if (!store.stage(job.payNo, token, cancelRequested ? job.state : "ORDER_SYNC_UNKNOWN"))
           return PayTccDeliveryVO.from(store.read(payNo));
         try {
           if (cancelRequested) orders.cancel(job.orderNo, job.userId);
@@ -88,7 +88,7 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
           /* 以紧接着的只读事实为准。 */
         }
         order = readOrder(job);
-        if (cancelRequested) requireCancellableOrder(order);
+        if (cancelRequested) requireCancellableOrder(order, reconcileCancellation);
       }
       if (Set.of("PAID", "COMPLETED").contains(order.status())
           && "SUCCEEDED".equals(order.stockActionStatus())) {
@@ -137,9 +137,9 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
     return PayTccDeliveryVO.from(store.read(payNo));
   }
 
-  /** 取消方向不可被订单相反终态改写，库存冲突必须保留人工核验。 */
-  private void requireCancellableOrder(OrderClient.OrderView order) {
-    if (Set.of("PAID", "COMPLETED").contains(order.status())
+  /** 严格取消拒绝相反终态；已发出paid的重协调允许按订单胜出事实收敛，库存冲突均保留。 */
+  private void requireCancellableOrder(OrderClient.OrderView order, boolean allowPaidWinner) {
+    if ((!allowPaidWinner && Set.of("PAID", "COMPLETED").contains(order.status()))
         || "CONFLICT".equals(order.stockActionStatus())) throw conflict("取消意图与订单或库存状态冲突");
   }
 

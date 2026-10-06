@@ -38,7 +38,7 @@ public class PayTccPaymentService {
   @Autowired(required = false)
   private PayTccAbortService abortService;
 
-  /** 已提交但尚未开始交付时的本地取消编排。 */
+  /** 已提交资金的本地取消意图编排，不在失败入口执行远程写入。 */
   @Autowired(required = false)
   private PayTccCommittedCancelService committedCancelService;
 
@@ -122,7 +122,7 @@ public class PayTccPaymentService {
     return "UNKNOWN";
   }
 
-  /** 已回滚执行只核验原事实；其余已有执行不接管，无执行沿用独立取消开关。 */
+  /** 按已提交、已回滚或未决事实分流；取消受理不代表订单已取消或退款完成。 */
   @Transactional(propagation = Propagation.NOT_SUPPORTED)
   public void failure(PayVO payment) {
     if ("SUCCESS".equals(payment.status) || "REFUNDED".equals(payment.status))

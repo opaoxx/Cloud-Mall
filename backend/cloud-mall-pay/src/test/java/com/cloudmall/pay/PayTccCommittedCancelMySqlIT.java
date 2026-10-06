@@ -170,6 +170,12 @@ class PayTccCommittedCancelMySqlIT {
         fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='attempted'");
     cancellations.request(payment("attempted"));
     assertEquals("CANCEL_REQUESTED", deliveryState("attempted"));
+    Map<String, Object> afterFirst =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='attempted'");
+    cancellations.request(payment("attempted"));
+    Map<String, Object> afterSecond =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='attempted'");
+    assertEquals(afterFirst, afterSecond);
     assertNull(deliveries.claim("attempted", "new-worker"));
     Map<String, Object> after =
         fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='attempted'");
@@ -236,15 +242,20 @@ class PayTccCommittedCancelMySqlIT {
   }
 
   @Test
-  void orderSyncUnknownDeliveryIsNeverRedirected() {
+  void orderSyncUnknownDeliveryEntersReconciliation() {
     insertFacts("unknown-delivery");
     insertDelivery("unknown-delivery", "READY", 0, null, null, DUE.minusMinutes(1));
     assertNotNull(deliveries.claim("unknown-delivery", "unknown-worker"));
     assertTrue(deliveries.stage("unknown-delivery", "unknown-worker", "ORDER_SYNC_UNKNOWN"));
-    BizException error =
-        assertThrows(BizException.class, () -> cancellations.request(payment("unknown-delivery")));
-    assertEquals(202, error.getHttpStatus());
-    assertEquals("ORDER_SYNC_UNKNOWN", deliveryState("unknown-delivery"));
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='unknown-delivery'");
+    cancellations.request(payment("unknown-delivery"));
+    assertEquals("CANCEL_RECONCILING", deliveryState("unknown-delivery"));
+    Map<String, Object> after =
+        fixture.queryForMap("SELECT * FROM pay_tcc_delivery WHERE pay_no='unknown-delivery'");
+    assertEquals(before.get("attempts"), after.get("attempts"));
+    assertEquals(before.get("lease_owner"), after.get("lease_owner"));
+    assertEquals(before.get("lease_until"), after.get("lease_until"));
   }
 
   @Test
@@ -291,7 +302,11 @@ class PayTccCommittedCancelMySqlIT {
 
     insertFacts("sql-unknown");
     insertDelivery("sql-unknown", "ORDER_SYNC_UNKNOWN", 0, null, null, DUE.minusMinutes(1));
-    assertEquals(0, deliveryMapper.requestCancellation("sql-unknown", DUE));
+    assertEquals(1, deliveryMapper.requestCancellation("sql-unknown", DUE));
+    assertEquals(
+        "CANCEL_RECONCILING",
+        fixture.queryForObject(
+            "SELECT state FROM pay_tcc_delivery WHERE pay_no='sql-unknown'", String.class));
   }
 
   @Test
@@ -400,14 +415,13 @@ class PayTccCommittedCancelMySqlIT {
         Future<Boolean> stage = pool.submit(stageTask);
         boolean requestAccepted = request.get(15, TimeUnit.SECONDS);
         boolean stageAccepted = stage.get(15, TimeUnit.SECONDS);
-        if (requestAccepted) {
-          assertFalse(stageAccepted);
+        assertTrue(requestAccepted);
+        if (stageAccepted) {
+          assertEquals("CANCEL_RECONCILING", deliveryState(payNo));
+          assertEquals("ORDER_SYNC_UNKNOWN", paymentState(payNo));
+        } else {
           assertEquals("CANCEL_REQUESTED", deliveryState(payNo));
           assertEquals("PENDING", paymentState(payNo));
-        } else {
-          assertTrue(stageAccepted);
-          assertEquals("ORDER_SYNC_UNKNOWN", deliveryState(payNo));
-          assertEquals("ORDER_SYNC_UNKNOWN", paymentState(payNo));
         }
       }
     } finally {
@@ -422,6 +436,9 @@ class PayTccCommittedCancelMySqlIT {
     assertNotNull(deliveries.claim("stale-stage", "stale-worker"));
     assertThrows(
         BizException.class, () -> deliveries.stage("stale-stage", "stale-worker", "SUCCESS"));
+    assertThrows(
+        BizException.class,
+        () -> deliveries.stage("stale-stage", "stale-worker", "CANCEL_RECONCILING"));
     assertEquals("CANCEL_REQUESTED", deliveryState("stale-stage"));
     assertEquals("PENDING", paymentState("stale-stage"));
   }
@@ -476,6 +493,49 @@ class PayTccCommittedCancelMySqlIT {
         deliveryMapper.findDue(DUE, 20).stream().map(row -> row.payNo).toList());
     assertNotNull(deliveries.claim("due-cancel", "due-token"));
     assertEquals(1, attempts("due-cancel"));
+  }
+
+  @Test
+  void reconciliationStateIsDueAndClaimable() {
+    insertFacts("due-recon");
+    fixture.update("UPDATE pay_record SET status='ORDER_SYNC_UNKNOWN' WHERE pay_no='due-recon'");
+    insertDelivery("due-recon", "CANCEL_RECONCILING", 2, "recon-worker", DUE, DUE.minusMinutes(1));
+    assertEquals(
+        List.of("due-recon"),
+        deliveryMapper.findDue(DUE, 20).stream().map(row -> row.payNo).toList());
+    assertNotNull(deliveries.claim("due-recon", "new-recon-worker"));
+    assertEquals(3, attempts("due-recon"));
+    assertEquals(
+        "new-recon-worker",
+        fixture.queryForObject(
+            "SELECT lease_owner FROM pay_tcc_delivery WHERE pay_no='due-recon'", String.class));
+  }
+
+  @Test
+  void reconciliationStageAllowsSuccessOrRefundButNeverOldUnknown() {
+    insertFacts("recon-success");
+    fixture.update(
+        "UPDATE pay_record SET status='ORDER_SYNC_UNKNOWN' WHERE pay_no='recon-success'");
+    insertDelivery(
+        "recon-success",
+        "CANCEL_RECONCILING",
+        1,
+        "recon-success-worker",
+        hostNow().plusDays(1),
+        DUE);
+    assertThrows(
+        BizException.class,
+        () -> deliveries.stage("recon-success", "recon-success-worker", "ORDER_SYNC_UNKNOWN"));
+    assertTrue(deliveries.stage("recon-success", "recon-success-worker", "SUCCESS"));
+    assertEquals("SUCCESS", paymentState("recon-success"));
+
+    insertFacts("recon-refund");
+    fixture.update("UPDATE pay_record SET status='ORDER_SYNC_UNKNOWN' WHERE pay_no='recon-refund'");
+    insertDelivery(
+        "recon-refund", "CANCEL_RECONCILING", 1, "recon-refund-worker", hostNow().plusDays(1), DUE);
+    assertTrue(deliveries.stage("recon-refund", "recon-refund-worker", "REFUND_PENDING"));
+    assertTrue(deliveries.stage("recon-refund", "recon-refund-worker", "REFUNDED"));
+    assertEquals("REFUNDED", paymentState("recon-refund"));
   }
 
   @Test

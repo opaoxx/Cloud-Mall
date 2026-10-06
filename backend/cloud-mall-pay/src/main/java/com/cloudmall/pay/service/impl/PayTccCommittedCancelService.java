@@ -10,7 +10,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-/** 已提交 TCC 尚未开始交付窗口的公开取消编排。 */
+/** 已提交TCC的公开取消意图编排，订单结果由原恢复链核验。 */
 @Service
 @ConditionalOnProperty(name = "cloudmall.pay.tcc-cancel.enabled", havingValue = "true")
 @DependsOn("payTccCancelConfiguration")

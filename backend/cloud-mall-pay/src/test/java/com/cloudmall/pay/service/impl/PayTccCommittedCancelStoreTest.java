@@ -146,6 +146,24 @@ class PayTccCommittedCancelStoreTest {
   }
 
   @Test
+  void orderSyncUnknownChoosesReconcilingAndRepeatedCancelIsIdempotent() {
+    PayVO payment = payment();
+    PayTccExecutionPO execution = execution();
+    PayTccDeliveryPO unknown = delivery("ORDER_SYNC_UNKNOWN", 2, null, null);
+    prepare(payment, execution, unknown);
+    when(deliveries.requestCancellation(eq(payment.payNo), any())).thenReturn(1);
+
+    store.request(payment);
+
+    verify(deliveries).requestCancellation(eq(payment.payNo), any());
+    reset(deliveries);
+    prepare(payment, execution, delivery("CANCEL_RECONCILING", 2, null, null));
+    store.request(payment);
+    verify(deliveries, never()).requestCancellation(any(), any());
+    verify(deliveries, never()).insert(any());
+  }
+
+  @Test
   void claimedOrLegacyOrOldCancelFactsBlockDirectionChange() {
     PayVO payment = payment();
     PayTccExecutionPO execution = execution();

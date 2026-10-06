@@ -310,6 +310,72 @@ class PayTccDeliveryServiceTest {
     verify(users, never()).refund(any(), any(), any());
   }
 
+  /** 原paid先完成时依据订单/库存事实确认成功，不能因取消意图退款。 */
+  @Test
+  void reconcilingCancellationAcceptsPaidWinnerWithoutRefund() {
+    prepareJob(job("CANCEL_RECONCILING"));
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PAID", "SUCCEEDED")));
+    service.deliver(PAY_NO);
+    verify(store).stage(eq(PAY_NO), any(), eq("SUCCESS"));
+    verify(orders, never()).paid(any(), any());
+    verify(orders, never()).cancel(any(), any());
+    verify(users, never()).refund(any(), any(), any());
+  }
+
+  /** paid虽成功但库存未知、或库存冲突时，重协调保持原状态等待核验。 */
+  @Test
+  void reconcilingCancellationRetainsUnknownStockAndConflict() {
+    prepareJob(job("CANCEL_RECONCILING"));
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PAID", "UNKNOWN")))
+        .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT", "CONFLICT")));
+    service.deliver(PAY_NO);
+    service.deliver(PAY_NO);
+    verify(store, never()).stage(any(), any(), any());
+    verify(orders, never()).paid(any(), any());
+    verify(orders, never()).cancel(any(), any());
+    verify(users, never()).refund(any(), any(), any());
+  }
+
+  /** 即使paid已赢，只要存在退款事实也不能再投影SUCCESS。 */
+  @Test
+  void reconcilingPaidWinnerWithRefundFactStaysUnresolved() {
+    prepareJob(job("CANCEL_RECONCILING"));
+    prepareConfirmedMoney();
+    when(users.operation(USER_ID, PAY_NO, USER_ID))
+        .thenReturn(
+            ApiResponse.ok(
+                new UserClient.BalanceOperationView(
+                    PAY_NO, "DEBIT", "APPLIED", "12.34", REFUND_KEY)));
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PAID", "SUCCEEDED")));
+    service.deliver(PAY_NO);
+    verify(store, never()).stage(any(), any(), any());
+    verify(users, never()).refund(any(), any(), any());
+    verify(orders, never()).paid(any(), any());
+  }
+
+  /** 订单仍待支付时重协调只尝试cancel，不创建新的paid许可。 */
+  @Test
+  void reconcilingPendingOrderUsesCancelAndRetainsUnknownResult() {
+    prepareJob(job("CANCEL_RECONCILING"));
+    prepareConfirmedMoney();
+    when(orders.paymentState(ORDER_NO, USER_ID))
+        .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT", "NONE")));
+    doThrow(new IllegalStateException("cancel response unknown"))
+        .when(orders)
+        .cancel(ORDER_NO, USER_ID);
+    service.deliver(PAY_NO);
+    verify(store).stage(eq(PAY_NO), any(), eq("CANCEL_RECONCILING"));
+    verify(store, never()).stage(eq(PAY_NO), any(), eq("ORDER_SYNC_UNKNOWN"));
+    verify(orders).cancel(ORDER_NO, USER_ID);
+    verify(orders, never()).paid(any(), any());
+    verify(users, never()).refund(any(), any(), any());
+  }
+
   private PayTccDeliveryPO job(String state) {
     PayTccDeliveryPO job = new PayTccDeliveryPO();
     job.payNo = PAY_NO;

@@ -512,7 +512,7 @@ class PayTccCancelIT {
 
   @Test
   @Order(3)
-  void committedDeliveryWithPaidPermissionRejectsCancellation() throws Exception {
+  void committedDeliveryWithPaidPermissionPersistsCancellationForReconciliation() throws Exception {
     createPublic();
     assertEquals(
         "COMMITTED",
@@ -525,16 +525,24 @@ class PayTccCancelIT {
     deliveryStore.ensure(request.payNo);
     assertNotNull(deliveryStore.claim(request.payNo, "prior-delivery"));
     assertTrue(deliveryStore.stage(request.payNo, "prior-delivery", "ORDER_SYNC_UNKNOWN"));
-    assertEquals(
-        202, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
-    assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
-    assertEquals(
-        "COMMIT", payDb.queryForObject("SELECT decision FROM pay_tcc_execution", String.class));
-    assertEquals("PENDING_PAYMENT", orderState());
-    assertEquals("ORDER_SYNC_UNKNOWN", deliveryStore.read(request.payNo).state);
-    assertEquals("ORDER_SYNC_UNKNOWN", paymentState());
-    assertFunds("90.00", 1, 0);
-    deliveryStore.finish(request.payNo, "prior-delivery", 1, null);
+    try {
+      assertEquals(
+          202, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
+      assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_tcc_cancel", Integer.class));
+      assertEquals("COMMIT", decision());
+      assertEquals("PENDING_PAYMENT", orderState());
+      assertEquals("CANCEL_RECONCILING", deliveryStore.read(request.payNo).state);
+      assertEquals("ORDER_SYNC_UNKNOWN", paymentState());
+      assertFunds("90.00", 1, 0);
+    } finally {
+      deliveryStore.finish(request.payNo, "prior-delivery", 1, null);
+    }
+    parentRunning.set(false);
+    pauseOwned = false;
+    await(() -> "REFUNDED".equals(paymentState()), 40);
+    assertFunds("100.00", 1, 1);
+    assertStock(10, 0, 0);
+    assertEquals(0, proxies.get("order").paidPostCount());
   }
 
   @Test
@@ -864,6 +872,18 @@ class PayTccCancelIT {
   @Test
   @Order(13)
   void committedCancellationCallbackSurvivesLostResponsesAndRestartWithFlagOff() throws Exception {
+    assertCancellationRestartWithFlagOff(false);
+  }
+
+  /** 已取得paid许可的取消待核验状态同样可在关闭入口开关的新进程恢复。 */
+  @Test
+  @Order(18)
+  void uncertainCancellationSurvivesLostResponsesAndRestartWithFlagOff() throws Exception {
+    assertCancellationRestartWithFlagOff(true);
+  }
+
+  private void assertCancellationRestartWithFlagOff(boolean reconcileCancellation)
+      throws Exception {
     createPublic();
     assertEquals(
         "COMMITTED",
@@ -871,9 +891,14 @@ class PayTccCancelIT {
             .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
             .execute(request)
             .state);
-    application
-        .getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class)
-        .ensure(request.payNo);
+    var deliveryStore =
+        application.getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class);
+    deliveryStore.ensure(request.payNo);
+    if (reconcileCancellation) {
+      assertNotNull(deliveryStore.claim(request.payNo, "lost-before-paid"));
+      assertTrue(deliveryStore.stage(request.payNo, "lost-before-paid", "ORDER_SYNC_UNKNOWN"));
+      deliveryStore.finish(request.payNo, "lost-before-paid", 1, "fixture caller stopped");
+    }
     Map<String, Object> failureCallback = callback(false, "committed-cancel");
     assertEquals(202, post("/api/payments/callback", failureCallback, callbackHeaders()).status());
     var accepted =
@@ -888,9 +913,11 @@ class PayTccCancelIT {
             + " MESSAGE_TEXT='test committed cancellation stock unavailable'; END IF; END");
     proxies.get("order").dropNextPostBodyForPath("/cancel");
     try {
-      assertEquals("CANCEL_REQUESTED", delivery.deliver(request.payNo).state);
+      assertEquals(
+          reconcileCancellation ? "CANCEL_RECONCILING" : "CANCEL_REQUESTED",
+          delivery.deliver(request.payNo).state);
       assertEquals("CANCELLED", orderState());
-      assertEquals("PENDING", paymentState());
+      assertEquals(reconcileCancellation ? "ORDER_SYNC_UNKNOWN" : "PENDING", paymentState());
       assertFunds("90.00", 1, 0);
       assertEquals(0, proxies.get("order").paidPostCount());
     } finally {
@@ -936,7 +963,13 @@ class PayTccCancelIT {
     replacementPay =
         new ProcessBuilder(arguments)
             .redirectErrorStream(true)
-            .redirectOutput(artifacts.resolve("committed-cancel-replacement.log").toFile())
+            .redirectOutput(
+                artifacts
+                    .resolve(
+                        reconcileCancellation
+                            ? "uncertain-cancel-replacement.log"
+                            : "committed-cancel-replacement.log")
+                    .toFile())
             .start();
     await(
         () -> {
@@ -1055,6 +1088,118 @@ class PayTccCancelIT {
     assertFunds("100.00", 1, 1);
     assertStock(10, 0, 0);
     assertEquals("COMMIT", decision());
+  }
+
+  /** 旧paid已授权但尚未抵达Order时，取消先赢，迟到paid必须被Order拒绝。 */
+  @Test
+  @Order(16)
+  void uncertainCancellationWinsAgainstLatePaidRequest() throws Exception {
+    assertUncertainCancellationWinner(false);
+  }
+
+  /** paid实际已成功但回包丢失时，取消待核验收敛SUCCESS，不能退款。 */
+  @Test
+  @Order(17)
+  void uncertainCancellationLosesToPaidWithLostResponse() throws Exception {
+    assertUncertainCancellationWinner(true);
+  }
+
+  /** 在真实Order paid写入之前或之后暂停旧调用，验证两种服务端CAS胜者。 */
+  private void assertUncertainCancellationWinner(boolean paidWins) throws Exception {
+    createPublic();
+    assertEquals(
+        "COMMITTED",
+        application
+            .getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class)
+            .execute(request)
+            .state);
+    Object worker = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(delivery);
+    var original =
+        (com.cloudmall.pay.feign.OrderClient) ReflectionTestUtils.getField(worker, "orders");
+    var paused =
+        org.mockito.Mockito.mock(
+            com.cloudmall.pay.feign.OrderClient.class,
+            org.mockito.AdditionalAnswers.delegatesTo(original));
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    if (paidWins) proxies.get("order").dropNextPostBodyForPath("/paid");
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              com.cloudmall.common.api.ApiResponse<com.cloudmall.pay.feign.OrderClient.OrderView>
+                  result = null;
+              RuntimeException lostResponse = null;
+              if (paidWins) {
+                try {
+                  result = original.paid(request.orderNo, request.userId);
+                } catch (RuntimeException failure) {
+                  lostResponse = failure;
+                }
+              }
+              entered.countDown();
+              if (!release.await(30, TimeUnit.SECONDS))
+                throw new IllegalStateException("fixture paid timeout");
+              if (lostResponse != null) throw lostResponse;
+              return paidWins ? result : original.paid(request.orderNo, request.userId);
+            })
+        .when(paused)
+        .paid(request.orderNo, request.userId);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    Future<PayTccDeliveryVO> oldWorker = null;
+    ReflectionTestUtils.setField(worker, "orders", paused);
+    try {
+      oldWorker = pool.submit(() -> delivery.deliver(request.payNo));
+      assertTrue(entered.await(15, TimeUnit.SECONDS));
+      assertEquals("ORDER_SYNC_UNKNOWN", paymentState());
+      Response accepted = post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of());
+      assertEquals(202, accepted.status(), accepted.body().toString());
+      assertEquals(
+          "CANCEL_RECONCILING",
+          payDb.queryForObject(
+              "SELECT state FROM pay_tcc_delivery WHERE pay_no=?", String.class, request.payNo));
+      payDb.update(
+          "UPDATE pay_tcc_delivery SET lease_until=DATE_SUB(NOW(3),INTERVAL 1"
+              + " DAY),next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE pay_no=?",
+          request.payNo);
+      if (paidWins) {
+        assertEquals("PAID", orderState());
+        await(
+            () ->
+                "SUCCEEDED"
+                    .equals(
+                        orderDb.queryForObject(
+                            "SELECT status FROM order_stock_action WHERE order_no=?",
+                            String.class,
+                            request.orderNo)),
+            20);
+      }
+      delivery.deliver(request.payNo);
+      assertEquals(paidWins ? "PAID" : "CANCELLED", orderState());
+      release.countDown();
+      oldWorker.get(20, TimeUnit.SECONDS);
+    } finally {
+      release.countDown();
+      try {
+        if (oldWorker != null) oldWorker.get(20, TimeUnit.SECONDS);
+      } finally {
+        ReflectionTestUtils.setField(worker, "orders", original);
+        pool.shutdownNow();
+      }
+    }
+    String terminalState = paidWins ? "SUCCESS" : "REFUNDED";
+    await(
+        () -> {
+          forceDue();
+          return terminalState.equals(delivery.deliver(request.payNo).state);
+        },
+        30);
+    assertEquals(terminalState, paymentState());
+    assertEquals(1, proxies.get("order").paidPostCount());
+    assertEquals(paidWins ? 0 : 1, proxies.get("order").cancelPostCount());
+    assertFunds(paidWins ? "90.00" : "100.00", 1, paidWins ? 0 : 1);
+    assertStock(paidWins ? 9 : 10, 0, paidWins ? 1 : 0);
+    assertEquals("COMMIT", decision());
+    assertEquals(
+        409, post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()).status());
   }
 
   private String decision() {

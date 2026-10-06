@@ -23,7 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-/** 已提交但尚未开始交付的 TCC 取消意图本地存储器。 */
+/** 已提交TCC的严格取消或订单结果待核验意图本地存储器。 */
 @Service
 public class PayTccCommittedCancelStore {
   /** Pay 原记录 Mapper。 */
@@ -65,7 +65,7 @@ public class PayTccCommittedCancelStore {
     this.intents = intents;
   }
 
-  /** 只提交 CANCEL_REQUESTED 本地意图，不调用远程服务或抛出入口 202。 */
+  /** 只提交与原交付阶段匹配的取消意图，接受后正常返回，拒绝时保留既有错误语义。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void request(PayVO payment) {
     validateInput(payment);
@@ -91,23 +91,24 @@ public class PayTccCommittedCancelStore {
     if (dispatch == null
         || !"COMMITTED".equals(evidence.classify(execution, PayTccDispatchVO.from(dispatch))))
       throw pending("TCC 永久证据尚未确认");
-    // 3. 缺失台账创建取消状态；READY仅改变方向，不接管已有 lease，保留历史尝试事实。
+    // 3. READY选择严格取消，已有paid许可选择结果待核验；均不接管原lease。
     if (current == null) {
       insertCancellation(execution, currentTime);
       return;
     }
     validateDelivery(current, execution);
-    if ("CANCEL_REQUESTED".equals(current.state)) return;
+    if (Set.of("CANCEL_REQUESTED", "CANCEL_RECONCILING").contains(current.state)) return;
     boolean noLease = current.leaseOwner == null && current.leaseUntil == null;
     boolean completeLease =
         current.leaseOwner != null && !current.leaseOwner.isBlank() && current.leaseUntil != null;
-    if (!"READY".equals(current.state)
+    if (!Set.of("READY", "ORDER_SYNC_UNKNOWN").contains(current.state)
         || current.attempts == null
         || current.attempts < 0
         || (!noLease && !completeLease)) throw pending("交付已经开始，保留原资金结果");
     if (deliveries.requestCancellation(payment.payNo, currentTime) != 1) {
       PayTccDeliveryPO observed = deliveries.selectForUpdate(payment.payNo);
-      if (observed == null || !"CANCEL_REQUESTED".equals(observed.state))
+      if (observed == null
+          || !Set.of("CANCEL_REQUESTED", "CANCEL_RECONCILING").contains(observed.state))
         throw pending("取消与交付竞争失败");
     }
   }

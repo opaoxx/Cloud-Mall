@@ -321,7 +321,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
 
 公开成功请求按持久支付模式路由。TCC 首次核验待支付订单后认领唯一 execution；重放恢复原 XID，资金确认后经 delivery 完成订单与库存交付。双端取消及无扣款证据齐全才投影 FAILED。切换新建配置不改变旧支付模式，不得手动改库迁移历史支付。
 
-TCC `mock-fail` 和失败 callback 对未决资金执行返回 202，取消开关关闭时不改变全局决议。16E 在独立开关下支持尚无资金执行的主动取消；16F 支持已经回滚且证明完整的失败收尾。16K支持完整双Try且尚未决议的原执行请求回滚；16O/16P/16Q支持COMMITTED但尚未取得paid写许可的取消/退款，保留原lease。已取得paid许可和其他证据不足场景仍不接管，CM-18未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*` 只表示收到，只有真实支付终态才完成日志，跨支付或相反方向返回 409。
+TCC `mock-fail` 和失败 callback 对未决资金执行返回 202，取消开关关闭时不改变全局决议。16E支持尚无资金执行的主动取消；16F支持已回滚且证明完整的失败收尾；16K支持完整双Try且尚未决议时请求回滚。16O/16P/16Q支持COMMITTED但尚未取得paid许可的严格取消，16R支持ORDER_SYNC_UNKNOWN下的取消待核验，均保留原lease。未知资金证据及售后取消仍未扩展，CM-18未整体闭环。callbackId 在业务处理前独立绑定支付号、用户、金额及方向；`RECEIVED_*`只表示收到，不能作为取消或退款已完成的证明。
 
 ### 未开始扣款的 TCC 主动取消（CM-18 第 16 轮 E）
 
@@ -354,7 +354,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_cancel.sql |
 
 当 execution 已 COMMITTED、Pay 已处于 REFUND_PENDING 时，`mock-fail` 和失败 callback 返回 `PAY_REFUND_PENDING`/202，明确余额退款处理中。重复请求不触发 delivery、Order cancel/paid、TC 或 User refund，失败 callback 保持 RECEIVED_FAILURE，不能提前伪造 FAILED。
 
-COMMITTED 但 Pay 仍 PENDING/ORDER_SYNC_UNKNOWN 时返回202；16O/16P/16Q仅在独立取消开关开启、尚未取得paid许可的窗口持久接受取消。SUCCESS/REFUNDED 的409和FAILED幂等保持不变。16H本身只校正结果分类。
+COMMITTED但Pay仍PENDING/ORDER_SYNC_UNKNOWN时返回202；独立取消开关开启时按16O–16R的交付阶段持久接受严格取消或取消待核验。SUCCESS/REFUNDED的409和FAILED幂等保持不变，16H本身只校正退款中结果分类。
 
 ### Legacy 失败与退款结果（第16轮I）
 
@@ -410,7 +410,7 @@ mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelLeaseMySqlIT' '-Dsur
 
 复用默认关闭的 `cloudmall.pay.tcc-cancel.enabled`。只有Pay为TCC且PENDING/ORDER_SYNC_UNKNOWN、原资金COMMITTED证据匹配、无16E/Legacy冲突意图，并且delivery不存在或为READY且租约字段完整，失败请求才可持久写入 `CANCEL_REQUESTED`。owner/lease需同时为空，或非空白owner与到期时间同时存在；16Q允许原租约仍有效，但不修改它。尝试次数必须非负，部分租约字段继续拒绝。入口只返回202，不调用远程写接口、不写FAILED、不反转COMMIT。
 
-取消请求与delivery claim、paid前状态更新共用Pay→delivery锁序。所有paid请求必须先提交ORDER_SYNC_UNKNOWN，这一状态不能改向。取消先提交时，旧READY worker的迟到状态更新不能授权paid；它仍可释放自己的租约，或在已证实订单取消/库存成功时同向退款。新worker必须等待原租约释放或过期才能认领，不承诺立即退款。双端CONFIRMED及原扣款账本核验、Order CANCELLED和库存SUCCEEDED全部满足后，才沿原REFUND_PENDING→REFUNDED及固定 `refund:<payNo>` 清算。
+取消请求与delivery claim、paid前状态更新共用Pay→delivery锁序。所有paid请求必须先提交ORDER_SYNC_UNKNOWN，该状态须按16R独立核验，不能当作严格取消。取消先于READY写许可提交时，旧worker不能再授权paid；它仍可释放自己的租约，或在已证实订单取消/库存成功时同向退款。新worker必须等待原租约释放或过期才能认领，不承诺立即退款。双端CONFIRMED及原扣款账本核验、Order CANCELLED和库存SUCCEEDED全部满足后，才沿原REFUND_PENDING→REFUNDED及固定 `refund:<payNo>` 清算。
 
 查询、取消或库存结果未知时保留CANCEL_REQUESTED重试；订单已支付或库存冲突时保留冲突供核验，不paid、不猜退款。持久取消不因关闭取消开关而失效，已启用的delivery恢复器仍继续清算。回调保留RECEIVED_FAILURE，退款完成后失败回调重放仍按原约定409，不伪造FAILED。
 
@@ -421,6 +421,14 @@ mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelLeaseMySqlIT' '-Dsur
 ```powershell
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCommittedCancelMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
+
+### 订单支付结果未知时请求取消（第16轮R）
+
+取消开关开启且原资金COMMITTED证明完整时，delivery的ORDER_SYNC_UNKNOWN可持久转为 `CANCEL_RECONCILING`，返回202只表示受理，不保证取消胜出。原paid请求可能仍在途；新worker不再发paid，待支付订单只尝试cancel，再读取订单与库存最终结果。
+
+Order CANCELLED且库存回滚成功后使用原唯一退款键结清；Order PAID/COMPLETED且库存确认成功、没有退款事实时转为SUCCESS，表示原支付先赢。查询未知、库存未完成/冲突或资金证据不足时保留待核验状态，不能猜退款。严格CANCEL_REQUESTED的PAID冲突语义保持不变。
+
+租约/attempts/原COMMIT保持不变，关闭取消开关后已有意图仍由delivery恢复。callback保持RECEIVED_FAILURE，最终SUCCESS/REFUNDED的失败回调仍返回既有409。该能力不包含已完成支付的售后退款；新状态须由支持16R的Pay实例恢复。
 
 ## 验证命令
 
@@ -566,7 +574,7 @@ mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccPublicEntryIT' '-Dsurefire
 
 该测试创建独立数据库、Redis、Rabbit vhost 和发现组；核对原库校验和、TC 终态、资金与库存后清理，存在未决事实时保留现场。
 
-16E/16K/16O/16P/16Q 取消验收使用相同隔离夹具，覆盖取消响应丢失、库存延迟、并发首次支付、独立Pay进程接手、租约/原子写入失败、原NONE决议竞争，以及COMMITTED未取得paid许可窗口的持久取消、有效租约保留、迟到worker阻断与唯一退款：
+16E至16R的取消验收使用相同隔离夹具，覆盖响应丢失、库存延迟、首次支付竞争、独立Pay进程接手、租约/原子写入失败、原NONE决议竞争、READY严格取消，以及ORDER_SYNC_UNKNOWN下paid/cancel两种胜出结果和唯一退款：
 
 ```powershell
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
