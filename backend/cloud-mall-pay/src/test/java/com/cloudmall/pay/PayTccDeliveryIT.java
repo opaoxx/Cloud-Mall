@@ -6,6 +6,7 @@ import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.naming.NamingService;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.vo.PayTccDeliveryVO;
+import com.cloudmall.pay.mapper.PayTccDeliveryMapper;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.impl.PayTccDeliveryScheduler;
@@ -24,6 +25,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.*;
+import org.mockito.AdditionalAnswers;
+import org.mockito.Mockito;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -519,6 +522,39 @@ class PayTccDeliveryIT {
       payDb.execute("DROP TRIGGER fail_delivery_success");
     }
     completeDelivery("SUCCESS");
+  }
+
+  /** 种任务查询不可用时，已持久化的交付任务仍通过真实订单和库存链路完成。 */
+  @Test
+  @Order(8)
+  void missingScanFailureDoesNotStarveExistingRealDelivery() throws Exception {
+    commitFunds();
+    store.ensure(request.payNo);
+    PayTccDeliveryScheduler scheduler = application.getBean(PayTccDeliveryScheduler.class);
+    PayTccDeliveryMapper original = application.getBean(PayTccDeliveryMapper.class);
+    PayTccDeliveryMapper scanFailure =
+        Mockito.mock(PayTccDeliveryMapper.class, AdditionalAnswers.delegatesTo(original));
+    Mockito.doThrow(new IllegalStateException("fixture missing scan unavailable"))
+        .when(scanFailure)
+        .findMissing(20);
+    ReflectionTestUtils.setField(scheduler, "mapper", scanFailure);
+    ReflectionTestUtils.setField(scheduler, "seedFirst", true);
+    try {
+      parentRunning.set(false);
+      pauseOwned = false;
+      await(() -> "SUCCESS".equals(paymentState()), 40);
+      assertEquals("PAID", orderState());
+      assertStock(9, 0, 1);
+      assertFunds("90.00", 1, 0);
+      Mockito.verify(scanFailure, Mockito.atLeastOnce()).findMissing(20);
+    } finally {
+      try {
+        await(() -> parentRunning.compareAndSet(false, true), 10);
+        pauseOwned = true;
+      } finally {
+        ReflectionTestUtils.setField(scheduler, "mapper", original);
+      }
+    }
   }
 
   private void commitFunds() {

@@ -400,6 +400,12 @@ mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccDeliveryRecoveryMySqlIT' '
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccCancelLeaseMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### TCC 交付恢复阶段公平调度（第16轮N）
+
+创建交付任务与处理到期任务两阶段交替优先，首轮仍先创建任务。两阶段各最多20条，共享从轮次开始计算的10秒单调时钟预算；查询或单条任务异常仅影响当前工作，剩余预算允许时继续另一阶段。
+
+预算耗尽后不再启动查询或新任务，不强杀在途请求。重入调用直接跳过、不改变下一轮优先级。原delivery证据核验、租约和退款键保持不变；本轮不新增开关。
+
 ## 验证命令
 
 ```bash
@@ -519,7 +525,7 @@ mvn -pl backend/cloud-mall-pay -am test `
   '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
 ```
 
-7 项真实验收使用 `cm16c_*` 四个独立数据库、临时 Redis 容器、RabbitMQ vhost 和 Nacos 组，覆盖自动订单/库存交付、库存未回滚时禁止退款、禁用用户退款、退款响应丢失后新 Pay 进程恢复、paid 响应丢失、已回滚 execution 隔离、并发租约及本地状态事务失败回滚。测试只在资金/库存/TC 已核对后清理自身资源；未决现场保留，证据位于 `target/cm16c-delivery/`。未覆盖所有网络故障组合或生产容量。
+8 项真实验收使用 `cm16c_*` 四个独立数据库、临时 Redis 容器、RabbitMQ vhost 和 Nacos 组，覆盖自动订单/库存交付、库存未回滚时禁止退款、禁用用户退款、退款响应丢失后新 Pay 进程恢复、paid 响应丢失、已回滚 execution 隔离、并发租约、本地状态事务失败回滚，以及创建任务查询故障时已有交付继续完成。测试只在资金/库存/TC 已核对后清理自身资源；未决现场保留，证据位于 `target/cm16c-delivery/`。未覆盖所有网络故障组合或生产容量。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 
