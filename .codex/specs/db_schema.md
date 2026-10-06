@@ -465,6 +465,8 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 第 15A 使用 Seata 1.5.2 官方 `tcc_fence_log` 作为唯一 Fence 事实来源；不复制其表结构、不建立第二张 Fence 表。`tcc_fence_log` 与 `mall_user`、`balance_debit_attempt`、`balance_tcc_debit` 必须在同一 User 数据源和本地事务中写入。资源适配器使用 `useTCCFence=false`，由适配器显式调用官方 Fence API；空回滚的 Fence `SUSPENDED` 与业务 `CANCELLED` tombstone 一起提交。进程中断和 TC 暂失不属于 15A，后置 15B。
 
+第 16A 新增 Pay `pay_tcc_dispatch` 和 User `user_tcc_receive` 作为跨服务一次性派发事实。Pay dispatch 只能绑定原 `pay_record` 中精确 `TCC + PENDING` 的 payNo/user/order/amount；User receive 以 payNo、XID、operationKey、ledgerKey 唯一认领，`CLAIMED` 写入后才允许进入 LocalTCC。两张表不替代资金事实，重复 POST 只读取它们和 User attempt/TCC/ledger，不能注册第二 branch。GET 状态必须由一致快照核对，`TRYING` 不等于已扣款，终态不得被未知结果覆盖。
+
 ### 7.4 `pay_debit_intent`
 
 支付服务在调用用户余额服务前，必须先在支付库独立提交扣款意图。该表覆盖进程在用户扣款提交后、`pay_record` 更新前退出的窗口；恢复任务扫描该表，而不能只扫描支付记录状态。

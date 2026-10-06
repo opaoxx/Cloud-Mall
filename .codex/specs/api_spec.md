@@ -187,6 +187,8 @@ CM-18 第 14 轮只批准 User 侧本地 TCC 就绪状态机：新增冻结余�
 
 CM-18 第 15A 只接入 User `service.BalanceTccDebitLocalResource` 的真实 LocalTCC RM：`prepare(BusinessActionContext,@BusinessActionContextParameter(paramName="request") BalanceTccBranchDTO) boolean`、`commit(BusinessActionContext) boolean`、`rollback(BusinessActionContext) boolean`。DTO 只包含 `userId/payNo/orderNo/amount`，XID、branchId、operationKey、ledgerKey 由框架上下文和冻结规则绑定，调用者不能覆盖。资源使用 `useTCCFence=false`，由适配器在同一 User 本地事务显式调用官方 Fence 和业务 callback；不新增 Confirm/Cancel HTTP。Fence `SUSPENDED` 空回滚、被拒第二 branch 安全 ACK和 Fence 清理后业务终态幂等属于 15A；进程中断和 TC 暂失属于 15B。
 
+CM-18 第 16A 只允许显式内部测试/迁移入口使用 TCC bridge。Pay 必须先核对原 `pay_record` 的 payNo、userId、orderNo、amount、`debit_mode=TCC` 和 `status=PENDING`；公开支付创建仍只产生 LEGACY。Pay `dispatch(PayTccDispatchDTO)` 从 RootContext 读取 XID，POST 只允许一次；响应未知后只能调用 User GET。User 通过 `X-Internal-Service`、`X-User-Id`、现有 callback token 和 `TX_XID` 校验内部请求，并用 `user_tcc_receive` 唯一认领。Gateway/Auth 必须阻断包含 `tcc-debits` 的服务前缀、编码和路径参数变体。GET 返回精确 XID/branchId 供内部机器核验，`TRYING` 不表示支付成功；Confirm/Cancel 没有 HTTP/Feign 接口。
+
 支付服务与用户服务之间的内部接口契约：
 
 | 方法 | 路径 | 请求/响应 | 说明 |
