@@ -298,7 +298,22 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_recovery.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-本阶段未切换公开支付入口，也未接入订单/库存/退款交付。查询限制的是返回批量和调度预算，尚未完成大表容量及新增索引的负载验收。
+查询限制的是返回批量和调度预算，尚未完成大表容量及新增索引的负载验收。16C 已增加下面的独立交付任务，公开支付入口尚未切换。
+
+### TCC 订单交付与取消退款（CM-18 第 16 轮 C）
+
+`pay_tcc_delivery` 从本地 COMMITTED execution 派生 READY 意图；READY 本身不代表远程证据已齐全。每次处理先核对 Pay execution/receipt/Fence，再直接查询 User TCC 当前完整事实和原 APPLIED DEBIT。未知、已回滚或载荷矛盾均不允许支付订单或猜测退款，Legacy 支付恢复器保持原隔离规则。
+
+交付先 GET 订单状态，只有 PENDING_PAYMENT 才发送幂等 paid；无论写响应如何，再 GET 核对结果。只有 PAID/COMPLETED 且库存动作 SUCCEEDED 才将支付和任务同事务置为 SUCCESS。只有 CANCELLED 且库存回滚 SUCCEEDED 才进入 REFUND_PENDING，使用固定 `refund:<payNo>` POST 让 User 校验完整原退款载荷，再 GET 核验 APPLIED REFUND。已出现退款事实时禁止再次 paid。
+
+User 退款现在允许禁用账户清算已确认的 TCC 扣款，前提是匹配的 CONFIRMED attempt 和原 DEBIT/APPLIED 均存在；不依赖账户总冻结额为零。禁用 Legacy 账户退款仍为 404，active Legacy 行为不变。Pay 入站余额响应兼容实际退款字段 `refundOperationKey`，避免退款到账后因读取到空 operationKey 而一直待恢复。
+
+`cloudmall.pay.tcc-delivery.enabled=false` 默认关闭；启用要求 coordinator 及其依赖已启用。默认每 5 秒执行两阶段扫描，每阶段最多 20 条、总预算 10 秒，随机 60 秒 token lease 与 5–300 秒退避。旧 token 不能写本地支付终态或释放新租约；RPC 在本地事务外执行。公开 `/api/payments` 的新建模式仍为 LEGACY，TCC 公开入口和失败状态衔接留待下一批。
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_delivery.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
 
 ## 验证命令
 
@@ -408,6 +423,18 @@ mvn -pl backend/cloud-mall-pay -am test `
 ```
 
 前者在关闭 Seata 的随机 `cm16b3_scan_*` 库验证 8 项 SQL、租约竞争和旧数据迁移；后者用真实 Pay/User/TC 验证 5 项自动提交/取消、NONE 只读、未知 begin 不占窗口，以及 Pay 重启后的定时恢复，日志位于 `target/cm16b3-automatic/`。恢复 claim/RPC/release 各窗口的独立进程中断没有逐一演练；token 过期与迟到完成保护已有确定性 MySQL 验证。
+
+16C 四服务交付验收先构建服务 Jar，需要 Docker、本地中间件、`redis:7.0` 镜像及 RabbitMQ management（15674）：
+
+```powershell
+mvn -pl backend/cloud-mall-user,backend/cloud-mall-pay,backend/cloud-mall-order,backend/cloud-mall-stock -am package -DskipTests
+mvn -pl backend/cloud-mall-pay -am test `
+  '-Dtest=PayTccDeliveryIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+7 项真实验收使用 `cm16c_*` 四个独立数据库、临时 Redis 容器、RabbitMQ vhost 和 Nacos 组，覆盖自动订单/库存交付、库存未回滚时禁止退款、禁用用户退款、退款响应丢失后新 Pay 进程恢复、paid 响应丢失、已回滚 execution 隔离、并发租约及本地状态事务失败回滚。测试只在资金/库存/TC 已核对后清理自身资源；未决现场保留，证据位于 `target/cm16c-delivery/`。未覆盖所有网络故障组合或生产容量。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 

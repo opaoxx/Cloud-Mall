@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** 将 Pay 测试请求转发到本机 User 服务，并模拟响应丢失。 */
 public final class TccResponseProxy implements AutoCloseable {
@@ -47,6 +48,15 @@ public final class TccResponseProxy implements AutoCloseable {
 
   /** 下一次 POST 是否截断响应。 */
   private final AtomicBoolean dropNextPostResponse = new AtomicBoolean();
+
+  /** 指定业务 POST 的一次性响应故障，不影响原 TCC 用例。 */
+  private final AtomicReference<String> dropPostSuffix = new AtomicReference<>();
+
+  /** 退款请求次数，验证重放未换键。 */
+  private final AtomicInteger refundPosts = new AtomicInteger();
+
+  /** 订单 paid 请求次数。 */
+  private final AtomicInteger paidPosts = new AtomicInteger();
 
   /** 代理是否已经关闭。 */
   private final AtomicBoolean closed = new AtomicBoolean();
@@ -92,12 +102,30 @@ public final class TccResponseProxy implements AutoCloseable {
   /** 清除尚未触发的响应故障。 */
   public void clearFault() {
     dropNextPostResponse.set(false);
+    dropPostSuffix.set(null);
+  }
+
+  /** 在指定业务路径已处理后截断下一次 POST 响应。 */
+  public void dropNextPostBodyForPath(String suffix) {
+    dropPostSuffix.set(suffix);
+  }
+
+  /** 读取真实退款 POST 数量。 */
+  public int refundPostCount() {
+    return refundPosts.get();
+  }
+
+  /** 读取真实订单 paid POST 数量。 */
+  public int paidPostCount() {
+    return paidPosts.get();
   }
 
   /** 清零 POST/GET 统计计数。 */
   public void resetCounters() {
     postRequestCount.set(0);
     getRequestCount.set(0);
+    refundPosts.set(0);
+    paidPosts.set(0);
   }
 
   /** 幂等停止 HTTP 服务和 daemon 工作线程。 */
@@ -113,6 +141,10 @@ public final class TccResponseProxy implements AutoCloseable {
   private void handle(HttpExchange exchange) {
     boolean tccPath = exchange.getRequestURI().getPath().contains("/balance/tcc-debits");
     String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+    if ("POST".equals(method) && exchange.getRequestURI().getPath().endsWith("/refunds"))
+      refundPosts.incrementAndGet();
+    if ("POST".equals(method) && exchange.getRequestURI().getPath().endsWith("/paid"))
+      paidPosts.incrementAndGet();
     if (tccPath && "POST".equals(method)) {
       postRequestCount.incrementAndGet();
     } else if (tccPath && "GET".equals(method)) {
@@ -131,8 +163,13 @@ public final class TccResponseProxy implements AutoCloseable {
       copyRequestHeaders(exchange, requestBuilder);
       HttpResponse<byte[]> response =
           httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofByteArray());
+      String suffix = dropPostSuffix.get();
       boolean dropResponse =
-          tccPath && "POST".equals(method) && dropNextPostResponse.compareAndSet(true, false);
+          "POST".equals(method)
+              && ((tccPath && dropNextPostResponse.compareAndSet(true, false))
+                  || (suffix != null
+                      && exchange.getRequestURI().getPath().endsWith(suffix)
+                      && dropPostSuffix.compareAndSet(suffix, null)));
       copyResponseHeaders(response, exchange);
       if (dropResponse) {
         sendIncompleteResponse(exchange, response.statusCode(), response.body());

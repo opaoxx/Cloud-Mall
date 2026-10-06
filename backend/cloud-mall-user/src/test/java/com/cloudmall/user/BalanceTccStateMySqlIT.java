@@ -277,6 +277,66 @@ class BalanceTccStateMySqlIT {
   }
 
   @Test
+  void disabledConfirmedTccRefundLeavesOtherTryingFreezeAndRejectsOverRefund() {
+    BalanceTccDebitTryDTO confirmed = request("disabled-confirmed", 7L, "10.00");
+    service.tryDebit(confirmed);
+    service.confirmDebit(finalizeRequest(confirmed));
+    service.tryDebit(request("other-trying", 7L, "20.00"));
+    setEnabled(false);
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+
+    BalanceRefundRequestDTO refund = refundRequest(confirmed, "refund:disabled-confirmed", "10.00");
+    legacy.refundInternal(7L, 7L, refund);
+    legacy.refundInternal(7L, 7L, refund);
+    assertFunds(7L, "80.00", "20.00");
+    assertEquals(2, ledgerCount());
+
+    BalanceRefundRequestDTO excess =
+        refundRequest(confirmed, "refund:disabled-confirmed-extra", "11.00");
+    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, excess));
+    assertFunds(7L, "80.00", "20.00");
+  }
+
+  @Test
+  void disabledLegacyInitialAndExistingRefundReplayRemainNotFound() {
+    debitLegacy("disabled-legacy", "legacy-disabled-key", 7L, "10.00");
+    setEnabled(false);
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+    BalanceRefundRequestDTO refund = new BalanceRefundRequestDTO();
+    refund.refundOperationKey = "refund:disabled-legacy";
+    refund.originalOperationKey = "legacy-disabled-key";
+    refund.payNo = "disabled-legacy";
+    refund.orderNo = "order-disabled-legacy";
+    refund.amount = new BigDecimal("10.00");
+    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+    fixture.update(
+        "INSERT INTO"
+            + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+            + " VALUES(999,7,?,?,?,?,?,?,'APPLIED',90,100,NOW(3))",
+        "refund:disabled-legacy",
+        "REFUND",
+        "legacy-disabled-key",
+        "disabled-legacy",
+        "order-disabled-legacy",
+        new BigDecimal("10.00"));
+    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+    assertFunds(7L, "90.00", "0.00");
+  }
+
+  @Test
+  void disabledUnconfirmedTccCannotRefund() {
+    BalanceTccDebitTryDTO trying = request("disabled-trying", 7L, "10.00");
+    service.tryDebit(trying);
+    setEnabled(false);
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+    BalanceRefundRequestDTO refund = refundRequest(trying, "refund:disabled-trying", "10.00");
+
+    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+    assertFunds(7L, "90.00", "10.00");
+    assertEquals(0, ledgerCount());
+  }
+
+  @Test
   void concurrentTryRequestsCannotFreezeMoreThanAvailable() throws Exception {
     List<Boolean> outcomes =
         race(
@@ -537,6 +597,18 @@ class BalanceTccStateMySqlIT {
     completion.branchId = request.branchId;
     completion.amount = request.amount;
     return completion;
+  }
+
+  /** 构造与原 TCC 扣款完全匹配的退款请求。 */
+  private BalanceRefundRequestDTO refundRequest(
+      BalanceTccDebitTryDTO request, String refundOperationKey, String amount) {
+    BalanceRefundRequestDTO refund = new BalanceRefundRequestDTO();
+    refund.refundOperationKey = refundOperationKey;
+    refund.originalOperationKey = request.payNo;
+    refund.payNo = request.payNo;
+    refund.orderNo = request.orderNo;
+    refund.amount = new BigDecimal(amount);
+    return refund;
   }
 
   /** 直接调用生产 Legacy 事务方法，保持非 payNo 操作键覆盖。 */

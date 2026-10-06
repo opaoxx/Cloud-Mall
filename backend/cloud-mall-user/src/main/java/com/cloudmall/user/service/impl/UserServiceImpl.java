@@ -95,8 +95,7 @@ public class UserServiceImpl implements UserService {
       userMapper.insert(administrator);
       return;
     }
-    UserPO administrator =
-        userMapper.selectOne(new QueryWrapper<UserPO>().eq("username", "admin"));
+    UserPO administrator = userMapper.selectOne(new QueryWrapper<UserPO>().eq("username", "admin"));
     if (administrator != null && ENCODER.matches("admin", administrator.passwordHash)) {
       administrator.passwordHash = ENCODER.encode("admin123");
       administrator.updatedAt = LocalDateTime.now();
@@ -145,7 +144,9 @@ public class UserServiceImpl implements UserService {
     }
     String token = UUID.randomUUID().toString();
     try {
-      redis.opsForValue().set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
+      redis
+          .opsForValue()
+          .set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
     } catch (DataAccessException redisFailure) {
       throw new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
     }
@@ -243,18 +244,24 @@ public class UserServiceImpl implements UserService {
       @Valid @RequestBody BalanceRefundRequestDTO request) {
     assertInternalCaller(userId, callerId);
     validateMoney(request.amount, "退款金额不合法");
-    UserPO user = userMapper.selectActiveForUpdate(userId);
+    UserPO user = userMapper.selectByIdForUpdate(userId);
     if (user == null) {
       throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
     }
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
     if (existing != null) {
+      if (!Objects.equals(user.status, 1)) {
+        BalanceLedgerPO original =
+            balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        requireDisabledTccRefund(original, request, userId);
+      }
       ensureRefundMatches(existing, userId, request);
       return ApiResponse.ok(
           BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));
     }
     BalanceLedgerPO original =
         balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+    if (!Objects.equals(user.status, 1)) requireDisabledTccRefund(original, request, userId);
     if (original == null
         || !Objects.equals(userId, original.userId)
         || !"APPLIED".equals(original.state)
@@ -262,8 +269,7 @@ public class UserServiceImpl implements UserService {
         || !Objects.equals(request.orderNo, original.orderNo)) {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
-    BigDecimal refundedAmount =
-        balanceLedgerMapper.sumAppliedRefunds(request.originalOperationKey);
+    BigDecimal refundedAmount = balanceLedgerMapper.sumAppliedRefunds(request.originalOperationKey);
     if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
       throw new BizException("BALANCE_REFUND_EXCEEDED", "退款金额超过原扣款", 409);
     }
@@ -288,6 +294,40 @@ public class UserServiceImpl implements UserService {
     balanceLedgerMapper.insert(refund);
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** 禁用用户仅允许完全匹配已确认 TCC 扣款的退款，不能放宽 Legacy 退款边界。 */
+  private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceRefundRequestDTO request) {
+    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+    return attempt != null
+        && "TCC".equals(attempt.mode)
+        && "CONFIRMED".equals(attempt.state)
+        && attempt.xid != null
+        && !attempt.xid.isBlank()
+        && attempt.branchId != null
+        && attempt.branchId > 0
+        && Objects.equals(attempt.userId, original.userId)
+        && Objects.equals(attempt.payNo, original.payNo)
+        && Objects.equals(attempt.orderNo, original.orderNo)
+        && attempt.amount.compareTo(original.amount) == 0
+        && Objects.equals(attempt.ledgerKey, request.originalOperationKey)
+        && Objects.equals(attempt.operationKey, "tcc-debit:" + request.payNo);
+  }
+
+  /** disabled 退款必须先证明原 DEBIT/APPLIED 和完整已确认 TCC 归属。 */
+  private void requireDisabledTccRefund(
+      BalanceLedgerPO original, BalanceRefundRequestDTO request, Long userId) {
+    if (original == null
+        || !Objects.equals(original.userId, userId)
+        || !"DEBIT".equals(original.operationType)
+        || !"APPLIED".equals(original.state)
+        || !Objects.equals(original.payNo, request.payNo)
+        || !Objects.equals(original.orderNo, request.orderNo)) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
+    }
+    if (!confirmedTccRefund(original, request)) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
+    }
   }
 
   /** 在用户行锁保护下认领唯一归属，再同事务执行扣款与账本写入。 */

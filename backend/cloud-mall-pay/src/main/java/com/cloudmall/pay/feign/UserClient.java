@@ -1,10 +1,11 @@
 package com.cloudmall.pay.feign;
 
 import com.cloudmall.common.api.ApiResponse;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import java.math.BigDecimal;
 import org.springframework.cloud.openfeign.FeignClient;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -44,7 +45,8 @@ public interface UserClient {
       BigDecimal amount) {}
 
   /** 用户账本写接口的稳定响应。 */
-  record BalanceView(String operationKey, String state, String balance) {}
+  record BalanceView(
+      @JsonAlias("refundOperationKey") String operationKey, String state, String balance) {}
 
   /** 用户账本只读查询响应。 */
   record BalanceOperationView(

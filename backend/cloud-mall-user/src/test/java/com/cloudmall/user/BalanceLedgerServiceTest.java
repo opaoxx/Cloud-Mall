@@ -1,6 +1,7 @@
 package com.cloudmall.user;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -11,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
+import com.cloudmall.user.domain.po.BalanceDebitAttemptPO;
 import com.cloudmall.user.domain.po.BalanceLedgerPO;
 import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
@@ -76,10 +78,8 @@ class BalanceLedgerServiceTest {
     UserPO user = activeUser(new BigDecimal("90.00"));
     BalanceLedgerPO original = appliedDebit("pay-1", new BigDecimal("90.00"));
     BalanceLedgerPO refund = appliedRefund("refund-1", new BigDecimal("100.00"));
-    when(userMapper.selectActiveForUpdate(7L)).thenReturn(user);
-    when(balanceLedgerMapper.selectByOperationKey("refund-1"))
-        .thenReturn(null)
-        .thenReturn(refund);
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+    when(balanceLedgerMapper.selectByOperationKey("refund-1")).thenReturn(null).thenReturn(refund);
     when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(original);
     when(balanceLedgerMapper.sumAppliedRefunds("pay-1")).thenReturn(new BigDecimal("0.00"));
     when(userMapper.creditBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class)))
@@ -93,6 +93,91 @@ class BalanceLedgerServiceTest {
     assertEquals("100.00", ((com.cloudmall.user.domain.vo.BalanceRefundVO) replay.data).balance);
     verify(userMapper, times(1))
         .creditBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
+  }
+
+  /** 禁用用户的已确认 TCC 扣款仍可按完整归属退款一次。 */
+  @Test
+  void disabledConfirmedTccDebitCanRefundOnce() {
+    UserPO user = activeUser(new BigDecimal("90.00"));
+    user.status = 0;
+    BalanceLedgerPO original = appliedDebit("pay-tcc", new BigDecimal("90.00"));
+    original.payNo = "pay-tcc";
+    original.orderNo = "order-tcc";
+    BalanceLedgerPO refund = appliedRefund("refund:pay-tcc", new BigDecimal("100.00"));
+    refund.originalOperationKey = "pay-tcc";
+    refund.payNo = "pay-tcc";
+    refund.orderNo = "order-tcc";
+    BalanceDebitAttemptPO attempt = confirmedTccAttempt();
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+    when(balanceLedgerMapper.selectByOperationKey("refund:pay-tcc"))
+        .thenReturn(null)
+        .thenReturn(refund);
+    when(balanceLedgerMapper.selectDebitForUpdate("pay-tcc")).thenReturn(original);
+    when(balanceLedgerMapper.sumAppliedRefunds("pay-tcc")).thenReturn(new BigDecimal("0.00"));
+    when(balanceDebitAttemptMapper.selectByPayNo("pay-tcc")).thenReturn(attempt);
+    when(userMapper.creditBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class)))
+        .thenReturn(1);
+
+    BalanceRefundRequestDTO request = new BalanceRefundRequestDTO();
+    request.refundOperationKey = "refund:pay-tcc";
+    request.originalOperationKey = "pay-tcc";
+    request.payNo = "pay-tcc";
+    request.orderNo = "order-tcc";
+    request.amount = new BigDecimal("10.00");
+
+    userService.refundInternal(7L, 7L, request);
+    userService.refundInternal(7L, 7L, request);
+
+    verify(userMapper, times(1))
+        .creditBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
+  }
+
+  /** 禁用 Legacy 退款和未确认 TCC 退款都保持拒绝。 */
+  @Test
+  void disabledLegacyOrTryingTccCannotRefund() {
+    UserPO user = activeUser(new BigDecimal("90.00"));
+    user.status = 0;
+    BalanceLedgerPO original = appliedDebit("pay-disabled", new BigDecimal("90.00"));
+    original.payNo = "pay-disabled";
+    original.orderNo = "order-disabled";
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+    when(balanceLedgerMapper.selectByOperationKey("refund-disabled")).thenReturn(null);
+    when(balanceLedgerMapper.selectDebitForUpdate("pay-disabled")).thenReturn(original);
+    when(balanceDebitAttemptMapper.selectByPayNo("pay-disabled")).thenReturn(null);
+    BalanceRefundRequestDTO request = new BalanceRefundRequestDTO();
+    request.refundOperationKey = "refund-disabled";
+    request.originalOperationKey = "pay-disabled";
+    request.payNo = "pay-disabled";
+    request.orderNo = "order-disabled";
+    request.amount = new BigDecimal("10.00");
+    assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () -> userService.refundInternal(7L, 7L, request));
+
+    BalanceDebitAttemptPO trying = confirmedTccAttempt();
+    trying.payNo = "pay-disabled";
+    trying.orderNo = "order-disabled";
+    trying.state = "TRYING";
+    trying.ledgerKey = "pay-disabled";
+    when(balanceDebitAttemptMapper.selectByPayNo("pay-disabled")).thenReturn(trying);
+    assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () -> userService.refundInternal(7L, 7L, request));
+  }
+
+  private BalanceDebitAttemptPO confirmedTccAttempt() {
+    BalanceDebitAttemptPO attempt = new BalanceDebitAttemptPO();
+    attempt.mode = "TCC";
+    attempt.state = "CONFIRMED";
+    attempt.userId = 7L;
+    attempt.payNo = "pay-tcc";
+    attempt.orderNo = "order-tcc";
+    attempt.amount = new BigDecimal("10.00");
+    attempt.xid = "xid-tcc";
+    attempt.branchId = 12L;
+    attempt.operationKey = "tcc-debit:pay-tcc";
+    attempt.ledgerKey = "pay-tcc";
+    return attempt;
   }
 
   private BalanceDebitRequestDTO debitRequest() {
