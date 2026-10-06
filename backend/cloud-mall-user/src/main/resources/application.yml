@@ -6,6 +6,15 @@ spring:
   jackson.time-zone: Asia/Shanghai
 management.endpoints.web.exposure.include: health,info,prometheus
 cloudmall.user.tcc-debit.enabled: false
+cloudmall.user.tcc-resource.enabled: false
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
+seata:
+  enabled: false
+  enable-auto-data-source-proxy: false
+  registry.type: file
+  config.type: file
+  tx-service-group: cloudmall_tx_group
+  service.vgroup-mapping.cloudmall_tx_group: default
+  service.grouplist.default: 127.0.0.1:8091

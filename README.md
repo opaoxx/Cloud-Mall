@@ -219,7 +219,22 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_state.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-本轮方法仅供 User 内部调用，没有 TCC HTTP/Feign 入口，也未绑定 Seata RM/Fence。Pay 仍只使用 LEGACY；不能仅打开 User 开关就认为支付已接入分布式事务。公开余额字段继续表示可用余额。
+这些本地方法没有 TCC HTTP/Feign 入口。公开余额字段继续表示可用余额；Pay 仍只使用 LEGACY。
+
+### User Seata RM/Fence（CM-18 第 15 轮 A）
+
+User 已增加 Seata 1.5.2 LocalTCC 资源。适配器在同一 User 本地事务中调用官方 Fence 和上述资金状态机；空回滚也写永久取消归属，Fence 日志清理后仍会阻断迟到 Try。Fence 查询强制读取最新数据库事实，避免 SDK 的 JDBC 写入被 MyBatis 会话缓存遮蔽。
+
+默认 `cloudmall.user.tcc-resource.enabled=false`、`seata.enabled=false`，自动数据源代理也保持关闭。只有显式开启资源和 Seata，且 Fence/资金共用同一数据源和事务管理器，才能注册 RM；新 Try 还要求 `cloudmall.user.tcc-debit.enabled=true`。Confirm/Cancel 只作为 TC 回调，没有 HTTP 入口。
+
+JDK 17 开启此资源时，启动 JVM 或 IntelliJ VM options 需添加 `--add-opens=java.base/java.lang=ALL-UNNAMED`，以兼容固定版本 Seata 的 CGLIB。已有数据卷可先执行官方 Fence 表的幂等迁移：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_fence.sql |
+  docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
+```
+
+本阶段验证 User RM 与真实 TC 的提交、取消和重试。Pay 尚未接入 TCC；进程中断、TC 暂失及重启恢复属于下一故障验收批，不能只打开 User 开关就宣称支付已完成分布式事务改造。
 
 ## 验证命令
 
@@ -255,6 +270,17 @@ mvn -pl backend/cloud-mall-user -am test `
 ```
 
 该测试需要本地账号的建库权限：读取现有表结构，在随机命名的 `cm14_tcc_it_*` 独立库执行迁移、并发和事务回滚验证，结束后精确删除该测试库，不写入原业务数据。若测试进程被强行终止，可先核对实际遗留的该前缀库名，再清理测试库。
+
+真实 TC/RM 验收需同时启动本地 MySQL 和 Seata，并已完成第 14 轮用户表迁移：
+
+```powershell
+mvn -pl backend/cloud-mall-user -am test `
+  '-Dtest=BalanceTccFenceSeataIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+该测试在测试 JVM 中启动实际 User Spring Boot RM，通过网络连接真实 TC，使用独立 `cm15_tcc_it_*` 数据库。TC 默认地址为 `127.0.0.1:8091`，可用 `cloudmall.seata.test.tc` 覆盖。只有资金及 TC 事务均结束才清理数据库；若失败后保留测试库，应先恢复该测试事务，再清理，避免丢失仍在重试的分支事实。此测试不等同于进程中断或 Pay 全链路验收。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 

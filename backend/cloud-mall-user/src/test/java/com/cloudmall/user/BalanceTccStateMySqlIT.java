@@ -41,6 +41,7 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -134,6 +135,7 @@ class BalanceTccStateMySqlIT {
   /** 直接注册生产初始化器和服务，验证依赖顺序及事务注解。 */
   private void startContext() {
     context = new AnnotationConfigApplicationContext();
+    context.getEnvironment().setActiveProfiles("cm14-local-it");
     context
         .getEnvironment()
         .getPropertySources()
@@ -591,6 +593,7 @@ class BalanceTccStateMySqlIT {
 
   /** 使用真实 MyBatis 和事务管理器，仅 Redis 使用 mock，测试不依赖缓存。 */
   @Configuration
+  @Profile("cm14-local-it")
   @EnableTransactionManagement(proxyTargetClass = true)
   @MapperScan("com.cloudmall.user.mapper")
   static class Beans {
