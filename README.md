@@ -234,7 +234,7 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_user_tcc_fence.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
-本阶段验证 User RM 与真实 TC 的提交、取消和重试。Pay 尚未接入 TCC；进程中断、TC 暂失及重启恢复属于下一故障验收批，不能只打开 User 开关就宣称支付已完成分布式事务改造。
+15A 验证 User RM 与真实 TC 的提交、取消和重试；15B 使用独立 RM JVM 验证提交前中断、提交后 ACK 丢失、重启及客户端 TC 连接暂失。Pay 尚未接入 TCC，不能只打开 User 开关就宣称支付已完成分布式事务改造。
 
 ## 验证命令
 
@@ -281,6 +281,19 @@ mvn -pl backend/cloud-mall-user -am test `
 ```
 
 该测试在测试 JVM 中启动实际 User Spring Boot RM，通过网络连接真实 TC，使用独立 `cm15_tcc_it_*` 数据库。TC 默认地址为 `127.0.0.1:8091`，可用 `cloudmall.seata.test.tc` 覆盖。只有资金及 TC 事务均结束才清理数据库；若失败后保留测试库，应先恢复该测试事务，再清理，避免丢失仍在重试的分支事实。此测试不等同于进程中断或 Pay 全链路验收。
+
+15B 独立进程故障验收需单独运行此测试类，避免 Seata SDK 的 JVM 静态资源缓存混入其他 RM：
+
+```powershell
+mvn -pl backend/cloud-mall-user -am test `
+  '-Dtest=BalanceTccRmFailureIT' '-Dsurefire.failIfNoSpecifiedTests=false' `
+  '-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
+```
+
+测试自动启动、终止并重启自己创建的 RM 子 JVM，使用 `cm15b_rm_it_*` 隔离库和稳定 appId。父 TM 不注册资金 RM；子进程通过专用 loopback TCP 代理连接真实 TC，断连仅影响该测试客户端，不停止 Seata 容器。故障 barrier 同时记录事务是否活跃、XID/branchId，并核对外部可见资金事实；所有控制接口和故障装饰器均位于测试源码，不进入业务 Jar。
+
+验收日志、JVM 参数和资金快照保存在 User 模块 `target/cm15b_rm_it_*/`。只有 TC 已结束且资金终态核对通过才删除测试库；未决时保留库和恢复元数据。清理此类现场前应先用原 appId/XID/branch 恢复，不能通过删除 Fence、换键重试或手工改余额绕过。
 
 Order→Stock 的响应丢失演练可使用 `backend/loadtest/stock-fault-proxy.py`。代理只监听本机地址，默认从 18095 转发到 18085；在独立 Nacos Group 中将测试 Stock 实例指向代理，并使用专用 RabbitMQ vhost 和精确可清理的测试订单。`POST /__fault` 可设置 `path/mode/delay_ms/remaining`，模式包括 `reject_before`、`delay_after`、`drop_after` 和 `pass`；`GET /__stats` 核对真正发往 Stock 的请求数，不记录请求体或 Token。延迟响应和丢弃响应都在真实 Stock 返回后执行，用来验证已提交库存事实的结果未知恢复。
 
