@@ -453,7 +453,7 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderRoutingAuditIT' '-Dsurefi
 
 ### 月分片算法隔离验证（CM-20 第17轮B）
 
-月分片算法已补齐精确与有界范围路由，并修正未启用的 YAML 算法类名。只接受上海本地语义的 `LocalDateTime` 或 JDBC 已物化的 `Timestamp`，时间精度必须符合 `DATETIME(3)`；目标表必须属于当前逻辑表。范围按毫秒处理开闭边界，缺少任一所需月份或输入无界时明确失败。
+月分片算法已补齐精确与有界范围路由。第17轮B修正了原 YAML 算法类名，第17轮C进一步移除静态分片声明，改由隔离规则工厂使用算法对象。只接受上海本地语义的 `LocalDateTime` 或 JDBC 已物化的 `Timestamp`，时间精度必须符合 `DATETIME(3)`；目标表必须属于当前逻辑表。范围按毫秒处理开闭边界，缺少任一所需月份或输入无界时明确失败。
 
 Sharding-JDBC 4.1.1 不接受空路由集合；空区间直接抛出 `ORDER_SHARD_ROUTE_EMPTY`，未来查询适配层再评审如何转换为空页。当前没有业务接口接入该算法；缺少分片条件的 SQL 也需在后续接入层约束，不能仅靠算法阻止框架广播。
 
@@ -464,7 +464,20 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=MonthlyOrderShardingAlgorithmT
 mvn -pl backend/cloud-mall-order -am test '-Dtest=MonthlyOrderShardingMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
 ```
 
-本轮仍保留第17轮A的启动限制：默认订单链路使用动态物理月表，`sharding` profile 不可启用。静态配置窗口、滚动节点发布、跨月分页、恢复查询与 Seata 事务组合仍待后续评审和验证。
+本轮仍保留第17轮A的启动限制：默认订单链路使用动态物理月表，`sharding` profile 不可启用。滚动节点发布、跨月分页、恢复查询与 Seata 事务组合仍待后续评审和验证。
+
+### 节点清单与规则快照（CM-20 第17轮C）
+
+`OrderShardingRuleFactory.create(currentMonth, physicalTables)` 根据明确的上海业务月份和三类已观测月表清单，生成 Sharding-JDBC 4.1.1 规则。三表月份集合必须相同、历史连续，并覆盖建表器同一规则计算的上月、本月及未来两个月；任何缺口返回 `ORDER_SHARD_INVENTORY_INVALID`。节点包含完整历史，不只保留四个月。
+
+工厂是普通 Java 工具，不查询数据库、不创建数据源或物理表。它输出的是独立规则快照，不热更新已有数据源，也不能保证观测后的表一直存在。显式重新观测、校验并创建隔离数据源，才能路由新月份；实际业务发布和事务接入仍待评审。原 YAML 静态节点及数据源声明已移除，`sharding` profile 标记保留并继续被启动审计拒绝。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderShardingRuleFactoryTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-order -am test '-Dtest=MonthlyOrderShardingInventoryMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+集成测试只在自建 `cm17c_*` 库中操作表和种子，验证跨年窗口、旧规则与新规则、历史保留、缺伴表/缺月和观测后删表；结束后清理隔离库并核对原订单库 checksum。
 
 ## 验证命令
 

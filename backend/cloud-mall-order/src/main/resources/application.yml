@@ -68,40 +68,8 @@ seata:
     grouplist:
       default: 127.0.0.1:8091
 ---
-# 尚未接入主链路；17A 启动审计会拒绝该 profile。静态节点窗口仍待后续迁移评审。
+# 17A 启动审计继续拒绝该 profile；隔离节点规则由 OrderShardingRuleFactory 显式生成。
 spring:
   config:
     activate:
       on-profile: sharding
-  shardingsphere:
-    datasource:
-      names: ds0
-      ds0:
-        type: com.zaxxer.hikari.HikariDataSource
-        driver-class-name: com.mysql.cj.jdbc.Driver
-        jdbc-url: jdbc:mysql://localhost:13307/cloudmall_order?serverTimezone=Asia/Shanghai&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci
-        username: root
-        password: root
-    sharding:
-      tables:
-        mall_order:
-          actual-data-nodes: ds0.mall_order_$->{202608..202612}
-          table-strategy:
-            standard:
-              sharding-column: created_at
-              precise-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
-              range-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
-        mall_order_item:
-          actual-data-nodes: ds0.mall_order_item_$->{202608..202612}
-          table-strategy:
-            standard:
-              sharding-column: created_at
-              precise-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
-              range-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
-        order_status_log:
-          actual-data-nodes: ds0.order_status_log_$->{202608..202612}
-          table-strategy:
-            standard:
-              sharding-column: created_at
-              precise-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
-              range-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm

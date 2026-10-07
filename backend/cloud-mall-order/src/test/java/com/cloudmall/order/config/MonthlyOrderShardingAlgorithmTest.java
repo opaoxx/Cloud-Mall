@@ -153,27 +153,14 @@ class MonthlyOrderShardingAlgorithmTest {
   }
 
   @Test
-  void dormantYamlUsesLoadablePreciseAndRangeClassesWithSameMonthWindow() throws Exception {
+  void applicationDoesNotShipAnExpiredSecondSetOfShardingRules() {
     YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
     yaml.setResources(new ClassPathResource("application.yml"));
     Map<Object, Object> properties = yaml.getObject();
-    String expectedNodes = null;
-    for (String table : List.of("mall_order", "mall_order_item", "order_status_log")) {
-      String prefix = "spring.shardingsphere.sharding.tables." + table;
-      for (String kind : List.of("precise", "range")) {
-        String className =
-            (String)
-                properties.get(
-                    prefix + ".table-strategy.standard." + kind + "-algorithm-class-name");
-        assertEquals(MonthlyOrderShardingAlgorithm.class.getName(), className);
-        assertEquals(MonthlyOrderShardingAlgorithm.class, Class.forName(className));
-      }
-      String nodes = (String) properties.get(prefix + ".actual-data-nodes");
-      assertTrue(nodes.startsWith("ds0." + table + "_"));
-      String months = nodes.substring(("ds0." + table + "_").length());
-      if (expectedNodes == null) expectedNodes = months;
-      assertEquals(expectedNodes, months);
-    }
+    assertTrue(
+        properties.keySet().stream()
+            .noneMatch(key -> key.toString().startsWith("spring.shardingsphere.")));
+    assertEquals("sharding", properties.get("spring.config.activate.on-profile"));
   }
 
   private void assertEmptyRange(Range<LocalDateTime> values) {
