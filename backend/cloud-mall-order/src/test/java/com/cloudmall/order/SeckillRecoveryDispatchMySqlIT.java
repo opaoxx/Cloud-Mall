@@ -112,6 +112,100 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void scanFailuresAndUnexpectedClaimErrorsAreNotSilentlySwallowed() throws Exception {
+    seed(1, "exception-boundary");
+    Map<String, Object> before = row(1);
+    doThrow(new org.springframework.dao.DataAccessResourceFailureException("scan unavailable"))
+        .when(mapper)
+        .findDue(anyInt(), any(LocalDateTime.class));
+    assertThrows(org.springframework.dao.DataAccessException.class, () -> recovery.replayDue());
+    doCallRealMethod().when(mapper).findDue(anyInt(), any(LocalDateTime.class));
+    doThrow(new IllegalStateException("unexpected claim bug"))
+        .when(mapper)
+        .claim(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class));
+    assertThrows(IllegalStateException.class, () -> recovery.replayDue());
+    doThrow(new AssertionError("unexpected fatal error"))
+        .when(mapper)
+        .claim(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class));
+    assertThrows(AssertionError.class, () -> recovery.replayDue());
+    assertEquals(before, row(1));
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+  }
+
+  @Test
+  void failedClaimDoesNotBlockTheNextRecoverableRecord() throws Exception {
+    seed(1, "bad-claim");
+    seed(2, "good-claim");
+    Map<String, Object> before = row(1);
+    createFailureTrigger("NEW.lease_owner IS NOT NULL");
+    try {
+      assertDoesNotThrow(() -> recovery.replayDue());
+      assertEquals(before, row(1));
+      assertEquals("REPLAYED", row(2).get("status"));
+      assertEquals(1, sent.size());
+      verify(stock, never()).seckillReservationFact(eq("202610-bad-claim"), anyString());
+    } finally {
+      fixture.execute("DROP TRIGGER fail_first_recovery_update");
+    }
+  }
+
+  @Test
+  void failedCompletionIsNotRetriedAsASendFailureAndDoesNotStopTheBatch() throws Exception {
+    seed(1, "bad-completion");
+    seed(2, "good-completion");
+    createFailureTrigger("NEW.status='REPLAYED'");
+    try {
+      assertDoesNotThrow(() -> recovery.replayDue());
+      assertEquals("REPLAY_PENDING", row(1).get("status"));
+      assertEquals(0, ((Number) row(1).get("attempts")).intValue());
+      assertNotNull(row(1).get("lease_owner"));
+      assertEquals(CREATED.plusSeconds(30), row(1).get("lease_until"));
+      assertEquals("REPLAYED", row(2).get("status"));
+      assertEquals(2, sent.size());
+      verify(mapper, times(1))
+          .markReplayed(eq(1L), anyString(), eq(1), any(LocalDateTime.class), isNull());
+      verify(mapper, never())
+          .markReplayed(eq(1L), anyString(), anyInt(), any(LocalDateTime.class), anyString());
+    } finally {
+      fixture.execute("DROP TRIGGER fail_first_recovery_update");
+    }
+  }
+
+  @Test
+  void failedVerificationWriteDoesNotIssueAnotherStateWriteOrBlockTheNextRecord() throws Exception {
+    seed(1, "bad-verification");
+    seed(2, "good-verification");
+    when(stock.seckillReservationFact(eq("202610-bad-verification"), anyString()))
+        .thenReturn(ApiResponse.ok(Map.of("status", "NOT_FOUND")));
+    createFailureTrigger("NEW.status<>OLD.status");
+    try {
+      assertDoesNotThrow(() -> recovery.replayDue());
+      assertEquals("REPLAY_PENDING", row(1).get("status"));
+      assertNotNull(row(1).get("lease_owner"));
+      assertNull(row(1).get("last_error"));
+      assertEquals("REPLAYED", row(2).get("status"));
+      assertEquals(1, sent.size());
+      verify(mapper, times(1))
+          .markVerification(
+              eq(1L), anyString(), eq("QUARANTINED"), anyString(), any(LocalDateTime.class));
+      verify(mapper, never())
+          .markVerification(
+              eq(1L), anyString(), eq("VERIFYING"), anyString(), any(LocalDateTime.class));
+    } finally {
+      fixture.execute("DROP TRIGGER fail_first_recovery_update");
+    }
+  }
+
+  /** 仅隔离测试库中的首行更新失败，其他记录仍可读写。 */
+  private void createFailureTrigger(String condition) {
+    fixture.execute(
+        "CREATE TRIGGER fail_first_recovery_update BEFORE UPDATE ON seckill_message_recovery FOR EACH ROW BEGIN IF OLD.id=1 AND ("
+            + condition
+            + ") THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture recovery update failure'; END IF; END");
+  }
+
+  @Test
   void loneSurrogateAddressCannotReuseTheQuestionMarkFingerprint() throws Exception {
     seed(1, "unicode-address");
     String hash = SeckillRequestFingerprint.hash(1, 2, 3, 1, "{\"name\":\"?\"}");

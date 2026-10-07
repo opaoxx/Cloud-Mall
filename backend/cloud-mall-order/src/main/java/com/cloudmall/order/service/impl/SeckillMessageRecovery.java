@@ -213,51 +213,54 @@ public class SeckillMessageRecovery {
       if (Thread.currentThread().isInterrupted()) return;
       long id = ((Number) candidate.get("id")).longValue();
       String owner = UUID.randomUUID().toString();
-      // 2. 每条记录独立采样，并在外部 Stock 查询前核验当前归属。
-      LocalDateTime claimNow = recoveryNow();
-      if (recoveryMapper.claim(id, owner, claimNow.plusSeconds(30), claimNow) != 1) continue;
-      Map<String, Object> row = claimedRecord(id, owner);
-      if (row == null) continue;
-      Integer attempts = nextAttempt(row.get("attempts"));
-      if (attempts == null) {
-        LOGGER.warn("秒杀恢复计数非法，保留原事实并跳过，id={}", id);
-        continue;
-      }
-      if (!verifyStockFact(row, id, owner)) continue;
       try {
-        String eventId = String.valueOf(row.get("event_id"));
-        CorrelationData correlation = new CorrelationData(eventId);
-        MessageProperties properties = new MessageProperties();
-        properties.setContentType("application/json");
-        properties.setMessageId(eventId);
-        Message outbound =
-            new Message(
-                String.valueOf(row.get("payload")).getBytes(StandardCharsets.UTF_8), properties);
-        // 3. 慢 RPC 后再检查；发送开始后的竞态由原幂等和17J完成写CAS约束。
-        if (!ownsCurrentLease(id, owner)) continue;
-        rabbitTemplate.send(
-            OrderMessagingConfiguration.SECKILL_EXCHANGE, "", outbound, correlation);
-        CorrelationData.Confirm confirm = correlation.getFuture().get(5000, TimeUnit.MILLISECONDS);
-        if (confirm == null || !confirm.isAck() || correlation.getReturnedMessage() != null)
-          throw new IllegalStateException("秒杀事件未收到有效 publisher confirm");
+        // 2. 每条记录独立采样，并在外部 Stock 查询前核验当前归属。
+        LocalDateTime claimNow = recoveryNow();
+        if (recoveryMapper.claim(id, owner, claimNow.plusSeconds(30), claimNow) != 1) continue;
+        Map<String, Object> row = claimedRecord(id, owner);
+        if (row == null) continue;
+        Integer attempts = nextAttempt(row.get("attempts"));
+        if (attempts == null) {
+          LOGGER.warn("秒杀恢复计数非法，保留原事实并跳过，id={}", id);
+          continue;
+        }
+        if (!verifyStockFact(row, id, owner)) continue;
+        String publishError = null;
+        try {
+          String eventId = String.valueOf(row.get("event_id"));
+          CorrelationData correlation = new CorrelationData(eventId);
+          MessageProperties properties = new MessageProperties();
+          properties.setContentType("application/json");
+          properties.setMessageId(eventId);
+          Message outbound =
+              new Message(
+                  String.valueOf(row.get("payload")).getBytes(StandardCharsets.UTF_8), properties);
+          // 3. 慢 RPC 后再检查；发送开始后的竞态由原幂等和17J完成写CAS约束。
+          if (!ownsCurrentLease(id, owner)) continue;
+          rabbitTemplate.send(
+              OrderMessagingConfiguration.SECKILL_EXCHANGE, "", outbound, correlation);
+          CorrelationData.Confirm confirm =
+              correlation.getFuture().get(5000, TimeUnit.MILLISECONDS);
+          if (confirm == null || !confirm.isAck() || correlation.getReturnedMessage() != null)
+            throw new IllegalStateException("秒杀事件未收到有效 publisher confirm");
+        } catch (InterruptedException interruptedWait) {
+          // 已发送消息结果未知；保留原租约自然到期，不完成写，也不继续认领本批后续行。
+          Thread.currentThread().interrupt();
+          LOGGER.warn("秒杀恢复确认等待被中断，停止本批，id={}", id, interruptedWait);
+          return;
+        } catch (Exception exception) {
+          publishError = exception.toString();
+        }
+        // 4. 完成写只尝试一次；数据库失败不能重新归类为发送失败。
         recoveryMapper.markReplayed(
             id,
             owner,
             attempts,
             recoveryNow().plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))),
-            null);
-      } catch (InterruptedException interruptedWait) {
-        // 已发送消息结果未知；保留原租约自然到期，不完成写，也不继续认领本批后续行。
-        Thread.currentThread().interrupt();
-        LOGGER.warn("秒杀恢复确认等待被中断，停止本批，id={}", id, interruptedWait);
-        return;
-      } catch (Exception exception) {
-        recoveryMapper.markReplayed(
-            id,
-            owner,
-            attempts,
-            recoveryNow().plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))),
-            exception.toString());
+            publishError);
+      } catch (DataAccessException recordFailure) {
+        // 失败行保留事实/可能存在的租约，后续候选可独立处理。
+        LOGGER.warn("秒杀恢复单条数据库操作失败，本次跳过，id={}", id, recordFailure);
       }
     }
   }
@@ -364,6 +367,9 @@ public class SeckillMessageRecovery {
         return false;
       }
       return true;
+    } catch (DataAccessException databaseFailure) {
+      // 状态写失败交给候选级隔离，禁止再次写 VERIFYING 遮蔽原错误。
+      throw databaseFailure;
     } catch (Exception exception) {
       recoveryMapper.markVerification(
           id, owner, "VERIFYING", exception.toString(), recoveryNow().plusSeconds(30));

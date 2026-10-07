@@ -670,6 +670,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 沿用 common 指纹测试及 Stock/Order 地址 MySQL 回归验证：非法字符在 Stock 认领前拒绝，Order 不落单、恢复不重放并保留证据。现有业务进程未重启，新构建需部署并重启后生效；历史地址和指纹不自动修复。
 
+### 恢复批次隔离单条数据库失败（第17轮Y）
+
+候选记录的认领或状态写发生 `DataAccessException` 时，只记录该条失败并继续后续候选，保留原事实和可能存在的租约。发送/确认与完成写分开，`markReplayed` 最多尝试一次；验真状态写失败也不再追加一次 `VERIFYING` 写入。扫描查询失败仍向外传播，中断仍停止批次。
+
+`SeckillRecoveryDispatchMySqlIT` 在自有 MySQL 库以触发器注入首行三类更新失败，验证第二行可继续、失败行未被猜测修复、无重复完成写。原50条上限、退避和租约规则保持；这不保证数据库整体不可用时后续记录成功，消息/Feign仍为替身。
+
 ## 验证命令
 
 ```bash
