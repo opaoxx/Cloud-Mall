@@ -15,6 +15,7 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -112,6 +113,74 @@ class SeckillEventTimeMySqlIT {
   static void cleanupSource() {
     if (source != null) assertEquals(sourceFingerprint, fingerprint());
     System.out.println("CM17G original Stock tables and checksums unchanged");
+  }
+
+  @Test
+  void explicitPayloadIdentityConflictsStayUnchangedAndAreNotPublished() throws Exception {
+    for (String field : List.of("eventId", "requestHash")) {
+      for (Object value : new Object[] {null, "different", 123}) {
+        fixture.execute("DELETE FROM seckill_order_outbox");
+        fixture.execute("DELETE FROM seckill_reservation");
+        String orderNo = "202512-inner-identity";
+        seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+        var serializer = new ObjectMapper();
+        var payload =
+            serializer.readValue(
+                storedPayload(orderNo),
+                new com.fasterxml.jackson.core.type.TypeReference<
+                    LinkedHashMap<String, Object>>() {});
+        payload.put(field, value);
+        fixture.update(
+            "UPDATE seckill_order_outbox SET payload=? WHERE order_no=?",
+            serializer.writeValueAsString(payload),
+            orderNo);
+        String original = storedPayload(orderNo);
+        String originalHash =
+            fixture.queryForObject(
+                "SELECT request_hash FROM seckill_order_outbox WHERE order_no=?",
+                String.class,
+                orderNo);
+        due(orderNo);
+        List<Map<String, Object>> sent = new ArrayList<>();
+        dispatcher(sender(sent, false)).dispatch();
+        assertTrue(sent.isEmpty(), field);
+        assertEquals("UNKNOWN", state(orderNo));
+        assertEquals(original, storedPayload(orderNo));
+        assertEquals(
+            originalHash,
+            fixture.queryForObject(
+                "SELECT request_hash FROM seckill_order_outbox WHERE order_no=?",
+                String.class,
+                orderNo));
+        assertTrue(
+            fixture
+                .queryForObject(
+                    "SELECT last_error FROM seckill_order_outbox WHERE order_no=?",
+                    String.class,
+                    orderNo)
+                .startsWith("SECKILL_EVENT_TIME_UNVERIFIED:"));
+      }
+    }
+  }
+
+  @Test
+  void matchingPayloadMetadataOrLegacyAbsenceBothPublishWithoutRewritingStorage() throws Exception {
+    for (boolean explicit : List.of(false, true)) {
+      String orderNo = explicit ? "202512-inner-valid" : "202512-inner-absent";
+      seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+      if (explicit)
+        fixture.update(
+            "UPDATE seckill_order_outbox SET payload=JSON_SET(payload,'$.eventId',event_id,'$.requestHash',UPPER(request_hash)) WHERE order_no=?",
+            orderNo);
+      String original = storedPayload(orderNo);
+      due(orderNo);
+      List<Map<String, Object>> sent = new ArrayList<>();
+      dispatcher(sender(sent, false)).dispatch();
+      assertEquals(1, sent.size());
+      assertEquals("PUBLISHED", state(orderNo));
+      assertEquals(original, storedPayload(orderNo));
+      assertEquals(SeckillRequestFingerprint.eventId(orderNo), sent.get(0).get("eventId"));
+    }
   }
 
   @Test

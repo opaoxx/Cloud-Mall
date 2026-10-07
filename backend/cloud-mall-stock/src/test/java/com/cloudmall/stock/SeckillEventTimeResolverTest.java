@@ -14,6 +14,42 @@ import org.junit.jupiter.api.Test;
 
 /** 投递前的时间和不可变事实核验，避免将缺失证据当作当前时间。 */
 class SeckillEventTimeResolverTest {
+  @Test
+  void explicitPayloadIdentityCannotBeSilentlyReplaced() {
+    for (String field : List.of("eventId", "requestHash")) {
+      for (Object invalid : new Object[] {null, "", " ", 123, "different"}) {
+        Map<String, Object> payload = payload();
+        payload.put(field, invalid);
+        Map<String, Object> before = new LinkedHashMap<>(payload);
+        assertUnverified(outbox(), payload, reservation());
+        assertEquals(before, payload);
+      }
+    }
+    for (String invalidEvent :
+        List.of(
+            SeckillRequestFingerprint.eventId(ORDER).toUpperCase(java.util.Locale.ROOT),
+            SeckillRequestFingerprint.eventId(ORDER) + " ")) {
+      Map<String, Object> payload = payload();
+      payload.put("eventId", invalidEvent);
+      assertUnverified(outbox(), payload, reservation());
+    }
+  }
+
+  @Test
+  void matchingExplicitMetadataAndAbsentLegacyFieldsRemainCompatible() {
+    Map<String, Object> payload = payload();
+    assertEquals(
+        CREATED.atOffset(java.time.ZoneOffset.ofHours(8)),
+        SeckillEventTimeResolver.resolve(outbox(), payload, reservation()));
+    payload.put("eventId", SeckillRequestFingerprint.eventId(ORDER));
+    payload.put("requestHash", HASH.toUpperCase(java.util.Locale.ROOT));
+    Map<String, Object> before = new LinkedHashMap<>(payload);
+    assertEquals(
+        CREATED.atOffset(java.time.ZoneOffset.ofHours(8)),
+        SeckillEventTimeResolver.resolve(outbox(), payload, reservation()));
+    assertEquals(before, payload);
+  }
+
   /** 同月份且已对齐毫秒的首次创建时间。 */
   private static final LocalDateTime CREATED = LocalDateTime.parse("2026-12-31T23:59:59.999");
 

@@ -736,6 +736,12 @@ outbox 扫描只用扫描时刻选候选，每条认领重新采样上海毫秒�
 
 `SeckillEventTimeMySqlIT` 验证预中断零扫描、marker 读取/提交、claim、租约查询和 confirm 的中断边界；`SeckillOutboxRecoveryRaceTest` 验证中断后不追加受理竞争查询。Redis/Rabbit 为替身，不保证全链路取消或撤回在途消息，也不从异常 cause 猜测中断。
 
+### Stock payload 已有身份字段必须匹配（第17轮AJ）
+
+outbox payload 若已包含 `eventId/requestHash`，投递前必须核验：事件号为非空字符串且与台账精确一致，请求指纹为非空字符串且与已验证的台账指纹一致（允许合法十六进制大小写差异）。null、类型错误或冲突不能被 envelope 覆盖后掩盖，沿原失败退避保留原载荷，不发布。
+
+新旧 payload 完全缺失这两个字段时，仍由原 envelope 逻辑补全，不回写存储。`SeckillEventTimeResolverTest` 和 `SeckillEventTimeMySqlIT` 覆盖显式冲突、合法字段与缺失兼容；eventType/version 的既有行为不变，Rabbit为替身，历史数据不自动修复。
+
 ## 验证命令
 
 ```bash

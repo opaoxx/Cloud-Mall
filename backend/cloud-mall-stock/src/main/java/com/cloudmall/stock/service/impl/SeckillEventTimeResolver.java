@@ -50,7 +50,7 @@ public final class SeckillEventTimeResolver {
    * 核对 outbox、受理记录和载荷归属后返回不随投递重试变化的创建时间。
    *
    * @param outbox 本次认领的 outbox 行，包含原事件号/订单号/幂等键/哈希
-   * @param payload outbox 中反序列化的历史 JSON，不在此修改
+   * @param payload outbox 中反序列化的历史 JSON，已有事件号/指纹必须匹配，不在此修改
    * @param reservation 同订单号唯一受理记录，含持久 created_at
    * @return 已核验的持久时间；旧载荷缺字段时仅供调用方补发送 envelope
    * @throws IllegalStateException 证据不足或冲突；调用方应保留原事件并退避，不发布
@@ -91,6 +91,16 @@ public final class SeckillEventTimeResolver {
       }
     } catch (IllegalArgumentException invalidPayload) {
       throw unverified("invalid payload fingerprint");
+    }
+
+    // 缺字段沿用旧载荷兼容，但显式字段不能被 envelope 覆盖后掩盖冲突。
+    if (payload.containsKey("eventId")
+        && !text(outbox, "event_id").equals(text(payload, "eventId"))) {
+      throw unverified("explicit payload event mismatch");
+    }
+    if (payload.containsKey("requestHash")
+        && !hash.equalsIgnoreCase(text(payload, "requestHash"))) {
+      throw unverified("explicit payload hash mismatch");
     }
 
     // 2. 受理表 DATETIME 本地字段必须已是合法毫秒，且属于原订单号的月份。
