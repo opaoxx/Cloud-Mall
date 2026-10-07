@@ -190,14 +190,16 @@ class PayTccRecoveryScanMySqlIT {
   void expiredOwnerCannotReleaseNewLeaseOrChangeBusinessFacts() {
     insert(1, "handoff", "COMMIT_REQUESTED", "COMMIT");
     Map<String, Object> before = business("handoff");
-    assertNotNull(store.claimRecovery("handoff", "old-token", NOW.plusSeconds(1), NOW));
+    LocalDateTime current = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
     assertNotNull(
-        store.claimRecovery("handoff", "new-token", NOW.plusSeconds(62), NOW.plusSeconds(2)));
-    assertFalse(store.finishRecovery("handoff", "old-token", NOW.plusDays(1), "late"));
+        store.claimRecovery(
+            "handoff", "old-token", current.minusSeconds(1), current.minusSeconds(2)));
+    assertNotNull(store.claimRecovery("handoff", "new-token", current.plusSeconds(60), current));
+    assertFalse(store.finishRecovery("handoff", "old-token", current.plusDays(1), "late"));
     assertEquals(
         "new-token",
         fixture.queryForObject("SELECT recovery_owner FROM pay_tcc_execution", String.class));
-    assertTrue(store.finishRecovery("handoff", "new-token", NOW.plusSeconds(12), "pending"));
+    assertTrue(store.finishRecovery("handoff", "new-token", current.plusSeconds(12), "pending"));
     assertEquals(before, business("handoff"));
     assertEquals(
         2,
@@ -208,14 +210,109 @@ class PayTccRecoveryScanMySqlIT {
   void retryCounterSaturatesButNeverPermanentlyStopsRecovery() {
     insert(1, "old-unknown", "UNKNOWN", "NONE");
     fixture.update("UPDATE pay_tcc_execution SET recovery_attempts=31");
-    assertEquals(1, store.findDue(NOW, 20).size());
+    LocalDateTime current =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    assertEquals(1, store.findDue(current, 20).size());
     PayTccExecutionPO claimed =
-        store.claimRecovery("old-unknown", "token", NOW.plusSeconds(60), NOW);
+        store.claimRecovery("old-unknown", "token", current.plusSeconds(60), current);
     assertNotNull(claimed);
     assertEquals(31, claimed.recoveryAttempts);
-    assertTrue(store.finishRecovery("old-unknown", "token", NOW.plusSeconds(300), "still unknown"));
-    assertTrue(store.findDue(NOW.plusSeconds(299), 20).isEmpty());
-    assertEquals(1, store.findDue(NOW.plusSeconds(300), 20).size());
+    assertTrue(
+        store.finishRecovery("old-unknown", "token", current.plusSeconds(300), "still unknown"));
+    assertTrue(store.findDue(current.plusSeconds(299), 20).isEmpty());
+    assertEquals(1, store.findDue(current.plusSeconds(300), 20).size());
+  }
+
+  /** 尚未被新owner接手时，过期worker也不能清租约或延后恢复。 */
+  @Test
+  void expiredRecoveryOwnerCannotDeferUnclaimedWork() {
+    insert(1, "expired-finish", "UNKNOWN", "NONE");
+    LocalDateTime current = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+    assertNotNull(
+        store.claimRecovery(
+            "expired-finish", "expired-owner", current.minusSeconds(1), current.minusSeconds(2)));
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE pay_no='expired-finish'");
+    assertFalse(
+        store.finishRecovery("expired-finish", "expired-owner", current.plusMinutes(5), "late"));
+    assertEquals(
+        before,
+        fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE pay_no='expired-finish'"));
+    assertNotNull(
+        store.claimRecovery("expired-finish", "next-owner", current.plusMinutes(1), current));
+    assertEquals(
+        "next-owner",
+        fixture.queryForObject(
+            "SELECT recovery_owner FROM pay_tcc_execution WHERE pay_no='expired-finish'",
+            String.class));
+  }
+
+  /** finish必须精确匹配支付号和token，不能沿MySQL大小写不敏感比较释放租约。 */
+  @Test
+  void recoveryFinishRequiresExactTokenAndPayNo() {
+    insert(1, "exact-finish", "COMMIT_REQUESTED", "COMMIT");
+    LocalDateTime current = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+    assertNotNull(
+        store.claimRecovery("exact-finish", "exact-owner", current.plusMinutes(1), current));
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE pay_no='exact-finish'");
+    assertFalse(
+        store.finishRecovery("exact-finish", "EXACT-OWNER", current.plusMinutes(5), "wrong token"));
+    assertFalse(
+        store.finishRecovery("EXACT-FINISH", "exact-owner", current.plusMinutes(5), "wrong payNo"));
+    assertEquals(
+        before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE pay_no='exact-finish'"));
+    assertTrue(
+        store.finishRecovery("exact-finish", "exact-owner", current.plusSeconds(5), "pending"));
+    assertEquals(
+        "COMMIT_REQUESTED",
+        fixture.queryForObject(
+            "SELECT state FROM pay_tcc_execution WHERE pay_no='exact-finish'", String.class));
+  }
+
+  /** 显式固定now核验严格到期边界；非有效lease完全不改变行，资金状态不参与改写。 */
+  @Test
+  void finishSqlRequiresStrictlyFutureLeaseAndPreservesBusinessFacts() {
+    int identifier = 1;
+    for (String boundary : List.of("expired", "equal", "missing", "future")) {
+      String payNo = "finish-" + boundary;
+      insert(identifier++, payNo, "ROLLBACK_REQUESTED", "ROLLBACK");
+      LocalDateTime leaseUntil =
+          switch (boundary) {
+            case "expired" -> NOW.minusSeconds(1);
+            case "equal" -> NOW;
+            case "future" -> NOW.plusNanos(1_000_000);
+            default -> null;
+          };
+      fixture.update(
+          "UPDATE pay_tcc_execution SET recovery_owner='owner',recovery_lease_until=? WHERE"
+              + " pay_no=?",
+          leaseUntil,
+          payNo);
+      Map<String, Object> before =
+          fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE pay_no=?", payNo);
+      Map<String, Object> funds = business(payNo);
+      int updated = mapper.finishRecovery(payNo, "owner", NOW.plusMinutes(1), "pending", NOW);
+      assertEquals("future".equals(boundary) ? 1 : 0, updated, boundary);
+      assertEquals(funds, business(payNo));
+      if (updated == 0)
+        assertEquals(
+            before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE pay_no=?", payNo));
+      else {
+        assertNull(
+            fixture.queryForObject(
+                "SELECT recovery_owner FROM pay_tcc_execution WHERE pay_no=?",
+                String.class,
+                payNo));
+        assertEquals(
+            NOW.plusMinutes(1),
+            fixture.queryForObject(
+                "SELECT next_recovery_at FROM pay_tcc_execution WHERE pay_no=?",
+                LocalDateTime.class,
+                payNo));
+      }
+    }
   }
 
   @Test

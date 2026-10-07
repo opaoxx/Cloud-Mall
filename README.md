@@ -430,6 +430,12 @@ Order CANCELLED且库存回滚成功后使用原唯一退款键结清；Order PA
 
 租约/attempts/原COMMIT保持不变，关闭取消开关后已有意图仍由delivery恢复。callback保持RECEIVED_FAILURE，最终SUCCESS/REFUNDED的失败回调仍返回既有409。该能力不包含已完成支付的售后退款；新状态须由支持16R的Pay实例恢复。
 
+### execution 恢复完成时的租约校验（第16轮S）
+
+原资金恢复和回滚结果投影共用的finishRecovery，只有支付号/token精确匹配且租约仍有效时才能清除租约、更新退避时间。过期但尚未被接手的旧执行者也不能延后重试；新执行者仍可按原规则认领。时间由Store按上海毫秒精度采样，四参数调用接口保持不变。
+
+这只保护恢复元数据，不改变execution资金状态、决议或XID。缺少原XID的BEGIN_UNKNOWN仍保留待核验，不能通过重新begin/Try或猜回滚处理。
+
 ## 验证命令
 
 ```bash
@@ -537,7 +543,7 @@ mvn -pl backend/cloud-mall-pay -am test `
   '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
 ```
 
-前者在关闭 Seata 的随机 `cm16b3_scan_*` 库验证 8 项 SQL、租约竞争和旧数据迁移；后者用真实 Pay/User/TC 验证 5 项自动提交/取消、NONE 只读、未知 begin 不占窗口，以及 Pay 重启后的定时恢复，日志位于 `target/cm16b3-automatic/`。恢复 claim/RPC/release 各窗口的独立进程中断没有逐一演练；token 过期与迟到完成保护已有确定性 MySQL 验证。
+前者在关闭 Seata 的随机 `cm16b3_scan_*` 库验证14项SQL、租约竞争、过期完成拒绝和旧数据迁移；后者用真实Pay/User/TC验证5项自动提交/取消、NONE只读、未知begin不占窗口，以及Pay重启后的定时恢复，日志位于 `target/cm16b3-automatic/`。恢复claim/RPC/release各窗口的独立进程中断没有逐一演练；token过期与迟到完成保护已有确定性MySQL验证。
 
 16C 四服务交付验收先构建服务 Jar，需要 Docker、本地中间件、`redis:7.0` 镜像及 RabbitMQ management（15674）：
 

@@ -168,9 +168,7 @@ class PayTccRecoveryAutomaticIT {
     properties.put("password", "root");
     naming = NacosFactory.createNamingService(properties);
     for (int index = 0; index < 2; index++) {
-      try (ServerSocket socket = new ServerSocket(0)) {
-        userPorts[index] = socket.getLocalPort();
-      }
+      userPorts[index] = availablePort();
       proxies[index] = new TccResponseProxy(userPorts[index]);
       startUser(index);
     }
@@ -458,7 +456,7 @@ class PayTccRecoveryAutomaticIT {
   /** 只调整独立夹具的调度时间，不变更任何业务/XID/决议字段。 */
   private void due(String payNo) {
     payDb.update(
-        "UPDATE pay_tcc_execution SET next_recovery_at=DATE_SUB(NOW(3),INTERVAL 1 SECOND) WHERE"
+        "UPDATE pay_tcc_execution SET next_recovery_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
             + " pay_no=?",
         payNo);
   }
@@ -560,9 +558,7 @@ class PayTccRecoveryAutomaticIT {
 
   /** 测试子 JVM 只注册自己的稳定 RM 身份和回环控制端口。 */
   private void startPay(String fault, boolean recoveryEnabled) throws Exception {
-    try (ServerSocket socket = new ServerSocket(0)) {
-      controlPort = socket.getLocalPort();
-    }
+    controlPort = availablePort();
     controlKey = UUID.randomUUID().toString();
     String generation = Long.toString(System.nanoTime());
     childLog = artifacts.resolve("pay-" + generation + ".log");
@@ -735,6 +731,19 @@ class PayTccRecoveryAutomaticIT {
     return source.queryForList(
         "CHECKSUM TABLE"
             + " cloudmall_user.mall_user,cloudmall_user.balance_ledger,cloudmall_user.balance_debit_attempt,cloudmall_user.balance_tcc_debit,cloudmall_pay.pay_record,cloudmall_pay.pay_debit_intent,cloudmall_pay.pay_callback_log");
+  }
+
+  /** 与其他真实IT一致，避开本机1024..15000出站临时端口段。 */
+  private static int availablePort() throws Exception {
+    for (int attempt = 0; attempt < 128; attempt++) {
+      int candidate = ThreadLocalRandom.current().nextInt(22000, 42000);
+      try (ServerSocket socket = new ServerSocket(candidate)) {
+        return socket.getLocalPort();
+      } catch (java.io.IOException unavailable) {
+        // 尝试下一独立测试端口。
+      }
+    }
+    throw new IllegalStateException("没有可用隔离测试端口");
   }
 
   private static void await(BooleanSupplier condition, int seconds) throws Exception {

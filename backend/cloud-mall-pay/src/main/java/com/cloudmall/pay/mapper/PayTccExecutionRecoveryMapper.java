@@ -118,16 +118,18 @@ public interface PayTccExecutionRecoveryMapper {
       @Param("leaseUntil") LocalDateTime leaseUntil,
       @Param("now") LocalDateTime now);
 
-  /** 只按 token 释放恢复 lease 并更新退避元数据，不改变业务 execution 字段。 */
+  /** 仅精确匹配且仍有效的token可释放恢复租约，不改变execution资金字段。 */
   @Update(
       "UPDATE pay_tcc_execution SET recovery_owner=NULL,recovery_lease_until=NULL,"
-          + " next_recovery_at=#{nextAt},recovery_last_error=#{error} WHERE pay_no=#{payNo}"
-          + " AND recovery_owner=#{token}")
+          + " next_recovery_at=#{nextAt},recovery_last_error=#{error} WHERE pay_no=#{payNo} AND"
+          + " BINARY pay_no=BINARY #{payNo} AND BINARY recovery_owner=BINARY #{token} AND"
+          + " recovery_lease_until IS NOT NULL AND recovery_lease_until>#{now}")
   int finishRecovery(
       @Param("payNo") String payNo,
       @Param("token") String token,
       @Param("nextAt") LocalDateTime nextAt,
-      @Param("error") String error);
+      @Param("error") String error,
+      @Param("now") LocalDateTime now);
 
   /** 逐列检查并幂等补充恢复调度字段，列名和定义仅来自固定白名单。 */
   default void ensureSchema() {

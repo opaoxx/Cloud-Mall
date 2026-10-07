@@ -5,6 +5,8 @@ import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionRecoveryMapper;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -65,10 +67,14 @@ public class PayTccExecutionRecoveryStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 只允许原 token 写调度元数据，永远不修改 execution 资金状态或决议。 */
+  /** 只允许仍有效的原token写调度元数据，永远不修改execution资金状态或决议。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean finishRecovery(String payNo, String token, LocalDateTime nextAt, String error) {
+    // 1. 保留原错误长度限制和调用方计算的退避时间。
     if (error != null && error.length() > 512) error = error.substring(0, 512);
-    return recovery.finishRecovery(payNo, token, nextAt, error) == 1;
+    // 2. 使用同一次上海毫秒时间，拒绝过期或已被接管的恢复租约。
+    LocalDateTime currentTime =
+        LocalDateTime.now(ZoneId.of("Asia/Shanghai")).truncatedTo(ChronoUnit.MILLIS);
+    return recovery.finishRecovery(payNo, token, nextAt, error, currentTime) == 1;
   }
 }
