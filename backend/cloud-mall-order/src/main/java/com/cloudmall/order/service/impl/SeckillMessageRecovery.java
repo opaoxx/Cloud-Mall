@@ -326,11 +326,9 @@ public class SeckillMessageRecovery {
       }
       // 原事件自身已有明确错误时不能把问题归因于远端证据暂缺。
       String calculatedHash = tryRequestHash(event);
-      if (!hasCompleteEvidence(event)
-          || calculatedHash == null
-          || !calculatedHash.equalsIgnoreCase(String.valueOf(event.get("requestHash")))) {
+      if (!hasCompleteEvidence(event) || !matchesStoredIdentity(row, event, calculatedHash)) {
         recoveryMapper.markVerification(
-            id, owner, "CONFLICT", "原事件核心字段或请求指纹无效", recoveryNow().plusMinutes(5));
+            id, owner, "CONFLICT", "原事件核心字段或持久身份/请求指纹无效", recoveryNow().plusMinutes(5));
         return false;
       }
       var response =
@@ -375,6 +373,20 @@ public class SeckillMessageRecovery {
           id, owner, "VERIFYING", exception.toString(), recoveryNow().plusSeconds(30));
     }
     return false;
+  }
+
+  /** 台账与消息体必须保留同一精确事件身份；哈希只兼容合法十六进制大小写，不猜缺失值。 */
+  private static boolean matchesStoredIdentity(
+      Map<String, Object> row, Map<String, Object> event, String calculatedHash) {
+    return row.get("event_id") instanceof String storedEventId
+        && !storedEventId.isBlank()
+        && event.get("eventId") instanceof String payloadEventId
+        && storedEventId.equals(payloadEventId)
+        && row.get("request_hash") instanceof String storedHash
+        && event.get("requestHash") instanceof String payloadHash
+        && calculatedHash != null
+        && calculatedHash.equalsIgnoreCase(storedHash)
+        && calculatedHash.equalsIgnoreCase(payloadHash);
   }
 
   /** 缺失或空白只能说明证据不完整；字段齐全后再沿既有规则核对身份。 */

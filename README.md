@@ -676,6 +676,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryDispatchMySqlIT` 在自有 MySQL 库以触发器注入首行三类更新失败，验证第二行可继续、失败行未被猜测修复、无重复完成写。原50条上限、退避和租约规则保持；这不保证数据库整体不可用时后续记录成功，消息/Feign仍为替身。
 
+### 恢复发送前核对台账与消息体身份（第17轮Z）
+
+原时间校验通过后，恢复器在查询 Stock 前核对台账与消息体：eventId 必须为非空字符串且精确相同，双方 requestHash 必须为字符串并与实际业务指纹一致（兼容合法十六进制大小写）。缺失、类型错误或不一致进入原 `CONFLICT`/5分钟退避，保留原事件号、哈希和载荷，不猜值修补。
+
+`SeckillRecoveryDispatchMySqlIT` 覆盖元数据大小写/尾空格/不同事件号、缺失或数值型内部身份、哈希冲突及合法旧格式重放。无需 Stock 提供 eventId，原 legacy 兼容与租约保护保持；历史异常记录不批量改写，Stock/Rabbit 为替身。
+
 ## 验证命令
 
 ```bash

@@ -112,6 +112,94 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void mismatchedStoredIdentityIsQuarantinedBeforeStockOrRabbit() throws Exception {
+    for (String fault :
+        List.of(
+            "outer-case",
+            "outer-space",
+            "outer-other",
+            "missing-inner",
+            "number-inner",
+            "outer-hash",
+            "outer-blank",
+            "number-hash")) {
+      fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+      sent.clear();
+      clearInvocations(stock);
+      seed(1, "stored-identity");
+      switch (fault) {
+        case "outer-case" ->
+            fixture.update(
+                "UPDATE seckill_message_recovery SET event_id=UPPER(event_id) WHERE id=1");
+        case "outer-space" ->
+            fixture.update(
+                "UPDATE seckill_message_recovery SET event_id=CONCAT(event_id,' ') WHERE id=1");
+        case "outer-other" ->
+            fixture.update("UPDATE seckill_message_recovery SET event_id='other-event' WHERE id=1");
+        case "missing-inner" ->
+            fixture.update(
+                "UPDATE seckill_message_recovery SET payload=JSON_REMOVE(payload,'$.eventId') WHERE id=1");
+        case "number-inner" ->
+            fixture.update(
+                "UPDATE seckill_message_recovery SET payload=JSON_SET(payload,'$.eventId',123) WHERE id=1");
+        case "outer-hash" ->
+            fixture.update(
+                "UPDATE seckill_message_recovery SET request_hash=? WHERE id=1", "b".repeat(64));
+        case "outer-blank" ->
+            fixture.update("UPDATE seckill_message_recovery SET event_id=' ' WHERE id=1");
+        case "number-hash" ->
+            fixture.update(
+                "UPDATE seckill_message_recovery SET payload=JSON_SET(payload,'$.requestHash',123) WHERE id=1");
+        default -> throw new IllegalArgumentException(fault);
+      }
+      Map<String, Object> before = row(1);
+      // 返回完整匹配业务事实，确保阻断来自台账身份核验，而非Stock替身查询不到行。
+      Map<String, Object> fact =
+          new ObjectMapper()
+              .readValue(
+                  String.valueOf(before.get("payload")),
+                  new com.fasterxml.jackson.core.type.TypeReference<
+                      java.util.LinkedHashMap<String, Object>>() {});
+      fact.put("status", "ACCEPTED");
+      when(stock.seckillReservationFact(anyString(), anyString())).thenReturn(ApiResponse.ok(fact));
+      recovery.replayDue();
+      assertEquals("CONFLICT", row(1).get("status"), fault);
+      for (String field : List.of("event_id", "request_hash", "payload", "attempts", "created_at"))
+        assertEquals(before.get(field), row(1).get(field), field);
+      assertNull(row(1).get("lease_owner"));
+      assertEquals(CREATED.plusMinutes(5), row(1).get("next_retry_at"));
+      verifyNoInteractions(stock);
+      assertTrue(sent.isEmpty());
+    }
+  }
+
+  @Test
+  void matchingLegacyIdentityAndHexCaseRemainReplayable() throws Exception {
+    seed(1, "legacy-identity");
+    String legacyId = "legacy-seckill:original";
+    fixture.update(
+        "UPDATE seckill_message_recovery SET event_id=?,request_hash=UPPER(request_hash),payload=JSON_SET(payload,'$.eventId',?,'$.requestHash',UPPER(request_hash)) WHERE id=1",
+        legacyId,
+        legacyId);
+    Map<String, Object> before = row(1);
+    Map<String, Object> fact =
+        new ObjectMapper()
+            .readValue(
+                String.valueOf(before.get("payload")),
+                new com.fasterxml.jackson.core.type.TypeReference<
+                    java.util.LinkedHashMap<String, Object>>() {});
+    fact.put("status", "ACCEPTED");
+    when(stock.seckillReservationFact(anyString(), anyString())).thenReturn(ApiResponse.ok(fact));
+    recovery.replayDue();
+    assertEquals("REPLAYED", row(1).get("status"));
+    assertEquals(1, sent.size());
+    assertEquals(legacyId, sent.get(0).getMessageProperties().getMessageId());
+    assertEquals(
+        before.get("payload"),
+        new String(sent.get(0).getBody(), java.nio.charset.StandardCharsets.UTF_8));
+  }
+
+  @Test
   void scanFailuresAndUnexpectedClaimErrorsAreNotSilentlySwallowed() throws Exception {
     seed(1, "exception-boundary");
     Map<String, Object> before = row(1);
