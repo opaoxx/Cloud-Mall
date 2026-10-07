@@ -46,9 +46,11 @@
 - 上界正好落在下月月初时，exclusive 上界排除该边界，inclusive 上界按该毫秒瞬时所属月份处理；月末最后一毫秒之后的时间不再包含前一月；
 - 无下界或无上界的无界范围不允许广播全库，直接 fail closed；
 - 范围跨越 available target 缺失的月份时整体 fail closed，不能返回部分月份结果；
-- 空 range 的返回方式必须先通过 Sharding-JDBC 4.1.1 unit/IT 观察并冻结：若框架接受空 target 集合则返回空集合；若不接受则转换为明确无结果错误，禁止查询任意表。
+- 实测 Sharding-JDBC 4.1.1 在 range 算法返回空 target 集合后会继续路由并抛出 `IllegalStateException: no table route info`，因此算法不得返回空集合。下界/上界离散化后无可表示的 DATETIME(3) 毫秒值时，必须直接抛出稳定的 `IllegalArgumentException`，错误标识为 `ORDER_SHARD_ROUTE_EMPTY: no representable DATETIME(3) value`；不得广播、访问数据库或选择任意表。后续业务 adapter 是否将该 marker 转为空页另行评审，本轮不实现。
 
 Range 算法不负责 count、全局排序、跨月分页或物理表创建；这些仍属于 CM-20 后续逻辑路由评审。
+
+以上拒绝无界范围仅适用于框架调用该算法的场景。没有 `created_at` 条件的 SQL 可能绕过算法直接广播，未来业务查询适配层必须显式约束；本轮不开放该类业务入口，也不将算法校验视为全 SQL 防广播门。
 
 ## 6. 隔离影子验证前置
 

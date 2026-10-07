@@ -451,6 +451,21 @@ mvn -pl backend/cloud-mall-order -am package -DskipTests
 mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderRoutingAuditIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
 ```
 
+### 月分片算法隔离验证（CM-20 第17轮B）
+
+月分片算法已补齐精确与有界范围路由，并修正未启用的 YAML 算法类名。只接受上海本地语义的 `LocalDateTime` 或 JDBC 已物化的 `Timestamp`，时间精度必须符合 `DATETIME(3)`；目标表必须属于当前逻辑表。范围按毫秒处理开闭边界，缺少任一所需月份或输入无界时明确失败。
+
+Sharding-JDBC 4.1.1 不接受空路由集合；空区间直接抛出 `ORDER_SHARD_ROUTE_EMPTY`，未来查询适配层再评审如何转换为空页。当前没有业务接口接入该算法；缺少分片条件的 SQL 也需在后续接入层约束，不能仅靠算法阻止框架广播。
+
+隔离测试通过程序式 Sharding-JDBC 4.1.1 数据源读取随机 `cm17b_*` 库，与直接物理表查询对照；测试库中的表和种子由夹具创建，结束后删除。执行前启动 MySQL，测试固定 JVM/JDBC/session 上海时间语义：
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=MonthlyOrderShardingAlgorithmTest,OrderRoutingAuditTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-order -am test '-Dtest=MonthlyOrderShardingMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+本轮仍保留第17轮A的启动限制：默认订单链路使用动态物理月表，`sharding` profile 不可启用。静态配置窗口、滚动节点发布、跨月分页、恢复查询与 Seata 事务组合仍待后续评审和验证。
+
 ## 验证命令
 
 ```bash

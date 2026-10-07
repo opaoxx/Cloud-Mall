@@ -68,6 +68,7 @@ seata:
     grouplist:
       default: 127.0.0.1:8091
 ---
+# 尚未接入主链路；17A 启动审计会拒绝该 profile。静态节点窗口仍待后续迁移评审。
 spring:
   config:
     activate:
@@ -88,16 +89,19 @@ spring:
           table-strategy:
             standard:
               sharding-column: created_at
-              precise-algorithm-class-name: com.cloudmall.order.MonthlyOrderShardingAlgorithm
+              precise-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
+              range-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
         mall_order_item:
           actual-data-nodes: ds0.mall_order_item_$->{202608..202612}
           table-strategy:
             standard:
               sharding-column: created_at
-              precise-algorithm-class-name: com.cloudmall.order.MonthlyOrderShardingAlgorithm
+              precise-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
+              range-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
         order_status_log:
           actual-data-nodes: ds0.order_status_log_$->{202608..202612}
           table-strategy:
             standard:
               sharding-column: created_at
-              precise-algorithm-class-name: com.cloudmall.order.MonthlyOrderShardingAlgorithm
+              precise-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
+              range-algorithm-class-name: com.cloudmall.order.config.MonthlyOrderShardingAlgorithm
