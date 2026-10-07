@@ -8,6 +8,7 @@ import com.cloudmall.order.util.OrderCreationTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -134,15 +135,20 @@ public class SeckillMessageRecovery {
     // 1. 扫描时刻只用于发现候选；不能作为整批记录的租约起点。
     LocalDateTime scanNow = recoveryNow();
     List<Map<String, Object>> rows = recoveryMapper.findDue(50, scanNow);
-    for (Map<String, Object> row : rows) {
-      long id = ((Number) row.get("id")).longValue();
+    for (Map<String, Object> candidate : rows) {
+      long id = ((Number) candidate.get("id")).longValue();
       String owner = UUID.randomUUID().toString();
       // 2. 每条记录独立采样，并在外部 Stock 查询前核验当前归属。
       LocalDateTime claimNow = recoveryNow();
       if (recoveryMapper.claim(id, owner, claimNow.plusSeconds(30), claimNow) != 1) continue;
-      if (!ownsCurrentLease(id, owner)) continue;
+      Map<String, Object> row = claimedRecord(id, owner);
+      if (row == null) continue;
+      Integer attempts = nextAttempt(row.get("attempts"));
+      if (attempts == null) {
+        LOGGER.warn("秒杀恢复计数非法，保留原事实并跳过，id={}", id);
+        continue;
+      }
       if (!verifyStockFact(row, id, owner)) continue;
-      int attempts = ((Number) row.get("attempts")).intValue() + 1;
       try {
         String eventId = String.valueOf(row.get("event_id"));
         CorrelationData correlation = new CorrelationData(eventId);
@@ -180,6 +186,28 @@ public class SeckillMessageRecovery {
   private LocalDateTime recoveryNow() {
     return LocalDateTime.ofInstant(recoveryClock.instant(), ZoneOffset.ofHours(8))
         .truncatedTo(ChronoUnit.MILLIS);
+  }
+
+  /** 只使用当前认领后的快照；读取失败不回退到扫描旧值。 */
+  private Map<String, Object> claimedRecord(long id, String owner) {
+    try {
+      return recoveryMapper.findClaimed(id, owner);
+    } catch (DataAccessException unavailableSnapshot) {
+      LOGGER.warn("秒杀恢复认领快照读取失败，本次跳过，id={}", id, unavailableSnapshot);
+      return null;
+    }
+  }
+
+  /** 验证数据库整数范围后用 long 递增，最大值饱和；异常事实不能猜测归零。 */
+  private static Integer nextAttempt(Object storedAttempts) {
+    if (!(storedAttempts instanceof Number number)) return null;
+    try {
+      long current = new BigDecimal(number.toString()).longValueExact();
+      if (current < 0 || current > Integer.MAX_VALUE) return null;
+      return (int) Math.min(Integer.MAX_VALUE, current + 1L);
+    } catch (ArithmeticException | NumberFormatException invalidCount) {
+      return null;
+    }
   }
 
   /** 归属无法读取时不猜测有效性，也不尝试清理可能已归他人的租约。 */

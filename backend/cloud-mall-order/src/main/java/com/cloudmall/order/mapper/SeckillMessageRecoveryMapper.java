@@ -148,6 +148,36 @@ public class SeckillMessageRecoveryMapper {
         && deadlines.get(0).isAfter(completionTime());
   }
 
+  /**
+   * 认领后读取当前持久事实，替代可能已陈旧的扫描行。
+   *
+   * @param id 恢复台账主键
+   * @param owner 本次认领的原始 token
+   * @return 当前有效归属下的快照；无记录或读取期间到期时返回 null
+   */
+  public Map<String, Object> findClaimed(long id, String owner) {
+    LocalDateTime queryNow = completionTime();
+    List<Map<String, Object>> rows =
+        jdbcTemplate.queryForList(
+            "SELECT id,event_id,request_hash,payload,attempts,status,lease_until"
+                + " FROM seckill_message_recovery WHERE id=?"
+                + COMPLETION_GUARD,
+            id,
+            owner,
+            queryNow);
+    if (rows.size() != 1) return null;
+    Map<String, Object> row = rows.get(0);
+    Object storedDeadline = row.get("lease_until");
+    LocalDateTime deadline =
+        storedDeadline instanceof LocalDateTime local
+            ? local
+            : storedDeadline instanceof java.sql.Timestamp timestamp
+                ? timestamp.toLocalDateTime()
+                : null;
+    // 查询可能跨过截止时间；只有读取完成时仍有效才能把快照交给 Service。
+    return deadline != null && deadline.isAfter(completionTime()) ? row : null;
+  }
+
   /** 只有仍持有有效租约的 worker 可完成重放；失效 owner 或终态记录保持原样。 */
   public void markReplayed(
       long id, String owner, int retryCount, LocalDateTime nextRetry, String error) {
@@ -157,14 +187,16 @@ public class SeckillMessageRecoveryMapper {
     jdbcTemplate.update(
         "UPDATE seckill_message_recovery SET status='REPLAYED',attempts=?,next_retry_at=?,last_error=?,"
             + "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?"
-            + COMPLETION_GUARD,
+            + COMPLETION_GUARD
+            + " AND attempts>=0 AND attempts<=?",
         retryCount,
         nextRetry,
         compactError(error),
         now,
         id,
         owner,
-        now);
+        now,
+        retryCount);
   }
 
   /** 在有效 owner/租约及非终态下写入验真结果；不改变原 void 调用契约。 */

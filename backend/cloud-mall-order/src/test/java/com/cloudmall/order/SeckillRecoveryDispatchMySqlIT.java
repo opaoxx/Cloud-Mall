@@ -255,17 +255,17 @@ class SeckillRecoveryDispatchMySqlIT {
       seed(1, "read-error");
       var reads = new java.util.concurrent.atomic.AtomicInteger();
       var snapshot = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
-      doAnswer(
-              invocation -> {
-                if (reads.incrementAndGet() == failedRead) {
-                  snapshot.set(row(1));
-                  throw new org.springframework.dao.DataAccessResourceFailureException(
-                      "fixture lease read unavailable");
-                }
-                return invocation.callRealMethod();
-              })
-          .when(mapper)
-          .hasActiveLease(anyLong(), anyString());
+      org.mockito.stubbing.Answer<Object> failedQuery =
+          invocation -> {
+            if (reads.incrementAndGet() == failedRead) {
+              snapshot.set(row(1));
+              throw new org.springframework.dao.DataAccessResourceFailureException(
+                  "fixture lease read unavailable");
+            }
+            return invocation.callRealMethod();
+          };
+      doAnswer(failedQuery).when(mapper).findClaimed(anyLong(), anyString());
+      doAnswer(failedQuery).when(mapper).hasActiveLease(anyLong(), anyString());
       recovery.replayDue();
       assertTrue(sent.isEmpty());
       assertEquals(snapshot.get(), row(1));
@@ -291,15 +291,19 @@ class SeckillRecoveryDispatchMySqlIT {
       ReflectionTestUtils.setField(recovery, "recoveryClock", clock);
       var reads = new java.util.concurrent.atomic.AtomicInteger();
       var snapshot = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
-      doAnswer(
-              invocation -> {
-                Object result = invocation.callRealMethod();
-                if (reads.incrementAndGet() == delayedRead) {
-                  snapshot.set(row(1));
-                  clock.advance(31);
-                }
-                return result;
-              })
+      org.mockito.stubbing.Answer<Object> delayedQuery =
+          invocation -> {
+            Object result = invocation.callRealMethod();
+            if (reads.incrementAndGet() == delayedRead) {
+              snapshot.set(row(1));
+              clock.advance(31);
+            }
+            return result;
+          };
+      doAnswer(delayedQuery)
+          .when(delayed)
+          .queryForList(anyString(), anyLong(), anyString(), any(LocalDateTime.class));
+      doAnswer(delayedQuery)
           .when(delayed)
           .queryForList(
               anyString(),
@@ -314,6 +318,74 @@ class SeckillRecoveryDispatchMySqlIT {
       verify(stock, times(delayedRead - 1))
           .seckillReservationFact(anyString(), eq("cloud-mall-order"));
     }
+  }
+
+  @Test
+  void staleScanCannotLowerAttemptsCompletedByAnotherWorkerBeforeClaim() throws Exception {
+    seed(1, "stale-attempts");
+    fixture.update("UPDATE seckill_message_recovery SET attempts=2,status='REPLAYED' WHERE id=1");
+    doAnswer(
+            invocation -> {
+              Object scanned = invocation.callRealMethod();
+              assertEquals(
+                  1, mapper.claim(1, "interleaved-owner", CREATED.plusSeconds(30), CREATED));
+              mapper.markReplayed(1, "interleaved-owner", 3, CREATED.plusSeconds(8), null);
+              clock.advance(10);
+              return scanned;
+            })
+        .when(mapper)
+        .findDue(anyInt(), any(LocalDateTime.class));
+    recovery.replayDue();
+    assertEquals(1, sent.size());
+    assertEquals(4, ((Number) row(1).get("attempts")).intValue());
+    assertEquals(
+        CREATED.plusSeconds(26),
+        fixture.queryForObject(
+            "SELECT next_retry_at FROM seckill_message_recovery WHERE id=1", LocalDateTime.class));
+  }
+
+  @Test
+  void maximumAttemptsSaturatesWithoutNegativeCounterOrBackoffOverflow() throws Exception {
+    seed(1, "maximum-attempts");
+    fixture.update("UPDATE seckill_message_recovery SET attempts=? WHERE id=1", Integer.MAX_VALUE);
+    recovery.replayDue();
+    assertEquals(1, sent.size());
+    assertEquals(Integer.MAX_VALUE, ((Number) row(1).get("attempts")).intValue());
+    assertEquals(
+        CREATED.plusSeconds(256),
+        fixture.queryForObject(
+            "SELECT next_retry_at FROM seckill_message_recovery WHERE id=1", LocalDateTime.class));
+    assertNull(row(1).get("lease_owner"));
+  }
+
+  @Test
+  void negativeStoredAttemptsCannotBeResetOrPublished() throws Exception {
+    seed(1, "negative-attempts");
+    fixture.update("UPDATE seckill_message_recovery SET attempts=-1 WHERE id=1");
+    Map<String, Object> before = row(1);
+    recovery.replayDue();
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+    assertEquals(-1, ((Number) row(1).get("attempts")).intValue());
+    assertEquals(before.get("payload"), row(1).get("payload"));
+    assertEquals(before.get("status"), row(1).get("status"));
+    assertNotNull(row(1).get("lease_owner"));
+  }
+
+  @Test
+  void directCompletionCannotDecreaseCurrentCountOrRepairNegativeFacts() throws Exception {
+    seed(1, "monotonic-completion");
+    fixture.update("UPDATE seckill_message_recovery SET attempts=6 WHERE id=1");
+    assertEquals(1, mapper.claim(1, "owner", CREATED.plusSeconds(30), CREATED));
+    Map<String, Object> before = row(1);
+    for (int staleCount : new int[] {3, -1}) {
+      mapper.markReplayed(1, "owner", staleCount, CREATED.plusDays(1), "stale");
+      assertEquals(before, row(1));
+    }
+    fixture.update("UPDATE seckill_message_recovery SET attempts=-1 WHERE id=1");
+    before = row(1);
+    mapper.markReplayed(1, "owner", 0, CREATED.plusDays(1), "do not guess zero");
+    assertEquals(before, row(1));
   }
 
   private void seed(long id, String suffix) throws Exception {

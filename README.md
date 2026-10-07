@@ -578,7 +578,19 @@ Stock 验真之前和 Rabbit 发送紧前均只读检查精确 owner、有效期
 mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryDispatchMySqlIT,SeckillRecoveryLeaseMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
 ```
 
-测试使用 `cm17k_*` 自建库、可变时钟和 Stock/Rabbit 替身验证慢调用、接管、终态变化、查询异常及重试时间。检查与网络发送不是原子操作，已开始发送的消息不能撤回；原幂等机制及完成写 CAS 继续负责后续收敛。本轮不自动续租，也不改变扫描快照中的尝试次数逻辑。
+测试使用 `cm17k_*` 自建库、可变时钟和 Stock/Rabbit 替身验证慢调用、接管、终态变化、查询异常及重试时间。检查与网络发送不是原子操作，已开始发送的消息不能撤回；原幂等机制及完成写 CAS 继续负责后续收敛。第17轮K不自动续租，尝试次数由第17轮L继续修复。
+
+### 恢复认领后的最新快照与计数（第17轮L）
+
+扫描结果只用于找到候选 ID。认领成功后，恢复器按当前 owner 和有效租约读取最新持久快照，再进行验真、发送和尝试次数计算，避免其他 worker 已完成后仍使用旧计数。快照查询失败或返回时租约已失效，直接跳过，不回退到扫描旧值。
+
+计数仍在有效完成时回写，claim 不递增。`attempts+1` 使用 long 计算并在 `Integer.MAX_VALUE` 饱和；负数或非法计数保留事实，不猜测归零、不外发。完成 SQL 额外阻止计数降低；退避仍采用原 `2^min(n,8)` 规则，实际最大间隔256秒。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryDispatchMySqlIT,SeckillRecoveryLeaseMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+扩展测试覆盖真实数据库中的扫描/完成交错、计数溢出与回退；继续验证读取异常、到期和发送守卫。Stock/Rabbit 为替身，本轮未新增自动续租或网络原子性保证。
 
 ## 验证命令
 
