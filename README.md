@@ -652,6 +652,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryJsonMySqlIT` 覆盖重复字段、尾随对象/数组/标量/null/垃圾、非对象 JSON、完整原文和重复保持。合法首尾空白、Unicode 与旧格式仍按原流程处理；不修改共享 ObjectMapper/Factory、其他消费入口或历史记录。
 
+### 业务指纹失败不能由存证哈希替代（第17轮V）
+
+恢复器仅把活动、SKU、用户和地址均可按既有规则计算出的值视为业务指纹。缺失、非正数、非整数、溢出或非法地址导致计算失败时，死信进入 `CONFLICT`；原文 SHA-256 仍可用于存证，但不能用于通过库存验真或发送前自校验。已带 suppliedHash 的消息保留该值作为原证据。
+
+`SeckillRecoveryJsonMySqlIT` 和 `SeckillRecoveryDispatchMySqlIT` 覆盖非法维度、坏地址、空文本哈希绕过及合法数值字符串兼容。合法业务哈希算法、原消息字段和外部 API 不变；历史错误哈希不批量修复，Stock/Rabbit 为替身验证。
+
 ## 验证命令
 
 ```bash

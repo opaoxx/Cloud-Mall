@@ -112,6 +112,25 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void invalidBusinessFingerprintCannotPassRecoveryUsingTheEmptyTextHash() throws Exception {
+    seed(1, "invalid-fingerprint");
+    String emptyHash =
+        java.util.HexFormat.of()
+            .formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(new byte[0]));
+    fixture.update(
+        "UPDATE seckill_message_recovery SET request_hash=?,payload=JSON_SET(payload,'$.activityId',0,'$.requestHash',?) WHERE id=1",
+        emptyHash,
+        emptyHash);
+    Map<String, Object> before = row(1);
+    recovery.replayDue();
+    assertEquals("CONFLICT", row(1).get("status"));
+    assertEquals(before.get("payload"), row(1).get("payload"));
+    assertEquals(before.get("request_hash"), row(1).get("request_hash"));
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+  }
+
+  @Test
   void alreadyInterruptedRecoveryDoesNotClaimOrSendAnyRecord() throws Exception {
     seed(1, "stopped");
     Map<String, Object> before = row(1);

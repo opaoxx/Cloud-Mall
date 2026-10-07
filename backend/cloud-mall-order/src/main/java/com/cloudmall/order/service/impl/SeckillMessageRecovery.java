@@ -134,15 +134,21 @@ public class SeckillMessageRecovery {
               && event.get("addressSnapshot") == null;
       boolean coreFieldsValid = hasCoreFields(event);
       normalizeLegacy(event, eventId);
-      String calculatedHash = requestHash(event, raw);
-      String suppliedHash = event.get("requestHash") == null
-          ? calculatedHash : String.valueOf(event.get("requestHash"));
+      String calculatedHash = tryRequestHash(event);
+      // 无法计算业务指纹时，原文哈希仅用于留存证据，不能视为校验成功。
+      String evidenceHash = calculatedHash == null ? sha256(raw) : calculatedHash;
+      String suppliedHash =
+          event.get("requestHash") == null
+              ? evidenceHash
+              : String.valueOf(event.get("requestHash"));
       requestHash = suppliedHash;
       event.put("eventId", eventId);
       event.put("requestHash", suppliedHash);
       raw = objectMapper.writeValueAsString(event);
       // 旧 DLQ 没有库存受理事实可供订单侧核验，先隔离保留证据，避免幽灵订单。
-      if (!coreFieldsValid || !calculatedHash.equalsIgnoreCase(suppliedHash)) status = "CONFLICT";
+      if (!coreFieldsValid
+          || calculatedHash == null
+          || !calculatedHash.equalsIgnoreCase(suppliedHash)) status = "CONFLICT";
       else if (legacyPayload) status = "QUARANTINED";
     } catch (Exception exception) {
       eventId = "legacy-seckill:hash:" + sha256(raw);
@@ -316,8 +322,10 @@ public class SeckillMessageRecovery {
         return false;
       }
       // 原事件自身已有明确错误时不能把问题归因于远端证据暂缺。
+      String calculatedHash = tryRequestHash(event);
       if (!hasCompleteEvidence(event)
-          || !requestHash(event, "").equalsIgnoreCase(String.valueOf(event.get("requestHash")))) {
+          || calculatedHash == null
+          || !calculatedHash.equalsIgnoreCase(String.valueOf(event.get("requestHash")))) {
         recoveryMapper.markVerification(
             id, owner, "CONFLICT", "原事件核心字段或请求指纹无效", recoveryNow().plusMinutes(5));
         return false;
@@ -382,8 +390,9 @@ public class SeckillMessageRecovery {
         || !same(event, fact, "skuId")
         || !same(event, fact, "userId")
         || !same(event, fact, "idempotencyKey")) return false;
-    String expectedHash = requestHash(event, "");
-    return expectedHash.equalsIgnoreCase(String.valueOf(event.get("requestHash")))
+    String expectedHash = tryRequestHash(event);
+    return expectedHash != null
+        && expectedHash.equalsIgnoreCase(String.valueOf(event.get("requestHash")))
         && expectedHash.equalsIgnoreCase(String.valueOf(fact.get("requestHash")));
   }
 
@@ -408,9 +417,12 @@ public class SeckillMessageRecovery {
     event.put("eventId", eventId);
   }
 
-  private String requestHash(Map<String, Object> event, String raw) {
+  /** 仅返回有效业务指纹；字段或地址不能计算时返回 null，禁止退化为文本哈希放行。 */
+  private static String tryRequestHash(Map<String, Object> event) {
     try {
-      if (event.get("activityId") != null && event.get("skuId") != null && event.get("userId") != null)
+      if (event.get("activityId") != null
+          && event.get("skuId") != null
+          && event.get("userId") != null)
         return SeckillRequestFingerprint.hash(
             Long.parseLong(String.valueOf(event.get("activityId"))),
             Long.parseLong(String.valueOf(event.get("skuId"))),
@@ -418,9 +430,9 @@ public class SeckillMessageRecovery {
             1,
             String.valueOf(event.getOrDefault("addressSnapshot", "{}")));
     } catch (RuntimeException ignored) {
-      // malformed or legacy payload is retained as conflict evidence below
+      // 原始字段由持久化路径保留；无业务指纹的事件不得发送。
     }
-    return sha256(raw);
+    return null;
   }
 
   private static String stableEventId(Map<String, Object> event, String raw) {

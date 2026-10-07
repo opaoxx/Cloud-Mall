@@ -99,6 +99,70 @@ class SeckillRecoveryJsonMySqlIT {
   }
 
   @Test
+  void invalidBusinessDimensionsNeverTurnEvidenceHashIntoAnAcceptedFingerprint() throws Exception {
+    int sequence = 0;
+    for (Object[] invalid :
+        List.of(
+            new Object[] {"activityId", 0}, new Object[] {"skuId", -1},
+            new Object[] {"userId", "not-a-number"},
+                new Object[] {"activityId", "9223372036854775808"},
+            new Object[] {"skuId", 1.5}, new Object[] {"addressSnapshot", "not-json"},
+            new Object[] {"addressSnapshot", "[]"}, new Object[] {"userId", null})) {
+      for (boolean suppliedHash : List.of(false, true)) {
+        String eventId = "invalid-fingerprint-" + sequence++;
+        var serializer = new ObjectMapper();
+        var event =
+            serializer.readValue(
+                validPayload(eventId),
+                new com.fasterxml.jackson.core.type.TypeReference<
+                    java.util.LinkedHashMap<String, Object>>() {});
+        event.put(String.valueOf(invalid[0]), invalid[1]);
+        if (suppliedHash)
+          event.put(
+              "requestHash",
+              java.util.HexFormat.of()
+                  .formatHex(
+                      java.security.MessageDigest.getInstance("SHA-256").digest(new byte[0])));
+        String raw = serializer.writeValueAsString(event);
+        deliver(recoveryHandler(), raw);
+        Map<String, Object> saved = row(eventId);
+        assertEquals("CONFLICT", saved.get("status"), invalid[0] + "=" + invalid[1]);
+        assertEquals(
+            serializer.valueToTree(invalid[1]),
+            serializer
+                .readTree(String.valueOf(saved.get("payload")))
+                .get(String.valueOf(invalid[0])));
+        if (!suppliedHash)
+          assertEquals(
+              java.util.HexFormat.of()
+                  .formatHex(
+                      java.security.MessageDigest.getInstance("SHA-256")
+                          .digest(raw.getBytes(StandardCharsets.UTF_8))),
+              saved.get("request_hash"));
+      }
+    }
+    assertTrue(mapper.findDue(50, LocalDateTime.now().plusYears(1)).isEmpty());
+  }
+
+  @Test
+  void positiveNumericStringsRetainTheExistingBusinessFingerprintContract() throws Exception {
+    var serializer = new ObjectMapper();
+    var event =
+        serializer.readValue(
+            validPayload("numeric-strings"),
+            new com.fasterxml.jackson.core.type.TypeReference<
+                java.util.LinkedHashMap<String, Object>>() {});
+    event.put("activityId", "1");
+    event.put("skuId", "2");
+    event.put("userId", "3");
+    deliver(recoveryHandler(), serializer.writeValueAsString(event));
+    assertEquals("REPLAY_PENDING", row("numeric-strings").get("status"));
+    assertEquals(
+        SeckillRequestFingerprint.hash(1, 2, 3, 1, "{}"),
+        row("numeric-strings").get("request_hash"));
+  }
+
+  @Test
   void trailingJsonTokensAreQuarantinedWithTheEntireOriginalText() throws Exception {
     for (String suffix : List.of(" {}", " []", " 123", " true", " null", " garbage")) {
       assertRawJsonQuarantined(validPayload("trailing") + suffix);
