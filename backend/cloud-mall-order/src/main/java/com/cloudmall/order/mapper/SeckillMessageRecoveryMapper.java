@@ -9,6 +9,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -63,21 +64,27 @@ public class SeckillMessageRecoveryMapper {
       String payload,
       String status,
       LocalDateTime now) {
-    // 1. 唯一事件号完成并发认领；后到的相同事件不会改写原始载荷。
-    int inserted =
-        jdbcTemplate.update(
-            "INSERT IGNORE INTO seckill_message_recovery "
-                + "(id,event_id,request_hash,payload,status,attempts,next_retry_at,created_at,updated_at) "
-                + "VALUES (?,?,?,?,?,0,?,?,?)",
-            id,
-            eventId,
-            requestHash,
-            payload,
-            status,
-            now,
-            now,
-            now);
-    if (inserted == 1) return 1;
+    // 1. 不依赖 SQL mode 容忍非法列值；只把唯一键重复交给幂等核验。
+    requireColumnValue(eventId, 128, "eventId", true);
+    requireColumnValue(requestHash, 64, "requestHash", false);
+    requireColumnValue(status, 20, "status", true);
+    Objects.requireNonNull(payload, "payload不能为null");
+    try {
+      return jdbcTemplate.update(
+          "INSERT INTO seckill_message_recovery "
+              + "(id,event_id,request_hash,payload,status,attempts,next_retry_at,created_at,updated_at) "
+              + "VALUES (?,?,?,?,?,0,?,?,?)",
+          id,
+          eventId,
+          requestHash,
+          payload,
+          status,
+          now,
+          now,
+          now);
+    } catch (DuplicateKeyException duplicateKey) {
+      // 只有唯一键冲突可继续读取首记录，其他数据/数据库异常保留原重投路径。
+    }
     // 2. JSON 列会规范化空白/键顺序，由数据库比较 JSON 值，不能比较往返后的字符串。
     List<Map<String, Object>> existing =
         jdbcTemplate.queryForList(
@@ -100,6 +107,16 @@ public class SeckillMessageRecoveryMapper {
         "同一 eventId 的 requestHash 或 payload 不一致",
         now,
         eventId);
+  }
+
+  /** 按 MySQL 字符列的 Unicode 字符数限制输入，非 BMP 字符不能按 UTF-16 双倍计数。 */
+  private static void requireColumnValue(
+      String value, int maximumCharacters, String fieldName, boolean rejectBlank) {
+    if (value == null
+        || (rejectBlank && value.isBlank())
+        || value.codePointCount(0, value.length()) > maximumCharacters) {
+      throw new IllegalArgumentException("秒杀死信字段不符合列约束: " + fieldName);
+    }
   }
 
   /** 扫描到期记录；租约等于当前毫秒时已经失效，可被重新认领。 */

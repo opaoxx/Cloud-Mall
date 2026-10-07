@@ -616,6 +616,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 沿用 `SeckillRecoveryDispatchMySqlIT` / `SeckillRecoveryLeaseMySqlIT` 命令验证“证据暂缺→补齐后重放”、明确冲突、原事件无效及租约保护。Stock/Rabbit为替身，真实MySQL台账保留原载荷；不会自动重分类历史 `CONFLICT`。
 
+### 死信保存拒绝静默截断（第17轮P）
+
+死信 Mapper 在写入前核验 eventId、请求指纹、状态的列宽及必需值，按 Unicode 字符数计数，避免误拒绝合法非 BMP 字符。保存改用普通 `INSERT`，仅唯一键重复进入原 JSON/hash 幂等核验；字段或数据库错误直接交给既有重投流程，不再由 `INSERT IGNORE` 降为警告后确认成功。
+
+`SeckillRecoveryJsonMySqlIT` 覆盖严格/非严格 SQL 模式、超长及 null 输入、主键碰撞、Unicode 列宽边界、同事件并发和原字节重投。只有重投得到 publisher confirm 后才 ACK 原消息，否则请求重新投递；消息通道为替身。列宽、历史数据和消息拓扑保持不变。
+
 ## 验证命令
 
 ```bash

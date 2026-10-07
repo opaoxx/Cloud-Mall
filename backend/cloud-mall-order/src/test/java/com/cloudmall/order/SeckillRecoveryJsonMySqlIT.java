@@ -99,6 +99,112 @@ class SeckillRecoveryJsonMySqlIT {
   }
 
   @Test
+  void invalidMetadataCannotBeTruncatedOrDefaultedInEitherSqlMode() throws Exception {
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var isolatedJdbc =
+          new JdbcTemplate(
+              new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+      var strictMapper = new SeckillMessageRecoveryMapper(isolatedJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        isolatedJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (String[] invalid :
+            List.of(
+                new String[] {"x".repeat(129), HASH, "REPLAY_PENDING", "{}"},
+                new String[] {"event", "h".repeat(65), "REPLAY_PENDING", "{}"},
+                new String[] {"event", HASH, "s".repeat(21), "{}"},
+                new String[] {null, HASH, "REPLAY_PENDING", "{}"},
+                new String[] {"event", null, "REPLAY_PENDING", "{}"},
+                new String[] {"event", HASH, null, "{}"},
+                new String[] {"event", HASH, "REPLAY_PENDING", null},
+                new String[] {" ", HASH, "REPLAY_PENDING", "{}"})) {
+          isolatedJdbc.execute("TRUNCATE TABLE seckill_message_recovery");
+          assertThrows(
+              RuntimeException.class,
+              () ->
+                  strictMapper.saveDlq(1, invalid[0], invalid[1], invalid[3], invalid[2], CREATED));
+          assertEquals(
+              0,
+              isolatedJdbc.queryForObject(
+                  "SELECT COUNT(*) FROM seckill_message_recovery", Integer.class));
+        }
+      }
+    }
+  }
+
+  @Test
+  void primaryKeyCollisionCannotAcknowledgeAnUnstoredDifferentEvent() {
+    mapper.saveDlq(1, "original", HASH, "{}", "REPLAY_PENDING", CREATED);
+    Map<String, Object> before = row("original");
+    assertThrows(
+        IllegalStateException.class,
+        () -> mapper.saveDlq(1, "other", HASH, "{}", "REPLAY_PENDING", CREATED));
+    assertEquals(before, row("original"));
+    assertEquals(
+        1, fixture.queryForObject("SELECT COUNT(*) FROM seckill_message_recovery", Integer.class));
+  }
+
+  @Test
+  void unicodeCodePointColumnBoundaryPreservesOriginalEventIdentity() {
+    String eventId = "😀".repeat(128);
+    assertEquals(1, mapper.saveDlq(1, eventId, HASH, "{}", "REPLAY_PENDING", CREATED));
+    assertEquals(eventId, row(eventId).get("event_id"));
+    assertEquals(0, mapper.saveDlq(2, eventId, HASH, "{}", "REPLAY_PENDING", CREATED));
+  }
+
+  @Test
+  void oversizedDeadLetterRetriesOriginalBytesAndOnlyAcksConfirmedRetry() throws Exception {
+    for (boolean confirmed : List.of(true, false)) {
+      fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      Channel channel = mock(Channel.class);
+      var recovery =
+          new SeckillMessageRecovery(mapper, rabbit, new ObjectMapper(), mock(StockClient.class));
+      byte[] original = validPayload("event-" + "x".repeat(129)).getBytes(StandardCharsets.UTF_8);
+      MessageProperties properties = new MessageProperties();
+      properties.setDeliveryTag(41);
+      Message message = new Message(original, properties);
+      doAnswer(
+              invocation -> {
+                Message retry = invocation.getArgument(2);
+                assertArrayEquals(original, retry.getBody());
+                assertEquals(
+                    0,
+                    fixture.queryForObject(
+                        "SELECT COUNT(*) FROM seckill_message_recovery", Integer.class));
+                var correlation =
+                    (org.springframework.amqp.rabbit.connection.CorrelationData)
+                        invocation.getArgument(3);
+                correlation
+                    .getFuture()
+                    .set(
+                        new org.springframework.amqp.rabbit.connection.CorrelationData.Confirm(
+                            confirmed, "fixture"));
+                return null;
+              })
+          .when(rabbit)
+          .send(
+              anyString(),
+              anyString(),
+              any(Message.class),
+              any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
+      recovery.consumeDeadLetter(message, channel);
+      verify(rabbit)
+          .send(
+              eq(com.cloudmall.order.config.OrderMessagingConfiguration.SECKILL_DLQ_RETRY_EXCHANGE),
+              eq(""),
+              same(message),
+              any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
+      if (confirmed) {
+        verify(channel).basicAck(41, false);
+        verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
+      } else {
+        verify(channel).basicNack(41, false, true);
+        verify(channel, never()).basicAck(anyLong(), anyBoolean());
+      }
+    }
+  }
+
+  @Test
   void identicalCompactPayloadPreservesEveryExistingColumnAndTerminalState() {
     long recordId = 1;
     for (String state : List.of("VERIFYING", "RESOLVED", "CONFLICT")) {
