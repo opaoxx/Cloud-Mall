@@ -730,6 +730,12 @@ outbox 扫描只用扫描时刻选候选，每条认领重新采样上海毫秒�
 
 `SeckillEventTimeMySqlIT` 验证触发器拒绝更新、实际更新提交后注入响应丢失两类场景，失败记录保持数据库真实事实，已提交 outbox 仍能发布。Redis/受理/Rabbit 为替身，未新增补偿或真实网络故障演练。
 
+### Stock 恢复任务响应线程中断（第17轮AI）
+
+调度入口、marker/outbox 阶段切换及认领、marker 结果处理、租约查询和完成写前检查中断。发布确认等待被中断时恢复中断标志并停止本批，不写失败或完成状态。已推进游标、已提交 marker 状态、认领次数和租约保持原事实，后续按原机制恢复。
+
+`SeckillEventTimeMySqlIT` 验证预中断零扫描、marker 读取/提交、claim、租约查询和 confirm 的中断边界；`SeckillOutboxRecoveryRaceTest` 验证中断后不追加受理竞争查询。Redis/Rabbit 为替身，不保证全链路取消或撤回在途消息，也不从异常 cause 猜测中断。
+
 ## 验证命令
 
 ```bash

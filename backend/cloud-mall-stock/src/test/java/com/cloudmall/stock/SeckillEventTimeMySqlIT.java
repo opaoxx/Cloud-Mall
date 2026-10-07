@@ -115,6 +115,243 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void preInterruptedDispatcherDoesNotScanMarkersOrOutbox() throws Exception {
+    mapper = spy(mapper);
+    seedMarkerCandidate(1, "PENDING");
+    seed("202512-interrupt-ready", "2025-12-31T23:59:59.999+08:00");
+    due("202512-interrupt-ready");
+    var before = fixture.queryForList("SELECT * FROM seckill_order_outbox");
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    when(redis.opsForValue())
+        .thenReturn(mock(org.springframework.data.redis.core.ValueOperations.class));
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    List<Map<String, Object>> sent = new ArrayList<>();
+    var dispatcher =
+        new SeckillOrderOutboxDispatcher(
+            mapper,
+            acceptance,
+            redis,
+            sender(sent, false),
+            new ObjectMapper(),
+            new MockEnvironment());
+    clearInvocations(mapper, redis);
+    try {
+      Thread.currentThread().interrupt();
+      dispatcher.dispatch();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    verifyNoInteractions(mapper, redis, acceptance);
+    assertTrue(sent.isEmpty());
+    assertEquals(before, fixture.queryForList("SELECT * FROM seckill_order_outbox"));
+  }
+
+  @Test
+  void interruptedMarkerReadDoesNotBecomeMissingOrAcceptedEvidence() {
+    seedMarkerCandidate(1, "PENDING");
+    seedMarkerCandidate(2, "PENDING");
+    var before = fixture.queryForList("SELECT * FROM seckill_reservation ORDER BY id");
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    org.springframework.data.redis.core.ValueOperations<String, String> values =
+        mock(org.springframework.data.redis.core.ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(values);
+    for (boolean matched : List.of(false, true)) {
+      mapper = spy(new StockSqlMapper(fixture));
+      clearInvocations(values);
+      doAnswer(
+              invocation -> {
+                Thread.currentThread().interrupt();
+                return matched ? "202610-marker-1" : null;
+              })
+          .when(values)
+          .get(markerKey(1));
+      var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+      var dispatcher =
+          new SeckillOrderOutboxDispatcher(
+              mapper,
+              acceptance,
+              redis,
+              mock(RabbitTemplate.class),
+              new ObjectMapper(),
+              new MockEnvironment());
+      try {
+        dispatcher.dispatch();
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+      assertEquals(before, fixture.queryForList("SELECT * FROM seckill_reservation ORDER BY id"));
+      verifyNoInteractions(acceptance);
+      verify(values, never()).get(markerKey(2));
+      verify(mapper, never()).findPendingSeckillOutbox(any(), anyInt());
+    }
+  }
+
+  @Test
+  void interruptedOutboxConfirmPreservesClaimAndStopsTheNextRow() throws Exception {
+    for (boolean alreadyConfirmed : List.of(false, true)) {
+      fixture.execute("DELETE FROM seckill_order_outbox");
+      fixture.execute("DELETE FROM seckill_reservation");
+      mapper = spy(new StockSqlMapper(fixture));
+      seed("202512-interrupt-first", "2025-12-31T23:59:59.999+08:00");
+      seed("202512-interrupt-second", "2025-12-31T23:59:59.999+08:00");
+      fixture.update(
+          "UPDATE seckill_order_outbox SET id=1 WHERE order_no='202512-interrupt-first'");
+      fixture.update(
+          "UPDATE seckill_order_outbox SET id=2 WHERE order_no='202512-interrupt-second'");
+      due("202512-interrupt-first");
+      due("202512-interrupt-second");
+      Map<String, Object> secondBefore =
+          fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=2");
+      var firstBeforeSend = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      doAnswer(
+              invocation -> {
+                firstBeforeSend.set(
+                    fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1"));
+                CorrelationData correlation = invocation.getArgument(3);
+                if (alreadyConfirmed)
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                Thread.currentThread().interrupt();
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(Object.class), any(CorrelationData.class));
+      try {
+        dispatcher(rabbit).dispatch();
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+      assertEquals(
+          firstBeforeSend.get(),
+          fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1"));
+      assertEquals(
+          secondBefore, fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=2"));
+      verify(rabbit, times(1))
+          .convertAndSend(anyString(), anyString(), any(Object.class), any(CorrelationData.class));
+      verify(mapper, never())
+          .recordSeckillOutboxFailure(anyString(), anyString(), anyString(), any(), any());
+      verify(mapper, never()).markSeckillOutboxPublished(anyString(), anyString(), any());
+    }
+  }
+
+  @Test
+  void interruptAfterCommittedMarkerWritePreservesItAndStopsTheNextPhase() {
+    mapper = spy(mapper);
+    seedMarkerCandidate(1, "PENDING");
+    seedMarkerCandidate(2, "PENDING");
+    Map<String, Object> secondBefore =
+        fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=2");
+    var committed = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+    doAnswer(
+            invocation -> {
+              Object result = invocation.callRealMethod();
+              committed.set(fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+              Thread.currentThread().interrupt();
+              return result;
+            })
+        .when(mapper)
+        .markSeckillUnknown(eq(7L), eq("key:202610-marker-1"), anyString(), any());
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    when(redis.opsForValue())
+        .thenReturn(mock(org.springframework.data.redis.core.ValueOperations.class));
+    var dispatcher =
+        new SeckillOrderOutboxDispatcher(
+            mapper,
+            mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class),
+            redis,
+            mock(RabbitTemplate.class),
+            new ObjectMapper(),
+            new MockEnvironment());
+    try {
+      dispatcher.dispatch();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    assertEquals("UNKNOWN", committed.get().get("status"));
+    assertEquals(
+        committed.get(), fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+    assertEquals(secondBefore, fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=2"));
+    verify(mapper, never()).findPendingSeckillOutbox(any(), anyInt());
+  }
+
+  @Test
+  void interruptionAfterClaimKeepsTheLeaseWithoutReadingOrPublishing() throws Exception {
+    mapper = spy(mapper);
+    String orderNo = "202512-interrupted-claim";
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    due(orderNo);
+    var claimed = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+    doAnswer(
+            invocation -> {
+              Object result = invocation.callRealMethod();
+              claimed.set(
+                  fixture.queryForMap(
+                      "SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+              Thread.currentThread().interrupt();
+              return result;
+            })
+        .when(mapper)
+        .claimSeckillOutbox(anyLong(), anyString(), any(), any());
+    List<Map<String, Object>> sent = new ArrayList<>();
+    try {
+      dispatcher(sender(sent, false)).dispatch();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    assertNotNull(claimed.get().get("lease_owner"));
+    assertEquals(
+        claimed.get(),
+        fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+    assertTrue(sent.isEmpty());
+    verify(mapper, never()).findActiveSeckillOutboxLease(anyLong(), anyString(), any());
+    verify(mapper, never()).findSeckillByOrderNo(orderNo);
+  }
+
+  @Test
+  void interruptionWhileLeaseQueryReturnsStopsBeforeFactReadOrPublish() throws Exception {
+    for (int stage : List.of(1, 2)) {
+      fixture.execute("DELETE FROM seckill_order_outbox");
+      fixture.execute("DELETE FROM seckill_reservation");
+      mapper = spy(new StockSqlMapper(fixture));
+      String orderNo = "202512-interrupted-guard";
+      seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+      due(orderNo);
+      var calls = new java.util.concurrent.atomic.AtomicInteger();
+      var before = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+      doAnswer(
+              invocation -> {
+                Object result = invocation.callRealMethod();
+                if (calls.incrementAndGet() == stage) {
+                  before.set(
+                      fixture.queryForMap(
+                          "SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+                  Thread.currentThread().interrupt();
+                }
+                return result;
+              })
+          .when(mapper)
+          .findActiveSeckillOutboxLease(anyLong(), anyString(), any());
+      List<Map<String, Object>> sent = new ArrayList<>();
+      try {
+        dispatcher(sender(sent, false)).dispatch();
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+      assertTrue(sent.isEmpty());
+      assertEquals(
+          before.get(),
+          fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+      verify(mapper, times(stage == 1 ? 0 : 1)).findSeckillByOrderNo(orderNo);
+    }
+  }
+
+  @Test
   void markerUnknownWriteFailureDoesNotBlockLaterMarkerOrCommittedOutbox() throws Exception {
     seedMarkerCandidate(1, "PENDING");
     seedMarkerCandidate(2, "PENDING");

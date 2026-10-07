@@ -28,6 +28,31 @@ import org.springframework.mock.env.MockEnvironment;
 
 class SeckillOutboxRecoveryRaceTest {
   @Test
+  void interruptedAcceptanceFailureDoesNotStartVerificationQueries() {
+    pendingRow(Instant.now());
+    when(redis.opsForValue()).thenReturn(values);
+    when(values.get(anyString())).thenReturn(ORDER_NO);
+    doAnswer(
+            invocation -> {
+              Thread.currentThread().interrupt();
+              throw new IllegalStateException("fixture acceptance interrupted");
+            })
+        .when(acceptance)
+        .accept(anyLong(), anyString(), anyString(), anyString(), anyString(), anyString(), any());
+    try {
+      dispatcher.dispatch();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    verify(acceptance, times(1))
+        .accept(anyLong(), anyString(), anyString(), anyString(), anyString(), anyString(), any());
+    verify(mapper, never()).findSeckillByOrderNo(anyString());
+    verify(mapper, never()).findSeckillOutboxByOrderNo(anyString());
+    verify(mapper, never()).findPendingSeckillOutbox(any(), anyInt());
+  }
+
+  @Test
   void unexpectedUnknownTransitionErrorsStillPropagate() {
     pendingRow(Instant.now().minusSeconds(60));
     when(redis.opsForValue()).thenReturn(values);

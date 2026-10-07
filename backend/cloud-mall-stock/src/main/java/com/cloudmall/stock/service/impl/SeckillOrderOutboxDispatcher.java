@@ -73,9 +73,14 @@ public class SeckillOrderOutboxDispatcher {
   /** 恢复 Lua 后进程退出的 PENDING 受理，再扫描可投递 outbox。 */
   @Scheduled(fixedDelayString = "${cloudmall.stock.seckill.outbox.dispatch-interval-ms:1000}")
   public void dispatch() {
+    // 1. 停机请求不启动新阶段，已提交的marker或outbox事实保持原样。
+    if (Thread.currentThread().isInterrupted()) return;
     recoverPendingMarkers();
+    if (Thread.currentThread().isInterrupted()) return;
     OffsetDateTime scanNow = outboxNow();
     for (Map<String, Object> row : stockSqlMapper.findPendingSeckillOutbox(scanNow, batchSize)) {
+      // 2. 每条认领前重新响应中断，不继续扩大本批已认领集合。
+      if (Thread.currentThread().isInterrupted()) return;
       long id = ((Number) row.get("id")).longValue();
       String owner = UUID.randomUUID().toString();
       try {
@@ -94,6 +99,7 @@ public class SeckillOrderOutboxDispatcher {
   /** Lua 已经留下订单 marker 时补齐 ACCEPTED 和同一 eventId 的 outbox。 */
   private void recoverPendingMarkers() {
     for (Map<String, Object> row : nextMarkerCandidates()) {
+      if (Thread.currentThread().isInterrupted()) return;
       String orderNo = String.valueOf(row.get("order_no"));
       String marker;
       try {
@@ -118,6 +124,7 @@ public class SeckillOrderOutboxDispatcher {
         log.warn("秒杀 marker 读取失败，保留原事实并跳过，orderNo={}", orderNo, markerFailure);
         continue;
       }
+      if (Thread.currentThread().isInterrupted()) return;
       if (!orderNo.equals(marker)) {
         if (isPastMarkerGrace(row.get("updated_at"))) {
           int transitioned;
@@ -134,6 +141,7 @@ public class SeckillOrderOutboxDispatcher {
             log.warn("秒杀 marker UNKNOWN 状态写失败，保留原事实并跳过，orderNo={}", orderNo, transitionFailure);
             continue;
           }
+          if (Thread.currentThread().isInterrupted()) return;
           if (transitioned == 1) {
             log.error("秒杀受理缺少 Redis marker，已转 UNKNOWN 保留人工/对账证据，orderNo={}", orderNo);
           } else {
@@ -158,6 +166,7 @@ public class SeckillOrderOutboxDispatcher {
             String.valueOf(row.get("request_hash")),
             now());
       } catch (RuntimeException recoveryFailure) {
+        if (Thread.currentThread().isInterrupted()) return;
         StockDependencyGuard.noteMysqlFailure(recoveryFailure);
         try {
           if (alreadyCommitted(row, orderNo)) continue;
@@ -228,6 +237,7 @@ public class SeckillOrderOutboxDispatcher {
 
   /** 检查 publisher confirm 和 returned message，失败时保留 eventId 退避。 */
   private void dispatchOne(Map<String, Object> row, String owner) {
+    if (Thread.currentThread().isInterrupted()) return;
     String eventId = String.valueOf(row.get("event_id"));
     long outboxId = ((Number) row.get("id")).longValue();
     try {
@@ -260,10 +270,15 @@ public class SeckillOrderOutboxDispatcher {
         throw new IllegalStateException(
             returned == null ? "publisher confirm 未确认" : "消息被 RabbitMQ returned");
       }
+    } catch (InterruptedException interruptedWait) {
+      Thread.currentThread().interrupt();
+      log.warn("秒杀outbox确认等待被中断，停止本批并保留租约，eventId={}", eventId, interruptedWait);
+      return;
     } catch (DataAccessException databaseFailure) {
       // 受理事实读取失败不是发送失败，由候选层隔离，不另写UNKNOWN/DEAD。
       throw databaseFailure;
     } catch (Exception publishFailure) {
+      if (Thread.currentThread().isInterrupted()) return;
       OffsetDateTime failedAt = outboxNow();
       stockSqlMapper.recordSeckillOutboxFailure(
           eventId, owner, compactError(publishFailure), failedAt.plusSeconds(10), failedAt);
@@ -271,15 +286,19 @@ public class SeckillOrderOutboxDispatcher {
       return;
     }
     // 发布确认成功后的完成写只调用一次，写库失败不能落入发送失败分支。
+    if (Thread.currentThread().isInterrupted()) return;
     stockSqlMapper.markSeckillOutboxPublished(eventId, owner, outboxNow());
   }
 
   /** 查询返回后再次取时，失效或数据库异常时不猜归属、不写失败、不释放他人租约。 */
   private boolean ownsOutboxLease(long outboxId, String owner) {
+    if (Thread.currentThread().isInterrupted()) return false;
     try {
       LocalDateTime deadline =
           stockSqlMapper.findActiveSeckillOutboxLease(outboxId, owner, outboxNow());
-      return deadline != null && deadline.isAfter(outboxNow().toLocalDateTime());
+      return !Thread.currentThread().isInterrupted()
+          && deadline != null
+          && deadline.isAfter(outboxNow().toLocalDateTime());
     } catch (DataAccessException unavailableLease) {
       StockDependencyGuard.noteMysqlFailure(unavailableLease);
       log.warn("秒杀outbox租约查询失败，本次跳过，id={}", outboxId, unavailableLease);
