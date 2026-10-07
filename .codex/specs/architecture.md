@@ -212,6 +212,12 @@ COMMITTED execution 不接入 16E 无 execution cancel；failure 仅按持久 Pa
 
 16R 将严格 `CANCEL_REQUESTED` 与已取得交付尝试的 `CANCEL_RECONCILING` 分离。ORDER_SYNC_UNKNOWN 只在完整 TCC 证据和 Pay→delivery 锁内改为 CANCEL_RECONCILING；不调用远程写接口，不写 FAILED。Order cancel/paid 依赖现有 PENDING_PAYMENT CAS 与同事务唯一 stock action 作为最终仲裁。CANCEL_RECONCILING 只能按最终 Order/Stock 事实走 cancel+refund 或 paid+SUCCESS，未知/冲突退避，不猜测方向；旧 worker 不能以 ORDER_SYNC_UNKNOWN 覆盖取消意图，迟到 paid 由 Order CAS 拒绝。该轮不修改 Order 状态机，不处理售后 SUCCESS 取消或 BEGIN_UNKNOWN。
 
+### CM-20261007-20 Order 路由模式启动审计（阶段 A）
+
+CM-20 阶段 A 保持 `dynamic-monthly` 为默认 Order 主链路：普通 Hikari 或 Seata `DataSourceProxy` 包装的同一 Hikari 均可，只要 JdbcTemplate 与事务管理器引用同一事实 DataSource。激活未接入的 `sharding` profile、未知 routing mode、实际 ShardingDataSource、多个无法判定主数据源或 JdbcTemplate/TM 数据源不一致时，必须在订单业务初始化、DDL、恢复和 RPC 前 fail-fast；不得静默继续普通 Hikari，也不得强行消费静态 actual-data-nodes。只读启动日志和既有 `/actuator/info` 仅输出模式、简单类型、profile 和 Shanghai 月份窗口，禁止 URL/账号/密码/连接属性。阶段 A 不接入 ShardingDataSource、不迁移 SQL/事务、不改变订单数据，CM-20 分片切换继续 no-go。
+
+阶段 A 的 profile/mode 拒绝必须在 BeanFactoryPostProcessor 等 BeanFactory 早期阶段完成，且不实例化 DataSource、不建连。实际 DataSource 审计由独立 runtime Bean 完成，OrderTableInitializer 与 OrderReliabilityTableInitializer 显式依赖该 Bean，确保 DDL 前完成；定时任务和 RPC 业务调用按现有 Spring refresh 生命周期启动。审计要求选定的 primary DataSource、JdbcTemplate.getDataSource() 与 DataSourceTransactionManager.getDataSource() 是同一对象；不能只比较 unwrap 后 Hikari，因 Seata proxy 与原始 Hikari 可能使用不同事务资源键。多 DataSource 只有在 Spring 已明确 primary 且三者一致时允许；wrapper 仅识别已知 Spring AOP/Delegating/Seata 类型，不调用 getConnection。Info 只报告 observed/underlying/TM 简单类名、安全 profile、mode 和由 OrderTableInitializer 同一 helper 计算的 expectedMonths，不查询数据库或声称物理表存在。
+
 ### CM-20261007-18 execution recovery 过期 lease CAS（16S）
 
 16S 仅保护 `PayTccExecutionRecoveryMapper.finishRecovery` 的本地完成 CAS。保留 `PayTccExecutionRecoveryStore.finishRecovery(payNo,token,nextAt,error)` 四参数 public 方法，内部按 Asia/Shanghai DATETIME(3) 取一次 now 并传给 Mapper；SQL 以精确 `BINARY pay_no/token`、非空且严格 `recovery_lease_until>now` 为条件。过期、等于、NULL、大小写 owner 或旧 owner 均不得清理 lease、覆盖 next_recovery_at/error；普通 execution recovery 与 16G projection 共用该保护。候选、claim、state/decision/XID、BEGIN_UNKNOWN/缺 XID 保守边界均不变。

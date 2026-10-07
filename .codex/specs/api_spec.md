@@ -331,6 +331,12 @@ COMMITTED execution 的 failure 不实现主动取消。Pay `REFUND_PENDING` 明
 
 16R 为已进入 `ORDER_SYNC_UNKNOWN` 的 COMMITTED TCC delivery 增加状态 `CANCEL_RECONCILING`，与严格 `CANCEL_REQUESTED` 分离。mock-fail/callback failure 在完整 TCC tuple、receipt/Fence、16E/Legacy gate 下，只在 Pay→delivery 锁内将 ORDER_SYNC_UNKNOWN 改为 CANCEL_RECONCILING，返回 `PAY_ORDER_SYNC_UNKNOWN`/202，不调用 TC/Order/User、不写 FAILED；READY 仍走 CANCEL_REQUESTED，REFUND_PENDING/SUCCESS/REFUNDED/BEGIN_UNKNOWN 不改向。Order cancel 与 paid 均只接受 PENDING_PAYMENT，并在同一本地事务以状态 CAS 和唯一 stock action 决定最终胜者。
 
+### CM-20261007-20 Order 路由模式启动审计（阶段 A）
+
+阶段 A 不新增业务 API。Order 的 `dynamic-monthly` 为默认运行模式；新增的只读运行信息通过既有 `/actuator/info`、按当前 Actuator exposure 与访问控制提供，字段限于 routing mode、清洗后的 profile、DataSource/事务管理器简单类型和 Shanghai 月份窗口，不输出 URL、账号、密码、连接属性或订单数据。激活未接入的 sharding profile、未知 routing mode、实际 ShardingDataSource 或 JdbcTemplate/TM 数据源不一致时在启动早期失败，不返回业务 HTTP 错误；未来 shadow/逻辑路由另行评审。
+
+17A 的 `/actuator/info` 月份字段为 `expectedMonths`，复用 OrderTableInitializer 的目标窗口计算，只表示计划窗口，不查询或承诺物理表存在；可报告 observed/underlying/TM 的简单类型、清洗后的 profile 和 routing mode。profile/mode 不支持时由启动早期 BeanFactory 校验失败，不产生业务 HTTP 响应；runtime DataSource 绑定审计必须在订单 DDL 前完成，且不能通过新业务 endpoint 或 getConnection 探测绕过现有 Actuator 访问规则。
+
 `CANCEL_RECONCILING` worker 只能在完整资金 proof 后 GET Order：PENDING_PAYMENT 时同态校验 lease 后 cancel；CANCELLED+stock SUCCEEDED 进入原 REFUND_PENDING/唯一 refund key；PAID/COMPLETED+stock SUCCEEDED 且无退款事实时进入 SUCCESS；Order/Stock/User/Pay 未知或冲突保持 CANCEL_RECONCILING 退避，不 paid、不 refund、不 FAILED。旧 paid RPC 无法撤回，旧 worker 不得再写 ORDER_SYNC_UNKNOWN 覆盖取消意图。callback failure 保持 RECEIVED_FAILURE，最终 SUCCESS/REFUNDED failure 继续 409。本轮不做售后 SUCCESS 取消或 BEGIN_UNKNOWN。
 
 ### CM-20261007-18 Legacy failure 结果语义（16I）
