@@ -742,6 +742,12 @@ outbox payload 若已包含 `eventId/requestHash`，投递前必须核验：事�
 
 新旧 payload 完全缺失这两个字段时，仍由原 envelope 逻辑补全，不回写存储。`SeckillEventTimeResolverTest` 和 `SeckillEventTimeMySqlIT` 覆盖显式冲突、合法字段与缺失兼容；eventType/version 的既有行为不变，Rabbit为替身，历史数据不自动修复。
 
+### Stock 请求认领精确核对幂等键（第17轮AK）
+
+认领事务锁定用户幂等记录后，必须核对返回键与原始输入精确相等。大小写、重音或尾空格差异不能被 MySQL 排序规则当作同一请求；不一致返回已有 `SECKILL_IDEMPOTENCY_CONFLICT`/409，在 Redis/受理之前退出，保留原订单和载荷。
+
+`SeckillEventTimeMySqlIT` 验证三类别名冲突、精确重试、不同用户独立，以及 metadata 缺失后的重试调用边界。现有唯一索引未迁移，别名键仍不能保证共存，不自动改键或迁移历史记录；Redis 为替身。
+
 ## 验证命令
 
 ```bash

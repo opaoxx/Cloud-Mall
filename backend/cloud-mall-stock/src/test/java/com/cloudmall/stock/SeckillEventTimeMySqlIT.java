@@ -116,6 +116,87 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void claimKeyAliasesCannotReuseOrModifyAnotherExactRequestIdentity() {
+    var claims = transactionProxy(new SeckillRequestClaimService(mapper));
+    OffsetDateTime created = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    String hash = SeckillRequestFingerprint.hash(11, 7, 7, 1, "{}");
+    claims.claim(11, 7, 7, "202610-original-key", "Key-Case", "{}", hash, created);
+    Map<String, Object> before = fixture.queryForMap("SELECT * FROM seckill_reservation");
+    for (String alias : List.of("KEY-CASE", "Kéy-Case", "Key-Case ")) {
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () ->
+                  claims.claim(
+                      11, 7, 7, "202610-new-key", alias, "{}", hash, created.plusSeconds(1)));
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals("SECKILL_IDEMPOTENCY_CONFLICT", failure.getCode());
+      assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
+    }
+  }
+
+  @Test
+  void exactClaimKeyReplaysAndDifferentUsersKeepIndependentKeys() {
+    var claims = transactionProxy(new SeckillRequestClaimService(mapper));
+    OffsetDateTime created = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    String hash = SeckillRequestFingerprint.hash(11, 7, 7, 1, "{}");
+    Map<String, Object> first =
+        claims.claim(11, 7, 7, "202610-exact-first", "same-key", "{}", hash, created);
+    assertEquals(
+        first,
+        claims.claim(
+            11, 7, 7, "202610-exact-retry", "same-key", "{}", hash, created.plusSeconds(1)));
+    Map<String, Object> other =
+        claims.claim(
+            11,
+            7,
+            8,
+            "202610-other-user",
+            "same-key",
+            "{}",
+            SeckillRequestFingerprint.hash(11, 7, 8, 1, "{}"),
+            created);
+    assertEquals("202610-other-user", other.get("order_no"));
+    assertEquals(
+        2, fixture.queryForObject("SELECT COUNT(*) FROM seckill_reservation", Integer.class));
+  }
+
+  @Test
+  void publicStockEntryRejectsClaimAliasesBeforeTouchingRedis() {
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    HashOperations<String, Object, Object> operations = mock(HashOperations.class);
+    when(redis.opsForHash()).thenReturn(operations);
+    when(operations.entries(anyString())).thenReturn(Map.of());
+    var stock = new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+    ReflectionTestUtils.setField(
+        stock,
+        "seckillRequestClaimService",
+        transactionProxy(new SeckillRequestClaimService(mapper)));
+    AuthContext.set(7L, "USER");
+    SeckillReservationDTO original = request("Key-Case");
+    assertEquals(
+        503,
+        assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(original))
+            .getHttpStatus());
+    Map<String, Object> before = fixture.queryForMap("SELECT * FROM seckill_reservation");
+    for (String alias : List.of("KEY-CASE", "Kéy-Case", "Key-Case ")) {
+      clearInvocations(redis, operations);
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class, () -> stock.seckill(request(alias)));
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals("SECKILL_IDEMPOTENCY_CONFLICT", failure.getCode());
+      verifyNoInteractions(redis, operations);
+      assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
+    }
+    assertEquals(
+        503,
+        assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(original))
+            .getHttpStatus());
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
+  }
+
+  @Test
   void explicitPayloadIdentityConflictsStayUnchangedAndAreNotPublished() throws Exception {
     for (String field : List.of("eventId", "requestHash")) {
       for (Object value : new Object[] {null, "different", 123}) {
