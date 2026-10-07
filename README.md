@@ -664,6 +664,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRequestFingerprintTest` 固定合法输出并覆盖非法地址；`SeckillEventTimeMySqlIT`、`OrderCreationPrecisionMySqlIT` 及恢复 JSON/Dispatch IT 验证业务边界。修改 common 后需重新构建并重启依赖服务才生效；本轮完成构建和隔离验证，未重启现有业务进程，也不迁移历史歧义地址或指纹。
 
+### 地址 Unicode 字符完整性（第17轮X）
+
+地址规范化递归校验字段名和字符串值中的 UTF-16 代理对，拒绝孤立高/低代理字符，避免转成 UTF-8 时被问号替换而产生相同业务指纹。合法 emoji、中文、U+FFFD、问号及等价转义保持原值和 v1 哈希；不做 Unicode 归一化。
+
+沿用 common 指纹测试及 Stock/Order 地址 MySQL 回归验证：非法字符在 Stock 认领前拒绝，Order 不落单、恢复不重放并保留证据。现有业务进程未重启，新构建需部署并重启后生效；历史地址和指纹不自动修复。
+
 ## 验证命令
 
 ```bash

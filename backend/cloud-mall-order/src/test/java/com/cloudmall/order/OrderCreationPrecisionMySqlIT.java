@@ -391,8 +391,14 @@ class OrderCreationPrecisionMySqlIT {
   void ambiguousAddressCannotCreateAnOrderUsingTheOldCanonicalHash() {
     Map<String, Object> event = timeEvent("202612-address-integrity");
     event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
-    event.put("addressSnapshot", "{} {}");
-    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+    for (String[] sample :
+        List.of(
+            new String[] {"{} {}", "{}"},
+            new String[] {"{\"name\":\"\\uD800\"}", "{\"name\":\"?\"}"})) {
+      event.put("addressSnapshot", sample[0]);
+      event.put("requestHash", SeckillRequestFingerprint.hash(11, 7, 8, 1, sample[1]));
+      assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+    }
     for (String table :
         List.of(
             "mall_order_202612", "mall_order_item_202612", "seckill_order_dedup", "order_outbox")) {

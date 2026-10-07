@@ -112,6 +112,24 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void loneSurrogateAddressCannotReuseTheQuestionMarkFingerprint() throws Exception {
+    seed(1, "unicode-address");
+    String hash = SeckillRequestFingerprint.hash(1, 2, 3, 1, "{\"name\":\"?\"}");
+    fixture.update(
+        "UPDATE seckill_message_recovery SET request_hash=?,payload=JSON_SET(payload,'$.addressSnapshot',?,'$.requestHash',?) WHERE id=1",
+        hash,
+        "{\"name\":\"\\uD800\"}",
+        hash);
+    Map<String, Object> before = row(1);
+    recovery.replayDue();
+    assertEquals("CONFLICT", row(1).get("status"));
+    assertEquals(before.get("payload"), row(1).get("payload"));
+    assertEquals(before.get("request_hash"), row(1).get("request_hash"));
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+  }
+
+  @Test
   void ambiguousAddressCannotReuseAnOldNormalizedHashToPassRecovery() throws Exception {
     seed(1, "address-integrity");
     fixture.update(

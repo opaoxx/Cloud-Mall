@@ -106,7 +106,9 @@ class SeckillRecoveryJsonMySqlIT {
             "{} {}",
             "{} null",
             "{\"city\":1,\"city\":2}",
-            "{\"contact\":{\"name\":1,\"name\":2}}")) {
+            "{\"contact\":{\"name\":1,\"name\":2}}",
+            "{\"name\":\"\\uD800\"}",
+            "{\"nested\":{\"\\uDC00\":1}}")) {
       String eventId = "address-integrity-" + sequence++;
       var serializer = new ObjectMapper();
       var event =

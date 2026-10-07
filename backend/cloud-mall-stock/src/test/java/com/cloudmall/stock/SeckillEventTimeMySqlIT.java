@@ -130,7 +130,9 @@ class SeckillEventTimeMySqlIT {
             "{} null",
             "{} garbage",
             "{\"city\":1,\"city\":2}",
-            "{\"contact\":{\"name\":1,\"name\":2}}")) {
+            "{\"contact\":{\"name\":1,\"name\":2}}",
+            "{\"name\":\"\\uD800\"}",
+            "{\"\\uDC00\":1}")) {
       SeckillReservationDTO request = request("invalid-address");
       request.addressSnapshot = address;
       var failure =

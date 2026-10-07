@@ -10,6 +10,42 @@ import org.junit.jupiter.api.Test;
 /** 库存与订单两端共享的秒杀指纹契约。 */
 class SeckillRequestFingerprintTest {
   @Test
+  void loneUnicodeSurrogatesCannotBeReplacedWhileHashingAddresses() {
+    String escapedHigh = "\\uD800";
+    String escapedLow = "\\uDC00";
+    String invalidAddress = "{\"name\":\"" + escapedHigh + "\"}";
+    for (String address :
+        List.of(
+            invalidAddress,
+            "{\"name\":\"" + escapedLow + "\"}",
+            "{\"" + escapedHigh + "\":1}",
+            "{\"nested\":{\"" + escapedLow + "\":1}}",
+            "{\"values\":[\"" + escapedHigh + "\"]}",
+            "{\"name\":\"" + escapedHigh + "x\"}",
+            "{\"name\":\"" + (char) 0xD800 + "\"}")) {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> SeckillRequestFingerprint.canonicalAddress(address));
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> SeckillRequestFingerprint.hash(1, 2, 3, 1, address));
+    }
+  }
+
+  @Test
+  void validSurrogatePairsAndOrdinaryQuestionMarksRemainDistinctAndStable() {
+    assertEquals(
+        SeckillRequestFingerprint.hash(1, 2, 3, 1, "{\"name\":\"😀\"}"),
+        SeckillRequestFingerprint.hash(1, 2, 3, 1, "{\"name\":\"\\uD83D\\uDE00\"}"));
+    assertEquals(
+        "{\"😀\":\"�?\"}",
+        SeckillRequestFingerprint.canonicalAddress("{\"\\uD83D\\uDE00\":\"�?\"}"));
+    assertNotEquals(
+        SeckillRequestFingerprint.hash(1, 2, 3, 1, "{\"name\":\"�\"}"),
+        SeckillRequestFingerprint.hash(1, 2, 3, 1, "{\"name\":\"?\"}"));
+  }
+
+  @Test
   void trailingAddressValuesCannotBeIgnoredByCanonicalizationOrHashing() {
     for (String invalidRoot : List.of("null", "[]", "1", "true", "\"text\"", "{invalid")) {
       assertThrows(
