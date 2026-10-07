@@ -115,6 +115,125 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void outboxDatabaseWriteFailuresStayLocalAndDoNotMisclassifyConfirmedPublish() throws Exception {
+    for (String stage : List.of("claim", "published", "failure")) {
+      fixture.execute("DELETE FROM seckill_order_outbox");
+      fixture.execute("DELETE FROM seckill_reservation");
+      mapper = spy(new StockSqlMapper(fixture));
+      seed("202512-db-first", "2025-12-31T23:59:59.999+08:00");
+      seed("202512-db-second", "2025-12-31T23:59:59.999+08:00");
+      fixture.update("UPDATE seckill_order_outbox SET id=1 WHERE order_no='202512-db-first'");
+      fixture.update("UPDATE seckill_order_outbox SET id=2 WHERE order_no='202512-db-second'");
+      due("202512-db-first");
+      due("202512-db-second");
+      Map<String, Object> before =
+          fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1");
+      String condition =
+          switch (stage) {
+            case "claim" -> "NEW.lease_owner IS NOT NULL AND OLD.lease_owner IS NULL";
+            case "published" -> "NEW.status='PUBLISHED'";
+            case "failure" -> "NEW.status IN ('UNKNOWN','DEAD')";
+            default -> throw new IllegalArgumentException(stage);
+          };
+      fixture.execute(
+          "CREATE TRIGGER fail_first_outbox_update BEFORE UPDATE ON seckill_order_outbox FOR EACH ROW BEGIN IF OLD.id=1 AND ("
+              + condition
+              + ") THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture outbox update failure'; END IF; END");
+      try {
+        List<Map<String, Object>> sent = new ArrayList<>();
+        assertDoesNotThrow(() -> dispatcher(sender(sent, "failure".equals(stage))).dispatch());
+        Map<String, Object> failed =
+            fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1");
+        if ("claim".equals(stage)) assertEquals(before, failed);
+        else {
+          assertEquals("PENDING", failed.get("status"));
+          assertNotNull(failed.get("lease_owner"));
+          assertNull(failed.get("published_at"));
+          assertNull(failed.get("last_error"));
+          assertEquals(before.get("next_retry_at"), failed.get("next_retry_at"));
+        }
+        assertEquals("PUBLISHED", state("202512-db-second"));
+        assertEquals("claim".equals(stage) ? 1 : 2, sent.size());
+        verify(mapper, times("published".equals(stage) ? 1 : 0))
+            .markSeckillOutboxPublished(
+                eq(SeckillRequestFingerprint.eventId("202512-db-first")), anyString(), any());
+        verify(mapper, times("failure".equals(stage) ? 1 : 0))
+            .recordSeckillOutboxFailure(
+                eq(SeckillRequestFingerprint.eventId("202512-db-first")),
+                anyString(),
+                anyString(),
+                any(),
+                any());
+      } finally {
+        fixture.execute("DROP TRIGGER fail_first_outbox_update");
+      }
+    }
+  }
+
+  @Test
+  void outboxFactReadFailureDoesNotBecomeAPublishFailureOrBlockOtherRows() throws Exception {
+    mapper = spy(mapper);
+    seed("202512-fact-db-first", "2025-12-31T23:59:59.999+08:00");
+    seed("202512-fact-db-second", "2025-12-31T23:59:59.999+08:00");
+    fixture.update("UPDATE seckill_order_outbox SET id=1 WHERE order_no='202512-fact-db-first'");
+    fixture.update("UPDATE seckill_order_outbox SET id=2 WHERE order_no='202512-fact-db-second'");
+    due("202512-fact-db-first");
+    due("202512-fact-db-second");
+    doThrow(
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "fixture fact query unavailable"))
+        .when(mapper)
+        .findSeckillByOrderNo("202512-fact-db-first");
+    List<Map<String, Object>> sent = new ArrayList<>();
+    assertDoesNotThrow(() -> dispatcher(sender(sent, false)).dispatch());
+    Map<String, Object> failed =
+        fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1");
+    assertEquals("PENDING", failed.get("status"));
+    assertNotNull(failed.get("lease_owner"));
+    assertNull(failed.get("last_error"));
+    verify(mapper, never())
+        .recordSeckillOutboxFailure(
+            eq(SeckillRequestFingerprint.eventId("202512-fact-db-first")),
+            anyString(),
+            anyString(),
+            any(),
+            any());
+    assertEquals("PUBLISHED", state("202512-fact-db-second"));
+    assertEquals(1, sent.size());
+  }
+
+  @Test
+  void scanDatabaseFailureAndUnexpectedClaimErrorsStillPropagate() throws Exception {
+    mapper = spy(mapper);
+    String orderNo = "202512-scan-boundary";
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    due(orderNo);
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo);
+    List<Map<String, Object>> sent = new ArrayList<>();
+    var dispatcher = dispatcher(sender(sent, false));
+    doThrow(
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "fixture scan unavailable"))
+        .when(mapper)
+        .findPendingSeckillOutbox(any(), anyInt());
+    assertThrows(org.springframework.dao.DataAccessException.class, dispatcher::dispatch);
+    doCallRealMethod().when(mapper).findPendingSeckillOutbox(any(), anyInt());
+    doThrow(new IllegalStateException("fixture unexpected claim"))
+        .when(mapper)
+        .claimSeckillOutbox(anyLong(), anyString(), any(), any());
+    assertThrows(IllegalStateException.class, dispatcher::dispatch);
+    doThrow(new AssertionError("fixture fatal claim"))
+        .when(mapper)
+        .claimSeckillOutbox(anyLong(), anyString(), any(), any());
+    assertThrows(AssertionError.class, dispatcher::dispatch);
+    assertTrue(sent.isEmpty());
+    assertEquals(
+        before,
+        fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+  }
+
+  @Test
   void outboxClaimCounterSaturatesWithoutOverflowOrMovingTheIncrement() throws Exception {
     String orderNo = "202512-counter-boundary";
     seed(orderNo, "2025-12-31T23:59:59.999+08:00");

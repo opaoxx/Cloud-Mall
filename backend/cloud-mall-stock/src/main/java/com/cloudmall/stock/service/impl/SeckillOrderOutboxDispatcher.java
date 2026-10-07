@@ -78,9 +78,15 @@ public class SeckillOrderOutboxDispatcher {
     for (Map<String, Object> row : stockSqlMapper.findPendingSeckillOutbox(scanNow, batchSize)) {
       long id = ((Number) row.get("id")).longValue();
       String owner = UUID.randomUUID().toString();
-      OffsetDateTime claimNow = outboxNow();
-      if (stockSqlMapper.claimSeckillOutbox(id, owner, claimNow.plusSeconds(30), claimNow) == 1) {
-        dispatchOne(row, owner);
+      try {
+        OffsetDateTime claimNow = outboxNow();
+        if (stockSqlMapper.claimSeckillOutbox(id, owner, claimNow.plusSeconds(30), claimNow) == 1) {
+          dispatchOne(row, owner);
+        }
+      } catch (DataAccessException recordFailure) {
+        // 单条数据库失败不推断发送/提交结果，也不清理可能仍有效的租约。
+        StockDependencyGuard.noteMysqlFailure(recordFailure);
+        log.warn("秒杀outbox单条数据库操作失败，本次跳过，id={}", id, recordFailure);
       }
     }
   }
@@ -246,13 +252,18 @@ public class SeckillOrderOutboxDispatcher {
         throw new IllegalStateException(
             returned == null ? "publisher confirm 未确认" : "消息被 RabbitMQ returned");
       }
-      stockSqlMapper.markSeckillOutboxPublished(eventId, owner, outboxNow());
+    } catch (DataAccessException databaseFailure) {
+      // 受理事实读取失败不是发送失败，由候选层隔离，不另写UNKNOWN/DEAD。
+      throw databaseFailure;
     } catch (Exception publishFailure) {
       OffsetDateTime failedAt = outboxNow();
       stockSqlMapper.recordSeckillOutboxFailure(
           eventId, owner, compactError(publishFailure), failedAt.plusSeconds(10), failedAt);
       log.warn("秒杀订单 outbox 投递失败，将使用同一 eventId 重试，eventId={}", eventId, publishFailure);
+      return;
     }
+    // 发布确认成功后的完成写只调用一次，写库失败不能落入发送失败分支。
+    stockSqlMapper.markSeckillOutboxPublished(eventId, owner, outboxNow());
   }
 
   /** 查询返回后再次取时，失效或数据库异常时不猜归属、不写失败、不释放他人租约。 */
