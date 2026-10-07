@@ -566,7 +566,19 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryJsonMySqlIT' '-
 mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryLeaseMySqlIT,SeckillRecoveryJsonMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
 ```
 
-新测试使用自建 `cm17j_*` 库验证边界、owner 接管、冲突竞态和整行保持，结束后清理。本轮仅保护完成写；发送前租约复查、续期和批次时钟尚未处理，也不保证撤回已经发出的消息。
+新测试使用自建 `cm17j_*` 库验证边界、owner 接管、冲突竞态和整行保持，结束后清理。第17轮J仅保护完成写，发送前检查及批次时钟由第17轮K继续处理；未引入续期，也不保证撤回已经发出的消息。
+
+### 恢复发送前租约检查与逐条时钟（第17轮K）
+
+恢复扫描仍限定每批50条，但每条记录认领时重新采样上海毫秒时间，授予本次认领起算的30秒租约。验真、确认或失败后的退避计划也从实际处理时刻计算。租约等于当前毫秒时可再次认领，与第17轮J的严格有效期条件一致。
+
+Stock 验真之前和 Rabbit 发送紧前均只读检查精确 owner、有效期及可恢复状态；数据库查询返回后再检查是否已跨过截止时间。失效或数据库读取异常时停止本次处理，不发消息、不写完成，也不清理他人的租约。后置检查失败时，已经发生的 Stock 只读查询无法撤回。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryDispatchMySqlIT,SeckillRecoveryLeaseMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+测试使用 `cm17k_*` 自建库、可变时钟和 Stock/Rabbit 替身验证慢调用、接管、终态变化、查询异常及重试时间。检查与网络发送不是原子操作，已开始发送的消息不能撤回；原幂等机制及完成写 CAS 继续负责后续收敛。本轮不自动续租，也不改变扫描快照中的尝试次数逻辑。
 
 ## 验证命令
 

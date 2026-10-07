@@ -112,6 +112,7 @@ class SeckillMessageRecoveryTest {
 
   private static SeckillMessageRecovery recovery(
       SeckillMessageRecoveryMapper mapper, StockClient stockClient, RabbitTemplate rabbit) {
+    when(mapper.hasActiveLease(anyLong(), anyString())).thenReturn(true);
     return new SeckillMessageRecovery(mapper, rabbit, new ObjectMapper(), stockClient);
   }
 

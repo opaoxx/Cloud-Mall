@@ -101,27 +101,51 @@ public class SeckillMessageRecoveryMapper {
         eventId);
   }
 
+  /** 扫描到期记录；租约等于当前毫秒时已经失效，可被重新认领。 */
   public List<Map<String, Object>> findDue(int limit, LocalDateTime now) {
     return jdbcTemplate.queryForList(
         "SELECT id,event_id,request_hash,payload,attempts FROM seckill_message_recovery "
             + "WHERE status IN ('REPLAY_PENDING','REPLAYED','QUARANTINED','VERIFYING') AND next_retry_at<=? "
-            + "AND (lease_until IS NULL OR lease_until<?) ORDER BY id LIMIT ?",
+            + "AND (lease_until IS NULL OR lease_until<=?) ORDER BY id LIMIT ?",
         now,
         now,
         limit);
   }
 
+  /** 按调用方本次新鲜时刻认领到期记录，拒绝仍被有效租约占用的行。 */
   public int claim(long id, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE seckill_message_recovery SET lease_owner=?,lease_until=?,updated_at=? WHERE id=? "
             + "AND status IN ('REPLAY_PENDING','REPLAYED','QUARANTINED','VERIFYING') AND next_retry_at<=? "
-            + "AND (lease_until IS NULL OR lease_until<?)",
+            + "AND (lease_until IS NULL OR lease_until<=?)",
         owner,
         leaseUntil,
         now,
         id,
         now,
         now);
+  }
+
+  /**
+   * 只读核验当前 owner、有效租约及可恢复状态，不延长租约或修改记录。
+   *
+   * @param id 恢复台账主键
+   * @param owner 本次认领的原始 token
+   * @return 当前时刻是否仍可继续验真或尝试发送；不保证检查之后的网络调用原子性
+   */
+  public boolean hasActiveLease(long id, String owner) {
+    LocalDateTime queryNow = completionTime();
+    List<LocalDateTime> deadlines =
+        jdbcTemplate.queryForList(
+            "SELECT lease_until FROM seckill_message_recovery WHERE id=?" + COMPLETION_GUARD,
+            LocalDateTime.class,
+            id,
+            owner,
+            queryNow);
+    // 查询本身也可能阻塞；返回时必须仍未到期，不能只相信请求发起时的有效性。
+    return deadlines.size() == 1
+        && deadlines.get(0) != null
+        && deadlines.get(0).isAfter(completionTime());
   }
 
   /** 只有仍持有有效租约的 worker 可完成重放；失效 owner 或终态记录保持原样。 */

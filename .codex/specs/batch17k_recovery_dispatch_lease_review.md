@@ -13,13 +13,13 @@
 - 扫描开始用 `scanNow` 查询 due rows；
 - 每行 claim 前重新采样 `claimNow`，leaseUntil=`claimNow+30s`；
 - 每次 retry/完成计划使用实际失败或完成时新鲜 service now，不复用批次 scanNow；
-- 不自动续租；claim 输入必须保持原有效非空 token/leaseUntil>now 约束。
+- 不自动续租；调用方继续生成非空 UUID owner 与 claimNow+30s，本轮不新增 Mapper 参数契约。
 
 `findDue/claim` 本轮只统一边界为 `lease_until <= now`，与完成写严格 `lease_until > now` 对齐；不新增业务参数或状态。
 
 ## 3. 只读发送前 lease 守卫
 
-在 `verifyStockFact` 开始前和 Rabbit send 紧前，各调用一次 Mapper 只读方法 `hasActiveLease(id, owner)` 或等价语义方法。方法内部使用 fresh Shanghai DATETIME(3) now，精确校验：
+在 `verifyStockFact` 开始前和 Rabbit send 紧前，各调用一次 Mapper 只读方法 `hasActiveLease(id, owner)` 或等价语义方法。方法内部使用 fresh Shanghai DATETIME(3) `queryNow`，应直接在 SQL 中读取/比较 `lease_until`、精确 owner 和四个状态；不能只 SELECT COUNT 后使用调用方旧时间判断。查询返回后，Mapper 内部再使用新的 completionTime 与读取的 lease deadline 做一次 freshness 复核，保持 hasActiveLease 的 boolean API，查询/返回过程跨过 lease 截止时必须视为 false：
 
 ```text
 id = ?
@@ -29,7 +29,7 @@ AND lease_until > now
 AND status IN ('REPLAY_PENDING','REPLAYED','QUARANTINED','VERIFYING')
 ```
 
-守卫失败时不调用 Stock、不发送 Rabbit、不写 replay 完成；当前 worker 直接结束，后续由 due 扫描/新 owner 继续。Stock RPC 返回后必须重新检查，避免慢调用期间 lease 过期、owner 被替换或状态变为 CONFLICT/RESOLVED。
+前置守卫返回 false 或其数据库读取异常时，不调用 Stock、不发送 Rabbit、不写 replay 完成；后置守卫失败或数据库读取异常时，Stock 可能已经完成验真，但仍不得发送 Rabbit或写 replay 完成。实现应只将可预期的 DataAccessException 记录告警并 fail closed，不能把异常当作成功或进入 markReplayed，当前 worker 直接结束，后续由 due 扫描/新 owner 继续。其他编程错误仍按原异常路径暴露。Stock RPC 返回后必须重新检查，避免慢调用期间 lease 过期、owner 被替换或状态变为 CONFLICT/RESOLVED。
 
 既有 `markReplayed`/`markVerification` 完成 CAS 仍由 17J 负责，发送守卫不能替代完成写 CAS。
 
@@ -43,11 +43,11 @@ Rabbit confirm/returned、lease 完成写、退避和错误记录沿既有逻辑
 
 1. 可变 fake clock 验证批次第一行慢调用后第二行按新鲜 claimNow 获得有效 lease，不沿用 scanNow+30s。
 2. Stock RPC 返回前 lease 到期、owner 被替换、状态变为 CONFLICT/RESOLVED：不发送 Rabbit、不写完成状态。
-3. 发送紧前守卫失败：不发送、不修改 payload/hash/eventId/状态；新 owner 后续可继续处理。
+3. 发送紧前守卫失败或数据库读取异常：不发送、不写完成、不修改 payload/hash/eventId/状态；若为前置守卫失败还不得调用 Stock，后置守卫失败不否认 Stock 已读过；新 owner 后续可继续处理。
 4. 正常 active lease 两次守卫通过，发送原 payload/eventId/hash 稳定，完成 CAS 可正常收敛。
 5. `lease_until == now` 不能通过 active lease，随后可按 `<=now` 被重新 claim。
 6. 真实 MySQL + fake mutable Clock + Stock/Rabbit 替身覆盖慢调用、到期、owner 替换、CONFLICT/RESOLVED、正常发送和原字段不变。
-7. 说明替身 Rabbit 不等价真实 broker 网络 confirm；检查与发送之间的不可原子窗口保留为后续分布式可靠性议题。
+7. 真实/替身 JdbcTemplate 测试必须模拟查询结果返回前 clock 前进超过 lease，前置和后置守卫均不得误放行；说明替身 Rabbit 不等价真实 broker 网络 confirm，检查与发送之间的不可原子窗口保留为后续分布式可靠性议题。
 
 ## 6. 明确排除
 

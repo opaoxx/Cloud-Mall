@@ -10,7 +10,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,6 +27,7 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -35,6 +39,8 @@ public class SeckillMessageRecovery {
   private final RabbitTemplate rabbitTemplate;
   private final ObjectMapper objectMapper;
   private final StockClient stockClient;
+  /** 恢复操作的单次新鲜时钟；测试可模拟批次停顿，不注册新的配置 Bean。 */
+  private Clock recoveryClock = Clock.system(ZoneOffset.ofHours(8));
 
   public SeckillMessageRecovery(
       SeckillMessageRecoveryMapper recoveryMapper,
@@ -125,13 +131,17 @@ public class SeckillMessageRecovery {
   /** 只重放到达时间的记录；失败继续退避，超过阈值仍不停止。 */
   @Scheduled(fixedDelayString = "${cloudmall.order.seckill-recovery-interval-ms:5000}")
   public void replayDue() {
-    LocalDateTime now = LocalDateTime.now();
-    List<Map<String, Object>> rows = recoveryMapper.findDue(50, now);
+    // 1. 扫描时刻只用于发现候选；不能作为整批记录的租约起点。
+    LocalDateTime scanNow = recoveryNow();
+    List<Map<String, Object>> rows = recoveryMapper.findDue(50, scanNow);
     for (Map<String, Object> row : rows) {
       long id = ((Number) row.get("id")).longValue();
       String owner = UUID.randomUUID().toString();
-      if (recoveryMapper.claim(id, owner, now.plusSeconds(30), now) != 1) continue;
-      if (!verifyStockFact(row, id, owner, now)) continue;
+      // 2. 每条记录独立采样，并在外部 Stock 查询前核验当前归属。
+      LocalDateTime claimNow = recoveryNow();
+      if (recoveryMapper.claim(id, owner, claimNow.plusSeconds(30), claimNow) != 1) continue;
+      if (!ownsCurrentLease(id, owner)) continue;
+      if (!verifyStockFact(row, id, owner)) continue;
       int attempts = ((Number) row.get("attempts")).intValue() + 1;
       try {
         String eventId = String.valueOf(row.get("event_id"));
@@ -139,26 +149,60 @@ public class SeckillMessageRecovery {
         MessageProperties properties = new MessageProperties();
         properties.setContentType("application/json");
         properties.setMessageId(eventId);
-        Message outbound = new Message(String.valueOf(row.get("payload")).getBytes(StandardCharsets.UTF_8), properties);
-        rabbitTemplate.send(OrderMessagingConfiguration.SECKILL_EXCHANGE, "", outbound, correlation);
+        Message outbound =
+            new Message(
+                String.valueOf(row.get("payload")).getBytes(StandardCharsets.UTF_8), properties);
+        // 3. 慢 RPC 后再检查；发送开始后的竞态由原幂等和17J完成写CAS约束。
+        if (!ownsCurrentLease(id, owner)) continue;
+        rabbitTemplate.send(
+            OrderMessagingConfiguration.SECKILL_EXCHANGE, "", outbound, correlation);
         CorrelationData.Confirm confirm = correlation.getFuture().get(5000, TimeUnit.MILLISECONDS);
         if (confirm == null || !confirm.isAck() || correlation.getReturnedMessage() != null)
           throw new IllegalStateException("秒杀事件未收到有效 publisher confirm");
-        recoveryMapper.markReplayed(id, owner, attempts, now.plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))), null);
+        recoveryMapper.markReplayed(
+            id,
+            owner,
+            attempts,
+            recoveryNow().plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))),
+            null);
       } catch (Exception exception) {
-        recoveryMapper.markReplayed(id, owner, attempts, now.plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))), exception.toString());
+        recoveryMapper.markReplayed(
+            id,
+            owner,
+            attempts,
+            recoveryNow().plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))),
+            exception.toString());
       }
     }
   }
 
-  /** 只有库存受理台账确认存在时才允许重放事件。 */
-  private boolean verifyStockFact(Map<String, Object> row, long id, String owner, LocalDateTime now) {
+  /** 按上海偏移读取本次操作的毫秒时间，避免依赖 JVM 默认时区。 */
+  private LocalDateTime recoveryNow() {
+    return LocalDateTime.ofInstant(recoveryClock.instant(), ZoneOffset.ofHours(8))
+        .truncatedTo(ChronoUnit.MILLIS);
+  }
+
+  /** 归属无法读取时不猜测有效性，也不尝试清理可能已归他人的租约。 */
+  private boolean ownsCurrentLease(long id, String owner) {
     try {
-      Map<String, Object> event = objectMapper.readValue(
-          String.valueOf(row.get("payload")), new TypeReference<LinkedHashMap<String, Object>>() {});
+      return recoveryMapper.hasActiveLease(id, owner);
+    } catch (DataAccessException unavailableLease) {
+      LOGGER.warn("秒杀恢复租约核验失败，本次跳过，id={}", id, unavailableLease);
+      return false;
+    }
+  }
+
+  /** 只有库存受理台账确认存在时才允许重放事件。 */
+  private boolean verifyStockFact(Map<String, Object> row, long id, String owner) {
+    try {
+      Map<String, Object> event =
+          objectMapper.readValue(
+              String.valueOf(row.get("payload")),
+              new TypeReference<LinkedHashMap<String, Object>>() {});
       String orderNo = String.valueOf(event.getOrDefault("orderNo", ""));
       if (orderNo.isBlank()) {
-        recoveryMapper.markVerification(id, owner, "CONFLICT", "缺少 orderNo，无法核对库存受理", now.plusMinutes(5));
+        recoveryMapper.markVerification(
+            id, owner, "CONFLICT", "缺少 orderNo，无法核对库存受理", recoveryNow().plusMinutes(5));
         return false;
       }
       // 时间证据不足时保留原载荷和事件号，避免在 Stock 查询与 Rabbit 重发之间空转。
@@ -166,7 +210,7 @@ public class SeckillMessageRecovery {
         OrderCreationTime.forSeckill(orderNo, event.get("occurredAt"));
       } catch (IllegalArgumentException unverifiedTime) {
         recoveryMapper.markVerification(
-            id, owner, "QUARANTINED", unverifiedTime.getMessage(), now.plusMinutes(5));
+            id, owner, "QUARANTINED", unverifiedTime.getMessage(), recoveryNow().plusMinutes(5));
         return false;
       }
       var response =
@@ -174,35 +218,41 @@ public class SeckillMessageRecovery {
               OrderStockCircuitBreaker.STATUS,
               () -> stockClient.seckillReservationFact(orderNo, "cloud-mall-order"));
       if (response == null || !"0".equals(response.code) || response.data == null) {
-        recoveryMapper.markVerification(id, owner, "VERIFYING", "库存受理查询响应无效", now.plusSeconds(30));
+        recoveryMapper.markVerification(
+            id, owner, "VERIFYING", "库存受理查询响应无效", recoveryNow().plusSeconds(30));
         return false;
       }
       String status = String.valueOf(response.data.get("status"));
       if ("NOT_FOUND".equals(status) || "REJECTED".equals(status)) {
         // 没有库存事实的存量死信必须保留并持续核验，不能因字段缺失误判为冲突或创建幽灵订单。
         recoveryMapper.markVerification(
-            id, owner, "QUARANTINED", "库存受理状态=" + status, now.plusMinutes(5));
+            id, owner, "QUARANTINED", "库存受理状态=" + status, recoveryNow().plusMinutes(5));
         return false;
       }
       if (!hasCoreFields(event) || !matchesEvent(event, response.data)) {
-        recoveryMapper.markVerification(id, owner, "CONFLICT", "库存受理事实与原事件不一致", now.plusMinutes(5));
+        recoveryMapper.markVerification(
+            id, owner, "CONFLICT", "库存受理事实与原事件不一致", recoveryNow().plusMinutes(5));
         return false;
       }
       if ("ACCEPTED".equals(status) || "PUBLISHED".equals(status) || "ORDER_CREATED".equals(status))
         return true;
       recoveryMapper.markVerification(
-          id, owner, "VERIFYING", "库存受理状态未知=" + status, now.plusSeconds(30));
+          id, owner, "VERIFYING", "库存受理状态未知=" + status, recoveryNow().plusSeconds(30));
     } catch (Exception exception) {
       recoveryMapper.markVerification(
-          id, owner, "VERIFYING", exception.toString(), now.plusSeconds(30));
+          id, owner, "VERIFYING", exception.toString(), recoveryNow().plusSeconds(30));
     }
     return false;
   }
 
   private boolean matchesEvent(Map<String, Object> event, Map<String, Object> fact) {
-    if (fact == null || !hasCoreFields(event) || !hasCoreFields(fact)
-        || !same(event, fact, "orderNo") || !same(event, fact, "activityId")
-        || !same(event, fact, "skuId") || !same(event, fact, "userId")
+    if (fact == null
+        || !hasCoreFields(event)
+        || !hasCoreFields(fact)
+        || !same(event, fact, "orderNo")
+        || !same(event, fact, "activityId")
+        || !same(event, fact, "skuId")
+        || !same(event, fact, "userId")
         || !same(event, fact, "idempotencyKey")) return false;
     String expectedHash = requestHash(event, "");
     return expectedHash.equalsIgnoreCase(String.valueOf(event.get("requestHash")))
