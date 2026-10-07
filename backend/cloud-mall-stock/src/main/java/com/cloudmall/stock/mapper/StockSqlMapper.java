@@ -533,9 +533,11 @@ public class StockSqlMapper {
 
   /** 按原订单号读取秒杀受理记录，供进程重启恢复。 */
   public Map<String, Object> findSeckillByOrderNo(String orderNo) {
-    List<Map<String, Object>> rows = queryForList(
-        "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash"
-            + " FROM seckill_reservation WHERE order_no=?", orderNo);
+    List<Map<String, Object>> rows =
+        queryForList(
+            "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,created_at"
+                + " FROM seckill_reservation WHERE order_no=?",
+            orderNo);
     return rows.isEmpty() ? null : rows.get(0);
   }
 
@@ -612,13 +614,17 @@ public class StockSqlMapper {
   /** 读取可投递的秒杀 outbox。 */
   public List<Map<String, Object>> findPendingSeckillOutbox(OffsetDateTime now, int limit) {
     return queryForList(
-        "SELECT id,event_id,order_no,payload,request_hash,status,attempts FROM seckill_order_outbox"
+        "SELECT id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts FROM seckill_order_outbox"
             + " WHERE status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
-            + " AND (lease_until IS NULL OR lease_until<?) ORDER BY id LIMIT ?", now, now, limit);
+            + " AND (lease_until IS NULL OR lease_until<?) ORDER BY id LIMIT ?",
+        now,
+        now,
+        limit);
   }
 
   /** 以 CAS 方式认领 outbox，避免多实例重复发布。 */
-  public int claimSeckillOutbox(long id, String owner, OffsetDateTime leaseUntil, OffsetDateTime now) {
+  public int claimSeckillOutbox(
+      long id, String owner, OffsetDateTime leaseUntil, OffsetDateTime now) {
     return update(
         "UPDATE seckill_order_outbox SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
             + " WHERE id=? AND status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"

@@ -153,21 +153,32 @@ public class SeckillOrderOutboxDispatcher {
   private void dispatchOne(Map<String, Object> row, String owner) {
     String eventId = String.valueOf(row.get("event_id"));
     try {
-      Map<String, Object> payload = objectMapper.readValue(
-          String.valueOf(row.get("payload")), new TypeReference<LinkedHashMap<String, Object>>() {});
+      Map<String, Object> payload =
+          objectMapper.readValue(
+              String.valueOf(row.get("payload")),
+              new TypeReference<LinkedHashMap<String, Object>>() {});
       Map<String, Object> envelope = new LinkedHashMap<>(payload);
       envelope.put("eventId", eventId);
       envelope.put("eventType", "SECKILL_ORDER_REQUEST");
       envelope.put("payloadVersion", 1);
       envelope.put("orderNo", row.get("order_no"));
       envelope.put("requestHash", row.get("request_hash"));
-      envelope.put("occurredAt", now().toString());
+      // 创建时间来自首次受理事实；接受/投递/重试的调度时间不能替换它。
+      envelope.put(
+          "occurredAt",
+          SeckillEventTimeResolver.resolve(
+                  row,
+                  payload,
+                  stockSqlMapper.findSeckillByOrderNo(String.valueOf(row.get("order_no"))))
+              .toString());
       CorrelationData correlationData = new CorrelationData(eventId);
       rabbitTemplate.convertAndSend(EXCHANGE, "", envelope, correlationData);
-      CorrelationData.Confirm confirm = correlationData.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS);
+      CorrelationData.Confirm confirm =
+          correlationData.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS);
       Message returned = correlationData.getReturnedMessage();
       if (confirm == null || !confirm.isAck() || returned != null) {
-        throw new IllegalStateException(returned == null ? "publisher confirm 未确认" : "消息被 RabbitMQ returned");
+        throw new IllegalStateException(
+            returned == null ? "publisher confirm 未确认" : "消息被 RabbitMQ returned");
       }
       stockSqlMapper.markSeckillOutboxPublished(eventId, owner, now());
     } catch (Exception publishFailure) {

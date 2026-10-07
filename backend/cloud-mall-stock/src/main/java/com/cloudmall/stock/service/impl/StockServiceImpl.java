@@ -46,6 +46,9 @@ public class StockServiceImpl implements StockService {
   /** 保存 PREFIX 的业务状态或配置。 */
   private static final String PREFIX = "stock:available:", RES = "stock:reservation:";
 
+  /** 秒杀首次认领的单次时钟来源，隔离测试可注入跨月固定时刻。 */
+  private Clock seckillClaimClock = Clock.system(ZoneOffset.ofHours(8));
+
   /** 保存 redis 的业务状态或配置。 */
   @Autowired private StringRedisTemplate redis;
 
@@ -441,17 +444,28 @@ public class StockServiceImpl implements StockService {
       String activityId, String skuId, String requestUserId, String idempotencyKey) {
     String requestHash;
     try {
-      requestHash = SeckillRequestFingerprint.hash(
-          request.activityId, request.skuId, userId, 1, request.addressSnapshot);
+      requestHash =
+          SeckillRequestFingerprint.hash(
+              request.activityId, request.skuId, userId, 1, request.addressSnapshot);
     } catch (IllegalArgumentException invalidFingerprint) {
       throw new BizException(ErrorCodes.INVALID, invalidFingerprint.getMessage(), 400);
     }
-    String candidateOrderNo = now().format(DateTimeFormatter.ofPattern("yyyyMM"))
-        + UUID.randomUUID().toString().replace("-", "");
-    String candidatePayload = toSeckillPayload(request, candidateOrderNo);
-    Map<String, Object> claimed = seckillRequestClaimService.claim(
-        request.activityId, request.skuId, userId, candidateOrderNo, request.idempotencyKey,
-        candidatePayload, requestHash, now());
+    OffsetDateTime claimedAt =
+        SeckillEventTimeResolver.normalize(OffsetDateTime.now(seckillClaimClock));
+    String candidateOrderNo =
+        claimedAt.format(DateTimeFormatter.ofPattern("yyyyMM"))
+            + UUID.randomUUID().toString().replace("-", "");
+    String candidatePayload = toSeckillPayload(request, candidateOrderNo, claimedAt);
+    Map<String, Object> claimed =
+        seckillRequestClaimService.claim(
+            request.activityId,
+            request.skuId,
+            userId,
+            candidateOrderNo,
+            request.idempotencyKey,
+            candidatePayload,
+            requestHash,
+            claimedAt);
     if (!requestHash.equals(String.valueOf(claimed.get("request_hash"))))
       throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
     String orderNo = String.valueOf(claimed.get("order_no"));
@@ -722,7 +736,8 @@ public class StockServiceImpl implements StockService {
   }
 
   /** 保存可在进程重启后重建事件的完整受理载荷。 */
-  private String toSeckillPayload(SeckillReservationDTO request, String orderNo) {
+  private String toSeckillPayload(
+      SeckillReservationDTO request, String orderNo, OffsetDateTime claimedAt) {
     try {
       Map<String, Object> payload = new LinkedHashMap<>();
       payload.put("activityId", request.activityId);
@@ -732,6 +747,7 @@ public class StockServiceImpl implements StockService {
       payload.put("idempotencyKey", request.idempotencyKey);
       payload.put("addressSnapshot", request.addressSnapshot);
       payload.put("orderNo", orderNo);
+      payload.put("occurredAt", claimedAt.toString());
       return mapper.writeValueAsString(payload);
     } catch (com.fasterxml.jackson.core.JsonProcessingException serializationFailure) {
       throw new BizException(ErrorCodes.INVALID, "秒杀请求无法序列化", 400);

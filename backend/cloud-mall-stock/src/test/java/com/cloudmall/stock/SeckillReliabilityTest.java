@@ -4,9 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.times;
 
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
@@ -17,10 +17,10 @@ import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
 import com.cloudmall.stock.service.impl.StockReservationRequestService;
 import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.lang.reflect.Method;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.lang.reflect.Method;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
@@ -68,7 +68,7 @@ class SeckillReliabilityTest {
   }
 
   @Test
-  void publishedEnvelopeContainsStableOrderNoAndNackLeavesOutboxRetryable() {
+  void publishedEnvelopeContainsStableOrderNoAndNackLeavesOutboxRetryable() throws Exception {
     StockSqlMapper mapper = mock(StockSqlMapper.class);
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
     Environment environment = mock(Environment.class);
@@ -88,12 +88,51 @@ class SeckillReliabilityTest {
             environment);
     String orderNo = "202609stable-order";
     String eventId = SeckillRequestFingerprint.eventId(orderNo);
+    String hash = SeckillRequestFingerprint.hash(1, 2, 3, 1, "{}");
+    String payload =
+        new ObjectMapper()
+            .writeValueAsString(
+                Map.of(
+                    "activityId",
+                    1,
+                    "skuId",
+                    2,
+                    "userId",
+                    3,
+                    "quantity",
+                    1,
+                    "orderNo",
+                    orderNo,
+                    "idempotencyKey",
+                    "k",
+                    "addressSnapshot",
+                    "{}"));
+    when(mapper.findSeckillByOrderNo(orderNo))
+        .thenReturn(
+            Map.of(
+                "activity_id",
+                1L,
+                "sku_id",
+                2L,
+                "user_id",
+                3L,
+                "order_no",
+                orderNo,
+                "idempotency_key",
+                "k",
+                "request_hash",
+                hash,
+                "status",
+                "ACCEPTED",
+                "created_at",
+                java.time.LocalDateTime.of(2026, 9, 30, 23, 59, 59, 999_000_000)));
     Map<String, Object> row =
         Map.of(
             "event_id", eventId,
             "order_no", orderNo,
-            "request_hash", "hash",
-            "payload", "{\"activityId\":1,\"skuId\":2,\"userId\":3,\"idempotencyKey\":\"k\"}");
+            "request_hash", hash,
+            "idempotency_key", "k",
+            "payload", payload);
     Map<String, Object> sent = new LinkedHashMap<>();
     org.mockito.Mockito.doAnswer(
             invocation -> {
@@ -103,14 +142,20 @@ class SeckillReliabilityTest {
               return null;
             })
         .when(rabbit)
-        .convertAndSend(any(String.class), any(String.class), any(Object.class), any(CorrelationData.class));
+        .convertAndSend(
+            any(String.class), any(String.class), any(Object.class), any(CorrelationData.class));
 
     ReflectionTestUtils.invokeMethod(dispatcher, "dispatchOne", row, "owner-1");
 
     assertEquals(orderNo, sent.get("orderNo"));
     assertEquals(eventId, sent.get("eventId"));
-    verify(mapper).recordSeckillOutboxFailure(
-        eq(eventId), eq("owner-1"), any(String.class), any(OffsetDateTime.class), any(OffsetDateTime.class));
+    verify(mapper)
+        .recordSeckillOutboxFailure(
+            eq(eventId),
+            eq("owner-1"),
+            any(String.class),
+            any(OffsetDateTime.class),
+            any(OffsetDateTime.class));
   }
 
   @Test

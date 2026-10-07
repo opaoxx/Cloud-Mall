@@ -509,7 +509,7 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderTableInitializerMySqlIT' 
 
 普通订单和秒杀落单在写入前共用 `OrderCreationTime.normalize`：将创建时刻按同一瞬时转换为 `+08:00`，再向下截断到毫秒。普通订单用此值生成订单号月份和表名，订单、明细、幂等记录、初始预扣意图和超时 outbox 的创建字段沿用同一值。秒杀仍保留消息中的原订单号与幂等信息。
 
-该处理避免月末亚毫秒值被 MySQL 舍入到下一月，以及 UTC 等事件时间被错误当作上海本地字段。查询边界仍使用第17轮D的向上对齐规则，保持半开区间语义。Stock 生成候选订单号与载荷时多次采样、缺少 `occurredAt` 的历史消息跨月恢复仍待后续处理；本轮未修改这些分支。
+该处理避免月末亚毫秒值被 MySQL 舍入到下一月，以及 UTC 等事件时间被错误当作上海本地字段。查询边界仍使用第17轮D的向上对齐规则，保持半开区间语义。第17轮G继续修复 Stock 首次认领和投递事件时间；已经发出的历史缺时间消息及无法核验的旧记录仍需后续处理。
 
 ```powershell
 mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationTimeTest,SeckillAddressPropagationTest' '-Dsurefire.failIfNoSpecifiedTests=false'
@@ -517,6 +517,19 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT'
 ```
 
 创建集成测试使用自建 `cm17f_*` 库、真实 Order Service/Mapper 和 Spring 事务代理，仅外部 Feign 服务使用替身；核对持久化时间、消息幂等、非法消息回滚和原库 checksum，结束后清理。
+
+### 秒杀事件的持久创建时间（第17轮G）
+
+Stock 新请求在生成候选订单号之前只采样一次上海毫秒时间，共用于订单号月份、首次认领时间和 `request_payload.occurredAt`。同一幂等键重试保留首次认领的原号、载荷和时间；outbox 行的接受、租约和重试调度时间仍按实际操作时间更新。
+
+投递器从受理记录核对订单号、事件号、键、状态、用户/活动/SKU、数量、地址指纹及创建月份，再填写 envelope 时间。显式 `occurredAt` 必须与持久事实一致；旧载荷仅缺该字段时可以在发送 envelope 中补入，不改历史 JSON。缺证据或发生冲突时保留原事件并记录 `SECKILL_EVENT_TIME_UNVERIFIED`、按原机制退避，不用投递时的当前时间猜测。
+
+```powershell
+mvn -pl backend/cloud-mall-stock -am test '-Dtest=SeckillEventTimeResolverTest,SeckillReliabilityTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-stock -am test '-Dtest=SeckillEventTimeMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_stock?allowPublicKeyRetrieval=true'
+```
+
+测试使用自建 `cm17g_*` 库中的真实认领、outbox 和调度逻辑，Rabbit/Redis 为替身，验证 NACK/ACK 后的状态及重复 envelope；不等同于真实消息代理的网络故障验收。结束后清理隔离库并核对原 Stock 库 checksum。
 
 ## 验证命令
 
