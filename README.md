@@ -622,6 +622,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryJsonMySqlIT` 覆盖严格/非严格 SQL 模式、超长及 null 输入、主键碰撞、Unicode 列宽边界、同事件并发和原字节重投。只有重投得到 publisher confirm 后才 ACK 原消息，否则请求重新投递；消息通道为替身。列宽、历史数据和消息拓扑保持不变。
 
+### 死信重复保存精确核验事件号（第17轮Q）
+
+数据库唯一键可能忽略 eventId 的大小写、重音或尾空格。重复保存先读取原行并精确核对事件号；不同身份不得返回幂等成功或修改原记录，而是保留原消息进入既有重投流程。只有完全相同的事件号才继续 JSON/hash 比较，真实载荷冲突按原主键和二进制事件号条件更新。
+
+`SeckillRecoveryJsonMySqlIT` 覆盖三类排序规则别名、原行完整保持及重投确认后 ACK。现有唯一键保持不变，别名事件仍可能无法同时入库，需后续核验或单独评审迁移；不会自动合并、改号或修复历史记录。Rabbit 为替身。
+
 ## 验证命令
 
 ```bash

@@ -88,12 +88,16 @@ public class SeckillMessageRecoveryMapper {
     // 2. JSON 列会规范化空白/键顺序，由数据库比较 JSON 值，不能比较往返后的字符串。
     List<Map<String, Object>> existing =
         jdbcTemplate.queryForList(
-            "SELECT request_hash,payload=CAST(? AS JSON) AS payload_matches"
+            "SELECT id,event_id,request_hash,payload=CAST(? AS JSON) AS payload_matches"
                 + " FROM seckill_message_recovery WHERE event_id=?",
             payload,
             eventId);
     if (existing.isEmpty()) throw new IllegalStateException("秒杀死信事件号冲突后仍未找到原记录: " + eventId);
     Map<String, Object> row = existing.get(0);
+    // 唯一键可能忽略大小写、重音和尾空格；候选命中不等于原事件身份相同。
+    if (!eventId.equals(row.get("event_id"))) {
+      throw new IllegalStateException("SECKILL_DLQ_EVENT_ID_COLLISION: 事件号与已有记录不完全相同");
+    }
     Object payloadMatch = row.get("payload_matches");
     boolean samePayload =
         Boolean.TRUE.equals(payloadMatch)
@@ -103,9 +107,10 @@ public class SeckillMessageRecoveryMapper {
     // 3. 同事件号不同载荷保留原消息并标记冲突，禁止继续自动重放。
     return jdbcTemplate.update(
         "UPDATE seckill_message_recovery SET status='CONFLICT',last_error=?,updated_at=?"
-            + " WHERE event_id=?",
+            + " WHERE id=? AND BINARY event_id=BINARY ?",
         "同一 eventId 的 requestHash 或 payload 不一致",
         now,
+        row.get("id"),
         eventId);
   }
 

@@ -99,6 +99,75 @@ class SeckillRecoveryJsonMySqlIT {
   }
 
   @Test
+  void collationAliasesCannotBecomeIdempotentSuccessOrCorruptTheFirstRecord() {
+    for (String alias : List.of("EVENT", "évent", "event ")) {
+      for (String payload : List.of("{}", "{\"eventId\":\"different\"}")) {
+        fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+        mapper.saveDlq(1, "event", HASH, "{}", "REPLAY_PENDING", CREATED);
+        fixture.update(
+            "UPDATE seckill_message_recovery SET attempts=7,lease_owner='original-owner',lease_until=?,last_error='original-error' WHERE id=1",
+            CREATED.plusMinutes(1));
+        Map<String, Object> before = row("event");
+        assertThrows(
+            IllegalStateException.class,
+            () -> mapper.saveDlq(2, alias, HASH, payload, "REPLAY_PENDING", CREATED.plusSeconds(1)),
+            alias);
+        assertEquals(before, row("event"), alias);
+        assertEquals(
+            1,
+            fixture.queryForObject("SELECT COUNT(*) FROM seckill_message_recovery", Integer.class));
+      }
+    }
+  }
+
+  @Test
+  void collidingDeadLetterRetriesOriginalBytesWithoutChangingTheOtherIdentity() throws Exception {
+    String firstEvent = validPayload("event");
+    deliver(recoveryHandler(), firstEvent);
+    Map<String, Object> before = row("event");
+    byte[] original = validPayload("EVENT").getBytes(StandardCharsets.UTF_8);
+    MessageProperties properties = new MessageProperties();
+    properties.setDeliveryTag(52);
+    Message message = new Message(original, properties);
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    Channel channel = mock(Channel.class);
+    doAnswer(
+            invocation -> {
+              Message retry = invocation.getArgument(2);
+              assertArrayEquals(original, retry.getBody());
+              assertEquals(before, row("event"));
+              var correlation =
+                  (org.springframework.amqp.rabbit.connection.CorrelationData)
+                      invocation.getArgument(3);
+              correlation
+                  .getFuture()
+                  .set(
+                      new org.springframework.amqp.rabbit.connection.CorrelationData.Confirm(
+                          true, null));
+              return null;
+            })
+        .when(rabbit)
+        .send(
+            anyString(),
+            anyString(),
+            any(Message.class),
+            any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
+    var recovery =
+        new SeckillMessageRecovery(mapper, rabbit, new ObjectMapper(), mock(StockClient.class));
+    recovery.consumeDeadLetter(message, channel);
+    var sequence = inOrder(rabbit, channel);
+    sequence
+        .verify(rabbit)
+        .send(
+            eq(com.cloudmall.order.config.OrderMessagingConfiguration.SECKILL_DLQ_RETRY_EXCHANGE),
+            eq(""),
+            same(message),
+            any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
+    sequence.verify(channel).basicAck(52, false);
+    assertEquals(before, row("event"));
+  }
+
+  @Test
   void invalidMetadataCannotBeTruncatedOrDefaultedInEitherSqlMode() throws Exception {
     try (var connection = fixture.getDataSource().getConnection()) {
       var isolatedJdbc =
