@@ -6,10 +6,12 @@ import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import javax.annotation.PostConstruct;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 /** 为已有本地数据库准备订单预扣恢复与 outbox 表。 */
 @Component
+@DependsOn("orderRoutingAudit")
 public class OrderReliabilityTableInitializer {
   /** 预扣意图持久层。 */
   private final OrderReservationIntentMapper reservationIntentMapper;

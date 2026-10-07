@@ -436,6 +436,21 @@ Order CANCELLED且库存回滚成功后使用原唯一退款键结清；Order PA
 
 这只保护恢复元数据，不改变execution资金状态、决议或XID。缺少原XID的BEGIN_UNKNOWN仍保留待核验，不能通过重新begin/Try或猜回滚处理。
 
+## 订单路由模式审计（CM-20 第17轮A）
+
+订单默认使用 `cloudmall.order.routing.mode=dynamic-monthly`：由现有OrderSqlMapper按物理月表读写。当前Sharding-JDBC没有接管主链路；激活 `sharding` profile（含默认profile）或配置未支持的routing mode会以 `ORDER_ROUTING_UNSUPPORTED` 在数据源/建表初始化前失败。保留默认模式即可沿用当前行为。
+
+启动时还会核对选定DataSource、JdbcTemplate与本地事务管理器是否引用同一对象，并拒绝实际Sharding数据源链。合法的同源Seata代理允许使用；数据源绑定不一致会在订单DDL前失败。
+
+现有 `/actuator/info` 增加 `orderRouting`：只包含模式、清洗后的profile、数据源/事务管理器简单类型和上海时区的 `expectedMonths`。月份表示上月、本月及未来两个月的建表目标，不是表存在性证明；审计不会查询订单数据，也不输出连接URL、账号或密码。
+
+本阶段未切换SQL、事务或ShardingDataSource，CM-20仍待后续影子路由与迁移验证。真实启动验收先构建Jar，再用隔离库/Redis/Rabbit vhost执行：
+
+```powershell
+mvn -pl backend/cloud-mall-order -am package -DskipTests
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderRoutingAuditIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
 ## 验证命令
 
 ```bash

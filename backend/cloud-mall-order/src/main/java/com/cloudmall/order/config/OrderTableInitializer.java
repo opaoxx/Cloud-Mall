@@ -4,14 +4,18 @@ import com.cloudmall.order.mapper.OrderSqlMapper;
 import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import javax.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
 
 /** Prepares the rolling physical tables used by the application's monthly order routing. */
 @Component
+@DependsOn("orderRoutingAudit")
 public class OrderTableInitializer {
   /** 执行 getLogger 相关操作。 */
   private static final Logger log = LoggerFactory.getLogger(OrderTableInitializer.class);
@@ -21,6 +25,15 @@ public class OrderTableInitializer {
 
   /** 月表月份必须按数据库使用的上海本地时间计算。 */
   private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
+
+  /** 返回上海时区上月到未来两个月的四个目标月，供审计和 DDL 共用。 */
+  static List<String> rollingMonths(YearMonth currentMonth) {
+    List<String> months = new ArrayList<>();
+    YearMonth firstMonth = currentMonth.minusMonths(1);
+    for (int monthOffset = 0; monthOffset < 4; monthOffset++)
+      months.add(firstMonth.plusMonths(monthOffset).format(MONTH));
+    return List.copyOf(months);
+  }
 
   /** 保存 db 的业务状态或配置。 */
   private final OrderSqlMapper orderSqlMapper;
@@ -58,14 +71,15 @@ public class OrderTableInitializer {
     ensureTemplate("mall_order_item_template", "mall_order_item_202608");
     ensureTemplate("order_status_log_template", "order_status_log_202608");
     // 2. 同时准备上月、本月和未来两个月的三张物理月表。
-    YearMonth firstMonth = currentMonth.minusMonths(1);
-    for (int monthOffset = 0; monthOffset < 4; monthOffset++) {
-      String suffix = firstMonth.plusMonths(monthOffset).format(MONTH);
+    for (String suffix : rollingMonths(currentMonth)) {
       createLike("mall_order_" + suffix, "mall_order_template");
       createLike("mall_order_item_" + suffix, "mall_order_item_template");
       createLike("order_status_log_" + suffix, "order_status_log_template");
     }
-    log.info("订单月度分表已准备，覆盖 {} 至 {}", firstMonth, firstMonth.plusMonths(3));
+    log.info(
+        "订单月度分表已准备，覆盖 {} 至 {}",
+        rollingMonths(currentMonth).get(0),
+        rollingMonths(currentMonth).get(3));
   }
 
   /** 执行 ensureTemplate 相关操作。 */
