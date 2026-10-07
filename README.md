@@ -505,6 +505,19 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderTableInitializerMySqlIT' 
 
 测试只在自建 `cm17e_*` 库执行 DDL，核对跨年幂等、结构/数据保留后清理。真实启动回归 `OrderRoutingAuditIT` 还覆盖正式模板完整但两个历史来源已移除的场景。
 
+### 订单创建时间精度（第17轮F）
+
+普通订单和秒杀落单在写入前共用 `OrderCreationTime.normalize`：将创建时刻按同一瞬时转换为 `+08:00`，再向下截断到毫秒。普通订单用此值生成订单号月份和表名，订单、明细、幂等记录、初始预扣意图和超时 outbox 的创建字段沿用同一值。秒杀仍保留消息中的原订单号与幂等信息。
+
+该处理避免月末亚毫秒值被 MySQL 舍入到下一月，以及 UTC 等事件时间被错误当作上海本地字段。查询边界仍使用第17轮D的向上对齐规则，保持半开区间语义。Stock 生成候选订单号与载荷时多次采样、缺少 `occurredAt` 的历史消息跨月恢复仍待后续处理；本轮未修改这些分支。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationTimeTest,SeckillAddressPropagationTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+创建集成测试使用自建 `cm17f_*` 库、真实 Order Service/Mapper 和 Spring 事务代理，仅外部 Feign 服务使用替身；核对持久化时间、消息幂等、非法消息回滚和原库 checksum，结束后清理。
+
 ## 验证命令
 
 ```bash

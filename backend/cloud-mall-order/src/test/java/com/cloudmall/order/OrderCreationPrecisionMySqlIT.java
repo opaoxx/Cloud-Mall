@@ -1,0 +1,442 @@
+package com.cloudmall.order;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.common.messaging.SeckillRequestFingerprint;
+import com.cloudmall.order.domain.dto.CreateOrderDTO;
+import com.cloudmall.order.feign.CartClient;
+import com.cloudmall.order.feign.ProductClient;
+import com.cloudmall.order.feign.StockClient;
+import com.cloudmall.order.feign.UserClient;
+import com.cloudmall.order.mapper.OrderOutboxMapper;
+import com.cloudmall.order.mapper.OrderReservationIntentMapper;
+import com.cloudmall.order.mapper.OrderSqlMapper;
+import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
+import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
+import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.OrderServiceImpl;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import javax.sql.DataSource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
+import org.springframework.transaction.support.TransactionTemplate;
+
+/** 真实 MySQL 验证常规和秒杀订单创建的上海毫秒时间语义。 */
+class OrderCreationPrecisionMySqlIT {
+  /** 只读核对原订单库的连接。 */
+  private static JdbcTemplate source;
+
+  /** 测试前原库表清单和校验和。 */
+  private static List<Map<String, Object>> sourceFingerprint;
+
+  /** 当前测试独立创建的数据库名。 */
+  private String database;
+
+  /** 隔离库的真实 JDBC 入口。 */
+  private JdbcTemplate fixture;
+
+  /** 外层本地 RR 事务，与被测注解事务使用同一数据源。 */
+  private TransactionTemplate transaction;
+
+  /** 经注解事务代理的真实订单 Service。 */
+  private OrderServiceImpl service;
+
+  /** 隔离库连接地址。 */
+  private String isolatedUrl;
+
+  @BeforeAll
+  static void setupSource() {
+    String url = System.getProperty("cloudmall.mysql.test.url");
+    if (url == null || !url.matches("jdbc:mysql://[^/]+/cloudmall_order(\\?.*)?"))
+      throw new IllegalStateException("需要 cloudmall_order 测试 URL");
+    source =
+        new JdbcTemplate(new DriverManagerDataSource(withShanghaiTimezone(url), "root", "root"));
+    sourceFingerprint = fingerprint();
+  }
+
+  @BeforeEach
+  void setupFixture() {
+    String sourceUrl = System.getProperty("cloudmall.mysql.test.url");
+    database = "cm17f_" + UUID.randomUUID().toString().replace("-", "");
+    source.execute(
+        "CREATE DATABASE " + database + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+    isolatedUrl = withShanghaiTimezone(sourceUrl.replace("/cloudmall_order", "/" + database));
+    DataSource dataSource = new DriverManagerDataSource(isolatedUrl, "root", "root");
+    fixture = new JdbcTemplate(dataSource);
+    cloneFromSource("mall_order_template", "mall_order_template");
+    cloneFromSource("mall_order_item_template", "mall_order_item_template");
+    cloneFromSource("order_idempotency", "order_idempotency");
+    fixture.execute("CREATE TABLE mall_order_202612 LIKE mall_order_template");
+    fixture.execute("CREATE TABLE mall_order_202701 LIKE mall_order_template");
+    fixture.execute("CREATE TABLE mall_order_item_202612 LIKE mall_order_item_template");
+    fixture.execute("CREATE TABLE mall_order_item_202701 LIKE mall_order_item_template");
+    OrderReservationIntentMapper intentMapper = new OrderReservationIntentMapper(fixture);
+    OrderOutboxMapper outboxMapper = new OrderOutboxMapper(fixture);
+    SeckillOrderDedupMapper dedupMapper = new SeckillOrderDedupMapper(fixture);
+    SeckillMessageRecoveryMapper recoveryMapper = new SeckillMessageRecoveryMapper(fixture);
+    intentMapper.ensureTable();
+    outboxMapper.ensureTable();
+    dedupMapper.ensureTable();
+    recoveryMapper.ensureTable();
+    OrderSqlMapper sqlMapper = new OrderSqlMapper(fixture);
+    OrderReservationIntentService intentTarget = new OrderReservationIntentService(intentMapper);
+    OrderReservationIntentService intentProxy = transactionProxy(intentTarget, dataSource);
+    service =
+        new OrderServiceImpl(
+            mock(StockClient.class),
+            mock(ProductClient.class),
+            mock(UserClient.class),
+            mock(CartClient.class),
+            sqlMapper,
+            new ObjectMapper());
+    ReflectionTestUtils.setField(service, "reservationIntentService", intentProxy);
+    ReflectionTestUtils.setField(service, "reservationIntentMapper", intentMapper);
+    ReflectionTestUtils.setField(service, "orderOutboxMapper", outboxMapper);
+    ReflectionTestUtils.setField(service, "seckillOrderDedupMapper", dedupMapper);
+    ReflectionTestUtils.setField(service, "seckillMessageRecoveryMapper", recoveryMapper);
+    ReflectionTestUtils.setField(
+        service,
+        "creationClock",
+        Clock.fixed(
+            OffsetDateTime.of(2026, 12, 31, 23, 59, 59, 999_500_000, ZoneOffset.ofHours(8))
+                .toInstant(),
+            ZoneOffset.ofHours(8)));
+    configureMocks();
+    service = transactionProxy(service, dataSource);
+    transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+    transaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    transaction.setReadOnly(false);
+  }
+
+  @AfterEach
+  void cleanupFixture() {
+    AuthContext.clear();
+    if (database != null && database.matches("cm17f_[0-9a-f]{32}")) {
+      String dropped = database;
+      source.execute("DROP DATABASE " + dropped);
+      assertEquals(
+          0,
+          source.queryForObject(
+              "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?",
+              Integer.class,
+              dropped));
+      System.out.println("已清理订单创建测试隔离库: " + dropped);
+      database = null;
+    }
+  }
+
+  @AfterAll
+  static void cleanupSource() {
+    if (source != null) assertEquals(sourceFingerprint, fingerprint());
+    System.out.println("CM17F original tables and checksums unchanged");
+  }
+
+  @Test
+  void normalCreateUsesOneTruncatedShanghaiMillisecondForAllCreatedFields() throws Exception {
+    AuthContext.set(7L, "USER");
+    ApiResponse<?> response =
+        transaction.execute(status -> service.create("idem-normal", normalRequest()));
+    assertEquals("0", response.code);
+    Map<String, Object> order =
+        fixture.queryForMap("SELECT * FROM mall_order_202612 WHERE order_no LIKE '202612%'");
+    Timestamp expectedCreated =
+        Timestamp.valueOf(LocalDateTime.of(2026, 12, 31, 23, 59, 59, 999_000_000));
+    assertEquals(expectedCreated.toLocalDateTime(), local(order.get("created_at")));
+    assertEquals(expectedCreated.toLocalDateTime(), local(order.get("updated_at")));
+    assertEquals(
+        Timestamp.valueOf(LocalDateTime.of(2027, 1, 1, 0, 29, 59, 999_000_000)),
+        Timestamp.valueOf(local(order.get("expire_at"))));
+    assertEquals(
+        expectedCreated,
+        fixture.queryForObject(
+            "SELECT created_at FROM mall_order_item_202612 WHERE order_no=?",
+            Timestamp.class,
+            order.get("order_no")));
+    assertEquals(
+        expectedCreated,
+        fixture.queryForObject(
+            "SELECT created_at FROM order_reservation_intent WHERE order_no=?",
+            Timestamp.class,
+            order.get("order_no")));
+    Map<String, Object> outbox =
+        fixture.queryForMap("SELECT * FROM order_outbox WHERE order_no=?", order.get("order_no"));
+    assertEquals(expectedCreated.toLocalDateTime(), local(outbox.get("created_at")));
+    assertEquals(expectedCreated.toLocalDateTime(), local(outbox.get("updated_at")));
+    assertEquals(expectedCreated.toLocalDateTime(), local(outbox.get("next_retry_at")));
+    assertEquals(
+        expectedCreated,
+        fixture.queryForObject(
+            "SELECT created_at FROM order_idempotency WHERE idempotency_key='idem-normal'",
+            Timestamp.class));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE order_no=?",
+            String.class,
+            order.get("order_no")));
+    assertPersistedCreation(
+        String.valueOf(order.get("order_no")), expectedCreated.toLocalDateTime());
+  }
+
+  @Test
+  void explicitUtcSeckillInstantUsesJanuaryLocalMillisecondsAndDuplicateIsIdempotent()
+      throws Exception {
+    ProductClient products = mock(ProductClient.class);
+    ProductClient.SkuView sku =
+        new ProductClient.SkuView(7L, 9L, "商品", "SKU-7", new BigDecimal("12.30"), Map.of());
+    when(products.sku(7L)).thenReturn(ApiResponse.ok(sku));
+    ReflectionTestUtils.setField(service, "products", products);
+    String address = "{\"receiver\":\"小明\",\"phone\":\"13800138000\"}";
+    String requestHash = SeckillRequestFingerprint.hash(11L, 7L, 8L, 1, address);
+    Map<String, Object> event =
+        Map.of(
+            "orderNo",
+            "20270101-seckill-utc",
+            "eventId",
+            "event-utc-1",
+            "eventType",
+            "SECKILL_ORDER_REQUEST",
+            "activityId",
+            11L,
+            "idempotencyKey",
+            "request-utc-1",
+            "requestHash",
+            requestHash,
+            "skuId",
+            7L,
+            "userId",
+            8L,
+            "addressSnapshot",
+            address,
+            "occurredAt",
+            "2026-12-31T16:00:00.000900Z");
+    transaction.execute(
+        status -> {
+          service.consumeSeckill(event);
+          return null;
+        });
+    transaction.execute(
+        status -> {
+          service.consumeSeckill(event);
+          return null;
+        });
+    Map<String, Object> order =
+        fixture.queryForMap(
+            "SELECT * FROM mall_order_202701 WHERE order_no=?", "20270101-seckill-utc");
+    assertEquals(LocalDateTime.of(2027, 1, 1, 0, 0), local(order.get("created_at")));
+    assertTrue(String.valueOf(order.get("address_snapshot")).contains("小明"));
+    assertEquals(
+        1,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM order_outbox WHERE event_id=?",
+            Integer.class,
+            "order-timeout:20270101-seckill-utc"));
+    assertEquals(
+        1,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM seckill_order_dedup WHERE idempotency_key=?",
+            Integer.class,
+            "request-utc-1"));
+    Map<String, Object> dedup =
+        fixture.queryForMap(
+            "SELECT * FROM seckill_order_dedup WHERE idempotency_key='request-utc-1'");
+    assertEquals(requestHash, dedup.get("request_hash"));
+    assertEquals("event-utc-1", dedup.get("event_id"));
+    assertEquals("COMMITTED", dedup.get("status"));
+    assertPersistedCreation("20270101-seckill-utc", LocalDateTime.of(2027, 1, 1, 0, 0));
+  }
+
+  @Test
+  void seckillMonthEndDoesNotRoundIntoNextMonthAndExactMillisStayUnchanged() throws Exception {
+    for (String[] sample :
+        List.of(
+            new String[] {
+              "202612-end", "2026-12-31T23:59:59.999500+08:00", "2026-12-31T23:59:59.999"
+            },
+            new String[] {
+              "202701-exact", "2027-01-01T00:00:00.123+08:00", "2027-01-01T00:00:00.123"
+            })) {
+      Map<String, Object> event =
+          Map.of(
+              "orderNo",
+              sample[0],
+              "eventId",
+              "event:" + sample[0],
+              "eventType",
+              "SECKILL_ORDER_REQUEST",
+              "activityId",
+              11L,
+              "idempotencyKey",
+              "request:" + sample[0],
+              "requestHash",
+              SeckillRequestFingerprint.hash(11L, 7L, 8L, 1, "{}"),
+              "skuId",
+              7L,
+              "userId",
+              8L,
+              "addressSnapshot",
+              "{}",
+              "occurredAt",
+              sample[1]);
+      service.consumeSeckill(event);
+      assertPersistedCreation(sample[0], LocalDateTime.parse(sample[2]));
+    }
+  }
+
+  @Test
+  void invalidOccurredAtFailsWithoutLeavingOrderOrDedupRows() {
+    ProductClient products = mock(ProductClient.class);
+    when(products.sku(7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(7L, 9L, "商品", "SKU-7", BigDecimal.TEN, Map.of())));
+    ReflectionTestUtils.setField(service, "products", products);
+    Map<String, Object> event =
+        Map.of(
+            "orderNo", "20261231-seckill-invalid",
+            "eventId", "event-invalid",
+            "eventType", "SECKILL_ORDER_REQUEST",
+            "activityId", 11L,
+            "idempotencyKey", "request-invalid",
+            "requestHash", SeckillRequestFingerprint.hash(11L, 7L, 8L, 1, "{}"),
+            "skuId", 7L,
+            "userId", 8L,
+            "addressSnapshot", "{}",
+            "occurredAt", "not-an-offset-time");
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            transaction.execute(
+                status -> {
+                  service.consumeSeckill(event);
+                  return null;
+                }));
+    assertEquals(
+        0, fixture.queryForObject("SELECT COUNT(*) FROM mall_order_202612", Integer.class));
+    assertEquals(
+        0, fixture.queryForObject("SELECT COUNT(*) FROM seckill_order_dedup", Integer.class));
+    assertEquals(0, fixture.queryForObject("SELECT COUNT(*) FROM order_outbox", Integer.class));
+  }
+
+  private void assertPersistedCreation(String orderNo, LocalDateTime expected) throws Exception {
+    String month = orderNo.substring(0, 6);
+    Map<String, Object> order =
+        fixture.queryForMap("SELECT * FROM mall_order_" + month + " WHERE order_no=?", orderNo);
+    assertEquals(expected, local(order.get("created_at")));
+    assertEquals(expected, local(order.get("updated_at")));
+    assertEquals(expected.plusMinutes(30), local(order.get("expire_at")));
+    assertEquals(
+        expected,
+        fixture.queryForObject(
+            "SELECT created_at FROM mall_order_item_" + month + " WHERE order_no=?",
+            LocalDateTime.class,
+            orderNo));
+    Map<String, Object> outbox =
+        fixture.queryForMap("SELECT * FROM order_outbox WHERE order_no=?", orderNo);
+    for (String field : List.of("created_at", "updated_at", "next_retry_at"))
+      assertEquals(expected, local(outbox.get(field)));
+    var payload = new ObjectMapper().readTree(String.valueOf(outbox.get("payload")));
+    assertEquals(
+        expected.atOffset(ZoneOffset.ofHours(8)),
+        OffsetDateTime.parse(payload.path("occurredAt").asText()));
+    assertEquals(
+        expected.plusMinutes(30).atOffset(ZoneOffset.ofHours(8)),
+        OffsetDateTime.parse(payload.path("expireAt").asText()));
+    assertEquals("order-timeout:" + orderNo, payload.path("eventId").asText());
+  }
+
+  private LocalDateTime local(Object value) {
+    return value instanceof Timestamp timestamp
+        ? timestamp.toLocalDateTime()
+        : (LocalDateTime) value;
+  }
+
+  private CreateOrderDTO normalRequest() {
+    CreateOrderDTO request = new CreateOrderDTO();
+    request.addressId = 9L;
+    com.cloudmall.order.domain.dto.OrderItemDTO item =
+        new com.cloudmall.order.domain.dto.OrderItemDTO();
+    item.skuId = 7L;
+    item.quantity = 1;
+    request.items = List.of(item);
+    return request;
+  }
+
+  private void configureMocks() {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    UserClient users = (UserClient) ReflectionTestUtils.getField(service, "users");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    when(products.sku(7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(7L, 9L, "商品", "SKU-7", BigDecimal.TEN, Map.of())));
+    when(stock.reserve(any())).thenReturn(ApiResponse.ok(null));
+    when(cart.deleteItem(anyLong(), anyLong())).thenReturn(ApiResponse.ok(null));
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L, "receiver", "小明"))));
+  }
+
+  @SuppressWarnings("unchecked")
+  private <T> T transactionProxy(T target, DataSource dataSource) {
+    ProxyFactory factory = new ProxyFactory(target);
+    factory.setProxyTargetClass(true);
+    TransactionInterceptor interceptor =
+        new TransactionInterceptor(
+            new DataSourceTransactionManager(dataSource),
+            new AnnotationTransactionAttributeSource());
+    factory.addAdvice(interceptor);
+    return (T) factory.getProxy();
+  }
+
+  private void cloneFromSource(String sourceTable, String targetTable) {
+    String ddl =
+        String.valueOf(
+            source
+                .queryForMap("SHOW CREATE TABLE cloudmall_order." + sourceTable)
+                .get("Create Table"));
+    ddl = ddl.replace("`" + sourceTable + "`", "`" + targetTable + "`");
+    fixture.execute(ddl);
+  }
+
+  private static List<Map<String, Object>> fingerprint() {
+    List<Map<String, Object>> result = new ArrayList<>();
+    List<String> tables = source.queryForList("SHOW TABLES FROM cloudmall_order", String.class);
+    result.addAll(source.queryForList("SHOW TABLES FROM cloudmall_order"));
+    for (String table : tables) {
+      if (!table.matches("[A-Za-z0-9_]+")) throw new IllegalStateException("非法表名: " + table);
+      result.addAll(source.queryForList("CHECKSUM TABLE cloudmall_order." + table));
+    }
+    return result;
+  }
+
+  private static String withShanghaiTimezone(String url) {
+    return url
+        + (url.contains("?") ? "&" : "?")
+        + "serverTimezone=Asia%2FShanghai&forceConnectionTimeZoneToSession=true";
+  }
+}

@@ -30,6 +30,7 @@ import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
+import com.cloudmall.order.util.OrderCreationTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
@@ -56,6 +57,9 @@ public class OrderServiceImpl implements OrderService {
 
   /** 执行 ofPattern 相关操作。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
+
+  /** 常规订单创建的单次时钟来源；默认系统上海偏移，隔离测试可注入固定时刻。 */
+  private Clock creationClock = Clock.system(ZoneOffset.ofHours(8));
 
   /** 保存 stock 的业务状态或配置。 */
   @Autowired private StockClient stock;
@@ -130,7 +134,7 @@ public class OrderServiceImpl implements OrderService {
     if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
       bad("订单商品和地址不能为空");
     Map<String, Object> address = findAddress(req.addressId);
-    OffsetDateTime created = now();
+    OffsetDateTime created = OrderCreationTime.normalize(OffsetDateTime.now(creationClock));
     String orderNo = created.format(MONTH) + UUID.randomUUID().toString().replace("-", "");
     String table = table(created);
     List<StockClient.Line> lines = new ArrayList<>();
@@ -611,7 +615,7 @@ public class OrderServiceImpl implements OrderService {
       }
       ProductClient.SkuView s = products.sku(skuId).data;
       if (s == null) throw new IllegalStateException("秒杀商品不存在: " + event.get("skuId"));
-      OffsetDateTime created = occurredAt(event);
+      OffsetDateTime created = OrderCreationTime.normalize(occurredAt(event));
       String t = tableFromNo(orderNo);
       OrderPO order = new OrderPO();
       order.id = id();
