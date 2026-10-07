@@ -1,5 +1,6 @@
 package com.cloudmall.stock.mapper;
 
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
@@ -645,7 +646,7 @@ public class StockSqlMapper {
     return queryForList(
         "SELECT id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts FROM seckill_order_outbox"
             + " WHERE status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
-            + " AND (lease_until IS NULL OR lease_until<?) ORDER BY id LIMIT ?",
+            + " AND (lease_until IS NULL OR lease_until<=?) ORDER BY id LIMIT ?",
         now,
         now,
         limit);
@@ -657,7 +658,37 @@ public class StockSqlMapper {
     return update(
         "UPDATE seckill_order_outbox SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
             + " WHERE id=? AND status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
-            + " AND (lease_until IS NULL OR lease_until<?)", owner, leaseUntil, now, id, now, now);
+            + " AND (lease_until IS NULL OR lease_until<=?)",
+        owner,
+        leaseUntil,
+        now,
+        id,
+        now,
+        now);
+  }
+
+  /**
+   * 只读核对当前持有人与租约，返回截止时间供调用方在查询返回后再次核验。
+   *
+   * @param id outbox主键
+   * @param owner 本次认领的精确持有人
+   * @param checkedAt 调用方即时查询时间
+   * @return 上海DATETIME截止时间；身份、状态或租约无效时为null，不延长租约
+   */
+  public LocalDateTime findActiveSeckillOutboxLease(
+      long id, String owner, OffsetDateTime checkedAt) {
+    if (owner == null || owner.isBlank()) return null;
+    OffsetDateTime queryNow =
+        checkedAt.withOffsetSameInstant(ZoneOffset.ofHours(8)).truncatedTo(ChronoUnit.MILLIS);
+    List<LocalDateTime> deadlines =
+        jdbcTemplate.queryForList(
+            "SELECT lease_until FROM seckill_order_outbox WHERE id=? AND BINARY lease_owner=BINARY ?"
+                + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN','DEAD')",
+            LocalDateTime.class,
+            id,
+            owner,
+            queryNow);
+    return deadlines.size() == 1 ? deadlines.get(0) : null;
   }
 
   /**

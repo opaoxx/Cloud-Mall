@@ -43,7 +43,8 @@ class SeckillReliabilityTest {
     SeckillRequestClaimService claimService = mock(SeckillRequestClaimService.class);
     StockServiceImpl service =
         new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
-    ReflectionTestUtils.setField(service, "reservationRequestService", mock(StockReservationRequestService.class));
+    ReflectionTestUtils.setField(
+        service, "reservationRequestService", mock(StockReservationRequestService.class));
     ReflectionTestUtils.setField(service, "seckillRequestClaimService", claimService);
 
     SeckillReservationDTO request = request(11L, 22L, 33L, "legacy-key");
@@ -56,7 +57,8 @@ class SeckillReliabilityTest {
     acceptedRow.put("request_hash", hash);
     acceptedRow.put("request_payload", null);
     acceptedRow.put("idempotency_key", "legacy-key");
-    when(claimService.claim(eq(11L), eq(22L), eq(33L), any(), eq("legacy-key"), any(), eq(hash), any()))
+    when(claimService.claim(
+            eq(11L), eq(22L), eq(33L), any(), eq("legacy-key"), any(), eq(hash), any()))
         .thenReturn(acceptedRow);
     when(mapper.findSeckillOutboxByOrderNo(orderNo)).thenReturn(null);
 
@@ -128,6 +130,7 @@ class SeckillReliabilityTest {
                 java.time.LocalDateTime.of(2026, 9, 30, 23, 59, 59, 999_000_000)));
     Map<String, Object> row =
         Map.of(
+            "id", 1L,
             "event_id", eventId,
             "order_no", orderNo,
             "request_hash", hash,
@@ -145,6 +148,10 @@ class SeckillReliabilityTest {
         .convertAndSend(
             any(String.class), any(String.class), any(Object.class), any(CorrelationData.class));
 
+    when(mapper.findActiveSeckillOutboxLease(eq(1L), eq("owner-1"), any(OffsetDateTime.class)))
+        .thenAnswer(
+            invocation ->
+                ((OffsetDateTime) invocation.getArgument(2)).toLocalDateTime().plusSeconds(30));
     ReflectionTestUtils.invokeMethod(dispatcher, "dispatchOne", row, "owner-1");
 
     assertEquals(orderNo, sent.get("orderNo"));
@@ -166,7 +173,8 @@ class SeckillReliabilityTest {
     com.cloudmall.stock.service.impl.SeckillAcceptanceService acceptance =
         mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
     StockServiceImpl service = new StockServiceImpl(redis, mapper, rabbit, new ObjectMapper());
-    ReflectionTestUtils.setField(service, "reservationRequestService", mock(StockReservationRequestService.class));
+    ReflectionTestUtils.setField(
+        service, "reservationRequestService", mock(StockReservationRequestService.class));
     ReflectionTestUtils.setField(service, "seckillAcceptanceService", acceptance);
 
     String hash = "race-hash";
@@ -174,9 +182,15 @@ class SeckillReliabilityTest {
     String eventId = SeckillRequestFingerprint.eventId(orderNo);
     org.mockito.Mockito.doThrow(new IllegalStateException("response lost"))
         .when(acceptance)
-        .accept(any(Long.class), any(String.class), eq(orderNo), eq(eventId), any(String.class), eq(hash), any());
-    when(mapper.findSeckillByOrderNo(orderNo))
-        .thenReturn(Map.of("status", "ACCEPTED"));
+        .accept(
+            any(Long.class),
+            any(String.class),
+            eq(orderNo),
+            eq(eventId),
+            any(String.class),
+            eq(hash),
+            any());
+    when(mapper.findSeckillByOrderNo(orderNo)).thenReturn(Map.of("status", "ACCEPTED"));
     when(mapper.findSeckillOutboxByOrderNo(orderNo))
         .thenReturn(Map.of("event_id", eventId, "request_hash", hash));
 
@@ -186,13 +200,7 @@ class SeckillReliabilityTest {
     acceptAfterLua.setAccessible(true);
     com.cloudmall.common.api.ApiResponse<?> response =
         (com.cloudmall.common.api.ApiResponse<?>)
-            acceptAfterLua.invoke(
-                service,
-                34L,
-                "race-key",
-                orderNo,
-                "{}",
-                hash);
+            acceptAfterLua.invoke(service, 34L, "race-key", orderNo, "{}", hash);
     Map<?, ?> data = (Map<?, ?>) response.data;
 
     assertEquals(Boolean.TRUE, data.get("accepted"));

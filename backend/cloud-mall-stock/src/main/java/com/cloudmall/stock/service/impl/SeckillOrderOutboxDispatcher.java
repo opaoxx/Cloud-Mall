@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +47,9 @@ public class SeckillOrderOutboxDispatcher {
   /** marker宽限期使用瞬时时钟；测试可固定边界，不依赖JVM默认时区。 */
   private Clock markerClock = Clock.systemUTC();
 
+  /** outbox各阶段独立采样的时钟，不影响marker宽限期及业务创建时间。 */
+  private Clock outboxClock = Clock.systemUTC();
+
   /** 单实例定时扫描的非持久主键游标；null表示初次扫描，进程重启后从头检查。 */
   private Long markerScanAfterId;
 
@@ -70,11 +74,12 @@ public class SeckillOrderOutboxDispatcher {
   @Scheduled(fixedDelayString = "${cloudmall.stock.seckill.outbox.dispatch-interval-ms:1000}")
   public void dispatch() {
     recoverPendingMarkers();
-    String owner = UUID.randomUUID().toString();
-    OffsetDateTime now = now();
-    for (Map<String, Object> row : stockSqlMapper.findPendingSeckillOutbox(now, batchSize)) {
+    OffsetDateTime scanNow = outboxNow();
+    for (Map<String, Object> row : stockSqlMapper.findPendingSeckillOutbox(scanNow, batchSize)) {
       long id = ((Number) row.get("id")).longValue();
-      if (stockSqlMapper.claimSeckillOutbox(id, owner, now.plusSeconds(30), now) == 1) {
+      String owner = UUID.randomUUID().toString();
+      OffsetDateTime claimNow = outboxNow();
+      if (stockSqlMapper.claimSeckillOutbox(id, owner, claimNow.plusSeconds(30), claimNow) == 1) {
         dispatchOne(row, owner);
       }
     }
@@ -210,7 +215,9 @@ public class SeckillOrderOutboxDispatcher {
   /** 检查 publisher confirm 和 returned message，失败时保留 eventId 退避。 */
   private void dispatchOne(Map<String, Object> row, String owner) {
     String eventId = String.valueOf(row.get("event_id"));
+    long outboxId = ((Number) row.get("id")).longValue();
     try {
+      if (!ownsOutboxLease(outboxId, owner)) return;
       Map<String, Object> payload =
           objectMapper.readValue(
               String.valueOf(row.get("payload")),
@@ -230,6 +237,7 @@ public class SeckillOrderOutboxDispatcher {
                   stockSqlMapper.findSeckillByOrderNo(String.valueOf(row.get("order_no"))))
               .toString());
       CorrelationData correlationData = new CorrelationData(eventId);
+      if (!ownsOutboxLease(outboxId, owner)) return;
       rabbitTemplate.convertAndSend(EXCHANGE, "", envelope, correlationData);
       CorrelationData.Confirm confirm =
           correlationData.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS);
@@ -238,12 +246,32 @@ public class SeckillOrderOutboxDispatcher {
         throw new IllegalStateException(
             returned == null ? "publisher confirm 未确认" : "消息被 RabbitMQ returned");
       }
-      stockSqlMapper.markSeckillOutboxPublished(eventId, owner, now());
+      stockSqlMapper.markSeckillOutboxPublished(eventId, owner, outboxNow());
     } catch (Exception publishFailure) {
+      OffsetDateTime failedAt = outboxNow();
       stockSqlMapper.recordSeckillOutboxFailure(
-          eventId, owner, compactError(publishFailure), now().plusSeconds(10), now());
+          eventId, owner, compactError(publishFailure), failedAt.plusSeconds(10), failedAt);
       log.warn("秒杀订单 outbox 投递失败，将使用同一 eventId 重试，eventId={}", eventId, publishFailure);
     }
+  }
+
+  /** 查询返回后再次取时，失效或数据库异常时不猜归属、不写失败、不释放他人租约。 */
+  private boolean ownsOutboxLease(long outboxId, String owner) {
+    try {
+      LocalDateTime deadline =
+          stockSqlMapper.findActiveSeckillOutboxLease(outboxId, owner, outboxNow());
+      return deadline != null && deadline.isAfter(outboxNow().toLocalDateTime());
+    } catch (DataAccessException unavailableLease) {
+      StockDependencyGuard.noteMysqlFailure(unavailableLease);
+      log.warn("秒杀outbox租约查询失败，本次跳过，id={}", outboxId, unavailableLease);
+      return false;
+    }
+  }
+
+  /** outbox调度时间统一使用上海毫秒，扫描、认领、guard和完成各自即时采样。 */
+  private OffsetDateTime outboxNow() {
+    return OffsetDateTime.ofInstant(outboxClock.instant(), ZoneOffset.ofHours(8))
+        .truncatedTo(ChronoUnit.MILLIS);
   }
 
   private static String compactError(Exception exception) {

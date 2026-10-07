@@ -115,6 +115,235 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void slowFirstOutboxDoesNotGiveTheNextRowAnAlreadyExpiredLease() throws Exception {
+    mapper = spy(mapper);
+    seed("202512-slow-first", "2025-12-31T23:59:59.999+08:00");
+    seed("202512-slow-second", "2025-12-31T23:59:59.999+08:00");
+    fixture.update("UPDATE seckill_order_outbox SET id=1 WHERE order_no='202512-slow-first'");
+    fixture.update("UPDATE seckill_order_outbox SET id=2 WHERE order_no='202512-slow-second'");
+    due("202512-slow-first");
+    due("202512-slow-second");
+    var instant =
+        new java.util.concurrent.atomic.AtomicReference<>(
+            java.time.Instant.parse("2027-01-01T04:00:00Z"));
+    doAnswer(
+            invocation -> {
+              Object fact = invocation.callRealMethod();
+              instant.updateAndGet(value -> value.plusSeconds(40));
+              return fact;
+            })
+        .when(mapper)
+        .findSeckillByOrderNo("202512-slow-first");
+    doAnswer(
+            invocation -> {
+              assertEquals(
+                  java.time.LocalDateTime.parse("2027-01-01T12:01:10"),
+                  fixture.queryForObject(
+                      "SELECT lease_until FROM seckill_order_outbox WHERE id=2",
+                      java.time.LocalDateTime.class));
+              return invocation.callRealMethod();
+            })
+        .when(mapper)
+        .findSeckillByOrderNo("202512-slow-second");
+    List<Map<String, Object>> sent = new ArrayList<>();
+    var dispatcher = dispatcher(sender(sent, false));
+    setOutboxClock(dispatcher, instant);
+    dispatcher.dispatch();
+    assertEquals(1, sent.size());
+    assertEquals("202512-slow-second", sent.get(0).get("orderNo"));
+    assertEquals("PENDING", state("202512-slow-first"));
+    assertEquals("PUBLISHED", state("202512-slow-second"));
+  }
+
+  @Test
+  void guardQueryErrorsOrReturningAfterDeadlineNeverPublishOrWriteFailure() throws Exception {
+    for (int stage : List.of(1, 2)) {
+      for (boolean queryFailure : List.of(true, false)) {
+        fixture.execute("DELETE FROM seckill_order_outbox");
+        fixture.execute("DELETE FROM seckill_reservation");
+        mapper = spy(new StockSqlMapper(fixture));
+        String orderNo = "202512-slow-guard";
+        seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+        due(orderNo);
+        var instant =
+            new java.util.concurrent.atomic.AtomicReference<>(
+                java.time.Instant.parse("2027-01-01T04:00:00Z"));
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var snapshot = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+        doAnswer(
+                invocation -> {
+                  if (calls.incrementAndGet() == stage) {
+                    snapshot.set(
+                        fixture.queryForMap(
+                            "SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+                    if (queryFailure)
+                      throw new org.springframework.dao.DataAccessResourceFailureException(
+                          "fixture lease read failed");
+                    Object deadline = invocation.callRealMethod();
+                    instant.updateAndGet(value -> value.plusSeconds(31));
+                    return deadline;
+                  }
+                  return invocation.callRealMethod();
+                })
+            .when(mapper)
+            .findActiveSeckillOutboxLease(anyLong(), anyString(), any());
+        List<Map<String, Object>> sent = new ArrayList<>();
+        var dispatcher = dispatcher(sender(sent, false));
+        setOutboxClock(dispatcher, instant);
+        dispatcher.dispatch();
+        assertTrue(sent.isEmpty());
+        assertEquals(
+            snapshot.get(),
+            fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+        verify(mapper, times(stage == 1 ? 0 : 1)).findSeckillByOrderNo(orderNo);
+        verify(mapper, never())
+            .recordSeckillOutboxFailure(anyString(), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
+  @Test
+  void expirationDuringAnOutboxSendCannotUndoItButRejectsCompletion() throws Exception {
+    String orderNo = "202512-inflight-lease";
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    due(orderNo);
+    var instant =
+        new java.util.concurrent.atomic.AtomicReference<>(
+            java.time.Instant.parse("2027-01-01T04:00:00Z"));
+    var beforeSend = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    doAnswer(
+            invocation -> {
+              beforeSend.set(
+                  fixture.queryForMap(
+                      "SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+              instant.updateAndGet(value -> value.plusSeconds(31));
+              CorrelationData correlation = invocation.getArgument(3);
+              correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+              return null;
+            })
+        .when(rabbit)
+        .convertAndSend(anyString(), anyString(), any(Object.class), any(CorrelationData.class));
+    var dispatcher = dispatcher(rabbit);
+    setOutboxClock(dispatcher, instant);
+    dispatcher.dispatch();
+    verify(rabbit, times(1))
+        .convertAndSend(anyString(), anyString(), any(Object.class), any(CorrelationData.class));
+    assertEquals(
+        beforeSend.get(),
+        fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+  }
+
+  @Test
+  void exactlyExpiredOutboxLeaseCanBeScannedAndReclaimed() throws Exception {
+    String orderNo = "202512-exact-lease";
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    OffsetDateTime now = OffsetDateTime.parse("2027-01-01T12:00:00+08:00");
+    fixture.update(
+        "UPDATE seckill_order_outbox SET lease_owner='old',lease_until=?,next_retry_at=? WHERE order_no=?",
+        now,
+        now.minusSeconds(1),
+        orderNo);
+    List<Map<String, Object>> dueRows = mapper.findPendingSeckillOutbox(now, 10);
+    assertEquals(1, dueRows.size());
+    long outboxId = ((Number) dueRows.get(0).get("id")).longValue();
+    assertNull(mapper.findActiveSeckillOutboxLease(outboxId, "old", now));
+    assertEquals(1, mapper.claimSeckillOutbox(outboxId, "new", now.plusSeconds(30), now));
+    assertEquals(
+        now.plusSeconds(30).toLocalDateTime(),
+        mapper.findActiveSeckillOutboxLease(outboxId, "new", now));
+    assertNull(mapper.findActiveSeckillOutboxLease(outboxId, "NEW", now));
+    assertNull(mapper.findActiveSeckillOutboxLease(outboxId, "new ", now));
+  }
+
+  /** 用可推进的Clock替身验证数据库查询/发送耗时，不真实等待租约到期。 */
+  private void setOutboxClock(
+      SeckillOrderOutboxDispatcher dispatcher,
+      java.util.concurrent.atomic.AtomicReference<java.time.Instant> instant) {
+    Clock clock = mock(Clock.class);
+    when(clock.instant()).thenAnswer(invocation -> instant.get());
+    ReflectionTestUtils.setField(dispatcher, "outboxClock", clock);
+  }
+
+  @Test
+  void lostOutboxLeaseImmediatelyAfterClaimStopsBeforeFactLookupAndPublish() throws Exception {
+    for (String fault : List.of("expired", "replacement", "published")) {
+      fixture.execute("DELETE FROM seckill_order_outbox");
+      fixture.execute("DELETE FROM seckill_reservation");
+      mapper = spy(new StockSqlMapper(fixture));
+      String orderNo = "202512-guard-before";
+      seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+      due(orderNo);
+      var snapshot = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+      doAnswer(
+              invocation -> {
+                Object result = invocation.callRealMethod();
+                invalidateOutbox(orderNo, fault);
+                snapshot.set(
+                    fixture.queryForMap(
+                        "SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+                return result;
+              })
+          .when(mapper)
+          .claimSeckillOutbox(anyLong(), anyString(), any(), any());
+      List<Map<String, Object>> sent = new ArrayList<>();
+      dispatcher(sender(sent, false)).dispatch();
+      assertTrue(sent.isEmpty(), fault);
+      verify(mapper, never()).findSeckillByOrderNo(orderNo);
+      assertEquals(
+          snapshot.get(),
+          fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+    }
+  }
+
+  @Test
+  void lostOutboxLeaseDuringFactLookupStopsBeforePublish() throws Exception {
+    for (String fault : List.of("expired", "replacement", "published")) {
+      fixture.execute("DELETE FROM seckill_order_outbox");
+      fixture.execute("DELETE FROM seckill_reservation");
+      mapper = spy(new StockSqlMapper(fixture));
+      String orderNo = "202512-guard-after";
+      seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+      due(orderNo);
+      var snapshot = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+      doAnswer(
+              invocation -> {
+                Object fact = invocation.callRealMethod();
+                invalidateOutbox(orderNo, fault);
+                snapshot.set(
+                    fixture.queryForMap(
+                        "SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+                return fact;
+              })
+          .when(mapper)
+          .findSeckillByOrderNo(orderNo);
+      List<Map<String, Object>> sent = new ArrayList<>();
+      dispatcher(sender(sent, false)).dispatch();
+      assertTrue(sent.isEmpty(), fault);
+      assertEquals(
+          snapshot.get(),
+          fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+    }
+  }
+
+  private void invalidateOutbox(String orderNo, String fault) {
+    switch (fault) {
+      case "expired" ->
+          fixture.update(
+              "UPDATE seckill_order_outbox SET lease_until=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE order_no=?",
+              orderNo);
+      case "replacement" ->
+          fixture.update(
+              "UPDATE seckill_order_outbox SET lease_owner='replacement' WHERE order_no=?",
+              orderNo);
+      case "published" ->
+          fixture.update(
+              "UPDATE seckill_order_outbox SET status='PUBLISHED' WHERE order_no=?", orderNo);
+      default -> throw new IllegalArgumentException(fault);
+    }
+  }
+
+  @Test
   void outboxCompletionRequiresExactIdentityActiveLeaseAndRetryableState() throws Exception {
     String orderNo = "202512-completion-guard";
     String eventId = SeckillRequestFingerprint.eventId(orderNo);
