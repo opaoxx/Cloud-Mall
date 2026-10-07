@@ -112,6 +112,78 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void alreadyInterruptedRecoveryDoesNotClaimOrSendAnyRecord() throws Exception {
+    seed(1, "stopped");
+    Map<String, Object> before = row(1);
+    try {
+      Thread.currentThread().interrupt();
+      recovery.replayDue();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    assertEquals(before, row(1));
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+    verify(mapper, never()).findDue(anyInt(), any(LocalDateTime.class));
+  }
+
+  @Test
+  void interruptedPublishWaitKeepsLeaseAndStopsBeforeTheNextRecord() throws Exception {
+    seed(1, "interrupted-first");
+    seed(2, "interrupted-second");
+    Map<String, Object> secondBefore = row(2);
+    doAnswer(
+            invocation -> {
+              sent.add(invocation.getArgument(2));
+              Thread.currentThread().interrupt();
+              return null;
+            })
+        .when(rabbit)
+        .send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
+    try {
+      recovery.replayDue();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    assertEquals(1, sent.size());
+    assertEquals("REPLAY_PENDING", row(1).get("status"));
+    assertEquals(0, ((Number) row(1).get("attempts")).intValue());
+    assertNotNull(row(1).get("lease_owner"));
+    assertEquals(CREATED.plusSeconds(30), row(1).get("lease_until"));
+    assertEquals(secondBefore, row(2));
+    verify(mapper, never())
+        .markReplayed(anyLong(), anyString(), anyInt(), any(LocalDateTime.class), any());
+  }
+
+  @Test
+  void interruptAfterFirstCompletionStopsBeforeClaimingTheNextCandidate() throws Exception {
+    seed(1, "completed-first");
+    seed(2, "untouched-second");
+    Map<String, Object> secondBefore = row(2);
+    doAnswer(
+            invocation -> {
+              invocation.callRealMethod();
+              Thread.currentThread().interrupt();
+              return null;
+            })
+        .when(mapper)
+        .markReplayed(eq(1L), anyString(), anyInt(), any(LocalDateTime.class), any());
+    try {
+      recovery.replayDue();
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
+    assertEquals("REPLAYED", row(1).get("status"));
+    assertEquals(secondBefore, row(2));
+    assertEquals(1, sent.size());
+    verify(mapper, never())
+        .claim(eq(2L), anyString(), any(LocalDateTime.class), any(LocalDateTime.class));
+  }
+
+  @Test
   void unknownStockStatesRemainRetryableEvenWithoutIdentityFields() throws Exception {
     for (String status : List.of("UNKNOWN", "PROCESSING", "", "missing", "null")) {
       fixture.execute("TRUNCATE TABLE seckill_message_recovery");

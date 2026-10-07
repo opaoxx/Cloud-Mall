@@ -79,6 +79,9 @@ public class SeckillMessageRecovery {
         } catch (Exception nackFailure) {
           retryFailure.addSuppressed(nackFailure);
           throw new IllegalStateException("秒杀死信无法落库且 nack 失败", retryFailure);
+        } finally {
+          // 先完成既有单次 NACK，再恢复等待中断；NACK 抛错也不能丢失停机信号。
+          if (retryFailure instanceof InterruptedException) Thread.currentThread().interrupt();
         }
         LOGGER.warn("秒杀死信落库失败，延迟重试投递失败，已请求 RabbitMQ 重新投递", retryFailure);
         return;
@@ -145,10 +148,12 @@ public class SeckillMessageRecovery {
   /** 只重放到达时间的记录；失败继续退避，超过阈值仍不停止。 */
   @Scheduled(fixedDelayString = "${cloudmall.order.seckill-recovery-interval-ms:5000}")
   public void replayDue() {
+    if (Thread.currentThread().isInterrupted()) return;
     // 1. 扫描时刻只用于发现候选；不能作为整批记录的租约起点。
     LocalDateTime scanNow = recoveryNow();
     List<Map<String, Object>> rows = recoveryMapper.findDue(50, scanNow);
     for (Map<String, Object> candidate : rows) {
+      if (Thread.currentThread().isInterrupted()) return;
       long id = ((Number) candidate.get("id")).longValue();
       String owner = UUID.randomUUID().toString();
       // 2. 每条记录独立采样，并在外部 Stock 查询前核验当前归属。
@@ -184,6 +189,11 @@ public class SeckillMessageRecovery {
             attempts,
             recoveryNow().plusSeconds(Math.min(300, 1L << Math.min(attempts, 8))),
             null);
+      } catch (InterruptedException interruptedWait) {
+        // 已发送消息结果未知；保留原租约自然到期，不完成写，也不继续认领本批后续行。
+        Thread.currentThread().interrupt();
+        LOGGER.warn("秒杀恢复确认等待被中断，停止本批，id={}", id, interruptedWait);
+        return;
       } catch (Exception exception) {
         recoveryMapper.markReplayed(
             id,

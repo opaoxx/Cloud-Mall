@@ -19,6 +19,47 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 class SeckillMessageRecoveryAckTest {
   @Test
+  void interruptedDelayedPublishRestoresInterruptAfterNackEvenWhenNackFails() throws Exception {
+    for (boolean nackFails : java.util.List.of(false, true)) {
+      var mapper = mock(SeckillMessageRecoveryMapper.class);
+      var rabbit = mock(RabbitTemplate.class);
+      var channel = mock(Channel.class);
+      doThrow(new IllegalStateException("database unavailable"))
+          .when(mapper)
+          .saveDlq(anyLong(), any(), any(), any(), any(), any());
+      doAnswer(
+              invocation -> {
+                Thread.currentThread().interrupt();
+                return null;
+              })
+          .when(rabbit)
+          .send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
+      IOException nackFailure = new IOException("nack failed");
+      if (nackFails) doThrow(nackFailure).when(channel).basicNack(0L, false, true);
+      var recovery =
+          new SeckillMessageRecovery(mapper, rabbit, new ObjectMapper(), mock(StockClient.class));
+      try {
+        if (nackFails) {
+          var failure =
+              assertThrows(
+                  IllegalStateException.class,
+                  () -> recovery.consumeDeadLetter(message("not-json"), channel));
+          assertTrue(failure.getCause() instanceof InterruptedException);
+          assertArrayEquals(new Throwable[] {nackFailure}, failure.getCause().getSuppressed());
+        } else recovery.consumeDeadLetter(message("not-json"), channel);
+        assertTrue(
+            Thread.currentThread().isInterrupted(), "listener must preserve shutdown signal");
+      } finally {
+        Thread.interrupted();
+      }
+      verify(channel, times(1)).basicNack(0L, false, true);
+      verify(channel, never()).basicAck(anyLong(), anyBoolean());
+      verify(rabbit, times(1))
+          .send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
+    }
+  }
+
+  @Test
   void acknowledgementFailureAfterPersistenceDoesNotRepublishOrNack() throws Exception {
     SeckillMessageRecoveryMapper mapper = mock(SeckillMessageRecoveryMapper.class);
     RabbitTemplate rabbit = mock(RabbitTemplate.class);

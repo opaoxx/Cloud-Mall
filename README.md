@@ -634,6 +634,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillMessageRecoveryAckTest` 注入 Channel 异常验证调用次数、顺序和异常原因，`SeckillRecoveryJsonMySqlIT` 回归真实入库及重投路径。结果未知仍依赖容器/连接恢复和原消息幂等；这些替身测试不代表真实 broker 断连恢复或 exactly-once 保证。
 
+### 恢复线程保留中断并停止当前批次（第17轮S）
+
+恢复扫描入口及每条认领前检查线程中断。等待 Rabbit 确认被中断时，恢复中断标志并结束本批，不写 `REPLAYED`、不继续认领，原租约自然到期；已发送消息仍可能到达，继续依赖原幂等机制。死信延迟重投的确认等待中断时，先尝试原有的一次 requeue NACK，再在 finally 恢复中断标志，NACK 抛错也不丢失停机信号。
+
+`SeckillRecoveryDispatchMySqlIT` 和 `SeckillMessageRecoveryAckTest` 覆盖预中断、两条任务之间中断、确认等待中断及 NACK 失败。检查与网络发送不是原子操作，本轮不提供全链路取消或消息撤回；Rabbit/Channel 使用替身。
+
 ## 验证命令
 
 ```bash
