@@ -658,6 +658,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryJsonMySqlIT` 和 `SeckillRecoveryDispatchMySqlIT` 覆盖非法维度、坏地址、空文本哈希绕过及合法数值字符串兼容。合法业务哈希算法、原消息字段和外部 API 不变；历史错误哈希不批量修复，Stock/Rabbit 为替身验证。
 
+### 地址快照的共享指纹严格校验（第17轮W）
+
+`SeckillRequestFingerprint.canonicalAddress` 使用局部严格 reader，拒绝地址字符串中的重复字段、尾随 JSON/垃圾以及非对象值。合法地址的对象排序、十进制规范化、数组顺序和 v1 SHA-256 输出保持不变。Stock 在认领/Redis/受理前返回原参数错误；Order 消费沿原异常事务退出，恢复记录沿原业务指纹失败路径隔离。
+
+`SeckillRequestFingerprintTest` 固定合法输出并覆盖非法地址；`SeckillEventTimeMySqlIT`、`OrderCreationPrecisionMySqlIT` 及恢复 JSON/Dispatch IT 验证业务边界。修改 common 后需重新构建并重启依赖服务才生效；本轮完成构建和隔离验证，未重启现有业务进程，也不迁移历史歧义地址或指纹。
+
 ## 验证命令
 
 ```bash

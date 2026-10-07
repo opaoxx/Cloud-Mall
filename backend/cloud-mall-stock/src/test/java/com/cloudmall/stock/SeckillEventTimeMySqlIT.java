@@ -115,6 +115,36 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void ambiguousAddressIsRejectedBeforeClaimRedisOrOutboxWrites() {
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    StockServiceImpl stock = new StockServiceImpl(redis, mapper, rabbit, new ObjectMapper());
+    ReflectionTestUtils.setField(
+        stock,
+        "seckillRequestClaimService",
+        transactionProxy(new SeckillRequestClaimService(mapper)));
+    AuthContext.set(7L, "USER");
+    for (String address :
+        List.of(
+            "{} {}",
+            "{} null",
+            "{} garbage",
+            "{\"city\":1,\"city\":2}",
+            "{\"contact\":{\"name\":1,\"name\":2}}")) {
+      SeckillReservationDTO request = request("invalid-address");
+      request.addressSnapshot = address;
+      var failure =
+          assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(request));
+      assertEquals(400, failure.getHttpStatus());
+      assertEquals(
+          0, fixture.queryForObject("SELECT COUNT(*) FROM seckill_reservation", Integer.class));
+      assertEquals(
+          0, fixture.queryForObject("SELECT COUNT(*) FROM seckill_order_outbox", Integer.class));
+      verifyNoInteractions(redis, rabbit);
+    }
+  }
+
+  @Test
   void claimPersistsOneMillisecondAndReusesItAfterYearChanges() throws Exception {
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     HashOperations<String, Object, Object> operations = mock(HashOperations.class);

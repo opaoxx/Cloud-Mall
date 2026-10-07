@@ -99,6 +99,35 @@ class SeckillRecoveryJsonMySqlIT {
   }
 
   @Test
+  void ambiguousAddressInsideTheEventRemainsEvidenceRatherThanAValidFingerprint() throws Exception {
+    int sequence = 0;
+    for (String address :
+        List.of(
+            "{} {}",
+            "{} null",
+            "{\"city\":1,\"city\":2}",
+            "{\"contact\":{\"name\":1,\"name\":2}}")) {
+      String eventId = "address-integrity-" + sequence++;
+      var serializer = new ObjectMapper();
+      var event =
+          serializer.readValue(
+              validPayload(eventId),
+              new com.fasterxml.jackson.core.type.TypeReference<
+                  java.util.LinkedHashMap<String, Object>>() {});
+      event.put("addressSnapshot", address);
+      deliver(recoveryHandler(), serializer.writeValueAsString(event));
+      Map<String, Object> saved = row(eventId);
+      assertEquals("CONFLICT", saved.get("status"));
+      assertEquals(
+          address,
+          serializer
+              .readTree(String.valueOf(saved.get("payload")))
+              .get("addressSnapshot")
+              .asText());
+    }
+  }
+
+  @Test
   void invalidBusinessDimensionsNeverTurnEvidenceHashIntoAnAcceptedFingerprint() throws Exception {
     int sequence = 0;
     for (Object[] invalid :

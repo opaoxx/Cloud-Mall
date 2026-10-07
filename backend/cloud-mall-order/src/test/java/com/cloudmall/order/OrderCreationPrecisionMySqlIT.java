@@ -388,6 +388,20 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void ambiguousAddressCannotCreateAnOrderUsingTheOldCanonicalHash() {
+    Map<String, Object> event = timeEvent("202612-address-integrity");
+    event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    event.put("addressSnapshot", "{} {}");
+    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+    for (String table :
+        List.of(
+            "mall_order_202612", "mall_order_item_202612", "seckill_order_dedup", "order_outbox")) {
+      assertEquals(0, fixture.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class));
+    }
+    verifyNoInteractions(ReflectionTestUtils.getField(service, "products"));
+  }
+
+  @Test
   void firstDeliveryWithoutVerifiableTimeRollsBackBeforeProductLookup() {
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
     int index = 0;

@@ -1,17 +1,18 @@
 package com.cloudmall.common.messaging;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
-import java.util.Map;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeMap;
 
 /** 为库存受理和订单消费生成相同的秒杀请求指纹。 */
@@ -29,9 +30,13 @@ public final class SeckillRequestFingerprint {
   /** 规范化原地址快照；必须是 JSON 对象。 */
   public static String canonicalAddress(String addressSnapshot) {
     try {
-      Object parsed = MAPPER.readValue(addressSnapshot, Object.class);
-      if (!(parsed instanceof Map<?, ?>))
-        throw new IllegalArgumentException("秒杀地址快照必须是 JSON 对象");
+      Object parsed =
+          MAPPER
+              .readerFor(Object.class)
+              .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+              .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+              .readValue(addressSnapshot);
+      if (!(parsed instanceof Map<?, ?>)) throw new IllegalArgumentException("秒杀地址快照必须是 JSON 对象");
       return MAPPER.writeValueAsString(normalize(parsed));
     } catch (JsonProcessingException malformedAddress) {
       throw new IllegalArgumentException("秒杀地址快照不是合法 JSON", malformedAddress);

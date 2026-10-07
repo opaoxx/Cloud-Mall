@@ -112,6 +112,20 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void ambiguousAddressCannotReuseAnOldNormalizedHashToPassRecovery() throws Exception {
+    seed(1, "address-integrity");
+    fixture.update(
+        "UPDATE seckill_message_recovery SET payload=JSON_SET(payload,'$.addressSnapshot','{} {}') WHERE id=1");
+    Map<String, Object> before = row(1);
+    recovery.replayDue();
+    assertEquals("CONFLICT", row(1).get("status"));
+    assertEquals(before.get("payload"), row(1).get("payload"));
+    assertEquals(before.get("request_hash"), row(1).get("request_hash"));
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+  }
+
+  @Test
   void invalidBusinessFingerprintCannotPassRecoveryUsingTheEmptyTextHash() throws Exception {
     seed(1, "invalid-fingerprint");
     String emptyHash =
