@@ -55,19 +55,24 @@ public class SeckillMessageRecovery {
     this.rabbitTemplate.setMandatory(true);
   }
 
-  /** 死信先落库，方法正常返回后 RabbitMQ 才确认消息。 */
+  /**
+   * 死信持久化或延迟重投确认后尝试一次 ACK；确认结果未知时抛出异常，不追加确认指令。
+   *
+   * @param message 原始死信及投递属性
+   * @param channel 当前投递通道，保存与重投均失败时请求重新投递
+   */
   @RabbitListener(
       queues = OrderMessagingConfiguration.SECKILL_DLQ,
       containerFactory = "seckillDlqContainerFactory")
   public void consumeDeadLetter(Message message, Channel channel) {
     long deliveryTag = message.getMessageProperties().getDeliveryTag();
+    // 1. 只有持久化失败才进入延迟重投，不能把 ACK 失败误当作数据库错误。
     try {
       persistDeadLetter(message);
-      channel.basicAck(deliveryTag, false);
     } catch (Exception persistenceFailure) {
+      // 2. 重投未确认时最多请求一次 NACK；该分支结束后不能再发送 ACK。
       try {
         republishForDelayedRetry(message, persistenceFailure);
-        channel.basicAck(deliveryTag, false);
       } catch (Exception retryFailure) {
         try {
           channel.basicNack(deliveryTag, false, true);
@@ -76,7 +81,14 @@ public class SeckillMessageRecovery {
           throw new IllegalStateException("秒杀死信无法落库且 nack 失败", retryFailure);
         }
         LOGGER.warn("秒杀死信落库失败，延迟重试投递失败，已请求 RabbitMQ 重新投递", retryFailure);
+        return;
       }
+    }
+    // 3. 此时持久化或重投已成功；ACK 异常只表示确认结果未知，不再发布或 NACK。
+    try {
+      channel.basicAck(deliveryTag, false);
+    } catch (Exception acknowledgementFailure) {
+      throw new IllegalStateException("秒杀死信已持久化或重投，但 ACK 结果未知", acknowledgementFailure);
     }
   }
 

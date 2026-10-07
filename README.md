@@ -628,6 +628,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryJsonMySqlIT` 覆盖三类排序规则别名、原行完整保持及重投确认后 ACK。现有唯一键保持不变，别名事件仍可能无法同时入库，需后续核验或单独评审迁移；不会自动合并、改号或修复历史记录。Rabbit 为替身。
 
+### 死信确认异常不再触发重复发布（第17轮R）
+
+持久化失败才进入延迟重投，重投失败才请求一次 requeue NACK；持久化或重投确认成功后只尝试一次 ACK。ACK 异常保留原始原因向容器抛出，不再被当作数据库或重投失败，也不追加 ACK/NACK/发布操作。
+
+`SeckillMessageRecoveryAckTest` 注入 Channel 异常验证调用次数、顺序和异常原因，`SeckillRecoveryJsonMySqlIT` 回归真实入库及重投路径。结果未知仍依赖容器/连接恢复和原消息幂等；这些替身测试不代表真实 broker 断连恢复或 exactly-once 保证。
+
 ## 验证命令
 
 ```bash
