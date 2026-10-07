@@ -113,7 +113,8 @@ public class SeckillMessageRecovery {
         throw new IllegalStateException("无法保存秒杀死信原始载荷", serializationException);
       }
     }
-    recoveryMapper.saveDlq(id(), eventId, requestHash, raw, status, LocalDateTime.now());
+    // 持久化与恢复扫描共用上海毫秒时钟，三列时间使用同一次采样。
+    recoveryMapper.saveDlq(id(), eventId, requestHash, raw, status, recoveryNow());
   }
 
   private void republishForDelayedRetry(Message message, Exception failure) throws Exception {

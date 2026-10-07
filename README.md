@@ -604,6 +604,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 测试沿用隔离 `cm17f_*` / `cm17k_*` 库，覆盖真实 consumer 事务、两条成功路径、身份/JSON 类型差异、终态保护与迟到完成；核对原库校验和后清理。Feign 和 Rabbit 为替身，不代表跨服务网络故障验收。
 
+### 死信持久化时间与恢复扫描一致（第17轮N）
+
+死信入库复用恢复器的上海（`+08:00`）毫秒时钟，单次采样用于创建、更新和首次重试时间，避免 JVM 默认时区造成调度偏移或亚毫秒舍入跨月。该值是接收/调度时间，事件的 `occurredAt` 仍按原规则独立核验。
+
+使用上述 `SeckillRecoveryJsonMySqlIT` 命令可验证 UTC/GMT+14 默认时区、月末毫秒边界、合法/非法及旧格式死信、冲突更新和等价重复保持。测试使用隔离 MySQL 库及 Channel 替身，不自动修正历史时间，也不改变 ACK/nack、租约或消息拓扑。
+
 ## 验证命令
 
 ```bash

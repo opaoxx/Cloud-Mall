@@ -9,10 +9,16 @@ import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.service.impl.SeckillMessageRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -24,6 +30,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /** 使用真实 MySQL JSON 类型验证死信重复保存；不修改原业务库。 */
 class SeckillRecoveryJsonMySqlIT {
@@ -213,6 +220,146 @@ class SeckillRecoveryJsonMySqlIT {
       executor.shutdownNow();
       assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
     }
+  }
+
+  @Test
+  void deadLetterWallTimeUsesShanghaiRegardlessOfJvmDefaultZone() throws Exception {
+    TimeZone originalZone = TimeZone.getDefault();
+    try {
+      for (String zone : List.of("UTC", "GMT+14:00")) {
+        TimeZone.setDefault(TimeZone.getTimeZone(zone));
+        var recovery = recoveryHandler();
+        String eventId = "zone-" + zone;
+        LocalDateTime before = shanghai(Instant.now());
+        deliver(recovery, validPayload(eventId));
+        LocalDateTime after = shanghai(Instant.now());
+        Map<String, Object> saved = row(eventId);
+        LocalDateTime stored = localTime(saved.get("created_at"));
+        assertFalse(stored.isBefore(before), zone + " stored before Shanghai receive time");
+        assertFalse(stored.isAfter(after), zone + " stored after Shanghai receive time");
+        assertEquals(saved.get("created_at"), saved.get("updated_at"));
+        assertEquals(saved.get("created_at"), saved.get("next_retry_at"));
+        assertTrue(
+            mapper.findDue(50, after).stream()
+                .anyMatch(item -> eventId.equals(item.get("event_id"))));
+      }
+    } finally {
+      TimeZone.setDefault(originalZone);
+    }
+  }
+
+  @Test
+  void deadLetterMonthEndIsTruncatedAndImmediatelyDueAtStoredMillisecond() throws Exception {
+    var recovery = recoveryHandler();
+    Instant received = Instant.parse("2026-12-31T15:59:59.999999999Z");
+    ReflectionTestUtils.setField(recovery, "recoveryClock", Clock.fixed(received, ZoneOffset.UTC));
+    deliver(recovery, validPayload("month-end"));
+    Map<String, Object> saved = row("month-end");
+    for (String column : List.of("created_at", "updated_at", "next_retry_at")) {
+      assertEquals(shanghai(received), localTime(saved.get(column)), column);
+    }
+    assertTrue(mapper.findDue(50, shanghai(received).minusNanos(1_000_000)).isEmpty());
+    assertEquals(1, mapper.findDue(50, shanghai(received)).size());
+    ReflectionTestUtils.setField(
+        recovery, "recoveryClock", Clock.fixed(received.plusSeconds(30), ZoneOffset.UTC));
+    deliver(recovery, validPayload("month-end"));
+    assertEquals(saved, row("month-end"), "equivalent retry must not reset first receive time");
+  }
+
+  @Test
+  void malformedDeadLetterUsesSameClockWithoutBecomingReplayable() throws Exception {
+    var recovery = recoveryHandler();
+    Instant received = Instant.parse("2026-10-07T00:00:00.123999999Z");
+    ReflectionTestUtils.setField(recovery, "recoveryClock", Clock.fixed(received, ZoneOffset.UTC));
+    deliver(recovery, "{invalid-json");
+    Map<String, Object> saved = fixture.queryForMap("SELECT * FROM seckill_message_recovery");
+    assertEquals("CONFLICT", saved.get("status"));
+    for (String column : List.of("created_at", "updated_at", "next_retry_at")) {
+      assertEquals(shanghai(received), localTime(saved.get(column)), column);
+    }
+    assertTrue(mapper.findDue(50, shanghai(received).plusDays(1)).isEmpty());
+    assertEquals(
+        "{invalid-json",
+        new ObjectMapper()
+            .readTree(String.valueOf(saved.get("payload")))
+            .get("rawPayload")
+            .asText());
+  }
+
+  private SeckillMessageRecovery recoveryHandler() {
+    return new SeckillMessageRecovery(
+        mapper, mock(RabbitTemplate.class), new ObjectMapper(), mock(StockClient.class));
+  }
+
+  @Test
+  void legacyAndConflictingDeadLettersKeepFirstFactsAndUseOperationTime() throws Exception {
+    var recovery = recoveryHandler();
+    Instant received = Instant.parse("2026-10-07T00:00:00.123999999Z");
+    ReflectionTestUtils.setField(recovery, "recoveryClock", Clock.fixed(received, ZoneOffset.UTC));
+    var serializer = new ObjectMapper();
+    var legacy = serializer.readTree(validPayload("legacy-clock"));
+    ((com.fasterxml.jackson.databind.node.ObjectNode) legacy).remove("addressSnapshot");
+    ((com.fasterxml.jackson.databind.node.ObjectNode) legacy)
+        .put("eventType", "SECKILL_ORDER_ACCEPTED");
+    deliver(recovery, serializer.writeValueAsString(legacy));
+    Map<String, Object> first = row("legacy-clock");
+    assertEquals("QUARANTINED", first.get("status"));
+    for (String column : List.of("created_at", "updated_at", "next_retry_at")) {
+      assertEquals(shanghai(received), localTime(first.get(column)), column);
+    }
+    ReflectionTestUtils.setField(
+        recovery, "recoveryClock", Clock.fixed(received.plusSeconds(10), ZoneOffset.UTC));
+    ((com.fasterxml.jackson.databind.node.ObjectNode) legacy).put("userId", 4);
+    deliver(recovery, serializer.writeValueAsString(legacy));
+    Map<String, Object> conflict = row("legacy-clock");
+    assertEquals("CONFLICT", conflict.get("status"));
+    assertEquals(first.get("payload"), conflict.get("payload"));
+    assertEquals(first.get("request_hash"), conflict.get("request_hash"));
+    assertEquals(first.get("created_at"), conflict.get("created_at"));
+    assertEquals(first.get("next_retry_at"), conflict.get("next_retry_at"));
+    assertEquals(shanghai(received.plusSeconds(10)), localTime(conflict.get("updated_at")));
+  }
+
+  private String validPayload(String eventId) throws Exception {
+    return new ObjectMapper()
+        .writeValueAsString(
+            Map.of(
+                "eventId",
+                eventId,
+                "orderNo",
+                "202612-clock",
+                "activityId",
+                1,
+                "skuId",
+                2,
+                "userId",
+                3,
+                "idempotencyKey",
+                "clock-key",
+                "addressSnapshot",
+                "{}",
+                "occurredAt",
+                "2026-12-31T23:59:59.999+08:00"));
+  }
+
+  private void deliver(SeckillMessageRecovery recovery, String payload) throws Exception {
+    Channel channel = mock(Channel.class);
+    MessageProperties properties = new MessageProperties();
+    properties.setDeliveryTag(31);
+    recovery.consumeDeadLetter(
+        new Message(payload.getBytes(StandardCharsets.UTF_8), properties), channel);
+    verify(channel).basicAck(31, false);
+    verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
+  }
+
+  private static LocalDateTime shanghai(Instant instant) {
+    return LocalDateTime.ofInstant(instant, ZoneOffset.ofHours(8)).truncatedTo(ChronoUnit.MILLIS);
+  }
+
+  private static LocalDateTime localTime(Object value) {
+    return value instanceof LocalDateTime local
+        ? local
+        : ((java.sql.Timestamp) value).toLocalDateTime();
   }
 
   @Test
