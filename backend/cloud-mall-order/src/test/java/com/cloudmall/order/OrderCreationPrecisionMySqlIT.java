@@ -387,6 +387,167 @@ class OrderCreationPrecisionMySqlIT {
     return request;
   }
 
+  @Test
+  void firstDeliveryWithoutVerifiableTimeRollsBackBeforeProductLookup() {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    int index = 0;
+    for (Object invalid : new Object[] {null, "", "  ", 123L, "invalid-date"}) {
+      Map<String, Object> event = timeEvent("202612-invalid-time-" + index++);
+      event.put("occurredAt", invalid);
+      assertTimeRejected(event, products);
+    }
+    assertTimeRejected(timeEvent("202612-missing-time"), products);
+  }
+
+  @Test
+  void explicitWrongMonthCannotCreateOrderInTheOriginalNumberShard() {
+    Map<String, Object> event = timeEvent("202612-wrong-month");
+    event.put("occurredAt", "2027-01-01T00:00:00+08:00");
+    assertTimeRejected(event, (ProductClient) ReflectionTestUtils.getField(service, "products"));
+  }
+
+  @Test
+  void committedDuplicateStillSucceedsWhenLegacyRedeliveryHasNoTime() {
+    Map<String, Object> event = timeEvent("202612-committed-legacy");
+    event.put("occurredAt", "2026-12-31T23:59:59.999500+08:00");
+    service.consumeSeckill(event);
+    var before =
+        fixture.queryForList(
+            "CHECKSUM TABLE"
+                + " mall_order_202612,mall_order_item_202612,order_outbox,seckill_order_dedup");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    clearInvocations(products);
+    event.remove("occurredAt");
+    service.consumeSeckill(event);
+    verifyNoInteractions(products);
+    assertEquals(
+        before,
+        fixture.queryForList(
+            "CHECKSUM TABLE"
+                + " mall_order_202612,mall_order_item_202612,order_outbox,seckill_order_dedup"));
+    assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM order_outbox", Integer.class));
+  }
+
+  @Test
+  void deadLetterTimeFailuresKeepStoredPayloadAndQuarantineWithoutRpcOrRepublish()
+      throws Exception {
+    StockClient stock = mock(StockClient.class);
+    org.springframework.amqp.rabbit.core.RabbitTemplate rabbit =
+        mock(org.springframework.amqp.rabbit.core.RabbitTemplate.class);
+    com.rabbitmq.client.Channel channel = mock(com.rabbitmq.client.Channel.class);
+    SeckillMessageRecoveryMapper recoveryMapper =
+        (SeckillMessageRecoveryMapper)
+            ReflectionTestUtils.getField(service, "seckillMessageRecoveryMapper");
+    var recovery =
+        new com.cloudmall.order.service.impl.SeckillMessageRecovery(
+            recoveryMapper, rabbit, new ObjectMapper(), stock);
+    doAnswer(
+            invocation -> {
+              org.springframework.amqp.rabbit.connection.CorrelationData correlation =
+                  invocation.getArgument(3);
+              correlation
+                  .getFuture()
+                  .set(
+                      new org.springframework.amqp.rabbit.connection.CorrelationData.Confirm(
+                          true, null));
+              return null;
+            })
+        .when(rabbit)
+        .send(
+            anyString(),
+            anyString(),
+            any(org.springframework.amqp.core.Message.class),
+            any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
+    for (String kind : List.of("missing", "wrong-month")) {
+      String orderNo = "202612-recovery-" + kind;
+      Map<String, Object> event = timeEvent(orderNo);
+      if (kind.equals("wrong-month")) event.put("occurredAt", "2027-01-01T00:00:00+08:00");
+      Map<String, Object> stockFact = new java.util.LinkedHashMap<>(event);
+      stockFact.put("status", "ACCEPTED");
+      when(stock.seckillReservationFact(orderNo, "cloud-mall-order"))
+          .thenReturn(ApiResponse.ok(stockFact));
+      var properties = new org.springframework.amqp.core.MessageProperties();
+      properties.setDeliveryTag(17L);
+      recovery.consumeDeadLetter(
+          new org.springframework.amqp.core.Message(
+              new ObjectMapper().writeValueAsBytes(event), properties),
+          channel);
+      String eventId = String.valueOf(event.get("eventId"));
+      Map<String, Object> stored =
+          fixture.queryForMap("SELECT * FROM seckill_message_recovery WHERE event_id=?", eventId);
+      fixture.update(
+          "UPDATE seckill_message_recovery SET next_retry_at=DATE_SUB(NOW(3),INTERVAL 1 DAY) WHERE"
+              + " event_id=?",
+          eventId);
+      recovery.replayDue();
+      Map<String, Object> after =
+          fixture.queryForMap("SELECT * FROM seckill_message_recovery WHERE event_id=?", eventId);
+      assertEquals("QUARANTINED", after.get("status"));
+      assertTrue(String.valueOf(after.get("last_error")).contains("ORDER_SECKILL_TIME_UNVERIFIED"));
+      assertEquals(stored.get("payload"), after.get("payload"));
+      assertEquals(stored.get("request_hash"), after.get("request_hash"));
+      assertNull(after.get("lease_owner"));
+      assertTrue(local(after.get("next_retry_at")).isAfter(LocalDateTime.now().plusMinutes(4)));
+    }
+    verify(channel, times(2)).basicAck(17L, false);
+    verifyNoInteractions(stock);
+    verify(rabbit, never())
+        .send(
+            anyString(),
+            anyString(),
+            any(org.springframework.amqp.core.Message.class),
+            any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
+  }
+
+  private Map<String, Object> timeEvent(String orderNo) {
+    return new java.util.LinkedHashMap<>(
+        Map.of(
+            "orderNo",
+            orderNo,
+            "eventId",
+            SeckillRequestFingerprint.eventId(orderNo),
+            "eventType",
+            "SECKILL_ORDER_REQUEST",
+            "payloadVersion",
+            1,
+            "activityId",
+            11L,
+            "skuId",
+            7L,
+            "userId",
+            8L,
+            "idempotencyKey",
+            "time:" + orderNo,
+            "addressSnapshot",
+            "{}",
+            "requestHash",
+            SeckillRequestFingerprint.hash(11, 7, 8, 1, "{}")));
+  }
+
+  private void assertTimeRejected(Map<String, Object> event, ProductClient products) {
+    clearInvocations(products);
+    IllegalStateException failure =
+        assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+    boolean stableReason = false;
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (String.valueOf(cause.getMessage()).contains("ORDER_SECKILL_TIME_UNVERIFIED"))
+        stableReason = true;
+    }
+    assertTrue(stableReason);
+    verifyNoInteractions(products);
+    for (String table :
+        List.of(
+            "mall_order_202612",
+            "mall_order_202701",
+            "mall_order_item_202612",
+            "mall_order_item_202701",
+            "order_outbox",
+            "seckill_order_dedup")) {
+      assertEquals(
+          0, fixture.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class), table);
+    }
+  }
+
   private void configureMocks() {
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
     StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");

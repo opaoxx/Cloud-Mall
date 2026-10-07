@@ -531,6 +531,19 @@ mvn -pl backend/cloud-mall-stock -am test '-Dtest=SeckillEventTimeMySqlIT' '-Dsu
 
 测试使用自建 `cm17g_*` 库中的真实认领、outbox 和调度逻辑，Rabbit/Redis 为替身，验证 NACK/ACK 后的状态及重复 envelope；不等同于真实消息代理的网络故障验收。结束后清理隔离库并核对原 Stock 库 checksum。
 
+### 秒杀消费与恢复的时间校验（第17轮H）
+
+Order 首次消费秒杀事件必须有显式 ISO-8601 `occurredAt`，经上海毫秒规范化后，其月份必须与原订单号前缀一致。缺失、非法或错月事件以 `ORDER_SECKILL_TIME_UNVERIFIED` 失败，事务回滚，沿原重试/DLQ 路径保留；校验通过前不调用 Product，也不写订单、明细或超时事件。
+
+已有同用户/键、同 hash/orderNo 且已提交的重复事件仍先走原幂等分支，不因历史消息缺时间再次落单或报错。恢复任务在 Stock 验真和 Rabbit 重发前复用时间校验；无效时间进入 `QUARANTINED`、按原五分钟退避并释放租约，保留持久化 payload 和原键，不用当前时间补值。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationTimeTest,SeckillMessageRecoveryTest,SeckillMessageRecoveryAckTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+集成测试沿用 `cm17f_*` 隔离库，覆盖创建、回滚、重复事件、DLQ 持久化及恢复隔离；Rabbit/Feign 为替身。该防护不会重建历史错月订单或自动补写异常消息的时间。
+
 ## 验证命令
 
 ```bash

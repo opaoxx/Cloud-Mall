@@ -126,6 +126,7 @@ class SeckillMessageRecoveryTest {
     event.put("idempotencyKey", "key-1");
     event.put("addressSnapshot", "{}");
     event.put("requestHash", fingerprint());
+    event.put("occurredAt", "2026-09-30T23:59:59.999+08:00");
     return Map.of(
         "id", 1L,
         "event_id", EVENT_ID,

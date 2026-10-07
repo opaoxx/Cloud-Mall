@@ -70,6 +70,7 @@ class SeckillAddressPropagationTest {
             "requestHash", requestHash,
             "skuId", 7L,
             "userId", 8L,
+            "occurredAt", "2026-09-14T12:00:00+08:00",
             "addressSnapshot",
                 "{\"receiver\":\"小明\",\"phone\":\"13800138000\",\"detailAddress\":\"云购路1号\"}"));
 

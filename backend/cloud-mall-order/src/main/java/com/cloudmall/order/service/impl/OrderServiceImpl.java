@@ -613,10 +613,11 @@ public class OrderServiceImpl implements OrderService {
         }
         return;
       }
+      // 已提交重复消息在上方收敛；首次落单必须先核验原时间和订单月份。
+      OffsetDateTime created = OrderCreationTime.forSeckill(orderNo, event.get("occurredAt"));
+      String t = tableFromNo(orderNo);
       ProductClient.SkuView s = products.sku(skuId).data;
       if (s == null) throw new IllegalStateException("秒杀商品不存在: " + event.get("skuId"));
-      OffsetDateTime created = OrderCreationTime.normalize(occurredAt(event));
-      String t = tableFromNo(orderNo);
       OrderPO order = new OrderPO();
       order.id = id();
       order.orderNo = orderNo;
@@ -690,16 +691,6 @@ public class OrderServiceImpl implements OrderService {
       return "legacy-seckill:hash:" + sha256(mapper.writeValueAsString(event));
     } catch (Exception serializationFailure) {
       return "legacy-seckill:hash:" + sha256(String.valueOf(event));
-    }
-  }
-
-  private OffsetDateTime occurredAt(Map<String, Object> event) {
-    Object value = event.get("occurredAt");
-    if (value == null || String.valueOf(value).isBlank()) return now();
-    try {
-      return OffsetDateTime.parse(String.valueOf(value));
-    } catch (RuntimeException invalidTimestamp) {
-      throw new IllegalArgumentException("秒杀消息 occurredAt 非法", invalidTimestamp);
     }
   }
 

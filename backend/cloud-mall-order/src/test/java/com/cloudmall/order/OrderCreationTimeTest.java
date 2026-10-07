@@ -14,6 +14,46 @@ import org.junit.jupiter.api.Test;
 /** 创建时间先统一瞬时解释、再向下取毫秒，不允许数据库舍入跨月。 */
 class OrderCreationTimeTest {
   @Test
+  void seckillTimeMatchesShanghaiMonthAfterOffsetConversionAndFloor() {
+    assertEquals(
+        OffsetDateTime.parse("2027-01-01T00:00:00+08:00"),
+        OrderCreationTime.forSeckill("202701-order", "2026-12-31T16:00:00.000900Z"));
+    assertEquals(
+        OffsetDateTime.parse("2026-12-31T23:59:59.999+08:00"),
+        OrderCreationTime.forSeckill("202612-order", "2026-12-31T23:59:59.999999999+08:00"));
+  }
+
+  @Test
+  void absentBlankNonStringOrInvalidSeckillTimeCannotBeInvented() {
+    for (Object invalid :
+        new Object[] {
+          null, "", " ", 123, OffsetDateTime.now(), "not-a-time", "9999-12-31T23:59:59-01:00"
+        }) {
+      assertEquals(
+          "ORDER_SECKILL_TIME_UNVERIFIED",
+          assertThrows(
+                  IllegalArgumentException.class,
+                  () -> OrderCreationTime.forSeckill("202612-order", invalid))
+              .getMessage());
+    }
+  }
+
+  @Test
+  void malformedOrderNumberAndMismatchedMonthAreRejected() {
+    for (String orderNo :
+        new String[] {
+          null, "", "202612", "202613-order", "202611-order", "099912-order", "202612_unsafe"
+        }) {
+      assertEquals(
+          "ORDER_SECKILL_TIME_UNVERIFIED",
+          assertThrows(
+                  IllegalArgumentException.class,
+                  () -> OrderCreationTime.forSeckill(orderNo, "2026-12-31T23:59:59+08:00"))
+              .getMessage());
+    }
+  }
+
+  @Test
   void yearEndRemainsInOriginalMonthAfterTruncation() {
     assertEquals(
         OffsetDateTime.parse("2026-12-31T23:59:59.999+08:00"),

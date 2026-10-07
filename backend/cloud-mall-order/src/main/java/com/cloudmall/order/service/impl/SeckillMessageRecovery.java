@@ -2,19 +2,23 @@ package com.cloudmall.order.service.impl;
 
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
-import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.feign.StockClient;
+import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
+import com.cloudmall.order.util.OrderCreationTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rabbitmq.client.Channel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDateTime;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.HexFormat;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -22,9 +26,6 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import com.rabbitmq.client.Channel;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** 持久化并自动重放秒杀死信，确保原事件号和载荷不变。 */
 @Component
@@ -160,8 +161,18 @@ public class SeckillMessageRecovery {
         recoveryMapper.markVerification(id, owner, "CONFLICT", "缺少 orderNo，无法核对库存受理", now.plusMinutes(5));
         return false;
       }
-      var response = OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.STATUS,
-          () -> stockClient.seckillReservationFact(orderNo, "cloud-mall-order"));
+      // 时间证据不足时保留原载荷和事件号，避免在 Stock 查询与 Rabbit 重发之间空转。
+      try {
+        OrderCreationTime.forSeckill(orderNo, event.get("occurredAt"));
+      } catch (IllegalArgumentException unverifiedTime) {
+        recoveryMapper.markVerification(
+            id, owner, "QUARANTINED", unverifiedTime.getMessage(), now.plusMinutes(5));
+        return false;
+      }
+      var response =
+          OrderStockCircuitBreaker.call(
+              OrderStockCircuitBreaker.STATUS,
+              () -> stockClient.seckillReservationFact(orderNo, "cloud-mall-order"));
       if (response == null || !"0".equals(response.code) || response.data == null) {
         recoveryMapper.markVerification(id, owner, "VERIFYING", "库存受理查询响应无效", now.plusSeconds(30));
         return false;
@@ -169,17 +180,21 @@ public class SeckillMessageRecovery {
       String status = String.valueOf(response.data.get("status"));
       if ("NOT_FOUND".equals(status) || "REJECTED".equals(status)) {
         // 没有库存事实的存量死信必须保留并持续核验，不能因字段缺失误判为冲突或创建幽灵订单。
-        recoveryMapper.markVerification(id, owner, "QUARANTINED", "库存受理状态=" + status, now.plusMinutes(5));
+        recoveryMapper.markVerification(
+            id, owner, "QUARANTINED", "库存受理状态=" + status, now.plusMinutes(5));
         return false;
       }
       if (!hasCoreFields(event) || !matchesEvent(event, response.data)) {
         recoveryMapper.markVerification(id, owner, "CONFLICT", "库存受理事实与原事件不一致", now.plusMinutes(5));
         return false;
       }
-      if ("ACCEPTED".equals(status) || "PUBLISHED".equals(status) || "ORDER_CREATED".equals(status)) return true;
-      recoveryMapper.markVerification(id, owner, "VERIFYING", "库存受理状态未知=" + status, now.plusSeconds(30));
+      if ("ACCEPTED".equals(status) || "PUBLISHED".equals(status) || "ORDER_CREATED".equals(status))
+        return true;
+      recoveryMapper.markVerification(
+          id, owner, "VERIFYING", "库存受理状态未知=" + status, now.plusSeconds(30));
     } catch (Exception exception) {
-      recoveryMapper.markVerification(id, owner, "VERIFYING", exception.toString(), now.plusSeconds(30));
+      recoveryMapper.markVerification(
+          id, owner, "VERIFYING", exception.toString(), now.plusSeconds(30));
     }
     return false;
   }
