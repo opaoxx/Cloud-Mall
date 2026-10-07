@@ -28,6 +28,25 @@ import org.springframework.mock.env.MockEnvironment;
 
 class SeckillOutboxRecoveryRaceTest {
   @Test
+  void unexpectedUnknownTransitionErrorsStillPropagate() {
+    pendingRow(Instant.now().minusSeconds(60));
+    when(redis.opsForValue()).thenReturn(values);
+    for (Throwable fault :
+        List.of(
+            new IllegalStateException("fixture transition bug"),
+            new AssertionError("fixture fatal transition"))) {
+      clearInvocations(mapper, acceptance);
+      doThrow(fault).when(mapper).markSeckillUnknown(anyLong(), anyString(), anyString(), any());
+      org.junit.jupiter.api.Assertions.assertSame(
+          fault,
+          org.junit.jupiter.api.Assertions.assertThrows(fault.getClass(), dispatcher::dispatch));
+      verify(mapper, times(1)).markSeckillUnknown(anyLong(), anyString(), anyString(), any());
+      verify(mapper, never()).findPendingSeckillOutbox(any(), anyInt());
+      verifyNoInteractions(acceptance);
+    }
+  }
+
+  @Test
   void unexpectedMarkerReadFailuresAreNotTreatedAsRedisUnavailability() {
     pendingRow(Instant.now());
     when(redis.opsForValue()).thenReturn(values);

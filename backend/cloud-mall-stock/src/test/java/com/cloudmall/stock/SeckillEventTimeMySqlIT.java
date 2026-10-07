@@ -115,6 +115,100 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void markerUnknownWriteFailureDoesNotBlockLaterMarkerOrCommittedOutbox() throws Exception {
+    seedMarkerCandidate(1, "PENDING");
+    seedMarkerCandidate(2, "PENDING");
+    seed("202512-after-marker-db", "2025-12-31T23:59:59.999+08:00");
+    due("202512-after-marker-db");
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1");
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    org.springframework.data.redis.core.ValueOperations<String, String> values =
+        mock(org.springframework.data.redis.core.ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(values);
+    when(values.get(markerKey(2))).thenReturn("202610-marker-2");
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    List<Map<String, Object>> sent = new ArrayList<>();
+    var dispatcher =
+        new SeckillOrderOutboxDispatcher(
+            mapper,
+            acceptance,
+            redis,
+            sender(sent, false),
+            new ObjectMapper(),
+            new MockEnvironment());
+    fixture.execute(
+        "CREATE TRIGGER fail_marker_unknown BEFORE UPDATE ON seckill_reservation FOR EACH ROW BEGIN IF OLD.id=1 AND NEW.status='UNKNOWN' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture marker state failure'; END IF; END");
+    try {
+      assertDoesNotThrow(dispatcher::dispatch);
+      assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+      verify(acceptance, never())
+          .accept(
+              anyLong(),
+              anyString(),
+              eq("202610-marker-1"),
+              anyString(),
+              anyString(),
+              anyString(),
+              any());
+      verify(acceptance)
+          .accept(
+              anyLong(),
+              anyString(),
+              eq("202610-marker-2"),
+              anyString(),
+              anyString(),
+              anyString(),
+              any());
+      assertEquals("PUBLISHED", state("202512-after-marker-db"));
+      assertEquals(1, sent.size());
+    } finally {
+      fixture.execute("DROP TRIGGER fail_marker_unknown");
+    }
+  }
+
+  @Test
+  void unknownCommitResponseLossKeepsCommittedFactWithoutRetryingOrGuessing() throws Exception {
+    mapper = spy(mapper);
+    seedMarkerCandidate(1, "PENDING");
+    seed("202512-after-marker-unknown", "2025-12-31T23:59:59.999+08:00");
+    due("202512-after-marker-unknown");
+    var committed = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+    doAnswer(
+            invocation -> {
+              invocation.callRealMethod();
+              committed.set(fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+              throw new org.springframework.dao.DataAccessResourceFailureException(
+                  "fixture response lost after commit");
+            })
+        .when(mapper)
+        .markSeckillUnknown(eq(7L), eq("key:202610-marker-1"), anyString(), any());
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    when(redis.opsForValue())
+        .thenReturn(mock(org.springframework.data.redis.core.ValueOperations.class));
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    List<Map<String, Object>> sent = new ArrayList<>();
+    var dispatcher =
+        new SeckillOrderOutboxDispatcher(
+            mapper,
+            acceptance,
+            redis,
+            sender(sent, false),
+            new ObjectMapper(),
+            new MockEnvironment());
+    assertDoesNotThrow(dispatcher::dispatch);
+    assertEquals("UNKNOWN", committed.get().get("status"));
+    assertEquals(
+        committed.get(), fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+    verify(mapper, times(1))
+        .markSeckillUnknown(eq(7L), eq("key:202610-marker-1"), anyString(), any());
+    verify(mapper, never()).findSeckillByOrderNo("202610-marker-1");
+    verifyNoInteractions(acceptance);
+    assertEquals("PUBLISHED", state("202512-after-marker-unknown"));
+    assertEquals(1, sent.size());
+  }
+
+  @Test
   void outboxDatabaseWriteFailuresStayLocalAndDoNotMisclassifyConfirmedPublish() throws Exception {
     for (String stage : List.of("claim", "published", "failure")) {
       fixture.execute("DELETE FROM seckill_order_outbox");

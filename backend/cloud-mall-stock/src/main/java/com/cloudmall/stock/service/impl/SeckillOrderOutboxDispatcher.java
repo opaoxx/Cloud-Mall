@@ -120,12 +120,20 @@ public class SeckillOrderOutboxDispatcher {
       }
       if (!orderNo.equals(marker)) {
         if (isPastMarkerGrace(row.get("updated_at"))) {
-          int transitioned =
-              stockSqlMapper.markSeckillUnknown(
-                  ((Number) row.get("user_id")).longValue(),
-                  String.valueOf(row.get("idempotency_key")),
-                  "REDIS_MARKER_MISSING_AFTER_GRACE_PERIOD",
-                  now());
+          int transitioned;
+          try {
+            transitioned =
+                stockSqlMapper.markSeckillUnknown(
+                    ((Number) row.get("user_id")).longValue(),
+                    String.valueOf(row.get("idempotency_key")),
+                    "REDIS_MARKER_MISSING_AFTER_GRACE_PERIOD",
+                    now());
+          } catch (DataAccessException transitionFailure) {
+            // 提交结果可能未知，不能再写或按缺失受理；保留真实事实继续后续候选。
+            StockDependencyGuard.noteMysqlFailure(transitionFailure);
+            log.warn("秒杀 marker UNKNOWN 状态写失败，保留原事实并跳过，orderNo={}", orderNo, transitionFailure);
+            continue;
+          }
           if (transitioned == 1) {
             log.error("秒杀受理缺少 Redis marker，已转 UNKNOWN 保留人工/对账证据，orderNo={}", orderNo);
           } else {
