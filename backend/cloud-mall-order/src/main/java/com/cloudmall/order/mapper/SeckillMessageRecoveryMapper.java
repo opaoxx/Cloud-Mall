@@ -1,9 +1,13 @@
 package com.cloudmall.order.mapper;
 
+import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -12,6 +16,18 @@ import org.springframework.stereotype.Repository;
 public class SeckillMessageRecoveryMapper {
   /** 恢复台账的 SQL 执行入口。 */
   private final JdbcTemplate jdbcTemplate;
+
+  /** 完成写每次使用新鲜上海时间；隔离测试可固定精确毫秒边界。 */
+  private Clock completionClock = Clock.system(ZoneOffset.ofHours(8));
+
+  /** 完成写只接受当前精确 owner、未到期租约以及原可恢复状态。 */
+  private static final String COMPLETION_GUARD =
+      " AND BINARY lease_owner=BINARY ? AND lease_until IS NOT NULL AND lease_until>?"
+          + " AND status IN ('REPLAY_PENDING','REPLAYED','QUARANTINED','VERIFYING')";
+
+  /** 验真流程已经使用的三种目标状态，不开放任意状态覆盖。 */
+  private static final Set<String> VERIFICATION_STATES =
+      Set.of("QUARANTINED", "VERIFYING", "CONFLICT");
 
   /** 创建使用当前订单数据源的恢复台账 Mapper。 */
   public SeckillMessageRecoveryMapper(JdbcTemplate jdbcTemplate) {
@@ -108,23 +124,51 @@ public class SeckillMessageRecoveryMapper {
         now);
   }
 
-  public void markReplayed(long id, String owner, int retryCount, LocalDateTime nextRetry, String error) {
+  /** 只有仍持有有效租约的 worker 可完成重放；失效 owner 或终态记录保持原样。 */
+  public void markReplayed(
+      long id, String owner, int retryCount, LocalDateTime nextRetry, String error) {
+    // 1. 每次完成调用重新采样，不能复用批次开始时或重试计划中的时间。
+    LocalDateTime now = completionTime();
+    // 2. 状态和租约在同一 UPDATE 内核对，避免迟到完成覆盖 CONFLICT 或新 owner。
     jdbcTemplate.update(
         "UPDATE seckill_message_recovery SET status='REPLAYED',attempts=?,next_retry_at=?,last_error=?,"
-            + "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? AND lease_owner=?",
+            + "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?"
+            + COMPLETION_GUARD,
         retryCount,
         nextRetry,
         compactError(error),
-        LocalDateTime.now(),
+        now,
         id,
-        owner);
+        owner,
+        now);
   }
 
-  public void markVerification(long id, String owner, String status, String error, LocalDateTime nextRetry) {
+  /** 在有效 owner/租约及非终态下写入验真结果；不改变原 void 调用契约。 */
+  public void markVerification(
+      long id, String owner, String status, String error, LocalDateTime nextRetry) {
+    // 1. 只允许现有验真状态，并为本次完成采样同一个上海毫秒时间。
+    if (status == null || !VERIFICATION_STATES.contains(status)) {
+      throw new IllegalArgumentException("不支持的秒杀恢复验真状态");
+    }
+    LocalDateTime now = completionTime();
+    // 2. 过期、失去归属或已终结的记录必须零更新，不释放他人的租约。
     jdbcTemplate.update(
         "UPDATE seckill_message_recovery SET status=?,next_retry_at=?,last_error=?,"
-            + "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? AND lease_owner=?",
-        status, nextRetry, compactError(error), LocalDateTime.now(), id, owner);
+            + "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?"
+            + COMPLETION_GUARD,
+        status,
+        nextRetry,
+        compactError(error),
+        now,
+        id,
+        owner,
+        now);
+  }
+
+  /** 固定业务偏移并截断亚毫秒；UPDATE 时间和租约条件复用这一次采样。 */
+  private LocalDateTime completionTime() {
+    return LocalDateTime.ofInstant(completionClock.instant(), ZoneOffset.ofHours(8))
+        .truncatedTo(ChronoUnit.MILLIS);
   }
 
   public void markResolved(String eventId, LocalDateTime now) {

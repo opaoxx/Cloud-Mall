@@ -556,6 +556,18 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryJsonMySqlIT' '-
 
 测试在自建 `cm17i_*` 库验证 JSON 比较矩阵、并发重复和连续死信处理；确认两次 ACK 前都有持久记录，结束后清理。Rabbit Channel 使用替身，不等同于真实网络故障验收。
 
+### 恢复完成写的租约保护（第17轮J）
+
+恢复任务写入重放或验真结果时，必须仍持有尚未到期的租约、owner 字节精确匹配，且记录处于原可恢复状态。Mapper 每次完成调用重新采样上海毫秒时间，用同一次采样更新 `updated_at` 并检查 `lease_until > now`。过期、到期边界、空租约、被新 owner 接管或已为 `CONFLICT/RESOLVED` 时，不修改任何字段。
+
+验真目标状态仅允许原有 `QUARANTINED/VERIFYING/CONFLICT`。迟到 worker 不能将已确认的 DLQ 冲突重新改成 `REPLAYED`；有效 owner 仍按原流程完成、释放自己的租约和安排重试。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryLeaseMySqlIT,SeckillRecoveryJsonMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+新测试使用自建 `cm17j_*` 库验证边界、owner 接管、冲突竞态和整行保持，结束后清理。本轮仅保护完成写；发送前租约复查、续期和批次时钟尚未处理，也不保证撤回已经发出的消息。
+
 ## 验证命令
 
 ```bash
