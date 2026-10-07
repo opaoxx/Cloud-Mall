@@ -544,6 +544,18 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT'
 
 集成测试沿用 `cm17f_*` 隔离库，覆盖创建、回滚、重复事件、DLQ 持久化及恢复隔离；Rabbit/Feign 为替身。该防护不会重建历史错月订单或自动补写异常消息的时间。
 
+### 死信 JSON 幂等比较（第17轮I）
+
+同一事件重复落入恢复台账时，`request_hash` 仍按字符串精确比较，payload 则使用 MySQL 原生 JSON 值比较。对象键顺序、空白和等价数字表示不会再触发伪冲突；数字与字符串、数组顺序、JSON null 与缺字段等真实差异仍标记 `CONFLICT`，并保留首载荷。
+
+等价重复直接返回，不修改已有状态、尝试次数、租约、退避或时间字段。非法 JSON 和数据库错误仍沿原保存失败路径处理。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryJsonMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+测试在自建 `cm17i_*` 库验证 JSON 比较矩阵、并发重复和连续死信处理；确认两次 ACK 前都有持久记录，结束后清理。Rabbit Channel 使用替身，不等同于真实网络故障验收。
+
 ## 验证命令
 
 ```bash

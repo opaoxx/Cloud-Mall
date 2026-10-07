@@ -11,7 +11,7 @@
 保留现有 `INSERT IGNORE` 并发认领和“首载荷不可覆盖”语义：
 
 - 首次 eventId 插入成功，保存原始 payload、request_hash、状态和时间；
-- 重复 eventId 必须使用 MySQL 原生 JSON 值比较（例如 `payload = CAST(? AS JSON)` 或 4.1.1/当前 MySQL 8 驱动实际支持的等价 Mapper SQL），不能用 Java 字符串比较或 Jackson 树猜测；
+- 重复 eventId 必须使用 MySQL 原生 JSON 值比较（例如 `payload = CAST(? AS JSON)` 或当前 MySQL 8 驱动实际支持的等价 Mapper SQL），不能用 Java 字符串比较或 Jackson 树猜测；
 - request_hash 仍按精确字符串相等比较；
 - 同 eventId、同 hash、JSON 值等价时返回 0，保持数据库已有 payload、status、attempts、lease_owner、lease_until、next_retry_at、last_error 和时间字段完全不变；
 - hash 不同，或 JSON 值确实不同，继续保留首载荷并按原路径标记 CONFLICT。
