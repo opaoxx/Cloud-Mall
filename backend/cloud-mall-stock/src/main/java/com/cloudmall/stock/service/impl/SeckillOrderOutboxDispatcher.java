@@ -5,6 +5,10 @@ import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -35,6 +39,9 @@ public class SeckillOrderOutboxDispatcher {
   private final ObjectMapper objectMapper;
   private final int batchSize;
   private final long confirmTimeoutMillis;
+
+  /** marker宽限期使用瞬时时钟；测试可固定边界，不依赖JVM默认时区。 */
+  private Clock markerClock = Clock.systemUTC();
 
   public SeckillOrderOutboxDispatcher(
       StockSqlMapper stockSqlMapper,
@@ -138,15 +145,24 @@ public class SeckillOrderOutboxDispatcher {
   }
 
   /** 判断 PENDING 记录是否已超过 marker 恢复宽限期，避免旧记录永久占用扫描窗口。 */
-  private static boolean isPastMarkerGrace(Object updatedAtValue) {
-    java.time.Instant updatedAt = null;
-    if (updatedAtValue instanceof java.sql.Timestamp timestamp) {
-      updatedAt = timestamp.toInstant();
-    } else if (updatedAtValue instanceof OffsetDateTime offsetDateTime) {
-      updatedAt = offsetDateTime.toInstant();
+  private boolean isPastMarkerGrace(Object updatedAtValue) {
+    try {
+      Instant updatedAt;
+      if (updatedAtValue instanceof LocalDateTime localDateTime) {
+        updatedAt = localDateTime.toInstant(ZoneOffset.ofHours(8));
+      } else if (updatedAtValue instanceof java.sql.Timestamp timestamp) {
+        // JDBC DATETIME保存上海本地字段，不能按Timestamp携带的JVM默认区解释。
+        updatedAt = timestamp.toLocalDateTime().toInstant(ZoneOffset.ofHours(8));
+      } else if (updatedAtValue instanceof OffsetDateTime offsetDateTime) {
+        updatedAt = offsetDateTime.toInstant();
+      } else {
+        return false;
+      }
+      return updatedAt.plusSeconds(PENDING_MARKER_GRACE_SECONDS).isBefore(markerClock.instant());
+    } catch (DateTimeException | ArithmeticException invalidTime) {
+      // 无法解释的历史时间保留待核验，不猜测已超期。
+      return false;
     }
-    return updatedAt != null
-        && updatedAt.plusSeconds(PENDING_MARKER_GRACE_SECONDS).isBefore(java.time.Instant.now());
   }
 
   /** 检查 publisher confirm 和 returned message，失败时保留 eventId 退避。 */

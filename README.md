@@ -682,6 +682,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryDispatchMySqlIT` 覆盖元数据大小写/尾空格/不同事件号、缺失或数值型内部身份、哈希冲突及合法旧格式重放。无需 Stock 提供 eventId，原 legacy 兼容与租约保护保持；历史异常记录不批量改写，Stock/Rabbit 为替身。
 
+### Stock marker 宽限期支持真实 DATETIME 类型（第17轮AA）
+
+缺少 Redis marker 时，宽限期判断现在支持 MySQL 返回的 `LocalDateTime`，并将其及 `Timestamp` 的本地字段按项目固定 `+08:00` 解释；`OffsetDateTime` 保留同一瞬时。只有严格超过30秒才沿原逻辑转 `UNKNOWN`，恰好30秒、未来时间或无法识别的时间保持原状态。
+
+`SeckillEventTimeMySqlIT` 验证真实 DATETIME、边界和零受理/outbox；`SeckillOutboxRecoveryRaceTest` 覆盖 UTC/GMT+14 默认时区及三种时间类型。Redis/Rabbit为替身。扫描排序、UNKNOWN 后续处理和 outbox 租约未变，UNKNOWN 长期占窗口的问题仍需单独核验。
+
 ## 验证命令
 
 ```bash

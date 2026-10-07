@@ -115,6 +115,44 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void missingMarkerForOldLocalDateTimePendingFactMovesToUnknown() {
+    OffsetDateTime oldTime = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    mapper.insertSeckillPendingIgnore(
+        11, 7, 7, "202610-old-marker", "old-marker-key", "{}", "a".repeat(64), oldTime);
+    Map<String, Object> before = fixture.queryForMap("SELECT * FROM seckill_reservation");
+    assertTrue(before.get("updated_at") instanceof java.time.LocalDateTime);
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    var values = mock(org.springframework.data.redis.core.ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(values);
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var dispatcher =
+        new SeckillOrderOutboxDispatcher(
+            mapper, acceptance, redis, rabbit, new ObjectMapper(), new MockEnvironment());
+    ReflectionTestUtils.setField(
+        dispatcher,
+        "markerClock",
+        Clock.fixed(oldTime.toInstant().plusSeconds(30), ZoneOffset.UTC));
+    dispatcher.dispatch();
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
+    ReflectionTestUtils.setField(
+        dispatcher,
+        "markerClock",
+        Clock.fixed(oldTime.toInstant().plusSeconds(30).plusMillis(1), ZoneOffset.UTC));
+    dispatcher.dispatch();
+    Map<String, Object> after = fixture.queryForMap("SELECT * FROM seckill_reservation");
+    assertEquals("UNKNOWN", after.get("status"));
+    assertEquals("REDIS_MARKER_MISSING_AFTER_GRACE_PERIOD", after.get("last_error"));
+    for (String field : List.of("order_no", "request_payload", "request_hash", "created_at"))
+      assertEquals(before.get(field), after.get(field));
+    assertEquals(
+        0, fixture.queryForObject("SELECT COUNT(*) FROM seckill_order_outbox", Integer.class));
+    verifyNoInteractions(acceptance);
+    verify(rabbit, never())
+        .convertAndSend(anyString(), anyString(), any(Object.class), any(CorrelationData.class));
+  }
+
+  @Test
   void ambiguousAddressIsRejectedBeforeClaimRedisOrOutboxWrites() {
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
