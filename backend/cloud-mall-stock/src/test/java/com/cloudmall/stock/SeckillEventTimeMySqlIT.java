@@ -115,6 +115,136 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void outboxCompletionRequiresExactIdentityActiveLeaseAndRetryableState() throws Exception {
+    String orderNo = "202512-completion-guard";
+    String eventId = SeckillRequestFingerprint.eventId(orderNo);
+    OffsetDateTime completion = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    for (boolean published : List.of(true, false)) {
+      for (String fault :
+          List.of(
+              "expired",
+              "equal",
+              "null-lease",
+              "owner-case",
+              "owner-space",
+              "replacement",
+              "event-case",
+              "event-space",
+              "published",
+              "other-state",
+              "blank-owner",
+              "null-owner",
+              "null-event")) {
+        fixture.update(
+            "UPDATE seckill_order_outbox SET status='PENDING',attempts=2,lease_owner='Worker-A',lease_until=?,last_error='original-error',published_at=NULL WHERE order_no=?",
+            completion.plusSeconds(30),
+            orderNo);
+        String submittedEvent = eventId;
+        String submittedOwner = "Worker-A";
+        switch (fault) {
+          case "expired" ->
+              fixture.update(
+                  "UPDATE seckill_order_outbox SET lease_until=? WHERE order_no=?",
+                  completion.minusNanos(1_000_000),
+                  orderNo);
+          case "equal" ->
+              fixture.update(
+                  "UPDATE seckill_order_outbox SET lease_until=? WHERE order_no=?",
+                  completion,
+                  orderNo);
+          case "null-lease" ->
+              fixture.update(
+                  "UPDATE seckill_order_outbox SET lease_until=NULL WHERE order_no=?", orderNo);
+          case "owner-case" -> submittedOwner = "WORKER-A";
+          case "owner-space" -> submittedOwner += " ";
+          case "replacement" ->
+              fixture.update(
+                  "UPDATE seckill_order_outbox SET lease_owner='new-worker' WHERE order_no=?",
+                  orderNo);
+          case "event-case" -> submittedEvent = eventId.toUpperCase(java.util.Locale.ROOT);
+          case "event-space" -> submittedEvent += " ";
+          case "published" ->
+              fixture.update(
+                  "UPDATE seckill_order_outbox SET status='PUBLISHED' WHERE order_no=?", orderNo);
+          case "other-state" ->
+              fixture.update(
+                  "UPDATE seckill_order_outbox SET status='CANCELLED' WHERE order_no=?", orderNo);
+          case "blank-owner" -> {
+            submittedOwner = " ";
+            fixture.update(
+                "UPDATE seckill_order_outbox SET lease_owner=' ' WHERE order_no=?", orderNo);
+          }
+          case "null-owner" -> submittedOwner = null;
+          case "null-event" -> submittedEvent = null;
+          default -> throw new IllegalArgumentException(fault);
+        }
+        Map<String, Object> before =
+            fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo);
+        int changed =
+            published
+                ? mapper.markSeckillOutboxPublished(submittedEvent, submittedOwner, completion)
+                : mapper.recordSeckillOutboxFailure(
+                    submittedEvent,
+                    submittedOwner,
+                    "late error",
+                    completion.plusSeconds(10),
+                    completion);
+        assertEquals(0, changed, fault);
+        assertEquals(
+            before,
+            fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo),
+            fault);
+      }
+    }
+  }
+
+  @Test
+  void validOutboxCompletionNormalizesTimeAndLateFailureCannotUndoPublished() throws Exception {
+    String orderNo = "202512-completion-valid";
+    String eventId = SeckillRequestFingerprint.eventId(orderNo);
+    OffsetDateTime completion = OffsetDateTime.parse("2026-10-07T04:00:00.123999999Z");
+    java.time.LocalDateTime expected = java.time.LocalDateTime.parse("2026-10-07T12:00:00.123");
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    for (String status : List.of("PENDING", "UNKNOWN", "DEAD")) {
+      for (boolean published : List.of(true, false)) {
+        fixture.update(
+            "UPDATE seckill_order_outbox SET status=?,attempts=2,lease_owner='owner',lease_until=?,last_error=NULL,published_at=NULL WHERE order_no=?",
+            status,
+            expected.plusNanos(1_000_000),
+            orderNo);
+        Map<String, Object> before =
+            fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo);
+        int changed =
+            published
+                ? mapper.markSeckillOutboxPublished(eventId, "owner", completion)
+                : mapper.recordSeckillOutboxFailure(
+                    eventId, "owner", "failure", completion.plusSeconds(10), completion);
+        assertEquals(1, changed);
+        Map<String, Object> after =
+            fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo);
+        assertEquals(published ? "PUBLISHED" : "UNKNOWN", after.get("status"));
+        assertEquals(expected, after.get("updated_at"));
+        if (published) assertEquals(expected, after.get("published_at"));
+        assertNull(after.get("lease_owner"));
+        assertNull(after.get("lease_until"));
+        for (String field :
+            List.of("payload", "request_hash", "event_id", "created_at", "attempts"))
+          assertEquals(before.get(field), after.get(field));
+        if (published) {
+          assertEquals(
+              0,
+              mapper.recordSeckillOutboxFailure(
+                  eventId, "owner", "late", completion.plusSeconds(10), completion));
+          assertEquals(
+              after,
+              fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE order_no=?", orderNo));
+        }
+      }
+    }
+  }
+
+  @Test
   void redisMarkerFailuresDoNotBlockOtherMarkersOrCommittedOutbox() throws Exception {
     seedMarkerCandidate(1, "PENDING");
     seedMarkerCandidate(2, "PENDING");

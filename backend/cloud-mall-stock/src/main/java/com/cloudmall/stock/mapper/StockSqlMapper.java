@@ -1,6 +1,8 @@
 package com.cloudmall.stock.mapper;
 
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -11,6 +13,12 @@ import org.springframework.stereotype.Repository;
 /** 库存条件更新和流水 SQL 的统一持久化入口。 */
 @Repository
 public class StockSqlMapper {
+  /** 完成写仅允许精确身份、有效租约和仍可重试的 outbox 源状态。 */
+  private static final String SECKILL_OUTBOX_COMPLETION_GUARD =
+      " WHERE event_id=? AND BINARY event_id=BINARY ? AND BINARY lease_owner=BINARY ?"
+          + " AND lease_until IS NOT NULL AND lease_until>?"
+          + " AND status IN ('PENDING','UNKNOWN','DEAD')";
+
   /** Spring JDBC 执行器。 */
   private final JdbcTemplate jdbcTemplate;
 
@@ -652,16 +660,58 @@ public class StockSqlMapper {
             + " AND (lease_until IS NULL OR lease_until<?)", owner, leaseUntil, now, id, now, now);
   }
 
-  /** publisher confirm 成功后结束该 eventId 的投递重试。 */
+  /**
+   * publisher confirm 成功后，仅当前有效持有人可结束投递重试。
+   *
+   * @param eventId 原事件号，按字节精确匹配
+   * @param owner 本次认领持有人，空值或空白不执行更新
+   * @param publishedAt 调用方即时采样的完成时刻，规范为上海毫秒后共用于写入和租约判断
+   * @return 更新行数；过期、终态或身份不匹配返回0
+   */
   public int markSeckillOutboxPublished(String eventId, String owner, OffsetDateTime publishedAt) {
-    return update("UPDATE seckill_order_outbox SET status='PUBLISHED',published_at=?,lease_owner=NULL,lease_until=NULL,updated_at=? WHERE event_id=? AND lease_owner=?",
-        publishedAt, publishedAt, eventId, owner);
+    if (eventId == null || eventId.isBlank() || owner == null || owner.isBlank()) return 0;
+    OffsetDateTime completionNow =
+        publishedAt.withOffsetSameInstant(ZoneOffset.ofHours(8)).truncatedTo(ChronoUnit.MILLIS);
+    return update(
+        "UPDATE seckill_order_outbox SET status='PUBLISHED',published_at=?,lease_owner=NULL,lease_until=NULL,updated_at=?"
+            + SECKILL_OUTBOX_COMPLETION_GUARD,
+        completionNow,
+        completionNow,
+        eventId,
+        eventId,
+        owner,
+        completionNow);
   }
 
-  /** confirm 丢失或 returned 时保留同一 eventId 并退避重试。 */
-  public int recordSeckillOutboxFailure(String eventId, String owner, String error, OffsetDateTime nextRetryAt, OffsetDateTime updatedAt) {
-    return update("UPDATE seckill_order_outbox SET status=CASE WHEN attempts>=10 THEN 'DEAD' ELSE 'UNKNOWN' END,last_error=?,next_retry_at=?,lease_owner=NULL,lease_until=NULL,updated_at=? WHERE event_id=? AND lease_owner=?",
-        error, nextRetryAt, updatedAt, eventId, owner);
+  /**
+   * confirm 丢失或 returned 时，在有效租约下保留原事件并安排既有退避。
+   *
+   * @param eventId 原事件号，按字节精确匹配
+   * @param owner 本次认领持有人，空值或空白不执行更新
+   * @param error 调用方已按原规则截断的投递错误
+   * @param nextRetryAt 调用方既有退避计划，不由完成时刻覆盖
+   * @param updatedAt 调用方即时采样的完成时刻，规范为上海毫秒后共用于写入和租约判断
+   * @return 更新行数；过期、终态或身份不匹配返回0
+   */
+  public int recordSeckillOutboxFailure(
+      String eventId,
+      String owner,
+      String error,
+      OffsetDateTime nextRetryAt,
+      OffsetDateTime updatedAt) {
+    if (eventId == null || eventId.isBlank() || owner == null || owner.isBlank()) return 0;
+    OffsetDateTime completionNow =
+        updatedAt.withOffsetSameInstant(ZoneOffset.ofHours(8)).truncatedTo(ChronoUnit.MILLIS);
+    return update(
+        "UPDATE seckill_order_outbox SET status=CASE WHEN attempts>=10 THEN 'DEAD' ELSE 'UNKNOWN' END,last_error=?,next_retry_at=?,lease_owner=NULL,lease_until=NULL,updated_at=?"
+            + SECKILL_OUTBOX_COMPLETION_GUARD,
+        error,
+        nextRetryAt,
+        completionNow,
+        eventId,
+        eventId,
+        owner,
+        completionNow);
   }
 
   /** 查询仍处于预扣状态的普通库存流水。 */
@@ -669,7 +719,7 @@ public class StockSqlMapper {
     return queryForList(
         "select order_no,sku_id,sum(case when flow_type='RESERVE' then quantity when flow_type in"
             + " ('CONFIRM','ROLLBACK') then -quantity else 0 end) quantity from stock_flow group by"
-        + " order_no,sku_id having quantity>0");
+            + " order_no,sku_id having quantity>0");
   }
 
   /** 查询指定订单仍处于预扣状态的普通库存流水。 */

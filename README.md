@@ -700,6 +700,12 @@ marker 候选按主键递增扫描，实例内游标在成功读取一批后前�
 
 `SeckillEventTimeMySqlIT` 验证原生 Redis 异常、guard 503 和全部 marker 读取失败时，失败行保持不变、已提交 outbox 仍可发布；`SeckillOutboxRecoveryRaceTest` 验证异常分类边界。Redis/受理/Rabbit 为替身，不代表共享 Redis 断连或真实网络恢复验收。
 
+### Stock outbox 完成写校验租约（第17轮AD）
+
+成功发布和失败退避的完成写均要求：事件号与 owner 字节精确匹配、租约非空且尚未到期、源状态为 `PENDING/UNKNOWN/DEAD`。过期、恰好到期、owner 被替换或已结束时返回0，不清理他人的租约，也不覆盖已发布事实。
+
+调用方仍即时提供完成时间，Mapper 将其按同一瞬时转为固定 `+08:00` 并截断至毫秒，共用于完成时间和租约判断；退避计划保持原参数。`SeckillEventTimeMySqlIT` 验证身份/状态/时间边界和迟到失败保护。本轮仅保护完成写，未改变认领、发送前检查或批次时钟，也不保证 SQL 等锁期间的墙钟变化被再次核验。
+
 ## 验证命令
 
 ```bash
