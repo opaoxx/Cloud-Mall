@@ -549,18 +549,39 @@ public class StockSqlMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 读取进程中断后仍处于 PENDING 的秒杀受理记录。 */
+  /** 按主键读取 PENDING/UNKNOWN 首段候选，供 marker 恢复从头或回绕扫描。 */
   public List<Map<String, Object>> findPendingSeckillReservations(int limit) {
     return queryForList(
-        "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,updated_at"
-            + " FROM seckill_reservation WHERE status IN ('PENDING','UNKNOWN') ORDER BY updated_at,id LIMIT ?", limit);
+        "SELECT id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,updated_at"
+            + " FROM seckill_reservation WHERE status IN ('PENDING','UNKNOWN') ORDER BY id LIMIT ?",
+        limit);
+  }
+
+  /**
+   * 在上一批主键后继续读取候选，不修改业务更新时间或恢复状态。
+   *
+   * @param afterId 已读取批次的最后主键，严格排除自身
+   * @param limit 本轮最大候选数
+   * @return 按主键升序排列的 PENDING/UNKNOWN 后段记录
+   */
+  public List<Map<String, Object>> findPendingSeckillReservationsAfter(long afterId, int limit) {
+    return queryForList(
+        "SELECT id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,updated_at"
+            + " FROM seckill_reservation WHERE status IN ('PENDING','UNKNOWN') AND id>? ORDER BY id LIMIT ?",
+        afterId,
+        limit);
   }
 
   /** 将长期缺少 Redis marker 的受理隔离为 UNKNOWN，避免恢复任务无限饥饿。 */
-  public int markSeckillUnknown(long userId, String idempotencyKey, String error, OffsetDateTime updatedAt) {
+  public int markSeckillUnknown(
+      long userId, String idempotencyKey, String error, OffsetDateTime updatedAt) {
     return update(
         "UPDATE seckill_reservation SET status='UNKNOWN',last_error=?,updated_at=? WHERE user_id=?"
-            + " AND idempotency_key=? AND status='PENDING'", error, updatedAt, userId, idempotencyKey);
+            + " AND idempotency_key=? AND status='PENDING'",
+        error,
+        updatedAt,
+        userId,
+        idempotencyKey);
   }
 
   /** 首次受理前持久化完整请求载荷和哈希。 */

@@ -216,6 +216,7 @@ class SeckillOutboxRecoveryRaceTest {
                 "request_hash",
                 "hash"));
     row.put("updated_at", updatedAt);
+    row.put("id", 1L);
     when(mapper.findPendingSeckillReservations(anyInt())).thenReturn(List.of(row));
     when(mapper.findPendingSeckillOutbox(any(), anyInt())).thenReturn(List.of());
   }

@@ -115,6 +115,162 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void unknownPrefixCannotStarveLaterPendingAndUnknownMarkersAreRevisited() {
+    seedMarkerCandidate(1, "UNKNOWN");
+    seedMarkerCandidate(2, "UNKNOWN");
+    seedMarkerCandidate(3, "PENDING");
+    seedMarkerCandidate(4, "UNKNOWN");
+    Map<String, Object> firstBefore =
+        fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1");
+    List<String> visited = new ArrayList<>();
+    Map<String, String> markers = new java.util.HashMap<>();
+    markers.put(markerKey(3), "202610-marker-3");
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var dispatcher = markerDispatcher(visited, markers, acceptance, 2);
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(1), markerKey(2)), visited);
+    visited.clear();
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(3), markerKey(4)), visited);
+    verify(acceptance)
+        .accept(
+            eq(7L),
+            eq("key:202610-marker-3"),
+            eq("202610-marker-3"),
+            anyString(),
+            anyString(),
+            anyString(),
+            any());
+    assertEquals(firstBefore, fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+    markers.put(markerKey(1), "202610-marker-1");
+    visited.clear();
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(1), markerKey(2)), visited);
+    verify(acceptance)
+        .accept(
+            eq(7L),
+            eq("key:202610-marker-1"),
+            eq("202610-marker-1"),
+            anyString(),
+            anyString(),
+            anyString(),
+            any());
+  }
+
+  @Test
+  void partialPagesWrapAfterDeletedCursorAndIncludeNewLowerIdsWithoutExtraCandidates() {
+    seedMarkerCandidate(10, "UNKNOWN");
+    seedMarkerCandidate(20, "UNKNOWN");
+    seedMarkerCandidate(30, "UNKNOWN");
+    List<String> visited = new ArrayList<>();
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var dispatcher = markerDispatcher(visited, new java.util.HashMap<>(), acceptance, 2);
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(10), markerKey(20)), visited);
+    visited.clear();
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(30)), visited);
+    fixture.update("DELETE FROM seckill_reservation WHERE id=30");
+    seedMarkerCandidate(5, "UNKNOWN");
+    visited.clear();
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(5), markerKey(10)), visited);
+    verifyNoInteractions(acceptance);
+  }
+
+  /** 在独立测试库固定候选主键，避免随机ID掩盖扫描顺序。 */
+  private void seedMarkerCandidate(long candidateId, String status) {
+    String orderNo = "202610-marker-" + candidateId;
+    mapper.insertSeckillPendingIgnore(
+        11,
+        7,
+        7,
+        orderNo,
+        "key:" + orderNo,
+        "{}",
+        "a".repeat(64),
+        OffsetDateTime.parse("2026-10-01T12:00:00+08:00"));
+    fixture.update(
+        "UPDATE seckill_reservation SET id=?,status=? WHERE order_no=?",
+        candidateId,
+        status,
+        orderNo);
+  }
+
+  private String markerKey(long candidateId) {
+    return "seckill:accepted:11:7:7:key:202610-marker-" + candidateId;
+  }
+
+  private SeckillOrderOutboxDispatcher markerDispatcher(
+      List<String> visited,
+      Map<String, String> markers,
+      com.cloudmall.stock.service.impl.SeckillAcceptanceService acceptance,
+      int batchLimit) {
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    org.springframework.data.redis.core.ValueOperations<String, String> values =
+        mock(org.springframework.data.redis.core.ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(values);
+    when(values.get(anyString()))
+        .thenAnswer(
+            invocation -> {
+              String key = invocation.getArgument(0);
+              visited.add(key);
+              return markers.get(key);
+            });
+    return new SeckillOrderOutboxDispatcher(
+        mapper,
+        acceptance,
+        redis,
+        mock(RabbitTemplate.class),
+        new ObjectMapper(),
+        new MockEnvironment()
+            .withProperty("cloudmall.stock.seckill.outbox.batch-size", String.valueOf(batchLimit)));
+  }
+
+  @Test
+  void failedQueryKeepsItsPlaceAndFailedAcceptanceDoesNotPinTheNextScan() {
+    mapper = spy(mapper);
+    seedMarkerCandidate(10, "UNKNOWN");
+    seedMarkerCandidate(20, "UNKNOWN");
+    seedMarkerCandidate(30, "PENDING");
+    List<String> visited = new ArrayList<>();
+    var markers = Map.of(markerKey(30), "202610-marker-30");
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    doThrow(new IllegalStateException("fixture acceptance unavailable"))
+        .when(acceptance)
+        .accept(anyLong(), anyString(), anyString(), anyString(), anyString(), anyString(), any());
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=30");
+    var dispatcher = markerDispatcher(visited, markers, acceptance, 2);
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(10), markerKey(20)), visited);
+    visited.clear();
+    doThrow(
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "fixture scan unavailable"))
+        .when(mapper)
+        .findPendingSeckillReservationsAfter(20, 2);
+    assertThrows(org.springframework.dao.DataAccessException.class, dispatcher::dispatch);
+    assertTrue(visited.isEmpty());
+    doCallRealMethod().when(mapper).findPendingSeckillReservationsAfter(20, 2);
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(30)), visited);
+    verify(acceptance, times(1))
+        .accept(
+            anyLong(),
+            anyString(),
+            eq("202610-marker-30"),
+            anyString(),
+            anyString(),
+            anyString(),
+            any());
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=30"));
+    visited.clear();
+    dispatcher.dispatch();
+    assertEquals(List.of(markerKey(10), markerKey(20)), visited);
+  }
+
+  @Test
   void missingMarkerForOldLocalDateTimePendingFactMovesToUnknown() {
     OffsetDateTime oldTime = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
     mapper.insertSeckillPendingIgnore(

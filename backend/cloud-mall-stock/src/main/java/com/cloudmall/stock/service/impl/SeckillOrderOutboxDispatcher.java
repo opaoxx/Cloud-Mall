@@ -12,6 +12,7 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -42,6 +43,9 @@ public class SeckillOrderOutboxDispatcher {
 
   /** marker宽限期使用瞬时时钟；测试可固定边界，不依赖JVM默认时区。 */
   private Clock markerClock = Clock.systemUTC();
+
+  /** 单实例定时扫描的非持久主键游标；null表示初次扫描，进程重启后从头检查。 */
+  private Long markerScanAfterId;
 
   public SeckillOrderOutboxDispatcher(
       StockSqlMapper stockSqlMapper,
@@ -76,7 +80,7 @@ public class SeckillOrderOutboxDispatcher {
 
   /** Lua 已经留下订单 marker 时补齐 ACCEPTED 和同一 eventId 的 outbox。 */
   private void recoverPendingMarkers() {
-    for (Map<String, Object> row : stockSqlMapper.findPendingSeckillReservations(batchSize)) {
+    for (Map<String, Object> row : nextMarkerCandidates()) {
       String orderNo = String.valueOf(row.get("order_no"));
       String marker = redis.opsForValue().get(
           "seckill:accepted:" + row.get("activity_id") + ":" + row.get("sku_id") + ":"
@@ -121,6 +125,21 @@ public class SeckillOrderOutboxDispatcher {
         log.warn("秒杀 PENDING 受理恢复失败，将在下一轮重试，orderNo={}", orderNo, recoveryFailure);
       }
     }
+  }
+
+  /** 单轮最多回绕一次，不补满短批次；读成功后先推进游标，外部操作失败不霸占下一轮。 */
+  private List<Map<String, Object>> nextMarkerCandidates() {
+    List<Map<String, Object>> rows =
+        markerScanAfterId == null
+            ? stockSqlMapper.findPendingSeckillReservations(batchSize)
+            : stockSqlMapper.findPendingSeckillReservationsAfter(markerScanAfterId, batchSize);
+    if (rows.isEmpty() && markerScanAfterId != null) {
+      rows = stockSqlMapper.findPendingSeckillReservations(batchSize);
+    }
+    if (!rows.isEmpty()) {
+      markerScanAfterId = ((Number) rows.get(rows.size() - 1).get("id")).longValue();
+    }
+    return rows;
   }
 
   /** CAS 败方只在原订单号、用户幂等键、哈希和 outbox 事件全匹配时静默收敛。 */

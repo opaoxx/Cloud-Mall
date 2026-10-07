@@ -688,6 +688,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillEventTimeMySqlIT` 验证真实 DATETIME、边界和零受理/outbox；`SeckillOutboxRecoveryRaceTest` 覆盖 UTC/GMT+14 默认时区及三种时间类型。Redis/Rabbit为替身。扫描排序、UNKNOWN 后续处理和 outbox 租约未变，UNKNOWN 长期占窗口的问题仍需单独核验。
 
+### Stock marker 恢复使用有界循环扫描（第17轮AB）
+
+marker 候选按主键递增扫描，实例内游标在成功读取一批后前移；后段为空时，同轮最多回绕一次首段。每轮仍不超过 `batch-size`，短批次不补满，查询失败不前移。旧 `UNKNOWN` 不再因时间戳不变而固定占满窗口，后续 marker 到达时也能在回绕后重新检查。
+
+`SeckillEventTimeMySqlIT` 覆盖旧前缀、后续 PENDING、UNKNOWN 再检查、低主键插入、游标记录删除、短批次和查询/受理异常。扫描不改业务时间、状态、payload/hash，受理调用仍沿原逻辑。游标不持久化，重启从头；不保证频繁重启、无限流入或多实例下的全局公平，Redis/受理调用/Rabbit 为替身。
+
 ## 验证命令
 
 ```bash
