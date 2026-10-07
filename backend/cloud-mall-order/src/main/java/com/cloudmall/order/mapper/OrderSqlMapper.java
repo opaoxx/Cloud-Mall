@@ -5,6 +5,7 @@ import com.cloudmall.order.domain.po.OrderItemPO;
 import com.cloudmall.order.domain.po.OrderPO;
 import java.util.List;
 import java.util.Map;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -45,9 +46,57 @@ public class OrderSqlMapper {
     return jdbcTemplate.update(sql, arguments);
   }
 
-  /** 执行订单 DDL。 */
-  public void execute(String sql) {
-    jdbcTemplate.execute(sql);
+  /** 优先复用正式明细/状态日志模板，仅在缺失时从固定历史来源兼容引导。 */
+  public void ensureMonthlyCompanionTemplates() {
+    // 1. 正式模板存在时不再解析可能已归档的 legacy LIKE 源表。
+    ensureTemplate("mall_order_item_template", "mall_order_item_202608");
+    // 2. 两类模板独立选择来源；任何失败都向上传播，阻止后续月表维护。
+    ensureTemplate("order_status_log_template", "order_status_log_202608");
+  }
+
+  /**
+   * 使用固定三类模板幂等创建指定月份的物理表，不更改已有表结构或数据。
+   *
+   * @param suffix 服务端计算的 yyyyMM，年份1000..9999、月份01..12
+   * @throws IllegalArgumentException 月份非法，执行任何 SQL 前拒绝
+   */
+  public void createMonthlyOrderTables(String suffix) {
+    // 1. 表名只接受完整合法月份，不能把任意后缀插入 DDL。
+    if (suffix == null || !suffix.matches("[1-9][0-9]{3}(0[1-9]|1[0-2])")) {
+      throw new IllegalArgumentException("订单建表月份无效");
+    }
+    // 2. 主表、明细和状态日志共同沿用已准备的正式模板。
+    createLike("mall_order_" + suffix, "mall_order_template");
+    createLike("mall_order_item_" + suffix, "mall_order_item_template");
+    createLike("order_status_log_" + suffix, "order_status_log_template");
+  }
+
+  /** 判断模板优先级，缺少所有受支持来源时明确失败，不猜测其他业务月份。 */
+  private void ensureTemplate(String template, String legacySource) {
+    if (baseTableExists(template)) return;
+    if (!baseTableExists(legacySource)) {
+      throw new DataAccessResourceFailureException("ORDER_TEMPLATE_UNAVAILABLE: " + template);
+    }
+    createLike(template, legacySource);
+  }
+
+  /** 元数据读取失败不能当作缺表；视图等同名对象也不能当作可克隆模板。 */
+  private boolean baseTableExists(String table) {
+    List<String> types =
+        jdbcTemplate.queryForList(
+            "SELECT TABLE_TYPE FROM information_schema.tables WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?",
+            String.class,
+            table);
+    if (types.isEmpty()) return false;
+    if (types.size() != 1 || !"BASE TABLE".equals(types.get(0))) {
+      throw new DataAccessResourceFailureException("ORDER_TEMPLATE_UNAVAILABLE: " + table);
+    }
+    return true;
+  }
+
+  /** 参数仅由固定模板名和已校验月份构成；并发初始化依赖 IF NOT EXISTS 幂等。 */
+  private void createLike(String table, String template) {
+    jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS " + table + " LIKE " + template);
   }
 
   /** 查询用户幂等键已关联的订单号。 */

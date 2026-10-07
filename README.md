@@ -492,6 +492,19 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderQueryPrecisionMySqlIT' '-
 
 真实 MySQL 验证使用自建 `cm17d_*` 库，结束后清理；默认订单仍使用动态物理月表。
 
+### 月表模板引导（第17轮E）
+
+订单启动和定时建表优先使用 `mall_order_item_template`、`order_status_log_template`。正式模板存在时不依赖 `202608` 历史表；仅在模板缺失时，才从对应的 `mall_order_item_202608`、`order_status_log_202608` 兼容创建。
+
+两种来源都缺失或同名对象不是物理表时，明确返回 `ORDER_TEMPLATE_UNAVAILABLE` 并中止当次维护。数据库访问异常直接传播；不会猜测其他月份或重造结构。主表继续使用原 `mall_order_template`，上月、本月及未来两个月的窗口不变。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderTemplateMapperTest,OrderTableInitializerTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderTableInitializerMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+测试只在自建 `cm17e_*` 库执行 DDL，核对跨年幂等、结构/数据保留后清理。真实启动回归 `OrderRoutingAuditIT` 还覆盖正式模板完整但两个历史来源已移除的场景。
+
 ## 验证命令
 
 ```bash

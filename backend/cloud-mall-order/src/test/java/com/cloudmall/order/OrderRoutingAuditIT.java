@@ -160,8 +160,20 @@ class OrderRoutingAuditIT {
 
   @Test
   void defaultProcessReportsPhysicalRoutingAndExpectedWindow() throws Exception {
+    // 正式模板完整时，历史月份表归档不能使新的启动和滚动建表失败。
+    fixture.execute("DROP TABLE IF EXISTS mall_order_item_202608");
+    fixture.execute("DROP TABLE IF EXISTS order_status_log_202608");
     start();
     assertRoutingInfo();
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=? AND table_name IN"
+                + " (?,?)",
+            Integer.class,
+            batch,
+            "mall_order_item_202608",
+            "order_status_log_202608"));
   }
 
   /** 使用真实Seata自动代理配置，确认审计不会误拒绝原默认事务绑定。 */

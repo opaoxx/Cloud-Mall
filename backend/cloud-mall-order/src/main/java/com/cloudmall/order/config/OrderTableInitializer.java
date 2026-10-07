@@ -17,10 +17,10 @@ import org.springframework.stereotype.Component;
 @Component
 @DependsOn("orderRoutingAudit")
 public class OrderTableInitializer {
-  /** 执行 getLogger 相关操作。 */
+  /** 月表维护成功窗口及失败原因的日志。 */
   private static final Logger log = LoggerFactory.getLogger(OrderTableInitializer.class);
 
-  /** 执行 ofPattern 相关操作。 */
+  /** 物理月表的固定年月后缀格式。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
 
   /** 月表月份必须按数据库使用的上海本地时间计算。 */
@@ -35,7 +35,7 @@ public class OrderTableInitializer {
     return List.copyOf(months);
   }
 
-  /** 保存 db 的业务状态或配置。 */
+  /** 负责模板选择和物理月表 DDL 的持久化入口。 */
   private final OrderSqlMapper orderSqlMapper;
 
   /** 创建 OrderTableInitializer 实例。 */
@@ -68,27 +68,14 @@ public class OrderTableInitializer {
   /** 用显式月份准备滚动窗口，供定时任务与回归测试复用。 */
   void prepareForMonth(YearMonth currentMonth) {
     // 1. 准备订单明细与状态日志模板。
-    ensureTemplate("mall_order_item_template", "mall_order_item_202608");
-    ensureTemplate("order_status_log_template", "order_status_log_202608");
+    orderSqlMapper.ensureMonthlyCompanionTemplates();
     // 2. 同时准备上月、本月和未来两个月的三张物理月表。
     for (String suffix : rollingMonths(currentMonth)) {
-      createLike("mall_order_" + suffix, "mall_order_template");
-      createLike("mall_order_item_" + suffix, "mall_order_item_template");
-      createLike("order_status_log_" + suffix, "order_status_log_template");
+      orderSqlMapper.createMonthlyOrderTables(suffix);
     }
     log.info(
         "订单月度分表已准备，覆盖 {} 至 {}",
         rollingMonths(currentMonth).get(0),
         rollingMonths(currentMonth).get(3));
-  }
-
-  /** 执行 ensureTemplate 相关操作。 */
-  private void ensureTemplate(String template, String existingTable) {
-    createLike(template, existingTable);
-  }
-
-  /** 执行 createLike 相关操作。 */
-  private void createLike(String table, String template) {
-    orderSqlMapper.execute("CREATE TABLE IF NOT EXISTS " + table + " LIKE " + template);
   }
 }
