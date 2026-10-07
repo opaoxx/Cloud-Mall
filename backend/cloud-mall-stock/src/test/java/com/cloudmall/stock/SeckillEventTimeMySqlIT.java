@@ -115,6 +115,94 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void redisMarkerFailuresDoNotBlockOtherMarkersOrCommittedOutbox() throws Exception {
+    seedMarkerCandidate(1, "PENDING");
+    seedMarkerCandidate(2, "PENDING");
+    seed("202512-ready-redis", "2025-12-31T23:59:59.999+08:00");
+    Map<String, Object> failedBefore =
+        fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1");
+    List<Map<String, Object>> sent = new ArrayList<>();
+    RabbitTemplate rabbit = sender(sent, false);
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    org.springframework.data.redis.core.ValueOperations<String, String> values =
+        mock(org.springframework.data.redis.core.ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(values);
+    for (RuntimeException fault :
+        List.of(
+            new org.springframework.data.redis.RedisConnectionFailureException(
+                "fixture redis unavailable"),
+            new com.cloudmall.common.error.BizException(
+                "REDIS_SERVICE_UNAVAILABLE", "fixture guarded Redis", 503))) {
+      sent.clear();
+      clearInvocations(acceptance);
+      doThrow(fault).when(values).get(markerKey(1));
+      when(values.get(markerKey(2))).thenReturn("202610-marker-2");
+      fixture.update(
+          "UPDATE seckill_order_outbox SET status='PENDING' WHERE order_no='202512-ready-redis'");
+      due("202512-ready-redis");
+      var dispatcher =
+          new SeckillOrderOutboxDispatcher(
+              mapper, acceptance, redis, rabbit, new ObjectMapper(), new MockEnvironment());
+      assertDoesNotThrow(dispatcher::dispatch);
+      assertEquals(
+          failedBefore, fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+      verify(acceptance, never())
+          .accept(
+              anyLong(),
+              anyString(),
+              eq("202610-marker-1"),
+              anyString(),
+              anyString(),
+              anyString(),
+              any());
+      verify(acceptance)
+          .accept(
+              eq(7L),
+              anyString(),
+              eq("202610-marker-2"),
+              anyString(),
+              anyString(),
+              anyString(),
+              any());
+      assertEquals("PUBLISHED", state("202512-ready-redis"));
+      assertEquals(1, sent.size());
+    }
+  }
+
+  @Test
+  void totalMarkerReadOutageStillAllowsAlreadyCommittedOutboxDelivery() throws Exception {
+    seedMarkerCandidate(1, "PENDING");
+    seed("202512-ready-outage", "2025-12-31T23:59:59.999+08:00");
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1");
+    List<Map<String, Object>> sent = new ArrayList<>();
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    org.springframework.data.redis.core.ValueOperations<String, String> values =
+        mock(org.springframework.data.redis.core.ValueOperations.class);
+    when(redis.opsForValue()).thenReturn(values);
+    when(values.get(anyString()))
+        .thenThrow(
+            new org.springframework.data.redis.RedisConnectionFailureException(
+                "fixture total marker outage"));
+    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var dispatcher =
+        new SeckillOrderOutboxDispatcher(
+            mapper,
+            acceptance,
+            redis,
+            sender(sent, false),
+            new ObjectMapper(),
+            new MockEnvironment());
+    due("202512-ready-outage");
+    assertDoesNotThrow(dispatcher::dispatch);
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1"));
+    verifyNoInteractions(acceptance);
+    assertEquals("PUBLISHED", state("202512-ready-outage"));
+    assertEquals(1, sent.size());
+  }
+
+  @Test
   void unknownPrefixCannotStarveLaterPendingAndUnknownMarkersAreRevisited() {
     seedMarkerCandidate(1, "UNKNOWN");
     seedMarkerCandidate(2, "UNKNOWN");

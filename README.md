@@ -694,6 +694,12 @@ marker 候选按主键递增扫描，实例内游标在成功读取一批后前�
 
 `SeckillEventTimeMySqlIT` 覆盖旧前缀、后续 PENDING、UNKNOWN 再检查、低主键插入、游标记录删除、短批次和查询/受理异常。扫描不改业务时间、状态、payload/hash，受理调用仍沿原逻辑。游标不持久化，重启从头；不保证频繁重启、无限流入或多实例下的全局公平，Redis/受理调用/Rabbit 为替身。
 
+### Redis marker 读取故障不阻断已提交消息（第17轮AC）
+
+单条 marker GET 的 Redis 数据访问异常或既有 `REDIS_SERVICE_UNAVAILABLE`/503 只跳过该条。读取失败不等于 marker 缺失，不触发 UNKNOWN、受理或配额操作；同批后续记录以及已提交 MySQL outbox 的原投递流程仍可继续。其他业务异常、程序错误和扫描 SQL 异常保持传播，不新增重试或重复熔断计数。
+
+`SeckillEventTimeMySqlIT` 验证原生 Redis 异常、guard 503 和全部 marker 读取失败时，失败行保持不变、已提交 outbox 仍可发布；`SeckillOutboxRecoveryRaceTest` 验证异常分类边界。Redis/受理/Rabbit 为替身，不代表共享 Redis 断连或真实网络恢复验收。
+
 ## 验证命令
 
 ```bash

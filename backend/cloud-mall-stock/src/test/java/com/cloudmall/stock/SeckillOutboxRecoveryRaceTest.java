@@ -28,6 +28,28 @@ import org.springframework.mock.env.MockEnvironment;
 
 class SeckillOutboxRecoveryRaceTest {
   @Test
+  void unexpectedMarkerReadFailuresAreNotTreatedAsRedisUnavailability() {
+    pendingRow(Instant.now());
+    when(redis.opsForValue()).thenReturn(values);
+    for (Throwable fault :
+        List.of(
+            new com.cloudmall.common.error.BizException("OTHER_FAILURE", "fixture", 503),
+            new com.cloudmall.common.error.BizException(
+                "REDIS_SERVICE_UNAVAILABLE", "fixture", 400),
+            new IllegalStateException("fixture programming failure"),
+            new AssertionError("fixture fatal failure"))) {
+      clearInvocations(mapper, acceptance);
+      doThrow(fault).when(values).get(anyString());
+      org.junit.jupiter.api.Assertions.assertSame(
+          fault,
+          org.junit.jupiter.api.Assertions.assertThrows(fault.getClass(), dispatcher::dispatch));
+      verify(mapper, never()).markSeckillUnknown(anyLong(), anyString(), anyString(), any());
+      verify(mapper, never()).findPendingSeckillOutbox(any(), anyInt());
+      verifyNoInteractions(acceptance);
+    }
+  }
+
+  @Test
   void databaseTimeTypesUseShanghaiIndependentOfTheJvmDefaultZone() {
     java.util.TimeZone originalZone = java.util.TimeZone.getDefault();
     java.time.LocalDateTime updated = java.time.LocalDateTime.parse("2026-10-07T11:59:00");

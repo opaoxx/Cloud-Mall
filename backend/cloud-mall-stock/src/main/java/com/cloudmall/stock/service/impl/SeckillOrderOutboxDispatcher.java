@@ -1,5 +1,6 @@
 package com.cloudmall.stock.service.impl;
 
+import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.util.StockDependencyGuard;
@@ -22,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -82,16 +84,37 @@ public class SeckillOrderOutboxDispatcher {
   private void recoverPendingMarkers() {
     for (Map<String, Object> row : nextMarkerCandidates()) {
       String orderNo = String.valueOf(row.get("order_no"));
-      String marker = redis.opsForValue().get(
-          "seckill:accepted:" + row.get("activity_id") + ":" + row.get("sku_id") + ":"
-              + row.get("user_id") + ":" + row.get("idempotency_key"));
+      String marker;
+      try {
+        marker =
+            redis
+                .opsForValue()
+                .get(
+                    "seckill:accepted:"
+                        + row.get("activity_id")
+                        + ":"
+                        + row.get("sku_id")
+                        + ":"
+                        + row.get("user_id")
+                        + ":"
+                        + row.get("idempotency_key"));
+      } catch (RuntimeException markerFailure) {
+        if (!(markerFailure instanceof DataAccessException)
+            && !(markerFailure instanceof BizException dependencyFailure
+                && "REDIS_SERVICE_UNAVAILABLE".equals(dependencyFailure.getCode())
+                && dependencyFailure.getHttpStatus() == 503)) throw markerFailure;
+        // 读取失败不是 marker 缺失；保留当前行，后续候选和已提交 outbox 继续处理。
+        log.warn("秒杀 marker 读取失败，保留原事实并跳过，orderNo={}", orderNo, markerFailure);
+        continue;
+      }
       if (!orderNo.equals(marker)) {
         if (isPastMarkerGrace(row.get("updated_at"))) {
-          int transitioned = stockSqlMapper.markSeckillUnknown(
-              ((Number) row.get("user_id")).longValue(),
-              String.valueOf(row.get("idempotency_key")),
-              "REDIS_MARKER_MISSING_AFTER_GRACE_PERIOD",
-              now());
+          int transitioned =
+              stockSqlMapper.markSeckillUnknown(
+                  ((Number) row.get("user_id")).longValue(),
+                  String.valueOf(row.get("idempotency_key")),
+                  "REDIS_MARKER_MISSING_AFTER_GRACE_PERIOD",
+                  now());
           if (transitioned == 1) {
             log.error("秒杀受理缺少 Redis marker，已转 UNKNOWN 保留人工/对账证据，orderNo={}", orderNo);
           } else {
