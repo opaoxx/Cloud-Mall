@@ -32,7 +32,7 @@ SQL 必须采用安全参数绑定和 MySQL JSON 原生路径/类型比较，不
 
 新 Stock payload 的类型契约固定为：`userId` 为 JSON `INTEGER`，`orderNo`、`idempotencyKey`、payload/eventId、payload/requestHash 为 JSON `STRING`。Mapper 必须用 `JSON_TYPE` 和 JSON 原生值比较核对：
 
-- `userId` 仅接受 JSON `INTEGER`，与绑定的 Long 值比较；JSON 字符串形式的旧 userId 不自动转换或收敛；
+- `userId` 仅接受 JSON `INTEGER` 或 MySQL 对合法正 Long 可能返回的 `UNSIGNED INTEGER`，与绑定的 Long JSON 数字值严格比较；JSON 字符串或 DOUBLE 形式的旧 userId 不自动转换或收敛；
 - 其他字段要求 JSON `STRING`，用 `JSON_UNQUOTE(JSON_EXTRACT(...))` 配合 `BINARY` 精确比较，保留大小写、Unicode 和空白差异；
 - metadata requestHash 继续对合法 64 位 hex 使用 `LOWER(BINARY ...)` 等价大小写匹配，但 payload 内 requestHash、eventId 与入参/outer eventId 仍必须分别核对；
 - inner eventId 和 inner requestHash 都必须存在且与对应持久/入参事实一致。

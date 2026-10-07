@@ -459,7 +459,14 @@ class SeckillRecoveryDispatchMySqlIT {
               "{\"different\":true}",
               "REPLAY_PENDING",
               CREATED);
-      case "resolved" -> mapper.markResolved(String.valueOf(row(1).get("event_id")), CREATED);
+      case "resolved" ->
+          mapper.markResolved(
+              String.valueOf(row(1).get("event_id")),
+              "202610-resolved",
+              3L,
+              "key:202610-resolved",
+              String.valueOf(row(1).get("request_hash")),
+              CREATED);
       default -> throw new IllegalArgumentException("unknown fixture fault");
     }
   }

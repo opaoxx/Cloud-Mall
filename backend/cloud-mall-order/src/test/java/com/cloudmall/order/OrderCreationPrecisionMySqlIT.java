@@ -499,6 +499,187 @@ class OrderCreationPrecisionMySqlIT {
             any(org.springframework.amqp.rabbit.connection.CorrelationData.class));
   }
 
+  @Test
+  void firstCommittedConsumerResolvesAllMatchingRecoverableStates() throws Exception {
+    int sequence = 0;
+    for (String state : List.of("REPLAY_PENDING", "REPLAYED", "QUARANTINED", "VERIFYING")) {
+      Map<String, Object> event = timeEvent("202612-resolve-first-" + sequence);
+      event.put("occurredAt", "2026-12-01T12:00:00+08:00");
+      saveRecovery(100 + sequence++, String.valueOf(event.get("eventId")), event, state);
+      Map<String, Object> before = recoveryRow(String.valueOf(event.get("eventId")));
+      service.consumeSeckill(event);
+      Map<String, Object> after = recoveryRow(String.valueOf(event.get("eventId")));
+      assertEquals("RESOLVED", after.get("status"), state);
+      assertNull(after.get("lease_owner"));
+      assertNull(after.get("lease_until"));
+      for (String field :
+          List.of(
+              "payload", "request_hash", "created_at", "attempts", "next_retry_at", "last_error"))
+        assertEquals(before.get(field), after.get(field));
+    }
+  }
+
+  @Test
+  void committedDuplicateResolvesHeldRowsWithoutTimeAndAcceptsHexCase() throws Exception {
+    int sequence = 0;
+    for (String state : List.of("QUARANTINED", "VERIFYING")) {
+      Map<String, Object> event = timeEvent("202612-resolve-duplicate-" + sequence);
+      event.put("occurredAt", "2026-12-01T12:00:00+08:00");
+      service.consumeSeckill(event);
+      event.remove("occurredAt");
+      event.put(
+          "requestHash",
+          String.valueOf(event.get("requestHash")).toUpperCase(java.util.Locale.ROOT));
+      long recordId = 100 + sequence++;
+      String eventId = String.valueOf(event.get("eventId"));
+      saveRecovery(recordId, eventId, event, state);
+      service.consumeSeckill(event);
+      Map<String, Object> resolved = recoveryRow(eventId);
+      assertEquals("RESOLVED", resolved.get("status"));
+      assertNull(resolved.get("lease_owner"));
+      recoveryMapper()
+          .markReplayed(recordId, "held-owner", 99, LocalDateTime.now().plusDays(1), "late");
+      recoveryMapper()
+          .markVerification(
+              recordId, "held-owner", "VERIFYING", "late", LocalDateTime.now().plusDays(1));
+      assertEquals(resolved, recoveryRow(eventId));
+    }
+  }
+
+  @Test
+  void reusedEventIdCannotResolveAnotherOrderBusinessTuple() throws Exception {
+    Map<String, Object> original = timeEvent("202612-original-identity");
+    original.put("occurredAt", "2026-12-01T12:00:00+08:00");
+    String eventId = String.valueOf(original.get("eventId"));
+    saveRecovery(100, eventId, original, "REPLAY_PENDING");
+    Map<String, Object> before = recoveryRow(eventId);
+    Map<String, Object> incoming = timeEvent("202612-other-identity");
+    incoming.put("eventId", eventId);
+    incoming.put("occurredAt", "2026-12-01T12:00:00+08:00");
+    service.consumeSeckill(incoming);
+    assertEquals(
+        1,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM mall_order_202612 WHERE order_no=?",
+            Integer.class,
+            incoming.get("orderNo")));
+    assertEquals(before, recoveryRow(eventId));
+  }
+
+  @Test
+  void exactEventIdentityAndPayloadTypesAreRequiredForResolution() throws Exception {
+    int sequence = 0;
+    for (String fault :
+        List.of(
+            "case",
+            "trailing",
+            "inner-event",
+            "user-string",
+            "key-number",
+            "body-hash",
+            "metadata-hash")) {
+      Map<String, Object> incoming = timeEvent("202612-resolution-fault-" + sequence);
+      incoming.put("occurredAt", "2026-12-01T12:00:00+08:00");
+      if (fault.equals("key-number")) incoming.put("idempotencyKey", "123");
+      String storedId = String.valueOf(incoming.get("eventId"));
+      Map<String, Object> payload = new java.util.LinkedHashMap<>(incoming);
+      switch (fault) {
+        case "case" -> {
+          incoming.put("eventId", storedId.toUpperCase(java.util.Locale.ROOT));
+          payload.put("eventId", incoming.get("eventId"));
+        }
+        case "trailing" -> {
+          incoming.put("eventId", storedId + " ");
+          payload.put("eventId", incoming.get("eventId"));
+        }
+        case "inner-event" -> payload.put("eventId", "other-event");
+        case "user-string" -> payload.put("userId", "8");
+        case "key-number" -> payload.put("idempotencyKey", 123);
+        case "body-hash" -> payload.put("requestHash", "b".repeat(64));
+        default -> {}
+      }
+      // 元数据hash与incoming保持一致，body-hash用例单独验证内层hash防线。
+      recoveryMapper()
+          .saveDlq(
+              100 + sequence++,
+              storedId,
+              String.valueOf(incoming.get("requestHash")),
+              new ObjectMapper().writeValueAsString(payload),
+              "REPLAY_PENDING",
+              LocalDateTime.now());
+      if (fault.equals("metadata-hash"))
+        fixture.update(
+            "UPDATE seckill_message_recovery SET request_hash=? WHERE event_id=?",
+            "b".repeat(64),
+            storedId);
+      Map<String, Object> before = recoveryRow(storedId);
+      service.consumeSeckill(incoming);
+      assertEquals(before, recoveryRow(storedId), fault);
+    }
+  }
+
+  @Test
+  void conflictResolvedAndUnknownStatesRemainUntouchedByCommittedEvidence() throws Exception {
+    int sequence = 0;
+    for (String state : List.of("CONFLICT", "RESOLVED", "UNRECOGNIZED")) {
+      Map<String, Object> event = timeEvent("202612-resolution-terminal-" + sequence);
+      event.put("occurredAt", "2026-12-01T12:00:00+08:00");
+      String eventId = String.valueOf(event.get("eventId"));
+      saveRecovery(100 + sequence++, eventId, event, state);
+      Map<String, Object> before = recoveryRow(eventId);
+      service.consumeSeckill(event);
+      assertEquals(before, recoveryRow(eventId));
+    }
+  }
+
+  @Test
+  void largeLongUserIdentityUsesExactJsonIntegerRatherThanStringCoercion() throws Exception {
+    Map<String, Object> event = timeEvent("202612-resolution-large-user");
+    event.put("userId", Long.MAX_VALUE);
+    event.put("requestHash", SeckillRequestFingerprint.hash(11, 7, Long.MAX_VALUE, 1, "{}"));
+    event.put("occurredAt", "2026-12-01T12:00:00+08:00");
+    String eventId = String.valueOf(event.get("eventId"));
+    saveRecovery(100, eventId, event, "QUARANTINED");
+    assertEquals(
+        "UNSIGNED INTEGER",
+        fixture.queryForObject(
+            "SELECT JSON_TYPE(JSON_EXTRACT(payload,'$.userId')) FROM seckill_message_recovery WHERE"
+                + " event_id=?",
+            String.class,
+            eventId));
+    service.consumeSeckill(event);
+    assertEquals("RESOLVED", recoveryRow(eventId).get("status"));
+    assertEquals(
+        Long.MAX_VALUE,
+        fixture.queryForObject("SELECT user_id FROM mall_order_202612", Long.class));
+  }
+
+  private SeckillMessageRecoveryMapper recoveryMapper() {
+    return (SeckillMessageRecoveryMapper)
+        ReflectionTestUtils.getField(service, "seckillMessageRecoveryMapper");
+  }
+
+  private void saveRecovery(long id, String eventId, Map<String, Object> event, String status)
+      throws Exception {
+    recoveryMapper()
+        .saveDlq(
+            id,
+            eventId,
+            String.valueOf(event.get("requestHash")),
+            new ObjectMapper().writeValueAsString(event),
+            status,
+            LocalDateTime.now());
+    fixture.update(
+        "UPDATE seckill_message_recovery SET"
+            + " lease_owner='held-owner',lease_until=?,last_error='keep original' WHERE event_id=?",
+        LocalDateTime.now().plusMinutes(1),
+        eventId);
+  }
+
+  private Map<String, Object> recoveryRow(String eventId) {
+    return fixture.queryForMap("SELECT * FROM seckill_message_recovery WHERE event_id=?", eventId);
+  }
+
   private Map<String, Object> timeEvent(String orderNo) {
     return new java.util.LinkedHashMap<>(
         Map.of(

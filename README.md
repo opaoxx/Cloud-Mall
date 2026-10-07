@@ -592,6 +592,18 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=SeckillRecoveryDispatchMySqlIT
 
 扩展测试覆盖真实数据库中的扫描/完成交错、计数溢出与回退；继续验证读取异常、到期和发送守卫。Stock/Rabbit 为替身，本轮未新增自动续租或网络原子性保证。
 
+### 已提交消费结果的身份核验与恢复收尾（第17轮M）
+
+首次成功落单或确认同一业务已 COMMITTED 的重复消费，按原 eventId、orderNo、userId、idempotencyKey 和请求指纹核验恢复台账。仅完整匹配的 `REPLAY_PENDING/REPLAYED/QUARANTINED/VERIFYING` 可转为 `RESOLVED` 并清理租约；原 payload、次数、退避和错误记录保持不变。消费者的已提交事实不依赖 recovery worker 租约，旧 worker 的迟到完成仍受完成写 CAS 保护。
+
+eventId 和业务字符串按字节匹配，防止数据库大小写或尾空格等价比较误命中。JSON 用户 ID 必须是与 Java long 值相同的整数（包括 MySQL `UNSIGNED INTEGER`），其他身份字段必须为字符串；合法64位十六进制指纹兼容大小写。历史字符串型用户 ID、字段缺失或身份冲突不自动修复，`CONFLICT/RESOLVED` 及未知状态保持原样。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,SeckillRecoveryDispatchMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+测试沿用隔离 `cm17f_*` / `cm17k_*` 库，覆盖真实 consumer 事务、两条成功路径、身份/JSON 类型差异、终态保护与迟到完成；核对原库校验和后清理。Feign 和 Rabbit 为替身，不代表跨服务网络故障验收。
+
 ## 验证命令
 
 ```bash

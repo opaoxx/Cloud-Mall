@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -227,12 +228,59 @@ public class SeckillMessageRecoveryMapper {
         .truncatedTo(ChronoUnit.MILLIS);
   }
 
-  public void markResolved(String eventId, LocalDateTime now) {
+  /**
+   * 由已成功创建或已提交幂等事实结束同一业务身份的恢复记录，不依赖恢复 worker 租约。
+   *
+   * @param eventId 本次消费的原事件号，按字节精确定位
+   * @param orderNo 已提交的原订单号
+   * @param userId 已提交业务的用户主键
+   * @param idempotencyKey 原用户幂等键
+   * @param requestHash 已由 consumer 验证的64位十六进制指纹
+   * @param now 本次收敛时间，首次创建时沿用原本地事务
+   */
+  public void markResolved(
+      String eventId,
+      String orderNo,
+      long userId,
+      String idempotencyKey,
+      String requestHash,
+      LocalDateTime now) {
+    // 1. 不为缺失/非法身份猜值；hash仅兼容既有十六进制字母大小写。
+    if (eventId == null
+        || eventId.isBlank()
+        || orderNo == null
+        || orderNo.isBlank()
+        || userId <= 0
+        || idempotencyKey == null
+        || idempotencyKey.isBlank()
+        || requestHash == null
+        || !requestHash.matches("[0-9a-fA-F]{64}")) return;
+    String canonicalHash = requestHash.toLowerCase(Locale.ROOT);
+    // 2. 索引定位后精确核验元数据和原JSON业务元组，终态/冲突不被清除。
     jdbcTemplate.update(
         "UPDATE seckill_message_recovery SET status='RESOLVED',lease_owner=NULL,lease_until=NULL,updated_at=? "
-            + "WHERE event_id=? AND status IN ('REPLAY_PENDING','REPLAYED')",
+            + "WHERE event_id=? AND BINARY event_id=BINARY ?"
+            + " AND BINARY LOWER(request_hash)=BINARY ?"
+            + " AND JSON_TYPE(JSON_EXTRACT(payload,'$.orderNo'))='STRING'"
+            + " AND BINARY JSON_UNQUOTE(JSON_EXTRACT(payload,'$.orderNo'))=BINARY ?"
+            + " AND JSON_TYPE(JSON_EXTRACT(payload,'$.userId')) IN ('INTEGER','UNSIGNED INTEGER')"
+            + " AND JSON_EXTRACT(payload,'$.userId')=CAST(? AS JSON)"
+            + " AND JSON_TYPE(JSON_EXTRACT(payload,'$.idempotencyKey'))='STRING'"
+            + " AND BINARY JSON_UNQUOTE(JSON_EXTRACT(payload,'$.idempotencyKey'))=BINARY ?"
+            + " AND JSON_TYPE(JSON_EXTRACT(payload,'$.eventId'))='STRING'"
+            + " AND BINARY JSON_UNQUOTE(JSON_EXTRACT(payload,'$.eventId'))=BINARY ?"
+            + " AND JSON_TYPE(JSON_EXTRACT(payload,'$.requestHash'))='STRING'"
+            + " AND BINARY LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.requestHash')))=BINARY ?"
+            + " AND status IN ('REPLAY_PENDING','REPLAYED','QUARANTINED','VERIFYING')",
         now,
-        eventId);
+        eventId,
+        eventId,
+        canonicalHash,
+        orderNo,
+        Long.toString(userId),
+        idempotencyKey,
+        eventId,
+        canonicalHash);
   }
 
   /** 避免恢复错误超过数据库列宽后反复无法释放租约。 */

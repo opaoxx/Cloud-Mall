@@ -606,7 +606,8 @@ public class OrderServiceImpl implements OrderService {
         if (computedHash.equalsIgnoreCase(String.valueOf(dedup.get("request_hash")))
             && orderNo.equals(String.valueOf(dedup.get("order_no")))) {
           if ("COMMITTED".equals(String.valueOf(dedup.get("status")))) {
-            seckillMessageRecoveryMapper.markResolved(eventId, now().toLocalDateTime());
+            seckillMessageRecoveryMapper.markResolved(
+                eventId, orderNo, userId, key, computedHash, now().toLocalDateTime());
             return;
           }
           throw new IllegalStateException("秒杀幂等记录仍在处理中，保留消息重试");
@@ -648,7 +649,8 @@ public class OrderServiceImpl implements OrderService {
       orderOutboxMapper.insert(timeoutOutbox(orderNo, created, created.plusMinutes(30)));
       seckillOrderDedupMapper.markCommitted(userId, key, now().toLocalDateTime());
       if (eventId != null && !eventId.isBlank())
-        seckillMessageRecoveryMapper.markResolved(eventId, now().toLocalDateTime());
+        seckillMessageRecoveryMapper.markResolved(
+            eventId, orderNo, userId, key, computedHash, now().toLocalDateTime());
     } catch (Exception e) {
       throw new IllegalStateException("秒杀订单消息消费失败，交由 RabbitMQ 重试或死信: " + event, e);
     }
