@@ -5,8 +5,10 @@ import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.util.OrderCreationTime;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import java.math.BigDecimal;
@@ -119,10 +121,17 @@ public class SeckillMessageRecovery {
     String requestHash;
     String status = "REPLAY_PENDING";
     try {
-      event = objectMapper.readValue(raw, new TypeReference<LinkedHashMap<String, Object>>() {});
+      // 局部 reader 拒绝重复字段和尾随内容，避免规范化时静默丢失原始证据。
+      event =
+          objectMapper
+              .readerFor(new TypeReference<LinkedHashMap<String, Object>>() {})
+              .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+              .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+              .readValue(raw);
       eventId = stableEventId(event, raw);
-      boolean legacyPayload = "SECKILL_ORDER_ACCEPTED".equals(event.get("eventType"))
-          && event.get("addressSnapshot") == null;
+      boolean legacyPayload =
+          "SECKILL_ORDER_ACCEPTED".equals(event.get("eventType"))
+              && event.get("addressSnapshot") == null;
       boolean coreFieldsValid = hasCoreFields(event);
       normalizeLegacy(event, eventId);
       String calculatedHash = requestHash(event, raw);

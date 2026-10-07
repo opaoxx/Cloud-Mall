@@ -646,6 +646,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryJsonMySqlIT` 验证 Base64 逐字节还原、重复保持、非法字节嵌入 JSON 时隔离，以及合法 U+FFFD、中文、emoji 兼容。正常 UTF-8 和旧格式解析规则保持不变；历史已丢失字节无法自动还原，消息通道仍使用替身验证。
 
+### 死信 JSON 拒绝重复字段和尾随内容（第17轮U）
+
+严格 UTF-8 解码后，死信入口使用局部严格 JSON reader：拒绝根/嵌套重复字段，以及根对象之后的第二个 JSON 值或垃圾内容。解析失败按完整原文生成指纹，将 `rawPayload` 原文保存为 `CONFLICT`，避免后值覆盖或忽略尾随内容后生成可重放事件。
+
+`SeckillRecoveryJsonMySqlIT` 覆盖重复字段、尾随对象/数组/标量/null/垃圾、非对象 JSON、完整原文和重复保持。合法首尾空白、Unicode 与旧格式仍按原流程处理；不修改共享 ObjectMapper/Factory、其他消费入口或历史记录。
+
 ## 验证命令
 
 ```bash

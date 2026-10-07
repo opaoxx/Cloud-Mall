@@ -99,6 +99,90 @@ class SeckillRecoveryJsonMySqlIT {
   }
 
   @Test
+  void trailingJsonTokensAreQuarantinedWithTheEntireOriginalText() throws Exception {
+    for (String suffix : List.of(" {}", " []", " 123", " true", " null", " garbage")) {
+      assertRawJsonQuarantined(validPayload("trailing") + suffix);
+    }
+  }
+
+  @Test
+  void duplicateRootOrNestedJsonFieldsCannotBeNormalizedIntoReplayableEvents() throws Exception {
+    String payload = validPayload("duplicate-fields");
+    assertRawJsonQuarantined("{\"eventId\":\"first-value\"," + payload.substring(1));
+    assertRawJsonQuarantined("{\"userId\":999," + payload.substring(1));
+    assertRawJsonQuarantined("{\"extra\":{\"key\":1,\"key\":2}," + payload.substring(1));
+  }
+
+  @Test
+  void nonObjectJsonStillKeepsTheEntireTextAsConflictEvidence() throws Exception {
+    for (String original : List.of("null", "[]", "123", "true", "\"text\"")) {
+      assertRawJsonQuarantined(original);
+    }
+  }
+
+  @Test
+  void trailingWhitespaceRemainsValidWithoutChangingSharedParserConfiguration() throws Exception {
+    ObjectMapper serializer = new ObjectMapper();
+    var recovery =
+        new SeckillMessageRecovery(
+            mapper, mock(RabbitTemplate.class), serializer, mock(StockClient.class));
+    String payload = validPayload("json-whitespace");
+    deliver(recovery, payload);
+    Map<String, Object> before = row("json-whitespace");
+    deliver(recovery, " \n\t" + payload + " \r\n\t");
+    assertEquals("REPLAY_PENDING", row("json-whitespace").get("status"));
+    assertEquals(before, row("json-whitespace"));
+    assertFalse(
+        serializer.isEnabled(
+            com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS));
+    assertFalse(
+        serializer
+            .getFactory()
+            .isEnabled(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION));
+  }
+
+  private void assertRawJsonQuarantined(String original) throws Exception {
+    String hash =
+        java.util.HexFormat.of()
+            .formatHex(
+                java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(original.getBytes(StandardCharsets.UTF_8)));
+    String eventId = "legacy-seckill:hash:" + hash;
+    Channel channel = mock(Channel.class);
+    doAnswer(
+            invocation -> {
+              assertEquals(
+                  1,
+                  fixture.queryForObject(
+                      "SELECT COUNT(*) FROM seckill_message_recovery WHERE event_id=?",
+                      Integer.class,
+                      eventId));
+              Map<String, Object> saved = row(eventId);
+              assertEquals("CONFLICT", saved.get("status"));
+              assertEquals(hash, saved.get("request_hash"));
+              assertEquals(
+                  original,
+                  new ObjectMapper()
+                      .readTree(String.valueOf(saved.get("payload")))
+                      .get("rawPayload")
+                      .asText());
+              return null;
+            })
+        .when(channel)
+        .basicAck(71, false);
+    MessageProperties properties = new MessageProperties();
+    properties.setDeliveryTag(71);
+    Message message = new Message(original.getBytes(StandardCharsets.UTF_8), properties);
+    var recovery = recoveryHandler();
+    recovery.consumeDeadLetter(message, channel);
+    Map<String, Object> before = row(eventId);
+    recovery.consumeDeadLetter(message, channel);
+    assertEquals(before, row(eventId));
+    verify(channel, times(2)).basicAck(71, false);
+    verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
+  }
+
+  @Test
   void malformedUtf8KeepsDistinctRawBytesBeforeAckAndDeduplicatesOnlyExactBytes() throws Exception {
     SeckillMessageRecovery recovery = recoveryHandler();
     for (byte[] body : List.of(new byte[] {(byte) 0x80}, new byte[] {(byte) 0x81})) {
