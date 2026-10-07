@@ -10,6 +10,7 @@ import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.config.SeckillSentinelConfiguration;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
+import com.cloudmall.order.domain.dto.OrderQueryWindow;
 import com.cloudmall.order.domain.dto.SeckillOrderDTO;
 import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.domain.po.OrderItemPO;
@@ -280,20 +281,20 @@ public class OrderServiceImpl implements OrderService {
     long userId = AuthContext.requireUserId();
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
-    OffsetDateTime start =
-            parse(startTime, now().minusMonths(1)).withOffsetSameInstant(ZoneOffset.ofHours(8)),
-        end = parse(endTime, now().plusSeconds(1)).withOffsetSameInstant(ZoneOffset.ofHours(8));
-    if (!start.isBefore(end)) throw new BizException(ErrorCodes.INVALID, "时间范围无效", 400);
+    OrderQueryWindow window = OrderQueryWindow.from(startTime, endTime, now());
+    if (window.isEmpty()) {
+      return ApiResponse.ok(new PageResult<OrderVO>(List.of(), page, pageSize, 0));
+    }
     long offset;
     try {
       offset = Math.multiplyExact((long) page - 1L, (long) pageSize);
     } catch (ArithmeticException invalidPage) {
       throw new BizException(ErrorCodes.INVALID, "页码超出支持范围", 400);
     }
-    java.sql.Timestamp rangeStart = ts(start);
-    java.sql.Timestamp rangeEnd = ts(end);
-    YearMonth firstMonth = YearMonth.from(start);
-    YearMonth lastMonth = YearMonth.from(end.minusNanos(1));
+    java.sql.Timestamp rangeStart = ts(window.getStart());
+    java.sql.Timestamp rangeEnd = ts(window.getEnd());
+    YearMonth firstMonth = window.getFirstMonth();
+    YearMonth lastMonth = window.getLastMonth();
 
     // 2. 逐月计数；任何一个月的读取失败都会让整次查询失败，不返回部分结果。
     Map<YearMonth, Long> monthlyCounts = new LinkedHashMap<>();
@@ -321,8 +322,8 @@ public class OrderServiceImpl implements OrderService {
         }
         YearMonth month = monthCount.getKey();
         String tableName = "mall_order_" + month.format(MONTH);
-        int limit = (int) Math.min(
-            (long) pageSize - items.size(), monthCount.getValue() - remainingOffset);
+        int limit =
+            (int) Math.min((long) pageSize - items.size(), monthCount.getValue() - remainingOffset);
         List<Map<String, Object>> rows;
         try {
           rows =
@@ -334,8 +335,7 @@ public class OrderServiceImpl implements OrderService {
         if (rows.size() != limit) {
           throw unavailableOrderMonth(
               month,
-              new IllegalStateException(
-                  "月表页结果数量与同一快照内的 COUNT 不一致: " + rows.size() + "/" + limit));
+              new IllegalStateException("月表页结果数量与同一快照内的 COUNT 不一致: " + rows.size() + "/" + limit));
         }
         for (Map<String, Object> row : rows) {
           requireCorrectOrderMonth(row, month);
@@ -939,18 +939,6 @@ public class OrderServiceImpl implements OrderService {
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     }
     return "mall_order_" + orderNo.substring(0, 6);
-  }
-
-  /** 执行 parse 相关操作。 */
-  private static OffsetDateTime parse(String s, OffsetDateTime d) {
-    // 1. 接收并整理 parse 的业务请求。
-    // 2. 执行 parse 的核心业务校验与状态处理。
-    // 3. 返回 parse 的处理结果。
-    try {
-      return s == null ? d : OffsetDateTime.parse(s);
-    } catch (Exception e) {
-      throw new BizException(ErrorCodes.INVALID, "时间格式错误", 400);
-    }
   }
 
   /** 执行 ts 相关操作。 */

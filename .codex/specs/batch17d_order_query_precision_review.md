@@ -57,4 +57,3 @@
 ## 6. 实施门与范围声明
 
 实现限定在窗口值对象、查询入口和必要 Mapper 参数测试；不改 API 字段、Sharding profile、DataSource、订单写入时间、其他业务时间辅助方法或默认物理表方案。17D 完成只表示订单查询与 DATETIME(3) 事实对齐，不表示 CM-20 Sharding 主链路已接入。
-

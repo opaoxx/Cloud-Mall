@@ -479,6 +479,19 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=MonthlyOrderShardingInventoryM
 
 集成测试只在自建 `cm17c_*` 库中操作表和种子，验证跨年窗口、旧规则与新规则、历史保留、缺伴表/缺月和观测后删表；结束后清理隔离库并核对原订单库 checksum。
 
+### 订单列表查询时间精度（第17轮D）
+
+`GET /api/orders` 继续使用 `[startTime,endTime)`，支持带不同 offset 的 ISO-8601 时间。查询先转换到项目约定的上海偏移，再将两端向上对齐至 `DATETIME(3)` 毫秒；SQL 参数和月份选择共用这一窗口，避免纳秒边界因 JDBC 精度变化漏单或多查。
+
+原始起止时间不递增、格式错误或端点超出数据库年份范围返回400。合法纳秒区间若不包含任何可存储毫秒，返回 `total=0,items=[]`，不查询月表；非空区间缺表仍整体返回503。缺省起止时间从同一次时钟采样计算，订单写入和支付/库存时间逻辑保持原样。
+
+```powershell
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderQueryWindowTest,OrderListFailureTest' '-Dsurefire.failIfNoSpecifiedTests=false'
+mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderQueryPrecisionMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_order?allowPublicKeyRetrieval=true'
+```
+
+真实 MySQL 验证使用自建 `cm17d_*` 库，结束后清理；默认订单仍使用动态物理月表。
+
 ## 验证命令
 
 ```bash
