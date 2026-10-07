@@ -242,6 +242,13 @@ public class SeckillMessageRecovery {
             id, owner, "QUARANTINED", unverifiedTime.getMessage(), recoveryNow().plusMinutes(5));
         return false;
       }
+      // 原事件自身已有明确错误时不能把问题归因于远端证据暂缺。
+      if (!hasCompleteEvidence(event)
+          || !requestHash(event, "").equalsIgnoreCase(String.valueOf(event.get("requestHash")))) {
+        recoveryMapper.markVerification(
+            id, owner, "CONFLICT", "原事件核心字段或请求指纹无效", recoveryNow().plusMinutes(5));
+        return false;
+      }
       var response =
           OrderStockCircuitBreaker.call(
               OrderStockCircuitBreaker.STATUS,
@@ -258,20 +265,39 @@ public class SeckillMessageRecovery {
             id, owner, "QUARANTINED", "库存受理状态=" + status, recoveryNow().plusMinutes(5));
         return false;
       }
-      if (!hasCoreFields(event) || !matchesEvent(event, response.data)) {
+      if (!"ACCEPTED".equals(status)
+          && !"PUBLISHED".equals(status)
+          && !"ORDER_CREATED".equals(status)) {
+        recoveryMapper.markVerification(
+            id, owner, "VERIFYING", "库存受理状态未知=" + status, recoveryNow().plusSeconds(30));
+        return false;
+      }
+      if (!hasCompleteEvidence(response.data)) {
+        recoveryMapper.markVerification(
+            id, owner, "VERIFYING", "库存受理事实字段不完整", recoveryNow().plusSeconds(30));
+        return false;
+      }
+      if (!matchesEvent(event, response.data)) {
         recoveryMapper.markVerification(
             id, owner, "CONFLICT", "库存受理事实与原事件不一致", recoveryNow().plusMinutes(5));
         return false;
       }
-      if ("ACCEPTED".equals(status) || "PUBLISHED".equals(status) || "ORDER_CREATED".equals(status))
-        return true;
-      recoveryMapper.markVerification(
-          id, owner, "VERIFYING", "库存受理状态未知=" + status, recoveryNow().plusSeconds(30));
+      return true;
     } catch (Exception exception) {
       recoveryMapper.markVerification(
           id, owner, "VERIFYING", exception.toString(), recoveryNow().plusSeconds(30));
     }
     return false;
+  }
+
+  /** 缺失或空白只能说明证据不完整；字段齐全后再沿既有规则核对身份。 */
+  private static boolean hasCompleteEvidence(Map<String, Object> evidence) {
+    for (String field :
+        List.of("orderNo", "activityId", "skuId", "userId", "idempotencyKey", "requestHash")) {
+      Object value = evidence.get(field);
+      if (value == null || String.valueOf(value).isBlank()) return false;
+    }
+    return true;
   }
 
   private boolean matchesEvent(Map<String, Object> event, Map<String, Object> fact) {
@@ -293,8 +319,10 @@ public class SeckillMessageRecovery {
   }
 
   private static boolean hasCoreFields(Map<String, Object> event) {
-    return event.get("orderNo") != null && event.get("activityId") != null
-        && event.get("skuId") != null && event.get("userId") != null
+    return event.get("orderNo") != null
+        && event.get("activityId") != null
+        && event.get("skuId") != null
+        && event.get("userId") != null
         && event.get("idempotencyKey") != null
         && !String.valueOf(event.get("orderNo")).isBlank()
         && !String.valueOf(event.get("idempotencyKey")).isBlank();

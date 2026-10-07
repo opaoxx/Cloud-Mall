@@ -112,6 +112,114 @@ class SeckillRecoveryDispatchMySqlIT {
   private List<Message> sent;
 
   @Test
+  void unknownStockStatesRemainRetryableEvenWithoutIdentityFields() throws Exception {
+    for (String status : List.of("UNKNOWN", "PROCESSING", "", "missing", "null")) {
+      fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+      clock.reset(CREATED);
+      sent.clear();
+      seed(1, "unknown");
+      Map<String, Object> before = row(1);
+      Map<String, Object> response = new java.util.LinkedHashMap<>();
+      if (!"missing".equals(status)) response.put("status", "null".equals(status) ? null : status);
+      when(stock.seckillReservationFact(anyString(), anyString()))
+          .thenReturn(ApiResponse.ok(response));
+      recovery.replayDue();
+      assertEquals("VERIFYING", row(1).get("status"), status);
+      assertEquals(CREATED.plusSeconds(30), row(1).get("next_retry_at"));
+      assertEquals(before.get("payload"), row(1).get("payload"));
+      assertEquals(before.get("attempts"), row(1).get("attempts"));
+      assertNull(row(1).get("lease_owner"));
+      assertTrue(sent.isEmpty());
+      clock.advance(30);
+      when(stock.seckillReservationFact(anyString(), anyString()))
+          .thenReturn(ApiResponse.ok(fact("202610-unknown")));
+      recovery.replayDue();
+      assertEquals("REPLAYED", row(1).get("status"));
+      assertEquals(1, sent.size());
+    }
+  }
+
+  @Test
+  void incompleteAcceptedEvidenceCanRecoverWhenCompleteFactArrives() throws Exception {
+    for (String field :
+        List.of("orderNo", "activityId", "skuId", "userId", "idempotencyKey", "requestHash")) {
+      fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+      clock.reset(CREATED);
+      sent.clear();
+      seed(1, "incomplete");
+      Map<String, Object> full = fact("202610-incomplete");
+      full.put(
+          "status",
+          "activityId".equals(field)
+              ? "PUBLISHED"
+              : "userId".equals(field) ? "ORDER_CREATED" : "ACCEPTED");
+      Map<String, Object> partial = new java.util.LinkedHashMap<>(full);
+      partial.remove(field);
+      when(stock.seckillReservationFact(anyString(), anyString()))
+          .thenReturn(ApiResponse.ok(partial));
+      recovery.replayDue();
+      assertEquals("VERIFYING", row(1).get("status"), field);
+      assertTrue(sent.isEmpty());
+      clock.advance(30);
+      when(stock.seckillReservationFact(anyString(), anyString())).thenReturn(ApiResponse.ok(full));
+      recovery.replayDue();
+      assertEquals("REPLAYED", row(1).get("status"), field);
+      assertEquals(1, sent.size());
+    }
+  }
+
+  @Test
+  void blankAcceptedEvidenceIsRetryableButCompleteMismatchStillConflicts() throws Exception {
+    for (String field :
+        List.of("orderNo", "activityId", "skuId", "userId", "idempotencyKey", "requestHash")) {
+      fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+      seed(1, "blank");
+      Map<String, Object> partial = fact("202610-blank");
+      partial.put(field, " ");
+      when(stock.seckillReservationFact(anyString(), anyString()))
+          .thenReturn(ApiResponse.ok(partial));
+      recovery.replayDue();
+      assertEquals("VERIFYING", row(1).get("status"), field);
+      assertTrue(sent.isEmpty());
+    }
+    fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+    seed(1, "mismatch");
+    Map<String, Object> mismatch = fact("202610-mismatch");
+    mismatch.put("userId", 999);
+    when(stock.seckillReservationFact(anyString(), anyString()))
+        .thenReturn(ApiResponse.ok(mismatch));
+    recovery.replayDue();
+    assertEquals("CONFLICT", row(1).get("status"));
+    assertTrue(sent.isEmpty());
+    assertTrue(mapper.findDue(50, CREATED.plusDays(1)).isEmpty());
+  }
+
+  @Test
+  void negativeStockEvidenceStaysQuarantinedAndInvalidEventDoesNotWaitForStock() throws Exception {
+    for (String status : List.of("NOT_FOUND", "REJECTED")) {
+      fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+      seed(1, "negative");
+      when(stock.seckillReservationFact(anyString(), anyString()))
+          .thenReturn(ApiResponse.ok(Map.of("status", status)));
+      recovery.replayDue();
+      assertEquals("QUARANTINED", row(1).get("status"));
+      assertEquals(CREATED.plusMinutes(5), row(1).get("next_retry_at"));
+      assertTrue(sent.isEmpty());
+    }
+    fixture.execute("TRUNCATE TABLE seckill_message_recovery");
+    seed(1, "invalid");
+    fixture.update(
+        "UPDATE seckill_message_recovery SET payload=JSON_REMOVE(payload,'$.requestHash') WHERE id=1");
+    Map<String, Object> before = row(1);
+    clearInvocations(stock);
+    recovery.replayDue();
+    assertEquals("CONFLICT", row(1).get("status"));
+    assertEquals(before.get("payload"), row(1).get("payload"));
+    verifyNoInteractions(stock);
+    assertTrue(sent.isEmpty());
+  }
+
+  @Test
   void slowFirstVerificationDoesNotGiveTheSecondRecordAnExpiredLease() throws Exception {
     seed(1, "first");
     seed(2, "second");

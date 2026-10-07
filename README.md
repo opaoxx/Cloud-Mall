@@ -610,6 +610,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 使用上述 `SeckillRecoveryJsonMySqlIT` 命令可验证 UTC/GMT+14 默认时区、月末毫秒边界、合法/非法及旧格式死信、冲突更新和等价重复保持。测试使用隔离 MySQL 库及 Channel 替身，不自动修正历史时间，也不改变 ACK/nack、租约或消息拓扑。
 
+### 库存验真证据暂缺时保持可重试（第17轮O）
+
+恢复器先核对原事件，再区分 Stock 响应：未知/缺失状态或已受理但核心字段、指纹缺失时进入 `VERIFYING`，30秒后重新查询；`NOT_FOUND/REJECTED` 仍隔离5分钟。只有完整事实与原事件确实不一致才进入 `CONFLICT`，完整匹配且处于 `ACCEPTED/PUBLISHED/ORDER_CREATED` 才允许重发。
+
+沿用 `SeckillRecoveryDispatchMySqlIT` / `SeckillRecoveryLeaseMySqlIT` 命令验证“证据暂缺→补齐后重放”、明确冲突、原事件无效及租约保护。Stock/Rabbit为替身，真实MySQL台账保留原载荷；不会自动重分类历史 `CONFLICT`。
+
 ## 验证命令
 
 ```bash
