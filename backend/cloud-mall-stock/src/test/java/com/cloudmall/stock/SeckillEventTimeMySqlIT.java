@@ -115,6 +115,90 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void outboxClaimCounterSaturatesWithoutOverflowOrMovingTheIncrement() throws Exception {
+    String orderNo = "202512-counter-boundary";
+    seed(orderNo, "2025-12-31T23:59:59.999+08:00");
+    long outboxId =
+        fixture.queryForObject(
+            "SELECT id FROM seckill_order_outbox WHERE order_no=?", Long.class, orderNo);
+    OffsetDateTime now = OffsetDateTime.parse("2027-01-01T12:00:00+08:00");
+    for (int attempts : List.of(0, Integer.MAX_VALUE - 1, Integer.MAX_VALUE)) {
+      fixture.update(
+          "UPDATE seckill_order_outbox SET attempts=?,status='PENDING',lease_owner=NULL,lease_until=NULL,next_retry_at=? WHERE id=?",
+          attempts,
+          now,
+          outboxId);
+      assertEquals(1, mapper.claimSeckillOutbox(outboxId, "first", now.plusSeconds(30), now));
+      assertEquals(
+          Math.min((long) Integer.MAX_VALUE, (long) attempts + 1),
+          fixture.queryForObject(
+              "SELECT attempts FROM seckill_order_outbox WHERE id=?", Long.class, outboxId));
+      assertEquals(0, mapper.claimSeckillOutbox(outboxId, "concurrent", now.plusSeconds(30), now));
+      assertEquals(
+          1, mapper.claimSeckillOutbox(outboxId, "next", now.plusSeconds(60), now.plusSeconds(30)));
+      assertEquals(
+          Math.min((long) Integer.MAX_VALUE, (long) attempts + 2),
+          fixture.queryForObject(
+              "SELECT attempts FROM seckill_order_outbox WHERE id=?", Long.class, outboxId));
+    }
+  }
+
+  @Test
+  void negativeOutboxCounterDoesNotOccupyScanWindowOrPermitAnyWrites() throws Exception {
+    seed("202512-negative-counter", "2025-12-31T23:59:59.999+08:00");
+    seed("202512-normal-counter", "2025-12-31T23:59:59.999+08:00");
+    OffsetDateTime now = OffsetDateTime.parse("2027-01-01T12:00:00+08:00");
+    fixture.update(
+        "UPDATE seckill_order_outbox SET id=1,attempts=-1,next_retry_at=? WHERE order_no='202512-negative-counter'",
+        now);
+    fixture.update(
+        "UPDATE seckill_order_outbox SET id=2,next_retry_at=? WHERE order_no='202512-normal-counter'",
+        now);
+    Map<String, Object> before =
+        fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1");
+    assertEquals(0, mapper.claimSeckillOutbox(1, "negative", now.plusSeconds(30), now));
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1"));
+    assertEquals(
+        2L, ((Number) mapper.findPendingSeckillOutbox(now, 1).get(0).get("id")).longValue());
+    fixture.update(
+        "UPDATE seckill_order_outbox SET lease_owner='negative',lease_until=? WHERE id=1",
+        now.plusSeconds(30));
+    before = fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1");
+    assertNull(mapper.findActiveSeckillOutboxLease(1, "negative", now));
+    String eventId = SeckillRequestFingerprint.eventId("202512-negative-counter");
+    assertEquals(0, mapper.markSeckillOutboxPublished(eventId, "negative", now));
+    assertEquals(
+        0,
+        mapper.recordSeckillOutboxFailure(eventId, "negative", "error", now.plusSeconds(10), now));
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_order_outbox WHERE id=1"));
+  }
+
+  @Test
+  void saturatedFirstOutboxRetriesWithoutBlockingTheFollowingPublish() throws Exception {
+    seed("202512-saturated", "2025-12-31T23:59:59.999+08:00");
+    seed("202512-after-saturated", "2025-12-31T23:59:59.999+08:00");
+    fixture.update(
+        "UPDATE seckill_order_outbox SET id=1,attempts=?,status='DEAD' WHERE order_no='202512-saturated'",
+        Integer.MAX_VALUE);
+    fixture.update("UPDATE seckill_order_outbox SET id=2 WHERE order_no='202512-after-saturated'");
+    due("202512-saturated");
+    due("202512-after-saturated");
+    List<Map<String, Object>> sent = new ArrayList<>();
+    assertDoesNotThrow(() -> dispatcher(sender(sent, true)).dispatch());
+    assertEquals(2, sent.size());
+    assertEquals("DEAD", state("202512-saturated"));
+    assertEquals(
+        Integer.MAX_VALUE,
+        fixture.queryForObject(
+            "SELECT attempts FROM seckill_order_outbox WHERE id=1", Integer.class));
+    assertEquals("PUBLISHED", state("202512-after-saturated"));
+    assertEquals(
+        1,
+        fixture.queryForObject(
+            "SELECT attempts FROM seckill_order_outbox WHERE id=2", Integer.class));
+  }
+
+  @Test
   void slowFirstOutboxDoesNotGiveTheNextRowAnAlreadyExpiredLease() throws Exception {
     mapper = spy(mapper);
     seed("202512-slow-first", "2025-12-31T23:59:59.999+08:00");

@@ -14,11 +14,11 @@ import org.springframework.stereotype.Repository;
 /** 库存条件更新和流水 SQL 的统一持久化入口。 */
 @Repository
 public class StockSqlMapper {
-  /** 完成写仅允许精确身份、有效租约和仍可重试的 outbox 源状态。 */
+  /** 完成写仅允许精确身份、有效租约、非负计数和仍可重试的 outbox 源状态。 */
   private static final String SECKILL_OUTBOX_COMPLETION_GUARD =
       " WHERE event_id=? AND BINARY event_id=BINARY ? AND BINARY lease_owner=BINARY ?"
           + " AND lease_until IS NOT NULL AND lease_until>?"
-          + " AND status IN ('PENDING','UNKNOWN','DEAD')";
+          + " AND status IN ('PENDING','UNKNOWN','DEAD') AND attempts>=0";
 
   /** Spring JDBC 执行器。 */
   private final JdbcTemplate jdbcTemplate;
@@ -641,23 +641,23 @@ public class StockSqlMapper {
         orderNo, idempotencyKey, payload, requestHash, occurredAt, occurredAt, occurredAt);
   }
 
-  /** 读取可投递的秒杀 outbox。 */
+  /** 读取可投递的秒杀 outbox；负计数在 LIMIT 前排除，保留原事实待核验。 */
   public List<Map<String, Object>> findPendingSeckillOutbox(OffsetDateTime now, int limit) {
     return queryForList(
         "SELECT id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts FROM seckill_order_outbox"
-            + " WHERE status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
+            + " WHERE status IN ('PENDING','UNKNOWN','DEAD') AND attempts>=0 AND next_retry_at<=?"
             + " AND (lease_until IS NULL OR lease_until<=?) ORDER BY id LIMIT ?",
         now,
         now,
         limit);
   }
 
-  /** 以 CAS 方式认领 outbox，避免多实例重复发布。 */
+  /** 以 CAS 认领并饱和递增非负计数，不重置历史负值；原租约条件保持。 */
   public int claimSeckillOutbox(
       long id, String owner, OffsetDateTime leaseUntil, OffsetDateTime now) {
     return update(
-        "UPDATE seckill_order_outbox SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
-            + " WHERE id=? AND status IN ('PENDING','UNKNOWN','DEAD') AND next_retry_at<=?"
+        "UPDATE seckill_order_outbox SET lease_owner=?,lease_until=?,attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,updated_at=?"
+            + " WHERE id=? AND status IN ('PENDING','UNKNOWN','DEAD') AND attempts>=0 AND next_retry_at<=?"
             + " AND (lease_until IS NULL OR lease_until<=?)",
         owner,
         leaseUntil,
@@ -683,7 +683,7 @@ public class StockSqlMapper {
     List<LocalDateTime> deadlines =
         jdbcTemplate.queryForList(
             "SELECT lease_until FROM seckill_order_outbox WHERE id=? AND BINARY lease_owner=BINARY ?"
-                + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN','DEAD')",
+                + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN','DEAD') AND attempts>=0",
             LocalDateTime.class,
             id,
             owner,
