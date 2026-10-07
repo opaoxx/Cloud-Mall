@@ -5,16 +5,21 @@ import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.util.OrderCreationTime;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -96,7 +101,19 @@ public class SeckillMessageRecovery {
   }
 
   private void persistDeadLetter(Message message) {
-    String raw = new String(message.getBody(), StandardCharsets.UTF_8);
+    String raw;
+    try {
+      raw =
+          StandardCharsets.UTF_8
+              .newDecoder()
+              .onMalformedInput(CodingErrorAction.REPORT)
+              .onUnmappableCharacter(CodingErrorAction.REPORT)
+              .decode(ByteBuffer.wrap(message.getBody()))
+              .toString();
+    } catch (CharacterCodingException invalidEncoding) {
+      persistInvalidUtf8(message.getBody());
+      return;
+    }
     Map<String, Object> event;
     String eventId;
     String requestHash;
@@ -132,11 +149,36 @@ public class SeckillMessageRecovery {
     recoveryMapper.saveDlq(id(), eventId, requestHash, raw, status, recoveryNow());
   }
 
+  /** 非法编码按原字节生成幂等身份，Base64 保留完整证据；保存失败继续由原消息重投。 */
+  private void persistInvalidUtf8(byte[] rawBytes) {
+    String requestHash = sha256(rawBytes);
+    String evidence;
+    try {
+      evidence =
+          objectMapper.writeValueAsString(
+              Map.of(
+                  "rawPayloadBase64",
+                  Base64.getEncoder().encodeToString(rawBytes),
+                  "rawEncoding",
+                  "base64",
+                  "reason",
+                  "INVALID_UTF8"));
+    } catch (JsonProcessingException serializationFailure) {
+      throw new IllegalStateException("无法序列化秒杀死信原始字节证据", serializationFailure);
+    }
+    recoveryMapper.saveDlq(
+        id(),
+        "legacy-seckill:bytes:" + requestHash,
+        requestHash,
+        evidence,
+        "CONFLICT",
+        recoveryNow());
+  }
+
   private void republishForDelayedRetry(Message message, Exception failure) throws Exception {
     MessageProperties properties = message.getMessageProperties();
     properties.setHeader("x-cloudmall-dlq-retry", true);
-    CorrelationData correlation = new CorrelationData(
-        "dlq-retry:" + UUID.randomUUID());
+    CorrelationData correlation = new CorrelationData("dlq-retry:" + UUID.randomUUID());
     rabbitTemplate.send(
         OrderMessagingConfiguration.SECKILL_DLQ_RETRY_EXCHANGE, "", message, correlation);
     CorrelationData.Confirm confirm = correlation.getFuture().get(5000, TimeUnit.MILLISECONDS);
@@ -385,8 +427,15 @@ public class SeckillMessageRecovery {
   private static long id() { return Math.abs(UUID.randomUUID().getMostSignificantBits()); }
 
   private static String sha256(String value) {
+    return sha256(value.getBytes(StandardCharsets.UTF_8));
+  }
+
+  /** 按原字节计算稳定指纹；合法文本沿原UTF-8编码后复用，不做替换解码。 */
+  private static String sha256(byte[] value) {
     try {
-      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
-    } catch (Exception exception) { throw new IllegalStateException(exception); }
+      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
+    } catch (Exception exception) {
+      throw new IllegalStateException(exception);
+    }
   }
 }

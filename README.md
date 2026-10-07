@@ -640,6 +640,12 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderCreationPrecisionMySqlIT,
 
 `SeckillRecoveryDispatchMySqlIT` 和 `SeckillMessageRecoveryAckTest` 覆盖预中断、两条任务之间中断、确认等待中断及 NACK 失败。检查与网络发送不是原子操作，本轮不提供全链路取消或消息撤回；Rabbit/Channel 使用替身。
 
+### 非法 UTF-8 死信保留原始字节（第17轮T）
+
+死信入口使用严格 UTF-8 解码，非法字节不再被替换后参与 JSON 解析或生成可重放事件。此类消息按原字节 SHA-256 生成 `legacy-seckill:bytes:` 身份，以 `rawPayloadBase64/rawEncoding/reason` JSON 证据保存为 `CONFLICT`，成功持久化后才按既有流程确认；同字节重复保持原行，不同字节分别保存。
+
+`SeckillRecoveryJsonMySqlIT` 验证 Base64 逐字节还原、重复保持、非法字节嵌入 JSON 时隔离，以及合法 U+FFFD、中文、emoji 兼容。正常 UTF-8 和旧格式解析规则保持不变；历史已丢失字节无法自动还原，消息通道仍使用替身验证。
+
 ## 验证命令
 
 ```bash

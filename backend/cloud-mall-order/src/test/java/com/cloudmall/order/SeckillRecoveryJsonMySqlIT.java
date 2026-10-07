@@ -99,6 +99,76 @@ class SeckillRecoveryJsonMySqlIT {
   }
 
   @Test
+  void malformedUtf8KeepsDistinctRawBytesBeforeAckAndDeduplicatesOnlyExactBytes() throws Exception {
+    SeckillMessageRecovery recovery = recoveryHandler();
+    for (byte[] body : List.of(new byte[] {(byte) 0x80}, new byte[] {(byte) 0x81})) {
+      String hash =
+          java.util.HexFormat.of()
+              .formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(body));
+      String eventId = "legacy-seckill:bytes:" + hash;
+      Channel channel = mock(Channel.class);
+      doAnswer(
+              invocation -> {
+                Map<String, Object> saved = row(eventId);
+                assertEquals("CONFLICT", saved.get("status"));
+                assertEquals(hash, saved.get("request_hash"));
+                var envelope = new ObjectMapper().readTree(String.valueOf(saved.get("payload")));
+                assertEquals("base64", envelope.get("rawEncoding").asText());
+                assertEquals("INVALID_UTF8", envelope.get("reason").asText());
+                assertArrayEquals(
+                    body,
+                    java.util.Base64.getDecoder()
+                        .decode(envelope.get("rawPayloadBase64").asText()));
+                return null;
+              })
+          .when(channel)
+          .basicAck(61, false);
+      MessageProperties properties = new MessageProperties();
+      properties.setDeliveryTag(61);
+      Message message = new Message(body, properties);
+      recovery.consumeDeadLetter(message, channel);
+      Map<String, Object> before = row(eventId);
+      recovery.consumeDeadLetter(message, channel);
+      assertEquals(before, row(eventId));
+      verify(channel, times(2)).basicAck(61, false);
+      verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
+    }
+    assertEquals(
+        2, fixture.queryForObject("SELECT COUNT(*) FROM seckill_message_recovery", Integer.class));
+    assertTrue(mapper.findDue(50, LocalDateTime.now().plusYears(1)).isEmpty());
+  }
+
+  @Test
+  void malformedUtf8InsideJsonStringCannotBecomeAReplayableRepairedEvent() throws Exception {
+    byte[] body = validPayload("bad-X").getBytes(StandardCharsets.UTF_8);
+    for (int index = 0; index < body.length; index++) {
+      if (body[index] == 'X') {
+        body[index] = (byte) 0x80;
+        break;
+      }
+    }
+    Channel channel = mock(Channel.class);
+    recoveryHandler().consumeDeadLetter(new Message(body, new MessageProperties()), channel);
+    Map<String, Object> saved = fixture.queryForMap("SELECT * FROM seckill_message_recovery");
+    assertEquals("CONFLICT", saved.get("status"));
+    var envelope = new ObjectMapper().readTree(String.valueOf(saved.get("payload")));
+    assertArrayEquals(
+        body, java.util.Base64.getDecoder().decode(envelope.get("rawPayloadBase64").asText()));
+    verify(channel).basicAck(0, false);
+  }
+
+  @Test
+  void validUtf8ReplacementCharacterChineseAndEmojiRemainNormalJson() throws Exception {
+    String eventId = "valid-�-中-😀";
+    deliver(recoveryHandler(), validPayload(eventId));
+    Map<String, Object> saved = row(eventId);
+    assertEquals("REPLAY_PENDING", saved.get("status"));
+    var payload = new ObjectMapper().readTree(String.valueOf(saved.get("payload")));
+    assertEquals(eventId, payload.get("eventId").asText());
+    assertFalse(payload.has("rawPayloadBase64"));
+  }
+
+  @Test
   void collationAliasesCannotBecomeIdempotentSuccessOrCorruptTheFirstRecord() {
     for (String alias : List.of("EVENT", "évent", "event ")) {
       for (String payload : List.of("{}", "{\"eventId\":\"different\"}")) {
