@@ -54,7 +54,7 @@ owner null/blank 仍在时间规范化前直接返回 0。分别规范化：
 
 ## 5. 验收矩阵
 
-1. 真实 MySQL strict/non-strict 覆盖 `.999499/.999500/.999999`、秒末/月末、9999 年末、1000 年初；claim 三个写入时间均为 floor 后毫秒，30 秒 lease 不跨越错误月份。
+1. 真实 MySQL strict/non-strict 覆盖 `.999499/.999500/.999999`、秒末/月末、9999 年末、1000 年初；claim 写入的 `lease_until` 与 `updated_at` 均为 floor 后毫秒，`next_retry_at` 仅作为同精度规范化的查询条件，30 秒 lease 不跨越错误月份。
 2. finish/retry 在 `lease_until == normalizedNow` 时严格返回 0；在此前有效时间可完成；全行保持原 AZ/BB/身份/key 语义。
 3. retry 跨秒/月末时 nextRetry 与 fresh now 分别 floor；不以 retryAt 授权过期 lease。
 4. null、year 999/0/10000、LocalDateTime MIN/MAX 和派生 lease 溢出均 SQL 前抛 `IllegalArgumentException`，原行/零行不变；owner blank 仍原 0。
