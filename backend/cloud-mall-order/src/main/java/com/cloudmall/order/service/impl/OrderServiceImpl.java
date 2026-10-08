@@ -929,31 +929,42 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 保存带原始载荷和稳定事件号的秒杀冲突证据，不触碰既有幂等记录。 */
+  /** 先成功序列化一次，再以同一文本派生匿名标识并保存证据；失败不得用占位或toString替代原文。 */
   private void recordSeckillConflict(
-      Map<String, Object> event, long userId, String key, String requestHash,
-      String orderNo, String eventId, String reason) {
-    String stableEventId = eventId == null || eventId.isBlank()
-        ? stableSeckillEventId(event, orderNo) : eventId;
+      Map<String, Object> event,
+      long userId,
+      String key,
+      String requestHash,
+      String orderNo,
+      String eventId,
+      String reason) {
+    // 1. 准备唯一成功文本；保留原异常，交由外层Rabbit重试流程处理。
     String payload;
     try {
       payload = mapper.writeValueAsString(event);
     } catch (Exception serializationFailure) {
-      payload = "{\"serializationError\":\"true\"}";
+      throw new IllegalStateException("秒杀冲突证据序列化失败", serializationFailure);
     }
+    // 2. 保留原显式身份优先级，匿名标识和缺失哈希复用同一文本。
+    String stableEventId =
+        eventId == null || eventId.isBlank() ? stableSeckillEventId(payload, orderNo) : eventId;
+    // 3. 只有真实文本准备完成后才写入JSON视图和原文证据。
     seckillOrderDedupMapper.recordConflictEvent(
-        id(), userId, key, requestHash == null || requestHash.isBlank()
-            ? sha256(payload) : requestHash, orderNo, stableEventId, reason, payload,
+        id(),
+        userId,
+        key,
+        requestHash == null || requestHash.isBlank() ? sha256(payload) : requestHash,
+        orderNo,
+        stableEventId,
+        reason,
+        payload,
         now().toLocalDateTime());
   }
 
-  private String stableSeckillEventId(Map<String, Object> event, String orderNo) {
+  /** 保留原订单派生标识，否则仅按已经成功序列化的文本计算稳定SHA256。 */
+  private static String stableSeckillEventId(String payload, String orderNo) {
     if (orderNo != null && !orderNo.isBlank()) return SeckillRequestFingerprint.eventId(orderNo);
-    try {
-      return "legacy-seckill:hash:" + sha256(mapper.writeValueAsString(event));
-    } catch (Exception serializationFailure) {
-      return "legacy-seckill:hash:" + sha256(String.valueOf(event));
-    }
+    return "legacy-seckill:hash:" + sha256(payload);
   }
 
   private static String sha256(String value) {

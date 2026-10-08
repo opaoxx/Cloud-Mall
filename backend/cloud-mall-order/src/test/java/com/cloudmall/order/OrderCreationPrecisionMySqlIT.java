@@ -1344,6 +1344,101 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void conflictSerializationFailuresCannotCommitPlaceholderEvidence() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    for (String identity : List.of("provided", "order-only", "anonymous", "existing")) {
+      Map<String, Object> original = timeEvent("202612-conflict-serialization-" + identity);
+      original.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      saveRecovery(
+          7500 + sequence++, String.valueOf(original.get("eventId")), original, "QUARANTINED");
+      Map<String, Object> invalid = new java.util.LinkedHashMap<>(original);
+      if ("existing".equals(identity)) {
+        ReflectionTestUtils.setField(service, "mapper", new ObjectMapper());
+        service.consumeSeckill(original);
+        String otherOrder = String.valueOf(original.get("orderNo")) + "-other";
+        invalid.put("orderNo", otherOrder);
+        invalid.put("eventId", SeckillRequestFingerprint.eventId(otherOrder));
+      } else invalid.put("skuId", new BigDecimal("7.5"));
+      if ("order-only".equals(identity) || "anonymous".equals(identity)) invalid.remove("eventId");
+      if ("anonymous".equals(identity)) invalid.remove("orderNo");
+      ObjectMapper serializer = spy(new ObjectMapper());
+      var originalFailure =
+          com.fasterxml.jackson.databind.JsonMappingException.fromUnexpectedIOE(
+              new java.io.IOException("controlled conflict serialization failure"));
+      doThrow(originalFailure).when(serializer).writeValueAsString(same(invalid));
+      ReflectionTestUtils.setField(service, "mapper", serializer);
+      clearInvocations(products);
+      var before = fixtureFacts();
+      IllegalStateException failure = null;
+      try {
+        service.consumeSeckill(invalid);
+      } catch (IllegalStateException rejected) {
+        failure = rejected;
+      }
+      IllegalStateException captured = failure;
+      var after = fixtureFacts();
+      checks.add(() -> assertNotNull(captured, identity));
+      checks.add(() -> assertEquals(before, after, identity));
+      if (captured != null)
+        checks.add(() -> assertSame(originalFailure, captured.getCause().getCause(), identity));
+    }
+    assertAll(checks);
+    verifyNoInteractions(
+        ReflectionTestUtils.getField(service, "products"),
+        ReflectionTestUtils.getField(service, "stock"),
+        ReflectionTestUtils.getField(service, "cart"));
+  }
+
+  @Test
+  void successfulConflictEvidenceUsesOneTextForRawHashAndStableIdentity() throws Exception {
+    for (String identity : List.of("provided", "order-only", "anonymous")) {
+      Map<String, Object> event = timeEvent("202612-conflict-text-" + identity);
+      event.put(
+          "skuId", java.math.BigInteger.ONE.shiftLeft(64).add(java.math.BigInteger.valueOf(7)));
+      event.remove("requestHash");
+      if ("provided".equals(identity)) event.put("eventId", "provided-conflict-text");
+      else event.remove("eventId");
+      if ("anonymous".equals(identity)) event.remove("orderNo");
+      String payload = new ObjectMapper().writeValueAsString(event);
+      String hash =
+          java.util.HexFormat.of()
+              .formatHex(
+                  java.security.MessageDigest.getInstance("SHA-256")
+                      .digest(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+      String expectedId =
+          "provided".equals(identity)
+              ? "provided-conflict-text"
+              : "order-only".equals(identity)
+                  ? SeckillRequestFingerprint.eventId(String.valueOf(event.get("orderNo")))
+                  : "legacy-seckill:hash:" + hash;
+      ObjectMapper serializer = spy(new ObjectMapper());
+      ReflectionTestUtils.setField(service, "mapper", serializer);
+      var before = fixtureFacts();
+      service.consumeSeckill(event);
+      verify(serializer).writeValueAsString(same(event));
+      var after = fixtureFacts();
+      for (String tableName : before.keySet())
+        if (!"seckill_order_dedup_conflict".equals(tableName))
+          assertEquals(before.get(tableName), after.get(tableName));
+      Map<String, Object> recorded =
+          fixture.queryForMap(
+              "SELECT * FROM seckill_order_dedup_conflict WHERE event_id=?", expectedId);
+      assertEquals(payload, recorded.get("raw_payload"));
+      assertEquals(hash, recorded.get("request_hash"));
+      clearInvocations(serializer);
+      service.consumeSeckill(event);
+      verify(serializer).writeValueAsString(same(event));
+      assertEquals(after, fixtureFacts());
+    }
+    verifyNoInteractions(
+        ReflectionTestUtils.getField(service, "products"),
+        ReflectionTestUtils.getField(service, "stock"),
+        ReflectionTestUtils.getField(service, "cart"));
+  }
+
+  @Test
   void zeroSeckillCommitUpdateCannotCommitOrdersOrResolveHeldRecovery() throws Exception {
     Map<String, Object> event = timeEvent("202612-zero-commit-result");
     event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");

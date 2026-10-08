@@ -561,6 +561,157 @@ class SeckillProductIdentityTest {
     verifyNoInteractions(fatal.recovery, fatal.stock, fatal.cart);
   }
 
+  @Test
+  void conflictSerializationFailuresPreserveBothCausesAndNeverWriteEvidence() throws Exception {
+    for (String identity : List.of("provided", "order-only", "anonymous", "existing")) {
+      Fixture fixture = new Fixture();
+      if ("existing".equals(identity)) {
+        fixture.event.put("orderNo", fixture.orderNo + "-other");
+        doReturn(0)
+            .when(fixture.dedup)
+            .claim(anyLong(), anyLong(), anyString(), anyString(), anyString(), anyString(), any());
+        doReturn(
+                Map.of(
+                    "request_hash",
+                    fixture.hash,
+                    "order_no",
+                    fixture.orderNo,
+                    "status",
+                    "COMMITTED"))
+            .when(fixture.dedup)
+            .find(8L, fixture.key);
+      } else fixture.event.put("skuId", new BigDecimal("7.5"));
+      if ("order-only".equals(identity) || "anonymous".equals(identity))
+        fixture.event.remove("eventId");
+      if ("anonymous".equals(identity)) fixture.event.remove("orderNo");
+      ObjectMapper serializer = spy(new ObjectMapper());
+      var original =
+          com.fasterxml.jackson.databind.JsonMappingException.fromUnexpectedIOE(
+              new java.io.IOException("conflict evidence unavailable"));
+      doThrow(original).when(serializer).writeValueAsString(same(fixture.event));
+      ReflectionTestUtils.setField(fixture.service, "mapper", serializer);
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertInstanceOf(IllegalStateException.class, failure.getCause());
+      assertSame(original, failure.getCause().getCause());
+      verify(serializer).writeValueAsString(same(fixture.event));
+      if ("existing".equals(identity)) {
+        verify(fixture.dedup)
+            .claim(
+                anyLong(),
+                eq(8L),
+                eq(fixture.key),
+                eq(fixture.hash),
+                eq(fixture.orderNo + "-other"),
+                eq(fixture.eventId),
+                any());
+        verify(fixture.dedup).find(8L, fixture.key);
+        verifyNoMoreInteractions(fixture.dedup);
+      } else verifyNoInteractions(fixture.dedup);
+      verifyNoInteractions(
+          fixture.products,
+          fixture.orders,
+          fixture.outbox,
+          fixture.recovery,
+          fixture.stock,
+          fixture.cart);
+    }
+  }
+
+  @Test
+  void successfulConflictHashAndIdentityReuseTheSingleSerializedPayload() throws Exception {
+    for (String identity : List.of("provided", "order-only", "anonymous")) {
+      Fixture fixture = new Fixture();
+      fixture.event.remove("requestHash");
+      if ("provided".equals(identity)) fixture.event.put("eventId", "provided-conflict-id");
+      else fixture.event.remove("eventId");
+      if ("anonymous".equals(identity)) fixture.event.remove("orderNo");
+      String payload = new ObjectMapper().writeValueAsString(fixture.event);
+      String hash =
+          java.util.HexFormat.of()
+              .formatHex(
+                  java.security.MessageDigest.getInstance("SHA-256")
+                      .digest(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+      String expectedId =
+          "provided".equals(identity)
+              ? "provided-conflict-id"
+              : "order-only".equals(identity)
+                  ? SeckillRequestFingerprint.eventId(fixture.orderNo)
+                  : "legacy-seckill:hash:" + hash;
+      ObjectMapper serializer = spy(new ObjectMapper());
+      ReflectionTestUtils.setField(fixture.service, "mapper", serializer);
+      fixture.service.consumeSeckill(fixture.event);
+      verify(serializer).writeValueAsString(same(fixture.event));
+      verify(fixture.dedup)
+          .recordConflictEvent(
+              anyLong(),
+              eq(8L),
+              eq(fixture.key),
+              eq(hash),
+              eq("anonymous".equals(identity) ? "" : fixture.orderNo),
+              eq(expectedId),
+              anyString(),
+              eq(payload),
+              any());
+      verifyNoMoreInteractions(fixture.dedup);
+      verifyNoInteractions(
+          fixture.products,
+          fixture.orders,
+          fixture.outbox,
+          fixture.recovery,
+          fixture.stock,
+          fixture.cart);
+    }
+  }
+
+  @Test
+  void fatalSerializationErrorsRemainUnwrappedAndHealthyPathsSkipConflictSerialization()
+      throws Exception {
+    Fixture fatal = new Fixture();
+    fatal.event.put("skuId", new BigDecimal("7.5"));
+    ObjectMapper serializer = spy(new ObjectMapper());
+    AssertionError original = new AssertionError("fatal serialization failure");
+    doThrow(original).when(serializer).writeValueAsString(same(fatal.event));
+    ReflectionTestUtils.setField(fatal.service, "mapper", serializer);
+    assertSame(
+        original,
+        assertThrows(AssertionError.class, () -> fatal.service.consumeSeckill(fatal.event)));
+    verifyNoInteractions(
+        fatal.dedup,
+        fatal.products,
+        fatal.orders,
+        fatal.outbox,
+        fatal.recovery,
+        fatal.stock,
+        fatal.cart);
+    for (boolean replay : List.of(false, true)) {
+      Fixture fixture = new Fixture();
+      if (replay) {
+        doReturn(0)
+            .when(fixture.dedup)
+            .claim(anyLong(), anyLong(), anyString(), anyString(), anyString(), anyString(), any());
+        doReturn(
+                Map.of(
+                    "request_hash",
+                    fixture.hash,
+                    "order_no",
+                    fixture.orderNo,
+                    "status",
+                    "COMMITTED"))
+            .when(fixture.dedup)
+            .find(8L, fixture.key);
+        fixture.event.remove("occurredAt");
+      }
+      ObjectMapper healthy = spy(new ObjectMapper());
+      ReflectionTestUtils.setField(fixture.service, "mapper", healthy);
+      fixture.service.consumeSeckill(fixture.event);
+      verify(healthy, never()).writeValueAsString(same(fixture.event));
+      if (replay) verifyNoInteractions(fixture.products, fixture.orders, fixture.outbox);
+      else verify(fixture.dedup).markCommitted(eq(8L), eq(fixture.key), any());
+    }
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
