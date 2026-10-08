@@ -153,12 +153,13 @@ public class OrderStockActionMapper {
    * 以数据库租约认领非负计数动作，次数在INT上限饱和递增。
    *
    * @param id 原动作主键
-   * @param owner 本次认领的独立标识
+   * @param owner 非空白且最多128个code point的本次认领标识，保留原值
    * @param now 原调用方提供的上海认领时间，向下毫秒后派生30秒租约
-   * @return 原租约条件匹配的更新行数，负计数或不匹配为0
+   * @return 原租约条件匹配的更新行数，非法owner、负计数或不匹配为0
    * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int claim(long id, String owner, LocalDateTime now) {
+    if (!validOwner(owner)) return 0;
     LocalDateTime normalizedNow = normalizeActionTime(now);
     LocalDateTime leaseUntil = normalizeActionTime(normalizedNow.plusSeconds(30));
     return jdbcTemplate.update(
@@ -178,15 +179,15 @@ public class OrderStockActionMapper {
    * 仅由本次认领的有效租约持有者完成动作；过期或被接管时零更新。
    *
    * @param id 原动作主键
-   * @param owner 本次认领标识，按原字符串精确比较
+   * @param owner 非空白且最多128个code point的认领标识，按原字符串精确比较
    * @param status 原调用方决定的目标状态
    * @param error 原错误文本，可为null
    * @param now 本次完成写的新鲜上海时间，同一规范毫秒值用于更新和租约判断
-   * @return 非负计数且有效租约匹配的更新行数，不匹配或空白标识为0
+   * @return 非负计数且有效租约匹配的更新行数，不匹配或非法标识为0
    * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int finish(long id, String owner, String status, String error, LocalDateTime now) {
-    if (owner == null || owner.isBlank()) return 0;
+    if (!validOwner(owner)) return 0;
     LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status=?,last_error=?,lease_owner=NULL,lease_until=NULL,"
@@ -205,15 +206,15 @@ public class OrderStockActionMapper {
    * 在本次有效租约内保留未知动作和原操作键，等待退避后重试。
    *
    * @param id 原动作主键
-   * @param owner 本次认领标识，按原字符串精确比较
+   * @param owner 非空白且最多128个code point的认领标识，按原字符串精确比较
    * @param error 原错误文本，可为null
    * @param retryAt 原调用方提供的下次重试时间，规范毫秒值只用于延期
    * @param now 本次重试写的新鲜上海时间，同一规范毫秒值用于更新和租约判断
-   * @return 非负计数且有效租约匹配的更新行数，不匹配或空白标识为0
+   * @return 非负计数且有效租约匹配的更新行数，不匹配或非法标识为0
    * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int retry(long id, String owner, String error, LocalDateTime retryAt, LocalDateTime now) {
-    if (owner == null || owner.isBlank()) return 0;
+    if (!validOwner(owner)) return 0;
     LocalDateTime normalizedRetryAt = normalizeActionTime(retryAt);
     LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.update(
@@ -228,6 +229,11 @@ public class OrderStockActionMapper {
         id,
         owner,
         normalizedNow);
+  }
+
+  /** 按owner列字符宽度先拒不可信标识；不裁剪、归一化或约束UUID格式。 */
+  private static boolean validOwner(String owner) {
+    return owner != null && !owner.isBlank() && owner.codePointCount(0, owner.length()) <= 128;
   }
 
   /** 同调用参数按上海local字段解释并floor毫秒；null/越界均在SQL前拒绝，不采新时钟。 */
