@@ -188,7 +188,7 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单 outbox 扫描 SQL 故障继续向外传播；单候选 DataAccessException 只隔离当前候选并继续后续候选。`markOutboxPublished` 或 failure 写入的数据库异常不得被普通发送 catch 转换为第二次 failure 写入，不猜测已确认消息状态；非数据库发送/解析异常保持原一次退避记录，Error 不捕获。
 
-订单 outbox publisher confirm 后，`markOutboxPublished` 仅返回 1 才直接完成；返回 0 只允许通过 event_id/status=PUBLISHED 的唯一只读 proof 确认 peer 已完成，否则按数据库并发证明失败隔离，不写 failure、不重发、不改变 outbox。非 0/1 不查询；该 proof 不保证 MQ 与数据库原子性。
+订单 outbox publisher confirm 后，`markOutboxPublished` 仅返回 1 才直接完成；返回 0 只允许通过唯一只读 publication facts proof 确认 peer 已完成。`findPublicationFacts(eventId)` 方法签名不变，仍只按原 eventId 读取 partial PO，投影为 `event_id,status,event_type,order_no,attempts`；proof 必须同时核对唯一行、原 eventId 精确相等、`status=PUBLISHED`、原 orderNo 精确相等、原 `event_type=ORDER_TIMEOUT`，以及 attempts 非 null 且非负。attempts 不要求保持原值，peer 合法增长 1 或饱和为 INT_MAX 均可接受。缺行、非唯一、任一事实不精确或 attempts null/负均按 Optimistic(DataAccess) 并发证明失败隔离，不写 failure、不重发、不修事实；非 0/1 不查询。`attempts` 使用 nullable 精确读取，NULL 仅为 unit seam，因为 SQL 列仍 NOT NULL；该 proof 不保证 MQ 与数据库原子性。
 
 订单 outbox 的完成写与失败写在既有 `event_id=?` 候选条件上追加 `CAST(event_id AS BINARY)=CAST(? AS BINARY)`，同一原 eventId 绑定两次；大小写、重音或尾空格别名不得改写其他事件。0 行完成继续 publication proof，0 行失败保持原返回语义，不改变扫描、消息或公开 API。
 

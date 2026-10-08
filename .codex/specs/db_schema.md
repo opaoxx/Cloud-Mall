@@ -298,7 +298,7 @@ Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行
 
 Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改变表事实，单候选写失败不追加未知状态或二次 failure 写，已 confirm 但终态更新失败保持原行供既有重试/人工核验；表结构和 SQL 条件不变。
 
-发布完成 proof 只读 `event_id,status` 当前事实；`markOutboxPublished` 影响行数 0 不直接代表成功，只有唯一精确 event_id 且 status=PUBLISHED 才可幂等收敛。该读取不新增列、索引或状态写入。
+发布完成 proof 只读当前事实的 partial PO；`findPublicationFacts(eventId)` 方法签名不变，投影固定为 `event_id,status,event_type,order_no,attempts`，不读取 payload、时间、错误或其他 full-row 字段，不用于重投。`markOutboxPublished` 影响行数 0 不直接代表成功，只有唯一行同时满足原 event_id 精确相等、status=PUBLISHED、原 order_no 精确相等、event_type=ORDER_TIMEOUT 且 attempts 非 NULL/非负时才可幂等收敛。attempts 不要求等于发送快照，可合法增长 1 或饱和为 INT_MAX；Mapper 以 nullable 精确方式读取它，NULL 仅是 unit proof 输入，`attempts INT NOT NULL` DDL 不变。任一事实不满足时由 dispatcher 抛 Optimistic(DataAccess) 并沿单候选隔离，不写 failure、不重发、不修事实；读前后中断、扫描/查询数据库异常、完成写 1 行及非 0/1 原规则保持。该读取不新增列、索引或状态写入，也不提供 MQ 与 DB 原子证明。
 
 订单 outbox 完成/失败更新保留 `event_id` 索引候选，并使用 `CAST(event_id AS BINARY)=CAST(? AS BINARY)` 精确核验身份；`event_id VARCHAR(128) UNIQUE NOT NULL`、索引和历史数据不变，不新增列或迁移。
 
