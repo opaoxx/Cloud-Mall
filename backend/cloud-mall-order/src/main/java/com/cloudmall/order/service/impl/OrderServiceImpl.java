@@ -62,6 +62,9 @@ public class OrderServiceImpl implements OrderService {
   /** 跨月订单查询失败及错月数据的诊断日志。 */
   private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
 
+  /** 既有订单/明细DECIMAL(18,2)非负数值容量上界；不表示商业限额或账户可支付余额。 */
+  private static final BigDecimal MAX_ORDER_AMOUNT = new BigDecimal("9999999999999999.99");
+
   /** 执行 ofPattern 相关操作。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
 
@@ -135,7 +138,7 @@ public class OrderServiceImpl implements OrderService {
    * @param key 与原用户绑定的幂等请求键
    * @param req 购买商品数量及原收货地址请求
    * @return 创建成功或既有幂等重放的订单摘要
-   * @throws BizException 请求非法400，商品缺失404，响应SKU或价格不可信500，幂等/库存冲突409，预扣待确认202
+   * @throws BizException 请求或组合金额非法400，商品缺失404，响应SKU或价格不可信500，幂等/库存冲突409，预扣待确认202
    */
   @Transactional
   @PostMapping("/orders")
@@ -190,8 +193,15 @@ public class OrderServiceImpl implements OrderService {
         throw new BizException(ErrorCodes.INTERNAL, "商品价格不可信", 500);
       if (!hasCentPrecision(skuView.unitPrice()))
         throw new BizException(ErrorCodes.INTERNAL, "商品价格小数精度不可信", 500);
+      if (!fitsOrderAmountCapacity(skuView.unitPrice()))
+        throw new BizException(ErrorCodes.INTERNAL, "商品价格超出金额容量", 500);
       BigDecimal line = skuView.unitPrice().multiply(BigDecimal.valueOf(item.quantity));
-      total = total.add(line);
+      if (!fitsOrderAmountCapacity(line))
+        throw new BizException(ErrorCodes.INVALID, "订单行金额超过支持范围", 400);
+      BigDecimal nextTotal = total.add(line);
+      if (!fitsOrderAmountCapacity(nextTotal))
+        throw new BizException(ErrorCodes.INVALID, "订单总额超过支持范围", 400);
+      total = nextTotal;
       lines.add(new StockClient.Line(item.skuId, item.quantity));
       rows.add(new ItemRow(skuView, line, item.quantity));
     }
@@ -319,6 +329,11 @@ public class OrderServiceImpl implements OrderService {
   /** 仅在非空/非负价格门后核数学分精度，去尾零临时值不写回。先检查scale<=2， 避免极负scale整数去尾零下溢；不展开、舍入或修改原价格对象，不定义整数位容量。 */
   private static boolean hasCentPrecision(BigDecimal amount) {
     return amount.scale() <= 2 || amount.stripTrailingZeros().scale() <= 2;
+  }
+
+  /** 在非空/非负及分精度通过后只比较既有列数值上界，不展开、舍入或改变原金额表示。 */
+  private static boolean fitsOrderAmountCapacity(BigDecimal amount) {
+    return amount.compareTo(MAX_ORDER_AMOUNT) <= 0;
   }
 
   /** 创建入口只读采样。只对购买聚合数量与原JSON正int数量一致的项提供不可变证明； long安全承载Java List中正int请求的总和，超int仅跳过清理，不改变订单流程。 */
@@ -841,6 +856,8 @@ public class OrderServiceImpl implements OrderService {
         throw new IllegalStateException("秒杀商品价格不可信: " + skuId);
       if (!hasCentPrecision(productSku.unitPrice()))
         throw new IllegalStateException("秒杀商品价格小数精度不可信: " + skuId);
+      if (!fitsOrderAmountCapacity(productSku.unitPrice()))
+        throw new IllegalStateException("秒杀商品价格超出金额容量: " + skuId);
       OrderPO order = new OrderPO();
       order.id = id();
       order.orderNo = orderNo;

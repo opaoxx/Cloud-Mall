@@ -1140,6 +1140,210 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void oversizedProductPricesLinesAndTotalsCannotReachStockOrLeaveIntentFacts() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String fault : List.of("unit", "line", "total")) {
+      BigDecimal price =
+          new BigDecimal(
+              "unit".equals(fault)
+                  ? "10000000000000000.00"
+                  : "line".equals(fault) ? "5000000000000000.00" : "6000000000000000.00");
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", price, Map.of())))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      if ("line".equals(fault)) request.items.get(0).quantity = 2;
+      else if ("total".equals(fault)) {
+        OrderItemDTO second = new OrderItemDTO();
+        second.skuId = 8L;
+        second.quantity = 1;
+        request.items = List.of(request.items.get(0), second);
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        8L,
+                        9L,
+                        "second",
+                        "SKU-8",
+                        new BigDecimal("4000000000000000.00"),
+                        Map.of())))
+            .when(products)
+            .sku(8L);
+      }
+      clearInvocations(products, stock, cart);
+      var before = fixtureFacts();
+      RuntimeException failure = null;
+      try {
+        transaction.execute(status -> service.create("amount-capacity-" + fault, request));
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+      RuntimeException captured = failure;
+      var after = fixtureFacts();
+      long stockCalls = mockingDetails(stock).getInvocations().size();
+      long cartWrites =
+          mockingDetails(cart).getInvocations().stream()
+              .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+              .count();
+      checks.add(() -> assertInstanceOf(BizException.class, captured, fault));
+      if (captured instanceof BizException controlled) {
+        checks.add(
+            () ->
+                assertEquals("unit".equals(fault) ? 500 : 400, controlled.getHttpStatus(), fault));
+        checks.add(
+            () ->
+                assertEquals(
+                    "unit".equals(fault) ? ErrorCodes.INTERNAL : ErrorCodes.INVALID,
+                    controlled.getCode(),
+                    fault));
+      }
+      checks.add(() -> assertEquals(before, after, fault));
+      checks.add(() -> assertEquals(0, stockCalls, fault));
+      checks.add(() -> assertEquals(0, cartWrites, fault));
+      verify(products).sku(7L);
+      if ("total".equals(fault)) verify(products).sku(8L);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void oversizedSeckillPriceRollsBackTheClaimAndKeepsHeldRecovery() throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    Map<String, Object> event = timeEvent("202612-amount-capacity");
+    event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(6400, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+    var before = fixtureFacts();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("1E+16"), Map.of())))
+        .when(products)
+        .sku(7L);
+    IllegalStateException failure =
+        assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+    assertInstanceOf(IllegalStateException.class, failure.getCause());
+    assertEquals(before, fixtureFacts());
+    verify(products).sku(7L);
+    verifyNoInteractions(
+        ReflectionTestUtils.getField(service, "stock"),
+        ReflectionTestUtils.getField(service, "cart"));
+  }
+
+  @Test
+  void exactAmountCapacityBoundariesPersistAndAnOversizedSeckillCanRetryAtMaximum()
+      throws Exception {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    BigDecimal maximum = new BigDecimal("9999999999999999.99");
+    int sequence = 0;
+    for (String scenario : List.of("max", "line-boundary", "total-boundary")) {
+      BigDecimal price =
+          new BigDecimal(
+              "line-boundary".equals(scenario)
+                  ? "4999999999999999.99"
+                  : "total-boundary".equals(scenario)
+                      ? "9999999999999999.98"
+                      : maximum.toPlainString());
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", price, Map.of())))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      if ("line-boundary".equals(scenario)) request.items.get(0).quantity = 2;
+      else if ("total-boundary".equals(scenario)) {
+        OrderItemDTO second = new OrderItemDTO();
+        second.skuId = 8L;
+        second.quantity = 1;
+        request.items = List.of(request.items.get(0), second);
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        8L, 9L, "second", "SKU-8", new BigDecimal("0.01"), Map.of())))
+            .when(products)
+            .sku(8L);
+      }
+      ApiResponse<?> created =
+          transaction.execute(status -> service.create("valid-capacity-" + scenario, request));
+      assertEquals("0", created.code);
+      String orderNo = ((OrderVO) created.data).orderNo;
+      BigDecimal total =
+          fixture.queryForObject(
+              "SELECT total_amount FROM mall_order_202612 WHERE order_no=?",
+              BigDecimal.class,
+              orderNo);
+      if (!"line-boundary".equals(scenario)) assertEquals(maximum, total);
+      BigDecimal summed = BigDecimal.ZERO;
+      for (Map<String, Object> detail :
+          fixture.queryForList(
+              "SELECT unit_price, quantity, line_amount FROM mall_order_item_202612 WHERE order_no=?",
+              orderNo)) {
+        BigDecimal line = (BigDecimal) detail.get("line_amount");
+        assertEquals(
+            0,
+            ((BigDecimal) detail.get("unit_price"))
+                .multiply(BigDecimal.valueOf(((Number) detail.get("quantity")).longValue()))
+                .compareTo(line));
+        summed = summed.add(line);
+      }
+      assertEquals(0, total.compareTo(summed));
+      assertEquals(
+          total,
+          fixture.queryForObject(
+              "SELECT pay_amount FROM mall_order_202612 WHERE order_no=?",
+              BigDecimal.class,
+              orderNo));
+      Map<String, Object> event = timeEvent("202612-valid-capacity-" + sequence++);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", maximum, Map.of())))
+          .when(products)
+          .sku(7L);
+      service.consumeSeckill(event);
+      assertEquals(
+          maximum,
+          fixture.queryForObject(
+              "SELECT total_amount FROM mall_order_202612 WHERE order_no=?",
+              BigDecimal.class,
+              event.get("orderNo")));
+    }
+    Map<String, Object> retry = timeEvent("202612-capacity-retry");
+    retry.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(6500, String.valueOf(retry.get("eventId")), retry, "QUARANTINED");
+    var before = fixtureFacts();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("1E+16"), Map.of())))
+        .when(products)
+        .sku(7L);
+    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(retry));
+    assertEquals(before, fixtureFacts());
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(7L, 9L, "product", "SKU-7", maximum, Map.of())))
+        .when(products)
+        .sku(7L);
+    service.consumeSeckill(retry);
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(retry.get("eventId"))).get("status"));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+            String.class,
+            retry.get("orderNo")));
+    assertPersistedCreation(
+        String.valueOf(retry.get("orderNo")), LocalDateTime.parse("2026-12-31T23:59:59.999"));
+  }
+
+  @Test
   void matchingProductIdentityUsesTheCurrentPriceAndSameSkuForStockAndSqlDetails() {
     AuthContext.set(7L, "USER");
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");

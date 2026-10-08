@@ -229,7 +229,7 @@ class SeckillProductIdentityTest {
       prices.add(new BigDecimal(representation));
     // 极端表示只验证Service与mock赋值，不能将其当作真实SQL或可支付金额承诺。
     prices.add(new BigDecimal(java.math.BigInteger.ZERO, Integer.MAX_VALUE));
-    prices.add(new BigDecimal(java.math.BigInteger.TEN, Integer.MIN_VALUE));
+
     for (BigDecimal price : prices) {
       Fixture fixture = new Fixture();
       doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
@@ -242,6 +242,45 @@ class SeckillProductIdentityTest {
       assertSame(price, detail.getValue().lineAmount);
       assertSame(price, order.getValue().totalAmount);
       assertSame(price, order.getValue().payAmount);
+      assertEquals(1, detail.getValue().quantity);
+    }
+  }
+
+  @Test
+  void oversizedAndExtremeIntegerPricesCannotWriteOrCompleteSeckillFacts() {
+    for (BigDecimal price :
+        List.of(
+            new BigDecimal("10000000000000000.00"),
+            new BigDecimal(java.math.BigInteger.TEN, Integer.MIN_VALUE))) {
+      Fixture fixture = new Fixture();
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertInstanceOf(IllegalStateException.class, failure.getCause());
+      assertTrue(failure.getCause().getMessage().contains("容量"));
+      fixture.verifyNoOrderOrCompletionWrites();
+    }
+  }
+
+  @Test
+  void maximumAndMathematicallyZeroExtremeScaleKeepTheirOriginalObjects() {
+    for (BigDecimal price :
+        List.of(
+            new BigDecimal("9999999999999999.99"),
+            new BigDecimal("9999999999999999.9900"),
+            new BigDecimal(java.math.BigInteger.ZERO, Integer.MAX_VALUE))) {
+      Fixture fixture = new Fixture();
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      fixture.service.consumeSeckill(fixture.event);
+      var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      verify(fixture.orders).insertOrder(anyString(), order.capture());
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      assertSame(price, order.getValue().totalAmount);
+      assertSame(price, order.getValue().payAmount);
+      assertSame(price, detail.getValue().unitPrice);
+      assertSame(price, detail.getValue().lineAmount);
       assertEquals(1, detail.getValue().quantity);
     }
   }

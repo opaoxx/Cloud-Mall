@@ -229,6 +229,90 @@ class OrderProductIdentityTest {
     }
   }
 
+  @Test
+  void unitLineAndTotalCapacityFailuresPrecedeIntentStockAndOrderWrites() {
+    for (String scenario : List.of("unit", "line", "total", "extreme-unit")) {
+      Fixture fixture = new Fixture();
+      BigDecimal price =
+          "extreme-unit".equals(scenario)
+              ? new BigDecimal(java.math.BigInteger.TEN, Integer.MIN_VALUE)
+              : new BigDecimal(
+                  "unit".equals(scenario)
+                      ? "1E+16"
+                      : "line".equals(scenario) ? "5000000000000000.00" : "6000000000000000.00");
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      CreateOrderDTO request = request("total".equals(scenario));
+      if ("line".equals(scenario)) request.items.get(0).quantity = 2;
+      else if ("total".equals(scenario)) {
+        request.items.get(1).quantity = 1;
+        doReturn(ApiResponse.ok(product(8L, new BigDecimal("4000000000000000.00"))))
+            .when(fixture.products)
+            .sku(8L);
+      }
+      BizException failure =
+          assertThrows(
+              BizException.class, () -> fixture.service.create("capacity-" + scenario, request));
+      boolean unitFailure = scenario.endsWith("unit") || "unit".equals(scenario);
+      assertEquals(unitFailure ? 500 : 400, failure.getHttpStatus());
+      assertEquals(unitFailure ? ErrorCodes.INTERNAL : ErrorCodes.INVALID, failure.getCode());
+      if (unitFailure) assertTrue(failure.getMessage().contains("容量"));
+      fixture.verifyNoBusinessWrites();
+    }
+  }
+
+  @Test
+  void exactCapacityBoundaryPreservesOriginalAmountsAndRequestLines() {
+    BigDecimal maximum = new BigDecimal("9999999999999999.99");
+    for (String scenario : List.of("max", "line-boundary", "total-boundary", "max-trailing")) {
+      Fixture fixture = new Fixture();
+      BigDecimal price =
+          new BigDecimal(
+              "line-boundary".equals(scenario)
+                  ? "4999999999999999.99"
+                  : "total-boundary".equals(scenario)
+                      ? "9999999999999999.98"
+                      : "max-trailing".equals(scenario)
+                          ? "9999999999999999.9900"
+                          : maximum.toPlainString());
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      CreateOrderDTO request = request("total-boundary".equals(scenario));
+      if ("line-boundary".equals(scenario)) request.items.get(0).quantity = 2;
+      else if ("total-boundary".equals(scenario)) {
+        request.items.get(1).quantity = 1;
+        doReturn(ApiResponse.ok(product(8L, new BigDecimal("0.01"))))
+            .when(fixture.products)
+            .sku(8L);
+      }
+      assertEquals("0", fixture.service.create("boundary-" + scenario, request).code);
+      var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+      var details = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      verify(fixture.orders).insertOrder(anyString(), order.capture());
+      verify(fixture.orders, times(request.items.size()))
+          .insertOrderItem(anyString(), details.capture());
+      assertSame(price, details.getAllValues().get(0).unitPrice);
+      BigDecimal expectedTotal = BigDecimal.ZERO;
+      for (OrderItemPO detail : details.getAllValues()) {
+        assertEquals(
+            detail.unitPrice.multiply(BigDecimal.valueOf(detail.quantity)), detail.lineAmount);
+        expectedTotal = expectedTotal.add(detail.lineAmount);
+      }
+      assertEquals(expectedTotal, order.getValue().totalAmount);
+      assertEquals(expectedTotal, order.getValue().payAmount);
+      assertTrue(expectedTotal.compareTo(maximum) <= 0);
+      if (!"line-boundary".equals(scenario)) assertEquals(0, maximum.compareTo(expectedTotal));
+      var reservation = org.mockito.ArgumentCaptor.forClass(StockClient.Reservation.class);
+      verify(fixture.stock).reserve(reservation.capture());
+      assertEquals(request.items.size(), reservation.getValue().items().size());
+      for (int index = 0; index < request.items.size(); index++) {
+        assertEquals(
+            request.items.get(index).skuId, reservation.getValue().items().get(index).skuId());
+        assertEquals(
+            request.items.get(index).quantity,
+            reservation.getValue().items().get(index).quantity());
+      }
+    }
+  }
+
   /** 原商品事实对象，不转换身份或规范化金额。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
