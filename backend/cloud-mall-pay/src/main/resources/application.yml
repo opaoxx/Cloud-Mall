@@ -33,7 +33,7 @@ seata:
   config.type: file
   tx-service-group: cloudmall_tx_group
   service.vgroup-mapping.cloudmall_tx_group: default
-  service.grouplist.default: 127.0.0.1:8091
+  service.grouplist.default: ${CLOUDMALL_SEATA_TC:127.0.0.1:18091}
 
 cloudmall.pay.tcc-cancel.enabled: false
 cloudmall.pay.tcc-cancel.interval-ms: 5000

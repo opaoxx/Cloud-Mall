@@ -69,19 +69,20 @@ class StockDependencyTransactionTest {
   @Test
   void commitFailuresOpenCircuitBeforeAnyThirdTransactionBegins() {
     ClusterBuilderSlot.resetClusterNodes();
-    DegradeRuleManager.loadRules(
-        java.util.List.of(
-            new DegradeRule(StockDependencyGuard.MYSQL_TRANSACTION)
-                .setGrade(1)
-                .setCount(0.5)
-                .setMinRequestAmount(2)
-                .setStatIntervalMs(1000)
-                .setTimeWindow(10)));
     try (AnnotationConfigApplicationContext context =
         new AnnotationConfigApplicationContext(Beans.class)) {
       StockController controller = context.getBean(StockController.class);
       TransactionProbe transactions = context.getBean(TransactionProbe.class);
       transactions.failCommit = true;
+      // 使用实际默认统计窗口，避免上下文启动或冷调用耗时让失败样本过期。
+      DegradeRuleManager.loadRules(
+          java.util.List.of(
+              new DegradeRule(StockDependencyGuard.MYSQL_TRANSACTION)
+                  .setGrade(1)
+                  .setCount(0.5)
+                  .setMinRequestAmount(2)
+                  .setStatIntervalMs(60000)
+                  .setTimeWindow(10)));
 
       for (int request = 0; request < 3; request++) {
         BizException failure =

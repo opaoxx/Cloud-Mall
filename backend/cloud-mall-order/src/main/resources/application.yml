@@ -66,7 +66,7 @@ seata:
     vgroup-mapping:
       cloudmall_tx_group: default
     grouplist:
-      default: 127.0.0.1:8091
+      default: ${CLOUDMALL_SEATA_TC:127.0.0.1:18091}
 ---
 # 17A 启动审计继续拒绝该 profile；隔离节点规则由 OrderShardingRuleFactory 显式生成。
 spring:

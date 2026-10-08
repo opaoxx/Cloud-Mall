@@ -180,14 +180,21 @@ class BackendP1RulesTest {
 
   @Test
   void seataClientsUseTheLocalFileModeServerAddress() throws Exception {
-    for (String module : List.of("cloud-mall-order", "cloud-mall-pay")) {
+    for (String module :
+        List.of("cloud-mall-order", "cloud-mall-pay", "cloud-mall-user", "cloud-mall-stock")) {
       Map<?, ?> root = (Map<?, ?>) new Yaml().loadAll(resource(module)).iterator().next();
       Map<?, ?> seata = mapValue(root, "seata", module);
-      assertEquals(true, seata.get("enabled"), module);
+      if (module.equals("cloud-mall-stock")) {
+        assertEquals("${CLOUDMALL_SEATA_ENABLED:false}", seata.get("enabled"), module);
+      } else {
+        assertEquals(!module.equals("cloud-mall-user"), seata.get("enabled"), module);
+      }
       assertEquals("file", nestedOrDottedValue(seata, "registry", "type"), module);
       assertEquals("file", nestedOrDottedValue(seata, "config", "type"), module);
       assertEquals(
-          "127.0.0.1:8091", nestedOrDottedValue(seata, "service.grouplist", "default"), module);
+          "${CLOUDMALL_SEATA_TC:127.0.0.1:18091}",
+          nestedOrDottedValue(seata, "service.grouplist", "default"),
+          module);
     }
   }
 

@@ -45,6 +45,27 @@ docker compose up -d
 
 首次启动时，MySQL 会执行 `backend/database/schema.sql`，创建数据库、表和本地演示商品。
 
+Nginx 宿主机入口为 `18088`（容器内 `80`），Seata TC 宿主机入口为 `18091`
+（容器内 `8091`）。四个 Seata 客户端默认连接 `127.0.0.1:18091`，可用环境变量
+`CLOUDMALL_SEATA_TC` 覆盖；容器之间仍使用内部服务名和端口。
+
+Windows 出现 `ports are not available` / `forbidden by its access permissions` 时，
+即使没有进程监听，也可能被系统 TCP 排除范围阻挡。启动前可执行只读诊断：
+
+```powershell
+.\deploy\check-local-ports.ps1
+# 同时检查 IDEA 业务服务固定端口和 Vite 端口：
+.\deploy\check-local-ports.ps1 -IncludeBusinessPorts
+netsh interface ipv4 show excludedportrange protocol=tcp
+netsh interface ipv6 show excludedportrange protocol=tcp
+```
+
+脚本报告排除范围或监听 PID，允许本项目运行中容器自身的 Docker/WSL 转发监听；
+不会杀进程或修改系统设置。2026-10-08 本机排除范围覆盖 8088/8091，且无残留
+Java/javaw 进程，因此本次映射改为上述高位端口。业务固定 8080–8086 当时也在
+排除范围内；中间件启动成功不代表这些 IDEA 端口已经可绑定，启动业务前须另行
+解决 Windows 的端口保留问题，并保持项目业务端口契约。
+
 Nacos 使用固定 hostname 作为 standalone Raft 节点身份。新数据卷默认使用
 `cloud-mall-nacos`；已有数据卷必须把持久 Raft 日志中唯一 peer 的 hostname 写入本机
 `.env` 的 `NACOS_NODE_HOSTNAME`，以后保持该值。当前本机恢复值为 `57c05639b175`。
@@ -83,7 +104,7 @@ npm ci
 npm run dev
 ```
 
-浏览器访问 <http://localhost:5173>；使用 Nginx 部署时访问 <http://localhost:8088>。
+浏览器访问 <http://localhost:5173>；使用 Nginx 部署时访问 <http://localhost:18088>。
 
 本地练习环境默认中间件账号约定为 `root/root`，仅用于本地开发，不应直接用于生产环境。
 
@@ -798,7 +819,7 @@ mvn -pl backend/cloud-mall-user -am test `
   '-Dcloudmall.mysql.test.url=jdbc:mysql://localhost:13307/cloudmall_user?serverTimezone=Asia/Shanghai'
 ```
 
-该测试在测试 JVM 中启动实际 User Spring Boot RM，通过网络连接真实 TC，使用独立 `cm15_tcc_it_*` 数据库。TC 默认地址为 `127.0.0.1:8091`，可用 `cloudmall.seata.test.tc` 覆盖。只有资金及 TC 事务均结束才清理数据库；若失败后保留测试库，应先恢复该测试事务，再清理，避免丢失仍在重试的分支事实。此测试不等同于进程中断或 Pay 全链路验收。
+该测试在测试 JVM 中启动实际 User Spring Boot RM，通过网络连接真实 TC，使用独立 `cm15_tcc_it_*` 数据库。TC 默认地址为 `127.0.0.1:18091`，可用 `cloudmall.seata.test.tc` 覆盖。只有资金及 TC 事务均结束才清理数据库；若失败后保留测试库，应先恢复该测试事务，再清理，避免丢失仍在重试的分支事实。此测试不等同于进程中断或 Pay 全链路验收。
 
 15B 独立进程故障验收需单独运行此测试类，避免 Seata SDK 的 JVM 静态资源缓存混入其他 RM：
 

@@ -98,7 +98,7 @@ class BalanceTccFenceSeataIT {
                   "--seata.enabled=true",
                   "--seata.enable-auto-data-source-proxy=false",
                   "--seata.service.grouplist.default="
-                      + System.getProperty("cloudmall.seata.test.tc", "127.0.0.1:8091"),
+                      + System.getProperty("cloudmall.seata.test.tc", "127.0.0.1:18091"),
                   "--cloudmall.user.tcc-resource.enabled=true",
                   "--cloudmall.user.tcc-debit.enabled=true");
       resource = application.getBean(BalanceTccDebitLocalResource.class);

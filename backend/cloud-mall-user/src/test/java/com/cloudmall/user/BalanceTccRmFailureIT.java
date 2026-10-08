@@ -122,7 +122,7 @@ class BalanceTccRmFailureIT {
       throw new IllegalStateException("显式 IT 需要 cloudmall_user 的 cloudmall.mysql.test.url");
     username = System.getProperty("cloudmall.mysql.test.username", "root");
     password = System.getProperty("cloudmall.mysql.test.password", "root");
-    tcAddress = System.getProperty("cloudmall.seata.test.tc", "127.0.0.1:8091");
+    tcAddress = System.getProperty("cloudmall.seata.test.tc", "127.0.0.1:18091");
     int delimiter = tcAddress.lastIndexOf(':');
     proxy =
         new RmTcLinkProxy(

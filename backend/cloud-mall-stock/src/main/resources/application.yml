@@ -50,4 +50,4 @@ seata:
     vgroup-mapping:
       cloudmall_tx_group: default
     grouplist:
-      default: ${CLOUDMALL_SEATA_TC:127.0.0.1:8091}
+      default: ${CLOUDMALL_SEATA_TC:127.0.0.1:18091}
