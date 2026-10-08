@@ -1344,6 +1344,46 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void zeroSeckillCommitUpdateCannotCommitOrdersOrResolveHeldRecovery() throws Exception {
+    Map<String, Object> event = timeEvent("202612-zero-commit-result");
+    event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(7400, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+    fixture.execute(
+        "CREATE TRIGGER co_bad_claim BEFORE INSERT ON seckill_order_dedup FOR EACH ROW SET NEW.status='CONFLICT'");
+    var before = fixtureFacts();
+    IllegalStateException failure = null;
+    try {
+      service.consumeSeckill(event);
+    } catch (IllegalStateException rejected) {
+      failure = rejected;
+    }
+    var after = fixtureFacts();
+    IllegalStateException captured = failure;
+    fixture.execute("DROP TRIGGER co_bad_claim");
+    assertAll(
+        () -> assertNotNull(captured, "zero-row completion must fail the consumer"),
+        () -> assertEquals(before, after, "all business and held recovery facts must roll back"));
+    assertInstanceOf(IllegalStateException.class, captured.getCause());
+    service.consumeSeckill(event);
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+            String.class,
+            event.get("orderNo")));
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(event.get("eventId"))).get("status"));
+    assertPersistedCreation(
+        String.valueOf(event.get("orderNo")), LocalDateTime.parse("2026-12-31T23:59:59.999"));
+    var committed = fixtureFacts();
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    clearInvocations(products);
+    event.remove("occurredAt");
+    service.consumeSeckill(event);
+    assertEquals(committed, fixtureFacts());
+    verifyNoInteractions(products);
+  }
+
+  @Test
   void conflictEvidenceRetainsExactNumericTextAndTheFirstWriter() throws Exception {
     SeckillOrderDedupMapper conflicts =
         (SeckillOrderDedupMapper) ReflectionTestUtils.getField(service, "seckillOrderDedupMapper");

@@ -518,6 +518,49 @@ class SeckillProductIdentityTest {
         fixture.cart);
   }
 
+  @Test
+  void nonSingleCompletionResultsCannotResolveOrReturnSuccessfully() {
+    for (int affectedRows : List.of(0, -1, 2)) {
+      Fixture fixture = new Fixture();
+      doReturn(affectedRows).when(fixture.dedup).markCommitted(anyLong(), anyString(), any());
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertInstanceOf(IllegalStateException.class, failure.getCause());
+      assertTrue(failure.getCause().getMessage().contains("幂等记录未能提交"));
+      verify(fixture.orders).insertOrder(anyString(), any(OrderPO.class));
+      verify(fixture.orders).insertOrderItem(anyString(), any(OrderItemPO.class));
+      verify(fixture.outbox).insert(any());
+      verify(fixture.dedup).markCommitted(eq(8L), eq(fixture.key), any());
+      verifyNoInteractions(fixture.recovery, fixture.stock, fixture.cart);
+    }
+  }
+
+  @Test
+  void completionWriteExceptionsPreserveCauseAndFatalErrorWithoutResolution() {
+    for (RuntimeException original :
+        List.of(
+            new IllegalStateException("commit unavailable"),
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "SQL completion unavailable"))) {
+      Fixture fixture = new Fixture();
+      doThrow(original).when(fixture.dedup).markCommitted(anyLong(), anyString(), any());
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertSame(original, failure.getCause());
+      verify(fixture.dedup).markCommitted(eq(8L), eq(fixture.key), any());
+      verifyNoInteractions(fixture.recovery, fixture.stock, fixture.cart);
+    }
+    Fixture fatal = new Fixture();
+    AssertionError original = new AssertionError("fatal completion failure");
+    doThrow(original).when(fatal.dedup).markCommitted(anyLong(), anyString(), any());
+    assertSame(
+        original,
+        assertThrows(AssertionError.class, () -> fatal.service.consumeSeckill(fatal.event)));
+    verifyNoInteractions(fatal.recovery, fatal.stock, fatal.cart);
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
@@ -594,6 +637,8 @@ class SeckillProductIdentityTest {
           .thenReturn(1);
       when(dedup.find(8L, key))
           .thenReturn(Map.of("request_hash", hash, "order_no", orderNo, "status", "PROCESSING"));
+      // 成功替身必须表达真实单行完成；异常计数由对应测试显式覆盖。
+      when(dedup.markCommitted(anyLong(), anyString(), any())).thenReturn(1);
       when(products.sku(7L)).thenReturn(ApiResponse.ok(product(7L, BigDecimal.TEN)));
       ReflectionTestUtils.setField(service, "seckillOrderDedupMapper", dedup);
       ReflectionTestUtils.setField(service, "seckillMessageRecoveryMapper", recovery);

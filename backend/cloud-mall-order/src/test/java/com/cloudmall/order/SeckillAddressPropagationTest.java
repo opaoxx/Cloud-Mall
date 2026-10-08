@@ -50,6 +50,7 @@ class SeckillAddressPropagationTest {
     when(dedupMapper.claim(
             anyLong(), anyLong(), anyString(), anyString(), anyString(), anyString(), any()))
         .thenReturn(1);
+    when(dedupMapper.markCommitted(anyLong(), anyString(), any())).thenReturn(1);
     ReflectionTestUtils.setField(service, "orderOutboxMapper", outboxMapper);
     ReflectionTestUtils.setField(service, "seckillOrderDedupMapper", dedupMapper);
     ReflectionTestUtils.setField(service, "seckillMessageRecoveryMapper", recoveryMapper);

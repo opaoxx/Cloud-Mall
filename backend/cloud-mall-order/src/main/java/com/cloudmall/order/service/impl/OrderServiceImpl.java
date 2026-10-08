@@ -902,7 +902,8 @@ public class OrderServiceImpl implements OrderService {
       orderItem.createdAt = created.toLocalDateTime();
       orderSqlMapper.insertOrderItem(itemTable, orderItem);
       orderOutboxMapper.insert(timeoutOutbox(orderNo, created, created.plusMinutes(30)));
-      seckillOrderDedupMapper.markCommitted(userId, key, now().toLocalDateTime());
+      if (seckillOrderDedupMapper.markCommitted(userId, key, now().toLocalDateTime()) != 1)
+        throw new IllegalStateException("秒杀幂等记录未能提交: " + orderNo);
       if (eventId != null && !eventId.isBlank())
         seckillMessageRecoveryMapper.markResolved(
             eventId, orderNo, userId, key, computedHash, now().toLocalDateTime());
