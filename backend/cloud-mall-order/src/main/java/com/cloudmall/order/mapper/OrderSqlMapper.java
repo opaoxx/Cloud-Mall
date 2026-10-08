@@ -5,6 +5,7 @@ import com.cloudmall.order.domain.po.OrderItemPO;
 import com.cloudmall.order.domain.po.OrderPO;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -161,10 +162,27 @@ public class OrderSqlMapper {
     return queryForObject("select id from " + tableName + " where order_no=?", Long.class, orderNo);
   }
 
-  /** 判断指定月表中是否存在已提交订单。 */
+  /**
+   * 单次读取原订单号候选，区分精确已提交、真正缺行和不可信身份。
+   *
+   * @param tableName 调用方根据原订单号计算的物理月表
+   * @param orderNo 原订单号，不裁剪或归一化
+   * @return 精确唯一候选为true，真正无候选为false
+   * @throws IllegalStateException 候选不唯一或原始订单号不精确匹配
+   */
   public boolean orderExists(String tableName, String orderNo) {
-    Long count = queryForObject("select count(*) from " + tableName + " where order_no=?", Long.class, orderNo);
-    return count != null && count > 0;
+    // 1. 保留collation索引候选，不把别名过滤成缺行并触发库存补偿。
+    List<Map<String, Object>> candidates =
+        queryForList("select order_no from " + tableName + " where order_no=?", orderNo);
+    if (candidates.isEmpty()) return false;
+    // 2. 只允许唯一且原值精确匹配的订单证明已提交。
+    if (candidates.size() != 1
+        || !(candidates.get(0).get("order_no") instanceof String)
+        || !Objects.equals(orderNo, candidates.get(0).get("order_no"))) {
+      throw new IllegalStateException("订单存在性候选身份与原意图不一致");
+    }
+    // 3. 未知候选抛异常走原失败退避；只有可信候选返回true。
+    return true;
   }
 
   /** 保存订单明细快照。 */
