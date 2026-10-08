@@ -89,6 +89,75 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void nonTimeoutEventTypesCannotBePublishedAsTimeouts() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String type : List.of("PAY_NOTIFY", "order_timeout", "ORDER_TIMEOUT ", "")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO invalid = pendingOutbox();
+      invalid.eventType = type;
+      invalid.lastError = "keep other event";
+      OrderOutboxPO healthy = pendingOutbox();
+      healthy.id = 2L;
+      healthy.eventId = "timeout-after-other-type";
+      healthy.orderNo = "202610-valid-timeout";
+      healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+      assertEquals(1, mapper.insert(invalid));
+      assertEquals(1, mapper.insert(healthy));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      List<String> sent = new ArrayList<>();
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                sent.add(correlation.getId());
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      dispatcher(rabbit).dispatchPending();
+      var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+      checks.add(() -> assertEquals(before, after, type));
+      checks.add(() -> assertEquals(List.of(healthy.eventId), sent, type));
+      assertEquals(
+          "PUBLISHED",
+          fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void typeAliasesCannotOccupyTheTimeoutScanWindow() {
+    LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(2).withNano(0);
+    for (int rowIndex = 1; rowIndex <= 50; rowIndex++) {
+      OrderOutboxPO invalid = pendingOutbox();
+      invalid.id = (long) rowIndex;
+      invalid.eventId = "wrong-type-head-" + rowIndex;
+      invalid.orderNo = "202610-wrong-type-" + rowIndex;
+      invalid.eventType = rowIndex % 2 == 0 ? "order_timeout" : "ORDER_TIMEOUT ";
+      invalid.nextRetryAt = dueAt;
+      assertEquals(1, mapper.insert(invalid));
+    }
+    var before = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    OrderOutboxPO valid = pendingOutbox();
+    valid.id = 100L;
+    valid.eventId = "timeout-after-type-window";
+    valid.orderNo = "202610-after-type-window";
+    valid.nextRetryAt = dueAt.plusSeconds(1);
+    valid.attempts = Integer.MAX_VALUE;
+    assertEquals(1, mapper.insert(valid));
+    List<OrderOutboxPO> selected = mapper.findPendingOutbox(50);
+    assertAll(
+        () ->
+            assertEquals(
+                List.of(valid.eventId), selected.stream().map(row -> row.eventId).toList()),
+        () ->
+            assertEquals(
+                before,
+                fixture.queryForList("SELECT * FROM order_outbox WHERE id<100 ORDER BY id")));
+  }
+
+  @Test
   void zeroPublicationUpdateNeedsExactPublishedEvidenceInsteadOfSilentCompletion() {
     for (String state : List.of("OTHER", "PUBLISHED", "MISSING", "ALIAS")) {
       fixture.update("DELETE FROM order_outbox");

@@ -112,6 +112,10 @@ public class OrderOutboxDispatcher {
       log.warn("订单超时outbox尝试次数快照非法，保留该项，eventId={}, attempts={}", outbox.eventId, outbox.attempts);
       return;
     }
+    if (!"ORDER_TIMEOUT".equals(outbox.eventType)) {
+      log.warn("订单超时outbox事件类型不可信，保留该项，eventId={}, eventType={}", outbox.eventId, outbox.eventType);
+      return;
+    }
     try {
       Map<String, Object> payload = parsePayload(outbox.payload);
       if (Thread.currentThread().isInterrupted()) return;

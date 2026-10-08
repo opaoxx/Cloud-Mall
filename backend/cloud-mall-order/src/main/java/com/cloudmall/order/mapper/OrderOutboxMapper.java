@@ -53,7 +53,7 @@ public class OrderOutboxMapper {
   }
 
   /**
-   * 在LIMIT之前排除负计数，查询已提交并到达重试时间的待发布事件。
+   * 在LIMIT前排除负计数和非精确超时类型，查询已提交并到达重试时间的超时候选。
    *
    * @param limit 本轮候选上限，非正值沿原规则归一为1
    * @return 按原重试时间及主键顺序的非负计数候选，不修改未入选事实
@@ -63,6 +63,7 @@ public class OrderOutboxMapper {
         "SELECT id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,"
             + "last_error,published_at,created_at,updated_at FROM order_outbox"
             + " WHERE status='PENDING' AND next_retry_at<=? AND attempts>=0"
+            + " AND BINARY event_type=BINARY 'ORDER_TIMEOUT'"
             + " ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderOutboxPO outbox = new OrderOutboxPO();

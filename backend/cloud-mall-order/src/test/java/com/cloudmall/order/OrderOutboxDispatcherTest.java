@@ -684,6 +684,66 @@ class OrderOutboxDispatcherTest {
     }
   }
 
+  @Test
+  void nonTimeoutTypeSnapshotsNeverParsePublishOrWrite() {
+    for (String type :
+        java.util.Arrays.asList(
+            null, "PAY_NOTIFY", "order_timeout", "ORDER_TIMEOUT ", "ORDER_TÍMEOUT", "")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      ObjectMapper json = org.mockito.Mockito.spy(new ObjectMapper());
+      OrderOutboxPO invalid = candidate("invalid-type");
+      invalid.eventType = type;
+      invalid.payload = "not-json";
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(invalid));
+      OrderOutboxDispatcher dispatcher =
+          new OrderOutboxDispatcher(mapper, rabbit, json, new MockEnvironment());
+      org.mockito.Mockito.clearInvocations(rabbit);
+      dispatcher.dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      org.mockito.Mockito.verifyNoInteractions(json, rabbit);
+      org.junit.jupiter.api.Assertions.assertEquals(type, invalid.eventType);
+      org.junit.jupiter.api.Assertions.assertEquals("not-json", invalid.payload);
+    }
+  }
+
+  @Test
+  void anInvalidTypeSnapshotDoesNotBlockTheFollowingTimeout() {
+    for (String type :
+        java.util.Arrays.asList(null, "PAY_NOTIFY", "order_timeout", "ORDER_TIMEOUT ")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO invalid = candidate("invalid-type-first");
+      invalid.eventType = type;
+      invalid.payload = "not-json";
+      OrderOutboxPO healthy = candidate("valid-type-second");
+      healthy.attempts = Integer.MAX_VALUE;
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(invalid, healthy));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                org.junit.jupiter.api.Assertions.assertEquals(healthy.eventId, correlation.getId());
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+          .dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(healthy.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
   /** 当前批次合法事件快照，避免将未填计数的PO当作可发布事实。 */
   private static OrderOutboxPO candidate(String eventId) {
     OrderOutboxPO outbox = new OrderOutboxPO();
