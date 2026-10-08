@@ -168,6 +168,48 @@ class OrderStockActionIdentityMySqlIT {
     }
   }
 
+  @Test
+  void unsupportedStoredTypesRemainUnknownWithoutAnyStockCall() {
+    for (String actionType :
+        List.of("", " \t", "confirm", "rollback", "CONFIRM ", "ROLLBACK ", "CANCEL", "OTHER")) {
+      fixture.update("DELETE FROM order_stock_action");
+      LocalDateTime created = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1);
+      assertEquals(1, mapper.insert(1L, "202610unknown1", actionType, created));
+      var before = fixture.queryForMap("SELECT * FROM order_stock_action");
+      StockClient stock = mock(StockClient.class);
+      when(stock.reservation("202610unknown1")).thenReturn(fact("202610unknown1", "ROLLED_BACK"));
+
+      new OrderStockActionRecovery(mapper, stock).recoverDue();
+
+      assertUnknownAction(before, fixture.queryForMap("SELECT * FROM order_stock_action"));
+      verifyNoInteractions(stock);
+    }
+  }
+
+  @Test
+  void unsupportedFirstTypeDoesNotPreventAHealthyActionFromCompleting() {
+    LocalDateTime created = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1);
+    assertEquals(1, mapper.insert(1L, "202610unknown1", "confirm", created));
+    assertEquals(1, mapper.insert(2L, "202610healthy2", "CONFIRM", created));
+    var firstBefore = fixture.queryForMap("SELECT * FROM order_stock_action WHERE id=1");
+    StockClient stock = mock(StockClient.class);
+    when(stock.reservation("202610unknown1")).thenReturn(fact("202610unknown1", "ROLLED_BACK"));
+    when(stock.reservation("202610healthy2")).thenReturn(fact("202610healthy2", "CONFIRMED"));
+
+    new OrderStockActionRecovery(mapper, stock).recoverDue();
+
+    assertUnknownAction(
+        firstBefore, fixture.queryForMap("SELECT * FROM order_stock_action WHERE id=1"));
+    var healthy = fixture.queryForMap("SELECT * FROM order_stock_action WHERE id=2");
+    assertEquals("SUCCEEDED", healthy.get("status"));
+    assertEquals("202610healthy2:CONFIRM", healthy.get("operation_key"));
+    assertEquals(1, ((Number) healthy.get("attempts")).intValue());
+    verify(stock, never()).reservation("202610unknown1");
+    verify(stock).reservation("202610healthy2");
+    verify(stock, never()).confirm(anyString(), any(StockClient.Action.class));
+    verify(stock, never()).rollback(anyString(), any(StockClient.Action.class));
+  }
+
   /** 错单只按原UNKNOWN重试更新元数据，原动作身份不能变化。 */
   private static void assertUnknownAction(Map<String, Object> before, Map<String, Object> after) {
     assertSameIdentity(before, after);

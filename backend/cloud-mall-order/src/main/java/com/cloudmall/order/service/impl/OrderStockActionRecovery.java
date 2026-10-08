@@ -51,6 +51,10 @@ public class OrderStockActionRecovery {
   /** 查询事实、按原操作键重试、确认最终状态。 */
   private void recoverOne(OrderStockActionPO action) {
     try {
+      // 未知类型不得默认成回滚；原事实保留并走既有UNKNOWN退避。
+      if (!"CONFIRM".equals(action.actionType) && !"ROLLBACK".equals(action.actionType)) {
+        throw new IllegalStateException("库存动作类型不受支持: " + action.actionType);
+      }
       // 1. 先查询库存事实；已到达目标终态直接完成，无需重新写入。
       String target = "CONFIRM".equals(action.actionType) ? "CONFIRMED" : "ROLLED_BACK";
       String opposite = "CONFIRM".equals(action.actionType) ? "ROLLED_BACK" : "CONFIRMED";

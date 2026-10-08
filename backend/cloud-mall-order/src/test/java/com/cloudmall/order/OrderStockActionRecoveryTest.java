@@ -156,6 +156,24 @@ class OrderStockActionRecoveryTest {
     }
   }
 
+  @Test
+  void unsupportedActionTypesCannotBeGuessedAsRollback() {
+    for (String actionType :
+        java.util.Arrays.asList(
+            null, "", " \t", "confirm", "rollback", "CONFIRM ", "ROLLBACK ", "CANCEL", "OTHER")) {
+      for (String current :
+          List.of("RESERVED", "ROLLED_BACK", "CONFIRMED", "REJECTED", "UNKNOWN")) {
+        setUp();
+        due(actionType);
+        when(stockClient.reservation("order-1")).thenReturn(status(current));
+        recovery.recoverDue();
+        org.mockito.Mockito.verifyNoInteractions(stockClient);
+        verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+        verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
   /** 构造具有指定身份的库存响应，不从请求路径补全字段。 */
   private static ApiResponse<StockReservationStatusVO> stockFact(String orderNo, String state) {
     StockReservationStatusVO fact = new StockReservationStatusVO();
