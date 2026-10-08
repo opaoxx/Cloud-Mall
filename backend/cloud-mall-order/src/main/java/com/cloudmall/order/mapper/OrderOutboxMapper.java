@@ -1,8 +1,10 @@
 package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderOutboxPO;
+import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -10,6 +12,15 @@ import org.springframework.stereotype.Repository;
 /** 订单超时 outbox 的唯一数据库访问入口。 */
 @Repository
 public class OrderOutboxMapper {
+  /** Java17空白字符的补集；以参数绑定传入ICU，保留NBSP等非Java空白，升级JDK须重审此集合。 */
+  private static final String NONBLANK_IDENTITY_PATTERN =
+      "[^\\x{0009}-\\x{000D}\\x{001C}-\\x{0020}\\x{1680}\\x{2000}-\\x{2006}"
+          + "\\x{2008}-\\x{200A}\\x{2028}-\\x{2029}\\x{205F}\\x{3000}]";
+
+  /** UTF8正则的ASCII十六进制传输值；服务器恢复文本，避免客户端SQL模式改写反斜杠。 */
+  private static final String NONBLANK_IDENTITY_PATTERN_HEX =
+      HexFormat.of().formatHex(NONBLANK_IDENTITY_PATTERN.getBytes(StandardCharsets.UTF_8));
+
   /** Spring JDBC 执行器。 */
   private final JdbcTemplate jdbcTemplate;
 
@@ -53,18 +64,20 @@ public class OrderOutboxMapper {
   }
 
   /**
-   * 在LIMIT前精确匹配待发布状态/超时类型并排除负计数，查询已提交并到期的超时候选。
+   * 在LIMIT前精确匹配状态/类型，排除负计数及Java空白身份，查询已提交并到期的超时候选。
    *
    * @param limit 本轮候选上限，非正值沿原规则归一为1
-   * @return 按原重试时间及主键顺序的非负计数候选，不修改未入选事实
+   * @return 按原重试时间及主键顺序的合资格候选，身份原样映射，不修改未入选事实
    */
   public List<OrderOutboxPO> findPendingOutbox(int limit) {
     return jdbcTemplate.query(
         "SELECT"
             + " id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,last_error,published_at,created_at,updated_at"
             + " FROM order_outbox WHERE CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND"
-            + " next_retry_at<=? AND attempts>=0 AND BINARY event_type=BINARY 'ORDER_TIMEOUT' ORDER"
-            + " BY next_retry_at,id LIMIT ?",
+            + " next_retry_at<=? AND attempts>=0 AND BINARY event_type=BINARY 'ORDER_TIMEOUT' AND"
+            + " REGEXP_LIKE(event_id, CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c') AND"
+            + " REGEXP_LIKE(order_no, CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c')"
+            + " ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderOutboxPO outbox = new OrderOutboxPO();
           outbox.id = resultSet.getLong("id");
@@ -83,6 +96,8 @@ public class OrderOutboxMapper {
           return outbox;
         },
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
+        NONBLANK_IDENTITY_PATTERN_HEX,
+        NONBLANK_IDENTITY_PATTERN_HEX,
         Math.max(1, limit));
   }
 

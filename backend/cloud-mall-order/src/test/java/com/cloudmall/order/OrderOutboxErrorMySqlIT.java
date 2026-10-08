@@ -89,6 +89,113 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void blankIdentityRowsCannotFillTheScanWindowAndStarveFollowingEvents() {
+    LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(2).withNano(0);
+    List<String> blanks = List.of("", " ", "\t\r\n", "\u2003");
+    for (int rowIndex = 1; rowIndex <= 50; rowIndex++) {
+      OrderOutboxPO invalid = pendingOutbox();
+      invalid.id = (long) rowIndex;
+      invalid.eventId = "blank-identity-head-" + rowIndex;
+      invalid.orderNo = blanks.get(rowIndex % blanks.size());
+      invalid.lastError = "preserve blank backlog";
+      invalid.nextRetryAt = dueAt;
+      assertEquals(1, mapper.insert(invalid));
+    }
+    var before = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    OrderOutboxPO healthy = pendingOutbox();
+    healthy.id = 100L;
+    healthy.eventId = "timeout-after-blank-window";
+    healthy.orderNo = "202610-after-blank-window";
+    healthy.attempts = Integer.MAX_VALUE;
+    healthy.nextRetryAt = dueAt.plusSeconds(1);
+    assertEquals(1, mapper.insert(healthy));
+    List<String> selected = mapper.findPendingOutbox(50).stream().map(row -> row.eventId).toList();
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    List<String> sentIds = new ArrayList<>();
+    doAnswer(
+            invocation -> {
+              CorrelationData correlation = invocation.getArgument(4);
+              sentIds.add(correlation.getId());
+              correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+              return null;
+            })
+        .when(rabbit)
+        .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    dispatcher(rabbit).dispatchPending();
+    assertAll(
+        () -> assertEquals(List.of(healthy.eventId), selected),
+        () -> assertEquals(List.of(healthy.eventId), sentIds),
+        () ->
+            assertEquals(
+                before,
+                fixture.queryForList("SELECT * FROM order_outbox WHERE id<100 ORDER BY id")),
+        () ->
+            assertEquals(
+                "PUBLISHED",
+                fixture.queryForObject(
+                    "SELECT status FROM order_outbox WHERE id=100", String.class)));
+  }
+
+  @Test
+  void identityScanMatchesJavaBlankAcrossWhitespaceBoundariesAndSqlModes() throws Exception {
+    java.util.Set<String> samples = new java.util.LinkedHashSet<>();
+    samples.add("");
+    for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++) {
+      if (Character.isWhitespace(codePoint)) {
+        samples.add(new String(Character.toChars(codePoint - 1)));
+        samples.add(new String(Character.toChars(codePoint)));
+        samples.add(new String(Character.toChars(codePoint + 1)));
+      }
+    }
+    samples.addAll(
+        List.of(
+            "\u0000",
+            "\u0085",
+            "\u00A0",
+            "\u2007",
+            "\u202F",
+            "\u200B",
+            "\uFEFF",
+            "😀",
+            "\t\u2003\n",
+            "\t事件😀\n",
+            " id "));
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderOutboxMapper(modeJdbc);
+      for (String sqlMode : List.of("STRICT_TRANS_TABLES", "NO_BACKSLASH_ESCAPES")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + sqlMode + "'");
+        for (String field : List.of("eventId", "orderNo")) {
+          for (String sample : samples) {
+            modeJdbc.update("DELETE FROM order_outbox");
+            OrderOutboxPO outbox = pendingOutbox();
+            if ("eventId".equals(field)) outbox.eventId = sample;
+            else outbox.orderNo = sample;
+            // 夹具由默认连接写入，特殊模式连接只验证实际扫描，防写入转义改变样本。
+            assertEquals(1, mapper.insert(outbox));
+            var before = modeJdbc.queryForMap("SELECT * FROM order_outbox");
+            assertEquals(outbox.eventId, before.get("event_id"), "fixture eventId");
+            assertEquals(outbox.orderNo, before.get("order_no"), "fixture orderNo");
+            List<OrderOutboxPO> selected = modeMapper.findPendingOutbox(50);
+            var after = modeJdbc.queryForMap("SELECT * FROM order_outbox");
+            String label = sqlMode + ":" + field + ":" + sample.codePoints().boxed().toList();
+            checks.add(() -> assertEquals(sample.isBlank() ? 0 : 1, selected.size(), label));
+            checks.add(() -> assertEquals(before, after, label));
+            if (!sample.isBlank() && !selected.isEmpty()) {
+              checks.add(() -> assertEquals(outbox.eventId, selected.get(0).eventId, label));
+              checks.add(() -> assertEquals(outbox.orderNo, selected.get(0).orderNo, label));
+            }
+          }
+        }
+      }
+    }
+    System.out.println(
+        "CM17DB identity samples: " + samples.size() + ", comparisons: " + samples.size() * 4);
+    assertAll(checks);
+  }
+
+  @Test
   void blankRequiredIdentitiesCannotBePublishedOrWrittenWhileHealthyEventsContinue() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (String column : List.of("eventId", "orderNo")) {
