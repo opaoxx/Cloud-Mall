@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -35,18 +36,27 @@ public class OrderStockActionRecovery {
     this.stockClient = stockClient;
   }
 
-  /** 定期处理订单事务已提交但库存动作尚未确认的记录。 */
+  /** 定期恢复已提交订单的库存动作；扫描失败传播，单条数据库异常隔离。 */
   @Scheduled(fixedDelayString = "${cloudmall.order.stock-action-recovery-interval-ms:5000}")
   public void recoverDue() {
     // 1. 扫描到期的非终态动作。
     List<OrderStockActionPO> due = actionMapper.findDue(now(), 50);
     // 2. 逐条认领，避免多实例重复执行相反动作。
     for (OrderStockActionPO action : due) {
-      LocalDateTime claimedAt = now();
-      // 每次认领使用独立代际标识，避免同实例重认领后接受迟到结果。
-      String claimOwner = UUID.randomUUID().toString();
-      if (actionMapper.claim(action.id, claimOwner, claimedAt) != 1) continue;
-      recoverOne(action, claimOwner);
+      try {
+        LocalDateTime claimedAt = now();
+        // 每次认领使用独立代际标识，避免同实例重认领后接受迟到结果。
+        String claimOwner = UUID.randomUUID().toString();
+        if (actionMapper.claim(action.id, claimOwner, claimedAt) != 1) continue;
+        recoverOne(action, claimOwner);
+      } catch (DataAccessException databaseFailure) {
+        // 保留原持久事实与已提交租约，不猜提交结果或追加当前动作写入。
+        log.warn(
+            "订单库存动作单条数据库操作失败，本次跳过，orderNo={}，action={}",
+            action.orderNo,
+            action.actionType,
+            databaseFailure);
+      }
     }
   }
 
@@ -99,13 +109,16 @@ public class OrderStockActionRecovery {
       } else {
         throw new IllegalStateException("库存动作写入后的状态待确认: " + afterWrite);
       }
+    } catch (DataAccessException databaseFailure) {
+      // 完成写数据库失败不是远端UNKNOWN，不再尝试retry或重新执行Stock动作。
+      throw databaseFailure;
     } catch (RuntimeException unknownResult) {
-      // 4. 查询或写入失败只记录未知，不猜测失败或执行相反操作。
+      // 4. 先保留原业务错误证据，再按原token尝试一次UNKNOWN退避。
+      log.warn(
+          "订单库存动作结果待恢复，orderNo={}，action={}", action.orderNo, action.actionType, unknownResult);
       long delaySeconds = Math.min(60, 5L * Math.max(1, action.attempts == null ? 1 : action.attempts));
       actionMapper.retry(
           action.id, claimOwner, unknownResult.toString(), now().plusSeconds(delaySeconds), now());
-      log.warn("订单库存动作结果待恢复，orderNo={}，action={}",
-          action.orderNo, action.actionType, unknownResult);
     }
   }
 

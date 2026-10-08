@@ -250,6 +250,118 @@ class OrderStockActionRecoveryTest {
     verify(stockClient, never()).rollback(anyString(), any());
   }
 
+  @Test
+  void aClaimDatabaseFailureDoesNotStarveTheHealthyCandidate() {
+    dueWithHealthyFollower();
+    when(actionMapper.claim(eq(1L), anyString(), any()))
+        .thenThrow(
+            new org.springframework.dao.DataAccessResourceFailureException("claim db unavailable"));
+    org.junit.jupiter.api.Assertions.assertDoesNotThrow(recovery::recoverDue);
+    verify(stockClient, never()).reservation("order-1");
+    verify(actionMapper, never()).retry(eq(1L), anyString(), anyString(), any(), any());
+    verify(actionMapper).finish(eq(2L), anyString(), eq("SUCCEEDED"), eq(null), any());
+  }
+
+  @Test
+  void aFinishDatabaseFailureCannotBecomeAnUnknownRetry() {
+    for (String stockState : List.of("CONFIRMED", "ROLLED_BACK")) {
+      setUp();
+      dueWithHealthyFollower();
+      when(stockClient.reservation("order-1")).thenReturn(status(stockState));
+      when(actionMapper.finish(eq(1L), anyString(), anyString(), any(), any()))
+          .thenThrow(
+              new org.springframework.dao.DataAccessResourceFailureException(
+                  "finish db unavailable"));
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(recovery::recoverDue);
+      verify(actionMapper, never()).retry(eq(1L), anyString(), anyString(), any(), any());
+      verify(actionMapper).finish(eq(2L), anyString(), eq("SUCCEEDED"), eq(null), any());
+      verify(stockClient, never()).confirm(anyString(), any());
+      verify(stockClient, never()).rollback(anyString(), any());
+    }
+  }
+
+  @Test
+  void retryDatabaseFailurePreservesTheBusinessLogAndProcessesTheFollower() {
+    dueWithHealthyFollower();
+    when(stockClient.reservation("order-1"))
+        .thenThrow(new IllegalStateException("original Stock unknown"));
+    when(actionMapper.retry(eq(1L), anyString(), anyString(), any(), any()))
+        .thenThrow(
+            new org.springframework.dao.DataAccessResourceFailureException("retry db unavailable"));
+    var logger =
+        (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(OrderStockActionRecovery.class);
+    var captured =
+        new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+    captured.start();
+    logger.addAppender(captured);
+    try {
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(recovery::recoverDue);
+      verify(actionMapper)
+          .retry(
+              eq(1L),
+              anyString(),
+              org.mockito.ArgumentMatchers.contains("original Stock unknown"),
+              any(),
+              any());
+      verify(actionMapper).finish(eq(2L), anyString(), eq("SUCCEEDED"), eq(null), any());
+      var failures =
+          captured.list.stream().filter(event -> event.getThrowableProxy() != null).toList();
+      org.junit.jupiter.api.Assertions.assertEquals(2, failures.size());
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "original Stock unknown", failures.get(0).getThrowableProxy().getMessage());
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "retry db unavailable", failures.get(1).getThrowableProxy().getMessage());
+    } finally {
+      logger.detachAppender(captured);
+      captured.stop();
+    }
+  }
+
+  @Test
+  void scanAndNonDatabaseClaimFailuresStillPropagate() {
+    var scanFailure =
+        new org.springframework.dao.DataAccessResourceFailureException("scan unavailable");
+    when(actionMapper.findDue(any(), anyInt())).thenThrow(scanFailure);
+    org.junit.jupiter.api.Assertions.assertSame(
+        scanFailure,
+        org.junit.jupiter.api.Assertions.assertThrows(
+            org.springframework.dao.DataAccessException.class, recovery::recoverDue));
+    org.mockito.Mockito.verifyNoInteractions(stockClient);
+    verify(actionMapper, never()).claim(org.mockito.ArgumentMatchers.anyLong(), anyString(), any());
+    for (Throwable failure :
+        List.of(new IllegalStateException("claim bug"), new AssertionError("claim Error"))) {
+      setUp();
+      dueWithHealthyFollower();
+      when(actionMapper.claim(eq(1L), anyString(), any())).thenThrow(failure);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          org.junit.jupiter.api.Assertions.assertThrows(failure.getClass(), recovery::recoverDue));
+      verify(actionMapper, never()).claim(eq(2L), anyString(), any());
+      org.mockito.Mockito.verifyNoInteractions(stockClient);
+    }
+  }
+
+  /** 构造首动作和后健康候选，隔离测试不依赖真实Stock或数据库。 */
+  private void dueWithHealthyFollower() {
+    OrderStockActionPO first = new OrderStockActionPO();
+    first.id = 1L;
+    first.orderNo = "order-1";
+    first.actionType = "CONFIRM";
+    first.operationKey = "order-1:CONFIRM";
+    first.attempts = 0;
+    OrderStockActionPO healthy = new OrderStockActionPO();
+    healthy.id = 2L;
+    healthy.orderNo = "order-2";
+    healthy.actionType = "CONFIRM";
+    healthy.operationKey = "order-2:CONFIRM";
+    healthy.attempts = 0;
+    when(actionMapper.findDue(any(), anyInt())).thenReturn(List.of(first, healthy));
+    when(actionMapper.claim(eq(2L), anyString(), any())).thenReturn(1);
+    when(stockClient.reservation("order-1")).thenReturn(status("CONFIRMED"));
+    when(stockClient.reservation("order-2")).thenReturn(stockFact("order-2", "CONFIRMED"));
+  }
+
   /** 构造具有指定身份的库存响应，不从请求路径补全字段。 */
   private static ApiResponse<StockReservationStatusVO> stockFact(String orderNo, String state) {
     StockReservationStatusVO fact = new StockReservationStatusVO();
