@@ -1344,6 +1344,176 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void lossyNumericSeckillIdentitiesCannotAuthorizeAliasOrdersOrResolveHeldFacts()
+      throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    ObjectMapper json = new ObjectMapper();
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String field : List.of("userId", "activityId", "skuId")) {
+      long alias = "userId".equals(field) ? 8L : "activityId".equals(field) ? 11L : 7L;
+      for (String fault : List.of("fraction", "overflow")) {
+        Map<String, Object> original = timeEvent("202612-numeric-" + field + "-" + fault);
+        original.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+        saveRecovery(
+            6800 + sequence++, String.valueOf(original.get("eventId")), original, "QUARANTINED");
+        Map<String, Object> corrupted = new java.util.LinkedHashMap<>(original);
+        Object lossy =
+            "fraction".equals(fault)
+                ? new BigDecimal(alias + ".5")
+                : java.math.BigInteger.ONE.shiftLeft(64).add(java.math.BigInteger.valueOf(alias));
+        corrupted.put(field, lossy);
+        Map<String, Object> incoming =
+            json.readValue(
+                json.writeValueAsString(corrupted),
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        clearInvocations(products);
+        var before = fixtureFacts();
+        service.consumeSeckill(incoming);
+        var after = fixtureFacts();
+        long productCalls = mockingDetails(products).getInvocations().size();
+        String label = field + "-" + fault;
+        for (String tableName : before.keySet())
+          if (!"seckill_order_dedup_conflict".equals(tableName))
+            checks.add(
+                () ->
+                    assertEquals(
+                        before.get(tableName), after.get(tableName), label + ":" + tableName));
+        checks.add(() -> assertEquals(0, productCalls, label));
+        List<Map<String, Object>> conflicts =
+            fixture.queryForList(
+                "SELECT user_id, conflict_type, payload FROM seckill_order_dedup_conflict WHERE event_id=?",
+                incoming.get("eventId"));
+        checks.add(() -> assertEquals(1, conflicts.size(), label));
+        if (!conflicts.isEmpty()) {
+          Map<String, Object> conflict = conflicts.get(0);
+          checks.add(() -> assertEquals("INVALID_PAYLOAD", conflict.get("conflict_type"), label));
+          checks.add(
+              () ->
+                  assertEquals(
+                      "userId".equals(field) ? 0L : 8L,
+                      ((Number) conflict.get("user_id")).longValue(),
+                      label));
+          String originalNumber =
+              json.readTree(json.writeValueAsString(incoming)).path(field).asText();
+          String recordedNumber =
+              json.readTree(String.valueOf(conflict.get("payload"))).path(field).asText();
+          if ("fraction".equals(fault))
+            checks.add(() -> assertEquals(originalNumber, recordedNumber, label));
+          // 原JSON列的大数精度另立待修；本批核入库前原载荷和既有SQL表示，不冒称原数值保真。
+          String databaseJson =
+              fixture.queryForObject(
+                  "SELECT CAST(? AS JSON)", String.class, json.writeValueAsString(incoming));
+          var expectedStoredPayload = json.readTree(databaseJson);
+          var actualStoredPayload = json.readTree(String.valueOf(conflict.get("payload")));
+          checks.add(() -> assertEquals(expectedStoredPayload, actualStoredPayload, label));
+        }
+      }
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock, cart);
+  }
+
+  @Test
+  void exactNumericIdentitiesAndCorrectedEventsKeepSqlIdentityAndReplaySemantics()
+      throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    int sequence = 0;
+    for (String field : List.of("userId", "activityId", "skuId")) {
+      long alias = "userId".equals(field) ? 8L : "activityId".equals(field) ? 11L : 7L;
+      for (String variant :
+          List.of("decimal", "double", "string", "max-integer", "max-decimal", "max-string")) {
+        long identity = variant.startsWith("max") ? Long.MAX_VALUE : alias;
+        Object representation =
+            switch (variant) {
+              case "decimal", "max-decimal" -> new BigDecimal(identity + ".000");
+              case "double" -> (double) identity;
+              case "string" -> "+000" + identity;
+              case "max-string" -> Long.toString(identity);
+              default -> java.math.BigInteger.valueOf(identity);
+            };
+        Map<String, Object> event = timeEvent("202612-exact-identity-" + sequence++);
+        event.put(field, representation);
+        event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+        long userId = "userId".equals(field) ? identity : 8L;
+        long activityId = "activityId".equals(field) ? identity : 11L;
+        long skuId = "skuId".equals(field) ? identity : 7L;
+        event.put(
+            "requestHash", SeckillRequestFingerprint.hash(activityId, skuId, userId, 1, "{}"));
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        skuId, 9L, "product", "SKU", BigDecimal.TEN, Map.of())))
+            .when(products)
+            .sku(skuId);
+        clearInvocations(products);
+        service.consumeSeckill(event);
+        verify(products).sku(skuId);
+        assertEquals(
+            userId,
+            fixture.queryForObject(
+                "SELECT user_id FROM mall_order_202612 WHERE order_no=?",
+                Long.class,
+                event.get("orderNo")));
+        assertEquals(
+            skuId,
+            fixture.queryForObject(
+                "SELECT sku_id FROM mall_order_item_202612 WHERE order_no=?",
+                Long.class,
+                event.get("orderNo")));
+        assertEquals(
+            userId,
+            fixture.queryForObject(
+                "SELECT user_id FROM seckill_order_dedup WHERE order_no=?",
+                Long.class,
+                event.get("orderNo")));
+        assertEquals(
+            "COMMITTED",
+            fixture.queryForObject(
+                "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+                String.class,
+                event.get("orderNo")));
+        var committed = fixtureFacts();
+        event.remove("occurredAt");
+        clearInvocations(products);
+        service.consumeSeckill(event);
+        assertEquals(committed, fixtureFacts());
+        verifyNoInteractions(products);
+      }
+    }
+    Map<String, Object> corrected = timeEvent("202612-numeric-corrected");
+    corrected.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(6900, String.valueOf(corrected.get("eventId")), corrected, "QUARANTINED");
+    var held = recoveryRow(String.valueOf(corrected.get("eventId")));
+    Map<String, Object> invalid = new java.util.LinkedHashMap<>(corrected);
+    invalid.put("skuId", new BigDecimal("7.5"));
+    service.consumeSeckill(invalid);
+    assertEquals(held, recoveryRow(String.valueOf(corrected.get("eventId"))));
+    List<Map<String, Object>> conflict =
+        fixture.queryForList(
+            "SELECT * FROM seckill_order_dedup_conflict WHERE event_id=?",
+            corrected.get("eventId"));
+    assertEquals(1, conflict.size());
+    service.consumeSeckill(corrected);
+    assertEquals(
+        conflict,
+        fixture.queryForList(
+            "SELECT * FROM seckill_order_dedup_conflict WHERE event_id=?",
+            corrected.get("eventId")));
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(corrected.get("eventId"))).get("status"));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+            String.class,
+            corrected.get("orderNo")));
+    assertPersistedCreation(
+        String.valueOf(corrected.get("orderNo")), LocalDateTime.parse("2026-12-31T23:59:59.999"));
+  }
+
+  @Test
   void snapshotSerializationFailuresCannotLeaveIntentsOrReachStockAndSqlWrites() throws Exception {
     AuthContext.set(7L, "USER");
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");

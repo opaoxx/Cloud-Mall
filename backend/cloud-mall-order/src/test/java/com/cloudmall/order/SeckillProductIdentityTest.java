@@ -352,6 +352,128 @@ class SeckillProductIdentityTest {
     }
   }
 
+  @Test
+  void lossyNumbersAndNonIdentityTypesOnlyRecordOriginalConflictEvidence() throws Exception {
+    for (String field : List.of("userId", "activityId", "skuId")) {
+      long alias = "userId".equals(field) ? 8L : "activityId".equals(field) ? 11L : 7L;
+      for (Object invalid :
+          List.of(
+              new BigDecimal(alias + ".5"),
+              java.math.BigInteger.ONE.shiftLeft(64).add(java.math.BigInteger.valueOf(alias)),
+              alias + 0.5d,
+              alias + 0.5f,
+              Double.NaN,
+              Double.POSITIVE_INFINITY,
+              Double.NEGATIVE_INFINITY,
+              new BigDecimal("9223372036854775808"),
+              new BigDecimal("-9223372036854775809"),
+              new BigDecimal("1E+1000"),
+              "9223372036854775808",
+              "7.5",
+              true,
+              Map.of(),
+              List.of())) {
+        Fixture fixture = new Fixture();
+        fixture.event.put(field, invalid);
+        fixture.service.consumeSeckill(fixture.event);
+        var payload = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(fixture.dedup)
+            .recordConflictEvent(
+                anyLong(),
+                eq("userId".equals(field) ? 0L : 8L),
+                eq(fixture.key),
+                eq(fixture.hash),
+                eq(fixture.orderNo),
+                eq(fixture.eventId),
+                anyString(),
+                payload.capture(),
+                any());
+        ObjectMapper json = new ObjectMapper();
+        assertEquals(
+            json.readTree(json.writeValueAsString(fixture.event)),
+            json.readTree(payload.getValue()));
+        verifyNoMoreInteractions(fixture.dedup);
+        verifyNoInteractions(
+            fixture.products,
+            fixture.orders,
+            fixture.outbox,
+            fixture.recovery,
+            fixture.stock,
+            fixture.cart);
+      }
+    }
+  }
+
+  @Test
+  void exactIntegralRepresentationsRetainOriginalBusinessIdentity() {
+    for (String field : List.of("userId", "activityId", "skuId")) {
+      long identity = "userId".equals(field) ? 8L : "activityId".equals(field) ? 11L : 7L;
+      for (Object representation :
+          List.of(
+              (byte) identity,
+              (short) identity,
+              (int) identity,
+              identity,
+              java.math.BigInteger.valueOf(identity),
+              new BigDecimal(identity + ".000"),
+              (float) identity,
+              (double) identity,
+              "+000" + identity)) {
+        Fixture fixture = new Fixture();
+        fixture.event.put(field, representation);
+        fixture.service.consumeSeckill(fixture.event);
+        verify(fixture.dedup)
+            .claim(
+                anyLong(),
+                eq(8L),
+                eq(fixture.key),
+                eq(fixture.hash),
+                eq(fixture.orderNo),
+                eq(fixture.eventId),
+                any());
+        verify(fixture.products).sku(7L);
+        var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+        verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+        assertEquals(7L, detail.getValue().skuId);
+        verify(fixture.dedup).markCommitted(eq(8L), eq(fixture.key), any());
+        verify(fixture.dedup, never())
+            .recordConflictEvent(
+                anyLong(),
+                anyLong(),
+                anyString(),
+                anyString(),
+                anyString(),
+                anyString(),
+                anyString(),
+                anyString(),
+                any());
+        verifyNoInteractions(fixture.stock, fixture.cart);
+      }
+    }
+  }
+
+  @Test
+  void nonPositiveExactValuesKeepTheExistingFingerprintFailureChannel() {
+    for (String field : List.of("userId", "activityId", "skuId")) {
+      for (Object representation : List.of(0L, -1L, new BigDecimal("-0.000"), "0", "-1")) {
+        Fixture fixture = new Fixture();
+        fixture.event.put(field, representation);
+        IllegalStateException failure =
+            assertThrows(
+                IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+        assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+        verifyNoInteractions(
+            fixture.dedup,
+            fixture.products,
+            fixture.orders,
+            fixture.outbox,
+            fixture.recovery,
+            fixture.stock,
+            fixture.cart);
+      }
+    }
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());

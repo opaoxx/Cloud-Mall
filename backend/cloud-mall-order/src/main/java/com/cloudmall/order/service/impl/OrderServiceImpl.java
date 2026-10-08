@@ -915,10 +915,14 @@ public class OrderServiceImpl implements OrderService {
     return value == null ? fallback : String.valueOf(value);
   }
 
+  /** 对当前消息身份表示执行无损long转换；禁止截断小数或回绕越界值，正数业务门仍由原指纹核验。 */
   private static long longValue(Object value, String fieldName) {
-    if (value instanceof Number number) return number.longValue();
     try {
-      return Long.parseLong(String.valueOf(value));
+      if (value instanceof BigDecimal decimal) return decimal.longValueExact();
+      if (value instanceof java.math.BigInteger integer) return integer.longValueExact();
+      if (value instanceof Number number) return new BigDecimal(number.toString()).longValueExact();
+      if (value instanceof String text) return Long.parseLong(text);
+      throw new IllegalArgumentException("消息身份必须是数值或整数字符串");
     } catch (RuntimeException exception) {
       throw new IllegalArgumentException("秒杀消息字段非法: " + fieldName, exception);
     }
