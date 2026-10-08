@@ -272,14 +272,18 @@ public class CartServiceImpl implements CartService {
     }
   }
 
-  /** 执行 currentSku 相关操作。 */
+  /** 读取成功且原SKU身份一致的商品事实，坏证明抛500阻止当前项回写/结算。 */
   private ProductClient.SkuView currentSku(Long skuId) {
-    // 1. 接收并整理 currentSku 的业务请求。
-    // 2. 执行 currentSku 的核心业务校验与状态处理。
-    // 3. 返回 currentSku 的处理结果。
+    // 1. 保持原查询和缺失响应/数据的404语义。
     ApiResponse<ProductClient.SkuView> response = products.getSku(skuId);
     if (response == null || response.data == null)
       throw new BizException(ErrorCodes.NOT_FOUND, "商品或SKU不存在", 404);
+    // 2. 可反序列化不代表可信，错误码或别SKU不得提供当前购物车价格。
+    if (!"0".equals(response.code)
+        || skuId == null
+        || !Objects.equals(skuId, response.data.skuId()))
+      throw new BizException(ErrorCodes.INTERNAL, "商品SKU响应身份或状态不可信", 500);
+    // 3. 只有精确原身份的成功事实进入既有摘要/价格处理。
     return response.data;
   }
 
