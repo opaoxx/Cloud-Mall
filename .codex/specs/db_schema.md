@@ -284,6 +284,8 @@
 
 索引：`idx_outbox_status_retry(status,next_retry_at)`、`idx_outbox_order(order_no)`。订单创建事务必须同时插入该表；只有 RabbitMQ publisher confirm 成功后才能标记 `PUBLISHED`。若 confirm 已成功但 `PUBLISHED` 更新失败，记录仍保持 `PENDING` 并重试同一 `eventId`；重复消息由关单 CAS 保证无副作用，不能生成新的事件 ID。发送超时、连接失败或进程中断保留 `PENDING`，dispatcher 重试；消费者以 `eventId` 和订单状态条件更新共同保证幂等。
 
+`attempts` 的失败更新使用 SQL 饱和递增，最大值为 INT_MAX；负值行不参与失败更新且不由本批自动修复。该应用语义不改变列类型、索引、退避时间或历史数据。
+
 ### 5.6 `order_stock_action`
 
 支付确认、手工取消和超时关单不能在订单本地事务中直接调用库存。订单状态迁移与库存动作意图必须先独立提交，再由恢复任务执行远程确认/回滚，覆盖库存已提交但响应丢失、订单事务回滚和进程崩溃窗口。
