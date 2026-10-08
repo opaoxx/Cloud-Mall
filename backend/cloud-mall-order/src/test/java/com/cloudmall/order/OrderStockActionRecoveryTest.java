@@ -21,6 +21,7 @@ import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import com.cloudmall.order.service.impl.StockCircuitOpenException;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -342,24 +343,258 @@ class OrderStockActionRecoveryTest {
     }
   }
 
+  @AfterEach
+  void clearTestInterruptSignal() {
+    Thread.interrupted();
+  }
+
+  @Test
+  void aPreInterruptedThreadDoesNotCallAnyDependency() {
+    Thread.currentThread().interrupt();
+    try {
+      recovery.recoverDue();
+      org.junit.jupiter.api.Assertions.assertTrue(Thread.currentThread().isInterrupted());
+      org.mockito.Mockito.verifyNoInteractions(actionMapper, stockClient);
+    } finally {
+      Thread.interrupted();
+    }
+  }
+
+  @Test
+  void signalsAtEachCheckpointStopTheCurrentActionAndAllFollowers() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      for (String phase :
+          List.of("SCAN", "CLAIM", "GET", "ACTION", "SECOND_GET", "FINISH", "RETRY")) {
+        setUp();
+        dueWithHealthyFollower(actionType);
+        String target = "CONFIRM".equals(actionType) ? "CONFIRMED" : "ROLLED_BACK";
+        when(stockClient.reservation("order-1"))
+            .thenReturn(stockFact("order-1", "RESERVED"), stockFact("order-1", target));
+        if ("CONFIRM".equals(actionType))
+          doReturn(ApiResponse.ok("confirmed")).when(stockClient).confirm(eq("order-1"), any());
+        else
+          doReturn(ApiResponse.ok("rolledBack")).when(stockClient).rollback(eq("order-1"), any());
+        switch (phase) {
+          case "SCAN" -> {
+            var candidates = actionMapper.findDue(LocalDateTime.now(), 50);
+            org.mockito.Mockito.doAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return candidates;
+                    })
+                .when(actionMapper)
+                .findDue(any(), anyInt());
+          }
+          case "CLAIM" ->
+              when(actionMapper.claim(eq(1L), anyString(), any()))
+                  .thenAnswer(
+                      invocation -> {
+                        Thread.currentThread().interrupt();
+                        return 1;
+                      });
+          case "GET" ->
+              when(stockClient.reservation("order-1"))
+                  .thenAnswer(
+                      invocation -> {
+                        Thread.currentThread().interrupt();
+                        return stockFact("order-1", "RESERVED");
+                      });
+          case "ACTION" -> {
+            if ("CONFIRM".equals(actionType))
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        Thread.currentThread().interrupt();
+                        return ApiResponse.ok("confirmed");
+                      })
+                  .when(stockClient)
+                  .confirm(eq("order-1"), any());
+            else
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        Thread.currentThread().interrupt();
+                        return ApiResponse.ok("rolledBack");
+                      })
+                  .when(stockClient)
+                  .rollback(eq("order-1"), any());
+          }
+          case "SECOND_GET" ->
+              when(stockClient.reservation("order-1"))
+                  .thenReturn(stockFact("order-1", "RESERVED"))
+                  .thenAnswer(
+                      invocation -> {
+                        Thread.currentThread().interrupt();
+                        return stockFact("order-1", target);
+                      });
+          case "FINISH" -> {
+            doReturn(stockFact("order-1", target)).when(stockClient).reservation("order-1");
+            when(actionMapper.finish(eq(1L), anyString(), anyString(), any(), any()))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return 1;
+                    });
+          }
+          case "RETRY" -> {
+            doThrow(new IllegalStateException("ordinary Stock unknown"))
+                .when(stockClient)
+                .reservation("order-1");
+            when(actionMapper.retry(eq(1L), anyString(), anyString(), any(), any()))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return 1;
+                    });
+          }
+          default -> throw new AssertionError("unexpected phase");
+        }
+        try {
+          org.junit.jupiter.api.Assertions.assertDoesNotThrow(recovery::recoverDue);
+          org.junit.jupiter.api.Assertions.assertTrue(
+              Thread.currentThread().isInterrupted(), actionType + phase);
+          verify(actionMapper, never()).claim(eq(2L), anyString(), any());
+          verify(stockClient, never()).reservation("order-2");
+          if (!"FINISH".equals(phase))
+            verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+          else verify(actionMapper).finish(eq(1L), anyString(), eq("SUCCEEDED"), eq(null), any());
+          if (!"RETRY".equals(phase))
+            verify(actionMapper, never()).retry(eq(1L), anyString(), anyString(), any(), any());
+          else verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+          if (List.of("SCAN", "CLAIM").contains(phase))
+            verify(stockClient, never()).reservation("order-1");
+          if (List.of("ACTION", "SECOND_GET").contains(phase)) {
+            if ("CONFIRM".equals(actionType)) verify(stockClient).confirm(eq("order-1"), any());
+            else verify(stockClient).rollback(eq("order-1"), any());
+          } else {
+            verify(stockClient, never()).confirm(anyString(), any());
+            verify(stockClient, never()).rollback(anyString(), any());
+          }
+        } finally {
+          Thread.interrupted();
+        }
+      }
+    }
+  }
+
+  @Test
+  void wrappedInterruptedCausesRestoreTheSignalAndStopAllFollowers() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      for (String phase :
+          List.of(
+              "SCAN_DB",
+              "SCAN_RUNTIME",
+              "CLAIM_DB",
+              "CLAIM_RUNTIME",
+              "GET",
+              "ACTION",
+              "FINISH",
+              "RETRY")) {
+        setUp();
+        dueWithHealthyFollower(actionType);
+        var signal = new InterruptedException("operation interrupted");
+        RuntimeException wrapped =
+            List.of("GET", "ACTION", "SCAN_RUNTIME", "CLAIM_RUNTIME").contains(phase)
+                ? new IllegalStateException("wrapped remote signal", signal)
+                : new org.springframework.dao.DataAccessResourceFailureException(
+                    "wrapped database signal", signal);
+        switch (phase) {
+          case "SCAN_DB", "SCAN_RUNTIME" ->
+              org.mockito.Mockito.doThrow(wrapped).when(actionMapper).findDue(any(), anyInt());
+          case "CLAIM_DB", "CLAIM_RUNTIME" ->
+              when(actionMapper.claim(eq(1L), anyString(), any())).thenThrow(wrapped);
+          case "GET" -> doThrow(wrapped).when(stockClient).reservation("order-1");
+          case "ACTION" -> {
+            doReturn(stockFact("order-1", "RESERVED")).when(stockClient).reservation("order-1");
+            if ("CONFIRM".equals(actionType))
+              doThrow(wrapped).when(stockClient).confirm(eq("order-1"), any());
+            else doThrow(wrapped).when(stockClient).rollback(eq("order-1"), any());
+          }
+          case "FINISH" ->
+              when(actionMapper.finish(eq(1L), anyString(), anyString(), any(), any()))
+                  .thenThrow(wrapped);
+          case "RETRY" -> {
+            doThrow(new IllegalStateException("ordinary Stock unknown"))
+                .when(stockClient)
+                .reservation("order-1");
+            when(actionMapper.retry(eq(1L), anyString(), anyString(), any(), any()))
+                .thenThrow(wrapped);
+          }
+          default -> throw new AssertionError("unexpected phase");
+        }
+        try {
+          org.junit.jupiter.api.Assertions.assertDoesNotThrow(recovery::recoverDue);
+          org.junit.jupiter.api.Assertions.assertTrue(
+              Thread.currentThread().isInterrupted(), actionType + phase);
+          verify(actionMapper, never()).claim(eq(2L), anyString(), any());
+          verify(stockClient, never()).reservation("order-2");
+          if (!"RETRY".equals(phase))
+            verify(actionMapper, never()).retry(eq(1L), anyString(), anyString(), any(), any());
+          else verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+          if (!"FINISH".equals(phase))
+            verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+        } finally {
+          Thread.interrupted();
+        }
+      }
+    }
+  }
+
+  @Test
+  void ordinaryIoTimeoutsAndCyclicCausesRemainBusinessRetries() {
+    var cycleFirst = new IllegalStateException("cycle first");
+    var cycleSecond = new IllegalStateException("cycle second");
+    cycleFirst.initCause(cycleSecond);
+    cycleSecond.initCause(cycleFirst);
+    for (RuntimeException failure :
+        List.of(
+            new IllegalStateException(new java.net.SocketTimeoutException("read timeout")),
+            new IllegalStateException(new java.io.InterruptedIOException("ordinary IO failure")),
+            cycleFirst)) {
+      setUp();
+      dueWithHealthyFollower();
+      doThrow(failure).when(stockClient).reservation("order-1");
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(recovery::recoverDue);
+      org.junit.jupiter.api.Assertions.assertFalse(Thread.currentThread().isInterrupted());
+      verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+      verify(actionMapper).finish(eq(2L), anyString(), eq("SUCCEEDED"), eq(null), any());
+    }
+  }
+
+  @Test
+  void aStockErrorStillPropagatesWithoutRetryOrFollowingClaims() {
+    dueWithHealthyFollower();
+    var failure = new AssertionError("Stock Error");
+    doThrow(failure).when(stockClient).reservation("order-1");
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class, recovery::recoverDue));
+    verify(actionMapper, never()).retry(eq(1L), anyString(), anyString(), any(), any());
+    verify(actionMapper, never()).claim(eq(2L), anyString(), any());
+  }
+
   /** 构造首动作和后健康候选，隔离测试不依赖真实Stock或数据库。 */
   private void dueWithHealthyFollower() {
+    dueWithHealthyFollower("CONFIRM");
+  }
+
+  /** 按原方向构造两个独立合法动作，不改变业务身份契约。 */
+  private void dueWithHealthyFollower(String actionType) {
     OrderStockActionPO first = new OrderStockActionPO();
     first.id = 1L;
     first.orderNo = "order-1";
-    first.actionType = "CONFIRM";
-    first.operationKey = "order-1:CONFIRM";
+    first.actionType = actionType;
+    first.operationKey = "order-1:" + actionType;
     first.attempts = 0;
     OrderStockActionPO healthy = new OrderStockActionPO();
     healthy.id = 2L;
     healthy.orderNo = "order-2";
-    healthy.actionType = "CONFIRM";
-    healthy.operationKey = "order-2:CONFIRM";
+    healthy.actionType = actionType;
+    healthy.operationKey = "order-2:" + actionType;
     healthy.attempts = 0;
     when(actionMapper.findDue(any(), anyInt())).thenReturn(List.of(first, healthy));
     when(actionMapper.claim(eq(2L), anyString(), any())).thenReturn(1);
-    when(stockClient.reservation("order-1")).thenReturn(status("CONFIRMED"));
-    when(stockClient.reservation("order-2")).thenReturn(stockFact("order-2", "CONFIRMED"));
+    String target = "CONFIRM".equals(actionType) ? "CONFIRMED" : "ROLLED_BACK";
+    when(stockClient.reservation("order-1")).thenReturn(status(target));
+    when(stockClient.reservation("order-2")).thenReturn(stockFact("order-2", target));
   }
 
   /** 构造具有指定身份的库存响应，不从请求路径补全字段。 */

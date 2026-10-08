@@ -7,8 +7,11 @@ import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,26 +39,44 @@ public class OrderStockActionRecovery {
     this.stockClient = stockClient;
   }
 
-  /** 定期恢复已提交订单的库存动作；扫描失败传播，单条数据库异常隔离。 */
+  /** 定期恢复库存动作；保留中断并停止，普通扫描失败传播、单条数据库故障隔离。 */
   @Scheduled(fixedDelayString = "${cloudmall.order.stock-action-recovery-interval-ms:5000}")
   public void recoverDue() {
-    // 1. 扫描到期的非终态动作。
-    List<OrderStockActionPO> due = actionMapper.findDue(now(), 50);
-    // 2. 逐条认领，避免多实例重复执行相反动作。
+    if (Thread.currentThread().isInterrupted()) return;
+    // 1. 扫描到期的非终态动作，扫描失败仍传播，中断优先停止。
+    List<OrderStockActionPO> due;
+    try {
+      if (Thread.currentThread().isInterrupted()) return;
+      due = actionMapper.findDue(now(), 50);
+    } catch (RuntimeException scanFailure) {
+      if (interrupted(scanFailure)) return;
+      throw scanFailure;
+    }
+    if (Thread.currentThread().isInterrupted()) return;
+    // 2. 逐条认领；中断后不再操作当前或后续候选。
     for (OrderStockActionPO action : due) {
+      if (Thread.currentThread().isInterrupted()) return;
       try {
         LocalDateTime claimedAt = now();
         // 每次认领使用独立代际标识，避免同实例重认领后接受迟到结果。
         String claimOwner = UUID.randomUUID().toString();
-        if (actionMapper.claim(action.id, claimOwner, claimedAt) != 1) continue;
+        if (Thread.currentThread().isInterrupted()) return;
+        int claimed = actionMapper.claim(action.id, claimOwner, claimedAt);
+        if (Thread.currentThread().isInterrupted()) return;
+        if (claimed != 1) continue;
         recoverOne(action, claimOwner);
+        if (Thread.currentThread().isInterrupted()) return;
       } catch (DataAccessException databaseFailure) {
+        if (interrupted(databaseFailure)) return;
         // 保留原持久事实与已提交租约，不猜提交结果或追加当前动作写入。
         log.warn(
             "订单库存动作单条数据库操作失败，本次跳过，orderNo={}，action={}",
             action.orderNo,
             action.actionType,
             databaseFailure);
+      } catch (RuntimeException candidateFailure) {
+        if (interrupted(candidateFailure)) return;
+        throw candidateFailure;
       }
     }
   }
@@ -63,6 +84,7 @@ public class OrderStockActionRecovery {
   /** 查询事实并携带本次认领标识完成本地CAS；失效零更新不猜测结果或再次写入。 */
   private void recoverOne(OrderStockActionPO action, String claimOwner) {
     try {
+      if (Thread.currentThread().isInterrupted()) return;
       // 未知类型不得默认成回滚；原事实保留并走既有UNKNOWN退避。
       if (!"CONFIRM".equals(action.actionType) && !"ROLLBACK".equals(action.actionType)) {
         throw new IllegalStateException("库存动作类型不受支持: " + action.actionType);
@@ -77,12 +99,17 @@ public class OrderStockActionRecovery {
       String target = "CONFIRM".equals(action.actionType) ? "CONFIRMED" : "ROLLED_BACK";
       String opposite = "CONFIRM".equals(action.actionType) ? "ROLLED_BACK" : "CONFIRMED";
       String current = stockStatus(action.orderNo);
+      if (Thread.currentThread().isInterrupted()) return;
       if (target.equals(current)) {
+        if (Thread.currentThread().isInterrupted()) return;
         actionMapper.finish(action.id, claimOwner, "SUCCEEDED", null, now());
+        if (Thread.currentThread().isInterrupted()) return;
         return;
       }
       if (opposite.equals(current) || "REJECTED".equals(current)) {
+        if (Thread.currentThread().isInterrupted()) return;
         actionMapper.finish(action.id, claimOwner, "CONFLICT", "库存已处于不可逆的相反终态: " + current, now());
+        if (Thread.currentThread().isInterrupted()) return;
         log.error("订单库存动作与库存事实冲突，需人工对账，orderNo={}，action={}，stock={}",
             action.orderNo, action.actionType, current);
         return;
@@ -91,47 +118,75 @@ public class OrderStockActionRecovery {
         throw new IllegalStateException("库存预扣尚未达到可结算状态: " + current);
       // 2. 只对 RESERVED 使用同一操作键重试，远端写响应不能代表最终事实。
       StockClient.Action request = new StockClient.Action(action.operationKey);
+      if (Thread.currentThread().isInterrupted()) return;
       ApiResponse<?> result = "CONFIRM".equals(action.actionType)
           ? OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.ACTION,
               () -> stockClient.confirm(action.orderNo, request))
           : OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.ACTION,
               () -> stockClient.rollback(action.orderNo, request));
+      if (Thread.currentThread().isInterrupted()) return;
       if (result == null || !"0".equals(result.code))
         throw new IllegalStateException("库存动作响应未确认");
       // 3. 再读持久状态；仅目标终态允许把本地动作标记成功。
       String afterWrite = stockStatus(action.orderNo);
+      if (Thread.currentThread().isInterrupted()) return;
       if (target.equals(afterWrite)) {
+        if (Thread.currentThread().isInterrupted()) return;
         actionMapper.finish(action.id, claimOwner, "SUCCEEDED", null, now());
+        if (Thread.currentThread().isInterrupted()) return;
       } else if (opposite.equals(afterWrite)) {
+        if (Thread.currentThread().isInterrupted()) return;
         actionMapper.finish(action.id, claimOwner, "CONFLICT", "库存写入后为相反终态: " + afterWrite, now());
+        if (Thread.currentThread().isInterrupted()) return;
         log.error("订单库存动作写入后发生终态冲突，orderNo={}，action={}",
             action.orderNo, action.actionType);
       } else {
         throw new IllegalStateException("库存动作写入后的状态待确认: " + afterWrite);
       }
+    } catch (InterruptedException interruptedCall) {
+      Thread.currentThread().interrupt();
     } catch (DataAccessException databaseFailure) {
+      if (interrupted(databaseFailure)) return;
       // 完成写数据库失败不是远端UNKNOWN，不再尝试retry或重新执行Stock动作。
       throw databaseFailure;
     } catch (RuntimeException unknownResult) {
+      if (interrupted(unknownResult)) return;
       // 4. 先保留原业务错误证据，再按原token尝试一次UNKNOWN退避。
       log.warn(
           "订单库存动作结果待恢复，orderNo={}，action={}", action.orderNo, action.actionType, unknownResult);
       long delaySeconds = Math.min(60, 5L * Math.max(1, action.attempts == null ? 1 : action.attempts));
+      if (Thread.currentThread().isInterrupted()) return;
       actionMapper.retry(
           action.id, claimOwner, unknownResult.toString(), now().plusSeconds(delaySeconds), now());
+      if (Thread.currentThread().isInterrupted()) return;
     }
   }
 
-  /** 核验响应原订单号再读取库存状态，错单或缺失身份沿原UNKNOWN退避处理。 */
-  private String stockStatus(String orderNo) {
+  /** GET前后保留中断；未中断时沿原身份门读取库存状态，错单仍走UNKNOWN退避。 */
+  private String stockStatus(String orderNo) throws InterruptedException {
+    if (Thread.currentThread().isInterrupted()) throw new InterruptedException("库存动作恢复线程已中断");
     ApiResponse<StockReservationStatusVO> response =
         OrderStockCircuitBreaker.call(
             OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
+    if (Thread.currentThread().isInterrupted()) throw new InterruptedException("库存动作恢复线程已中断");
     if (response == null || !"0".equals(response.code) || response.data == null)
       throw new IllegalStateException("库存状态查询结果未知");
     if (!Objects.equals(orderNo, response.data.orderNo))
       throw new IllegalStateException("库存状态查询订单号与原动作不一致");
     return response.data.status;
+  }
+
+  /** 按对象身份安全遍历cause，只认当前标志或明确InterruptedException，不猜普通IO超时。 */
+  private static boolean interrupted(Throwable failure) {
+    if (Thread.currentThread().isInterrupted()) return true;
+    Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (Throwable cause = failure; cause != null && visited.add(cause); cause = cause.getCause()) {
+      if (cause instanceof InterruptedException) {
+        Thread.currentThread().interrupt();
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 获取与 MySQL DATETIME(3) 一致的本地时间。 */
