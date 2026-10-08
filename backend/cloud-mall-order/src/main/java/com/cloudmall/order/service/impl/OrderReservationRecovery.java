@@ -10,10 +10,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.YearMonth;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -116,12 +117,15 @@ public class OrderReservationRecovery {
     }
   }
 
-  /** 按原订单号读取库存端的当前或终态事实。 */
+  /** 核验响应身份并读取库存事实；缺失或错单抛异常，交由原失败退避路径处理。 */
   private String reservationStatus(String orderNo) {
-    ApiResponse<StockReservationStatusVO> response = OrderStockCircuitBreaker.call(
-        OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
+    ApiResponse<StockReservationStatusVO> response =
+        OrderStockCircuitBreaker.call(
+            OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
     if (response == null || !"0".equals(response.code) || response.data == null)
       throw new IllegalStateException("库存预扣查询结果未知");
+    if (!Objects.equals(orderNo, response.data.orderNo))
+      throw new IllegalStateException("库存预扣查询订单号与原意图不一致");
     return response.data.status;
   }
 

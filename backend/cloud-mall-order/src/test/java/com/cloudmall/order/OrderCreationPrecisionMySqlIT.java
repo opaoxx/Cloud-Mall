@@ -10,7 +10,9 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
+import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.domain.vo.OrderVO;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
@@ -21,6 +23,7 @@ import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.OrderReservationRecovery;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -296,6 +299,143 @@ class OrderCreationPrecisionMySqlIT {
     assertEquals(
         2, fixture.queryForObject("SELECT COUNT(*) FROM order_reservation_intent", Integer.class));
     verify((StockClient) ReflectionTestUtils.getField(service, "stock"), times(2)).reserve(any());
+  }
+
+  @Test
+  void wrongStockOrderCannotFinishIntentAndMatchingFactCanRecoverLater() {
+    OrderReservationIntentPO original = insertStaleRecoveryIntent("first");
+    Map<String, Object> before = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+    StockClient stock = mock(StockClient.class);
+    doReturn(ApiResponse.ok(recoveryStatus(original.orderNo + "other", "ROLLED_BACK")))
+        .when(stock)
+        .reservation(original.orderNo);
+    OrderReservationRecovery recovery =
+        new OrderReservationRecovery(
+            stock,
+            new OrderReservationIntentMapper(fixture),
+            new OrderSqlMapper(fixture),
+            new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+
+    Map<String, Object> deferred = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+    assertDeferredRecoveryIdentity(before, deferred);
+    verify(stock, never()).reserve(any());
+    verify(stock, never()).rollback(anyString());
+    assertNoRecoveryOrderOrMessage(original);
+
+    doReturn(ApiResponse.ok(recoveryStatus(original.orderNo, "ROLLED_BACK")))
+        .when(stock)
+        .reservation(original.orderNo);
+    fixture.update(
+        "UPDATE order_reservation_intent SET next_retry_at=DATE_SUB(NOW(3), INTERVAL 1 SECOND)");
+    recovery.recoverStaleReservations();
+    Map<String, Object> resolved = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+    assertEquals("RELEASED", resolved.get("status"));
+    assertNull(resolved.get("last_error"));
+    assertNull(resolved.get("next_retry_at"));
+    assertEquals(before.get("order_no"), resolved.get("order_no"));
+    assertEquals(before.get("items_snapshot"), resolved.get("items_snapshot"));
+    assertNoRecoveryOrderOrMessage(original);
+    verify(stock, never()).reserve(any());
+    verify(stock, never()).rollback(anyString());
+  }
+
+  @Test
+  void wrongIdentityInSecondQueryKeepsRealIntentPendingAfterOriginalReserve() {
+    OrderReservationIntentPO original = insertStaleRecoveryIntent("second");
+    Map<String, Object> before = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+    StockClient stock = mock(StockClient.class);
+    doReturn(
+            ApiResponse.ok(recoveryStatus(original.orderNo, "NOT_FOUND")),
+            ApiResponse.ok(recoveryStatus(original.orderNo + "other", "ROLLED_BACK")))
+        .when(stock)
+        .reservation(original.orderNo);
+    doReturn(ApiResponse.ok(Map.of("reserved", true))).when(stock).reserve(any());
+    OrderReservationRecovery recovery =
+        new OrderReservationRecovery(
+            stock,
+            new OrderReservationIntentMapper(fixture),
+            new OrderSqlMapper(fixture),
+            new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+
+    assertDeferredRecoveryIdentity(
+        before, fixture.queryForMap("SELECT * FROM order_reservation_intent"));
+    var replay = org.mockito.ArgumentCaptor.forClass(StockClient.Reservation.class);
+    verify(stock).reserve(replay.capture());
+    assertEquals(original.orderNo, replay.getValue().orderNo());
+    assertEquals(7L, replay.getValue().items().get(0).skuId());
+    assertEquals(1, replay.getValue().items().get(0).quantity());
+    verify(stock, never()).rollback(anyString());
+    assertNoRecoveryOrderOrMessage(original);
+  }
+
+  /** 按当前上海时间创建真正陈旧的原意图，物理月表仍在本例隔离库内。 */
+  private OrderReservationIntentPO insertStaleRecoveryIntent(String suffix) {
+    OrderReservationIntentPO original = new OrderReservationIntentPO();
+    original.id = 1L;
+    original.userId = 7L;
+    original.idempotencyKey = "recovery-identity";
+    original.itemsSnapshot = "[{\"skuId\":7,\"quantity\":1}]";
+    original.status = "RESERVE_UNKNOWN";
+    original.createdAt =
+        OffsetDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(5).toLocalDateTime();
+    original.updatedAt = original.createdAt;
+    original.orderNo =
+        original.createdAt.format(java.time.format.DateTimeFormatter.ofPattern("yyyyMM"))
+            + "recover"
+            + suffix;
+    fixture.execute(
+        "CREATE TABLE IF NOT EXISTS mall_order_"
+            + original.orderNo.substring(0, 6)
+            + " LIKE mall_order_template");
+    assertEquals(1, new OrderReservationIntentMapper(fixture).insertIfAbsent(original));
+    return original;
+  }
+
+  /** 构造既有Stock响应VO，包含原查询身份及状态。 */
+  private static StockReservationStatusVO recoveryStatus(String orderNo, String status) {
+    StockReservationStatusVO fact = new StockReservationStatusVO();
+    fact.orderNo = orderNo;
+    fact.status = status;
+    fact.items = List.of();
+    return fact;
+  }
+
+  /** 只有失败元数据可变化；原意图状态、身份、载荷和创建时间必须保持。 */
+  private void assertDeferredRecoveryIdentity(
+      Map<String, Object> before, Map<String, Object> after) {
+    for (String column :
+        List.of(
+            "id",
+            "order_no",
+            "user_id",
+            "idempotency_key",
+            "items_snapshot",
+            "status",
+            "created_at")) {
+      assertEquals(before.get(column), after.get(column), column);
+    }
+    assertNotNull(after.get("last_error"));
+    assertTrue(
+        local(after.get("next_retry_at"))
+            .isAfter(OffsetDateTime.now(ZoneOffset.ofHours(8)).toLocalDateTime()));
+  }
+
+  /** 错单证据不得创建订单、幂等或outbox；只保留唯一原意图。 */
+  private void assertNoRecoveryOrderOrMessage(OrderReservationIntentPO original) {
+    for (String table :
+        List.of(
+            "mall_order_" + original.orderNo.substring(0, 6),
+            "order_idempotency",
+            "order_outbox")) {
+      assertEquals(
+          0, fixture.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class), table);
+    }
+    assertEquals(
+        1, fixture.queryForObject("SELECT COUNT(*) FROM order_reservation_intent", Integer.class));
   }
 
   /** 对比隔离库全部业务事实，拒绝/重放不得写新意图、订单、幂等或outbox。 */
