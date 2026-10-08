@@ -283,6 +283,144 @@ class OrderLegacyStockIdentityMySqlIT {
     verifyNoInteractions(stock);
   }
 
+  @Test
+  void orderAliasesCannotBeReadThroughGetOrPaymentState() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String[] identity :
+        List.of(
+            new String[] {"202610legacy1", "202610LEGACY1"},
+            new String[] {"202610LEGACY1", "202610legacy1"},
+            new String[] {"202610légacy1", "202610legacy1"},
+            new String[] {"202610legacy1 ", "202610legacy1"})) {
+      checks.add(
+          () -> {
+            seed("PAID");
+            fixture.update("UPDATE mall_order_202610 SET order_no=? WHERE id=1", identity[0]);
+            assertEquals(
+                1,
+                fixture.queryForObject(
+                    "SELECT COUNT(*) FROM mall_order_202610 WHERE order_no=?",
+                    Integer.class,
+                    identity[1]));
+            var before = fixtureSnapshot();
+            AuthContext.set(8L, "USER");
+            assertEquals(
+                404,
+                assertThrows(BizException.class, () -> service.get(identity[1])).getHttpStatus());
+            assertEquals(
+                404,
+                assertThrows(BizException.class, () -> service.paymentState(identity[1], 8L))
+                    .getHttpStatus());
+            assertEquals(before, fixtureSnapshot());
+          });
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void caseAliasesCannotChangeOrderStatusOrCreateStockActions() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String endpoint : List.of("CANCEL", "PAID", "CONFIRM", "TIMEOUT")) {
+      checks.add(
+          () -> {
+            seed("CONFIRM".equals(endpoint) ? "PAID" : "PENDING_PAYMENT");
+            assertEquals(
+                1,
+                fixture.queryForObject(
+                    "SELECT COUNT(*) FROM mall_order_202610 WHERE order_no='202610LEGACY1'",
+                    Integer.class));
+            var before = fixtureSnapshot();
+            AuthContext.set(8L, "USER");
+            BizException failure =
+                assertThrows(
+                    BizException.class,
+                    () -> {
+                      switch (endpoint) {
+                        case "CANCEL" -> service.cancel("202610LEGACY1", 8L);
+                        case "PAID" -> service.paid("202610LEGACY1");
+                        case "CONFIRM" -> service.confirm("202610LEGACY1");
+                        case "TIMEOUT" -> service.consumeTimeout("202610LEGACY1");
+                        default -> throw new AssertionError("unexpected endpoint");
+                      }
+                    });
+            assertEquals(404, failure.getHttpStatus());
+            assertEquals(before, fixtureSnapshot());
+          });
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void exactOrdersKeepOwnerChecksAndAuthorizedStatusTransitions() {
+    seed("PENDING_PAYMENT");
+    AuthContext.set(8L, "USER");
+    var before = fixtureSnapshot();
+    var order = (com.cloudmall.order.domain.vo.OrderVO) service.get("202610legacy1").data;
+    assertEquals("202610legacy1", order.orderNo);
+    assertEquals(new BigDecimal("12.30"), order.payAmount);
+    assertEquals("PENDING_PAYMENT", order.status);
+    assertEquals(before, fixtureSnapshot());
+    AuthContext.set(9L, "USER");
+    assertEquals(
+        403, assertThrows(BizException.class, () -> service.get("202610legacy1")).getHttpStatus());
+    assertEquals(before, fixtureSnapshot());
+    AuthContext.set(8L, "USER");
+    service.paid("202610legacy1");
+    assertEquals(
+        "PAID",
+        fixture.queryForObject("SELECT status FROM mall_order_202610 WHERE id=1", String.class));
+    assertEquals(
+        "202610legacy1:CONFIRM",
+        fixture.queryForObject("SELECT operation_key FROM order_stock_action", String.class));
+    service.confirm("202610legacy1");
+    assertEquals(
+        "COMPLETED",
+        fixture.queryForObject("SELECT status FROM mall_order_202610 WHERE id=1", String.class));
+    for (String endpoint : List.of("CANCEL", "TIMEOUT")) {
+      seed("PENDING_PAYMENT");
+      if ("CANCEL".equals(endpoint)) service.cancel("202610legacy1", 8L);
+      else service.consumeTimeout("202610legacy1");
+      assertEquals(
+          "CANCELLED",
+          fixture.queryForObject("SELECT status FROM mall_order_202610 WHERE id=1", String.class));
+      assertEquals(
+          "202610legacy1:ROLLBACK",
+          fixture.queryForObject("SELECT operation_key FROM order_stock_action", String.class));
+    }
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void invalidInputsMissingOrdersAndSqlFailuresStillHaveTheirOriginalBoundaries() {
+    seed("PENDING_PAYMENT");
+    var observedSqlMapper = spy(sqlMapper);
+    var target =
+        new OrderServiceImpl(
+            stock,
+            mock(ProductClient.class),
+            mock(UserClient.class),
+            mock(CartClient.class),
+            observedSqlMapper,
+            new ObjectMapper());
+    ReflectionTestUtils.setField(target, "orderStockActionMapper", mapper);
+    for (String requestedOrderNo :
+        java.util.Arrays.asList(
+            null, "", " \t", "202610légacy1", "202610legacy1 ", "202613invalid", "not-an-order")) {
+      assertEquals(
+          404,
+          assertThrows(BizException.class, () -> target.get(requestedOrderNo)).getHttpStatus());
+    }
+    verifyNoInteractions(observedSqlMapper);
+    assertEquals(
+        404, assertThrows(BizException.class, () -> target.get("202610missing")).getHttpStatus());
+    fixture.execute("DROP TABLE mall_order_202610");
+    assertThrows(
+        org.springframework.dao.DataAccessException.class, () -> target.get("202610legacy1"));
+    verifyNoInteractions(stock);
+  }
+
   /** 保留源模板定义，只在本例随机数据库创建两张固定月表。 */
   private void cloneTemplate(String template, String target) {
     String ddl =

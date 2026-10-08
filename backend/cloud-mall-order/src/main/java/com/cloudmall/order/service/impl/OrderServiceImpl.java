@@ -814,22 +814,24 @@ public class OrderServiceImpl implements OrderService {
       orderStockActionMapper.insert(id(), orderNo, "ROLLBACK", now().toLocalDateTime());
   }
 
-  /** 执行 find 相关操作。 */
+  /** 在映射视图和读取明细前绑定请求号与主表原身份，错单候选沿原404拒绝。 */
   private OrderVO find(String orderNo) {
-    // 1. 接收并整理 find 的业务请求。
-    // 2. 执行 find 的核心业务校验与状态处理。
-    // 3. 返回 find 的处理结果。
-    String t = tableFromNo(orderNo);
-    List<OrderVO> x = orderSqlMapper.findOrder(t, orderNo).stream().map(this::view).toList();
-    if (x.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
-    OrderVO o = x.get(0);
-    o.items =
+    // 1. 沿原格式/月校验查询主表原始候选，不改变数据库比较规则。
+    String orderTable = tableFromNo(orderNo);
+    List<Map<String, Object>> orderRows = orderSqlMapper.findOrder(orderTable, orderNo);
+    // 2. 无行或身份不精确时拒绝，禁止借别名继续明细、鉴权或后续状态操作。
+    if (orderRows.isEmpty() || !Objects.equals(orderNo, orderRows.get(0).get("order_no")))
+      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
+    // 3. 身份有效后保持原视图和明细顺序，调用方继续原鉴权与业务流程。
+    List<OrderVO> orders = orderRows.stream().map(this::view).toList();
+    OrderVO order = orders.get(0);
+    order.items =
         orderSqlMapper
-            .findOrderItems(t.replace("mall_order_", "mall_order_item_"), orderNo)
+            .findOrderItems(orderTable.replace("mall_order_", "mall_order_item_"), orderNo)
             .stream()
             .map(this::viewItem)
             .toList();
-    return o;
+    return order;
   }
 
   /** 按旧状态执行 CAS 迁移，仅影响一行时返回成功。 */

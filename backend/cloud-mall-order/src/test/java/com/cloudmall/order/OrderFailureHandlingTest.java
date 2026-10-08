@@ -484,6 +484,74 @@ class OrderFailureHandlingTest {
     }
   }
 
+  @Test
+  void malformedOrderCandidatesAreRejectedBeforeDetailsOrAnyAction() {
+    String requestedOrderNo = "202609LOOKUP";
+    for (Object storedOrderNo : java.util.Arrays.asList("202609lookup", "202609other", null, 42L)) {
+      for (String endpoint :
+          List.of("GET", "PAYMENT_STATE", "CANCEL", "PAID", "CONFIRM", "TIMEOUT")) {
+        OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
+        Map<String, Object> row =
+            new java.util.HashMap<>(
+                Map.of(
+                    "user_id",
+                    8L,
+                    "status",
+                    "CONFIRM".equals(endpoint) ? "PAID" : "PENDING_PAYMENT",
+                    "total_amount",
+                    new BigDecimal("12.30"),
+                    "pay_amount",
+                    new BigDecimal("12.30"),
+                    "address_snapshot",
+                    "{}"));
+        row.put("order_no", storedOrderNo);
+        when(sqlMapper.findOrder(anyString(), eq(requestedOrderNo))).thenReturn(List.of(row));
+        StockClient stockClient = mock(StockClient.class);
+        OrderServiceImpl target =
+            service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
+        AuthContext.set(8L, "USER");
+        BizException failure =
+            assertThrows(
+                BizException.class,
+                () -> {
+                  switch (endpoint) {
+                    case "GET" -> target.get(requestedOrderNo);
+                    case "PAYMENT_STATE" -> target.paymentState(requestedOrderNo, 8L);
+                    case "CANCEL" -> target.cancel(requestedOrderNo, 8L);
+                    case "PAID" -> target.paid(requestedOrderNo);
+                    case "CONFIRM" -> target.confirm(requestedOrderNo);
+                    case "TIMEOUT" -> target.consumeTimeout(requestedOrderNo);
+                    default -> throw new AssertionError("unknown endpoint");
+                  }
+                });
+        assertEquals(404, failure.getHttpStatus());
+        verify(sqlMapper, never()).findOrderItems(anyString(), anyString());
+        verify(sqlMapper, never())
+            .updateStatus(anyString(), anyString(), anyString(), anyString(), any());
+        OrderStockActionMapper actions =
+            (OrderStockActionMapper) ReflectionTestUtils.getField(target, "orderStockActionMapper");
+        verifyNoInteractions(actions, stockClient);
+      }
+    }
+  }
+
+  @Test
+  void missingOrderAndDatabaseLookupErrorsKeepTheirOriginalMeaning() {
+    OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
+    StockClient stockClient = mock(StockClient.class);
+    OrderServiceImpl target =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
+    String orderNo = "202609missing";
+    assertEquals(404, assertThrows(BizException.class, () -> target.get(orderNo)).getHttpStatus());
+    var unavailable = new DataAccessResourceFailureException("order database unavailable");
+    when(sqlMapper.findOrder(anyString(), eq(orderNo))).thenThrow(unavailable);
+    org.junit.jupiter.api.Assertions.assertSame(
+        unavailable,
+        assertThrows(DataAccessResourceFailureException.class, () -> target.get(orderNo)));
+    verify(sqlMapper, never()).findOrderItems(anyString(), anyString());
+    verifyNoInteractions(stockClient);
+  }
+
   /** 保留原Stock响应身份，不根据请求路径补全缺失或错单字段。 */
   private static ApiResponse<StockReservationStatusVO> legacyStockFact(
       String orderNo, String stockStatus) {
