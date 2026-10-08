@@ -33,14 +33,14 @@
 - 保留 plain INSERT、唯一键冲突的 `DuplicateKeyException` 原传播、表不存在/连接/约束/JSON 等数据库异常原传播；不把错误转成 0。
 - 不新增 INSERT IGNORE、repair SQL、默认值、schema CHECK 或迁移。
 - 非 strict 模式也必须在 SQL 前拒绝本轮非法字段，不能依赖数据库截断/默认化行为。
-- 正常业务调用参数和方向/订单号/时间语义保持；Mapper 独立验证主键。共享 `OrderServiceImpl.id()` 生成器的极值不在本批修复，本批不承诺所有生成路径都已保证合法。测试构造历史坏 action 时，先插入合法行再在隔离夹具中更新坏字段，不增加业务 repair 路径。
+- 正常业务调用参数和方向/订单号/时间语义保持；Mapper 独立验证主键。此前将 `Math.abs(UUID.randomUUID().getMostSignificantBits())` 误报为可能产生 0/MIN 的生成器问题已核验为不成立（JDK17 v4 UUID 的 version 位约束排除该极值），无需修改共享生成器；本批也不扩展全局唯一性保证。测试构造历史坏 action 时，先插入合法行再在隔离夹具中更新坏字段，不增加业务 repair 路径。
 
 ## 4. 与既有读取/恢复边界
 
 - 合法写入继续沿 AV/AW/AX/AY/AZ/BA/BB/BG 读取、动作、租约、attempts 和中断语义。
 - 不改变已有 action 的 statusForOrder、paymentState、Recovery 或 Stock 调用顺序。
 - 不自动修复历史非法 type/key/orderNo/time；读取门继续 UNKNOWN/fail closed。
-- 不扩展为订单年月、时间精度、Product 实时指标或其他服务写入校验。
+- 不扩展为订单年月、Product 实时指标或其他服务写入校验；本批不处理 DATETIME(3) 亚毫秒时间归一化，后续 17BJ 单独评审。
 
 ## 5. 验收矩阵
 
