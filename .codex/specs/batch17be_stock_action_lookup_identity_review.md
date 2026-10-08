@@ -4,7 +4,7 @@
 
 结论：**GO，限定修复 `OrderStockActionMapper.statusForOrder` 受数据库 collation 影响而借用别订单 action 行的问题。**
 
-当前查询只按 `order_no=?` 返回 status。CI/AI/PAD SPACE 等 collation 可能让大小写、重音或尾随空格不同的 orderNo 命中别行，`paymentState` 随后把该 status 当作当前订单事实，或错误回退到 Legacy 查询。
+当前查询只按 `order_no=?` 返回 status。CI/AI/PAD SPACE 等 collation 可能让大小写、重音或尾随空格不同的 orderNo 命中别行，`paymentState` 随后把该 status 当作当前订单事实；若简单改成 BINARY 过滤，又会把已命中的不可信候选伪装成无 action，错误回退到 Legacy 查询。
 
 本轮只增加 action lookup 的候选身份核验，不修改 schema、索引/collation、Service API、Pay/Stock、actionType/key/attempts、订单查询或其他入口。
 
