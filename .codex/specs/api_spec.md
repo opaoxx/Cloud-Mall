@@ -180,6 +180,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单超时 outbox dispatcher 处理候选前必须检查已读 PO 的 `attempts` 非 null 且非负；坏快照只告警并跳过，不解析、不发送、不完成或写失败，后续候选继续。该 guard 不改变扫描 SQL、数据库字段或其他并发/字段校验语义。
 
+订单 outbox 的扫描、发布完成和失败记录 SQL 必须对 `status='PENDING'` 使用 BINARY 精确匹配；dispatcher 对已读 PO 也要求精确 PENDING，别名/其他状态只告警跳过，不 parse、不发送、不写完成/失败。0 行完成继续沿现有 publication proof，0 行失败保持原返回语义。
+
 订单超时 outbox 扫描在既有状态和到期时间条件后、LIMIT 前增加 `attempts>=0` eligibility；负计数不得占满候选窗口，也不被自动修复或删除。排序、limit 归一、Rabbit 和失败退避语义保持不变。
 
 订单超时 outbox 扫描还必须在 LIMIT 前以 BINARY 精确筛选 `event_type='ORDER_TIMEOUT'`；dispatcher 对当前 PO 再做精确类型 guard，别名/其他类型只告警跳过，不解析、发送或写完成/失败。其他事件类型需独立 handler，不由 timeout exchange 处理器猜测。
