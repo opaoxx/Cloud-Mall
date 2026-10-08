@@ -294,6 +294,8 @@ Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行
 
 订单 timeout dispatcher 的扫描在 LIMIT 前以 BINARY 精确匹配 `event_type='ORDER_TIMEOUT'`；`event_type VARCHAR(64) NOT NULL` DDL 与索引不变，其他类型记录保留原事实并等待专属处理器。
 
+订单 outbox 完成/失败 UPDATE 在执行时继续精确校验 `CAST(event_type AS BINARY)=CAST('ORDER_TIMEOUT' AS BINARY)`；完成同时要求 attempts 非负，失败沿既有 attempts 条件。该应用资格门不改变 DDL、索引或历史记录。
+
 Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改变表事实，单候选写失败不追加未知状态或二次 failure 写，已 confirm 但终态更新失败保持原行供既有重试/人工核验；表结构和 SQL 条件不变。
 
 发布完成 proof 只读 `event_id,status` 当前事实；`markOutboxPublished` 影响行数 0 不直接代表成功，只有唯一精确 event_id 且 status=PUBLISHED 才可幂等收敛。该读取不新增列、索引或状态写入。
