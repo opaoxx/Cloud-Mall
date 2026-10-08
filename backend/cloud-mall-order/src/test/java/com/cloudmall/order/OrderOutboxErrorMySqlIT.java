@@ -89,6 +89,88 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void zeroPublicationUpdateNeedsExactPublishedEvidenceInsteadOfSilentCompletion() {
+    for (String state : List.of("OTHER", "PUBLISHED", "MISSING", "ALIAS")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO first = pendingOutbox();
+      first.lastError = "keep publication fact";
+      OrderOutboxPO second = pendingOutbox();
+      second.id = 2L;
+      second.eventId = "after-zero-publication";
+      second.orderNo = "202610-after-zero";
+      second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+      assertEquals(1, mapper.insert(first));
+      assertEquals(1, mapper.insert(second));
+      java.util.concurrent.atomic.AtomicReference<List<Map<String, Object>>> established =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      List<String> sentIds = new ArrayList<>();
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                sentIds.add(correlation.getId());
+                if (first.eventId.equals(correlation.getId())) {
+                  if ("PUBLISHED".equals(state) || "ALIAS".equals(state)) {
+                    assertEquals(
+                        1,
+                        mapper.markOutboxPublished(
+                            first.eventId, LocalDateTime.now(ZoneOffset.ofHours(8))));
+                    if ("ALIAS".equals(state))
+                      fixture.update(
+                          "UPDATE order_outbox SET event_id=? WHERE id=1",
+                          first.eventId.toUpperCase(java.util.Locale.ROOT));
+                  } else if ("MISSING".equals(state))
+                    fixture.update("DELETE FROM order_outbox WHERE id=1");
+                  else fixture.update("UPDATE order_outbox SET status='OTHER' WHERE id=1");
+                  established.set(fixture.queryForList("SELECT * FROM order_outbox WHERE id=1"));
+                }
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        dispatcher(rabbit).dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      long completionFailures =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getLevel() == ch.qos.logback.classic.Level.WARN
+                          && event.getThrowableProxy() != null
+                          && event
+                              .getThrowableProxy()
+                              .getClassName()
+                              .endsWith("OptimisticLockingFailureException"))
+              .count();
+      assertAll(
+          () -> assertEquals("PUBLISHED".equals(state) ? 0 : 1, completionFailures, state),
+          () ->
+              assertEquals(
+                  established.get(),
+                  fixture.queryForList("SELECT * FROM order_outbox WHERE id=1"),
+                  state),
+          () -> assertEquals(List.of(first.eventId, second.eventId), sentIds, state),
+          () ->
+              assertEquals(
+                  "PUBLISHED",
+                  fixture.queryForObject(
+                      "SELECT status FROM order_outbox WHERE id=2", String.class),
+                  state));
+    }
+  }
+
+  @Test
   void interruptingAConfirmWaitPreservesAllRowsAndStopsTheFollowingEvent() throws Exception {
     OrderOutboxPO first = pendingOutbox();
     OrderOutboxPO second = pendingOutbox();

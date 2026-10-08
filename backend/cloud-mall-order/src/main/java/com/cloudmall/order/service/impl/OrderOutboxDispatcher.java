@@ -25,6 +25,7 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -149,7 +150,22 @@ public class OrderOutboxDispatcher {
         throw new IllegalStateException(reason);
       }
       if (Thread.currentThread().isInterrupted()) return;
-      orderOutboxMapper.markOutboxPublished(outbox.eventId, LocalDateTime.now(BUSINESS_ZONE));
+      int publishedRows =
+          orderOutboxMapper.markOutboxPublished(outbox.eventId, LocalDateTime.now(BUSINESS_ZONE));
+      if (Thread.currentThread().isInterrupted()) return;
+      if (publishedRows == 1) return;
+      if (publishedRows != 0)
+        throw new OptimisticLockingFailureException("订单超时outbox完成更新行数不可信: " + outbox.eventId);
+      // 0可能是同事件已由其他投递者完成；仅接受精确身份的唯一PUBLISHED事实。
+      List<OrderOutboxPO> publicationFacts = orderOutboxMapper.findPublicationFacts(outbox.eventId);
+      if (Thread.currentThread().isInterrupted()) return;
+      if (publicationFacts == null
+          || publicationFacts.size() != 1
+          || publicationFacts.get(0) == null
+          || outbox.eventId == null
+          || !outbox.eventId.equals(publicationFacts.get(0).eventId)
+          || !"PUBLISHED".equals(publicationFacts.get(0).status))
+        throw new OptimisticLockingFailureException("订单超时outbox发布完成事实不可信: " + outbox.eventId);
     } catch (DataAccessException databaseFailure) {
       if (interrupted(databaseFailure)) return;
       // 完成写的数据库失败不等于发送失败，交由候选边界处理而非再次写failure。

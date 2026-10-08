@@ -231,6 +231,8 @@ class OrderOutboxDispatcherTest {
     outbox.payload = "{\"expireAt\":\"2099-01-01T00:00:00+08:00\",\"traceId\":\"trace-1\"}";
     outbox.attempts = 0;
     org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(outbox));
+    org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+        .thenReturn(1);
     doAnswer(
             invocation -> {
               CorrelationData correlationData = invocation.getArgument(4);
@@ -338,6 +340,8 @@ class OrderOutboxDispatcherTest {
       healthy.payload = "{\"expireAt\":\"2099-01-01T00:00:00+08:00\"}";
       org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
           .thenReturn(List.of(invalid, healthy));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
       doAnswer(
               invocation -> {
                 CorrelationData correlation = invocation.getArgument(4);
@@ -371,6 +375,8 @@ class OrderOutboxDispatcherTest {
           .thenReturn(List.of(first, second));
       RuntimeException sqlFailure =
           new org.springframework.dao.DataAccessResourceFailureException("candidate SQL failure");
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
       doAnswer(
               invocation -> {
                 CorrelationData correlation = invocation.getArgument(4);
@@ -473,6 +479,8 @@ class OrderOutboxDispatcherTest {
     OrderOutboxPO first = candidate("first-runtime");
     OrderOutboxPO second = candidate("second-runtime");
     org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(first, second));
+    org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+        .thenReturn(1);
     doAnswer(
             invocation -> {
               CorrelationData correlation = invocation.getArgument(4);
@@ -500,6 +508,180 @@ class OrderOutboxDispatcherTest {
     org.mockito.Mockito.verifyNoMoreInteractions(mapper);
     verify(rabbit, times(2))
         .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+  }
+
+  @Test
+  void zeroCompletionOnlyAcceptsUniqueExactPublishedEvidence() {
+    for (String proof : List.of("published", "pending", "other", "missing", "alias", "multiple")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO first = candidate("first-proof");
+      OrderOutboxPO second = candidate("second-proof");
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(first, second));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      org.mockito.Mockito.when(
+              mapper.markOutboxPublished(
+                  org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class)))
+          .thenReturn(0);
+      OrderOutboxPO fact = new OrderOutboxPO();
+      fact.eventId =
+          "alias".equals(proof) ? first.eventId.toUpperCase(java.util.Locale.ROOT) : first.eventId;
+      fact.status =
+          "pending".equals(proof) ? "PENDING" : "other".equals(proof) ? "OTHER" : "PUBLISHED";
+      org.mockito.Mockito.when(mapper.findPublicationFacts(first.eventId))
+          .thenReturn(
+              "missing".equals(proof)
+                  ? List.of()
+                  : "multiple".equals(proof) ? List.of(fact, fact) : List.of(fact));
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+            .dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      long proofFailures =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getThrowableProxy() != null
+                          && event
+                              .getThrowableProxy()
+                              .getClassName()
+                              .endsWith("OptimisticLockingFailureException"))
+              .count();
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "published".equals(proof) ? 0 : 1, proofFailures, proof);
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class));
+      verify(mapper).findPublicationFacts(first.eventId);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(second.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit, times(2))
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
+  void nonzeroCompletionCountsDoNotReadProofAndDoNotRewriteFailures() {
+    for (int affected : List.of(1, -1, 2)) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO first = candidate("first-count");
+      OrderOutboxPO second = candidate("second-count");
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(first, second));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      org.mockito.Mockito.when(
+              mapper.markOutboxPublished(
+                  org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class)))
+          .thenReturn(affected);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+          .dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class));
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(second.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit, times(2))
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
+  void proofReadErrorsAndInterruptionsDoNotProduceFailureWritesOrExtraSends() {
+    for (String phase : List.of("query-error", "before-read", "after-read")) {
+      try {
+        OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+        RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+        OrderOutboxPO first = candidate("first-proof-read");
+        OrderOutboxPO second = candidate("second-proof-read");
+        org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+            .thenReturn(List.of(first, second));
+        org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+            .thenReturn(1);
+        doAnswer(
+                invocation -> {
+                  if ("before-read".equals(phase)) Thread.currentThread().interrupt();
+                  return 0;
+                })
+            .when(mapper)
+            .markOutboxPublished(
+                org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class));
+        doAnswer(
+                invocation -> {
+                  if ("query-error".equals(phase))
+                    throw new org.springframework.dao.DataAccessResourceFailureException(
+                        "proof query failed");
+                  OrderOutboxPO fact = new OrderOutboxPO();
+                  fact.eventId = first.eventId;
+                  fact.status = "PUBLISHED";
+                  Thread.currentThread().interrupt();
+                  return List.of(fact);
+                })
+            .when(mapper)
+            .findPublicationFacts(first.eventId);
+        doAnswer(
+                invocation -> {
+                  CorrelationData correlation = invocation.getArgument(4);
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                  return null;
+                })
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+            .dispatchPending();
+        org.junit.jupiter.api.Assertions.assertEquals(
+            !"query-error".equals(phase), Thread.currentThread().isInterrupted(), phase);
+        verify(mapper).findPendingOutbox(50);
+        verify(mapper)
+            .markOutboxPublished(
+                org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class));
+        if (!"before-read".equals(phase)) verify(mapper).findPublicationFacts(first.eventId);
+        if ("query-error".equals(phase))
+          verify(mapper)
+              .markOutboxPublished(
+                  org.mockito.ArgumentMatchers.eq(second.eventId), any(LocalDateTime.class));
+        org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+        verify(rabbit, times("query-error".equals(phase) ? 2 : 1))
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      } finally {
+        Thread.interrupted();
+      }
+    }
   }
 
   /** 当前批次合法事件快照，避免将未填计数的PO当作可发布事实。 */

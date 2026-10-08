@@ -85,6 +85,24 @@ public class OrderOutboxMapper {
         Math.max(1, limit));
   }
 
+  /**
+   * 只读查询完成状态候选，数据库排序规则命中后仍由业务层核验精确原标识。
+   *
+   * @param eventId 原消息事件标识
+   * @return eventId/status部分投影，不用于重新投递，不修改状态或原文
+   */
+  public List<OrderOutboxPO> findPublicationFacts(String eventId) {
+    return jdbcTemplate.query(
+        "SELECT event_id,status FROM order_outbox WHERE event_id=?",
+        (resultSet, rowNumber) -> {
+          OrderOutboxPO fact = new OrderOutboxPO();
+          fact.eventId = resultSet.getString("event_id");
+          fact.status = resultSet.getString("status");
+          return fact;
+        },
+        eventId);
+  }
+
   /** 仅在 publisher confirm 成功后标记事件已发布。 */
   public int markOutboxPublished(String eventId, LocalDateTime publishedAt) {
     return jdbcTemplate.update(
