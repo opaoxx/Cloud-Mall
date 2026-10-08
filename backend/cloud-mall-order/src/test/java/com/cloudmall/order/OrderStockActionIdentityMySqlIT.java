@@ -210,6 +210,79 @@ class OrderStockActionIdentityMySqlIT {
     verify(stock, never()).rollback(anyString(), any(StockClient.Action.class));
   }
 
+  @Test
+  void malformedStoredKeysRemainUnknownEvenWhenStockReportsTheTargetState() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      String opposite = "CONFIRM".equals(actionType) ? "ROLLBACK" : "CONFIRM";
+      String target = "CONFIRM".equals(actionType) ? "CONFIRMED" : "ROLLED_BACK";
+      for (String wrongKey :
+          List.of(
+              "",
+              " \t",
+              "202610other:" + actionType,
+              "202610action1:" + opposite,
+              "202610action1:" + actionType.toLowerCase(java.util.Locale.ROOT),
+              "202610action1:" + actionType + " ",
+              "202610Action1:" + actionType)) {
+        fixture.update("DELETE FROM order_stock_action");
+        assertEquals(
+            1,
+            mapper.insert(
+                1L,
+                "202610action1",
+                actionType,
+                LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1)));
+        fixture.update("UPDATE order_stock_action SET operation_key=? WHERE id=1", wrongKey);
+        assertEquals(
+            1,
+            mapper.insert(
+                2L,
+                "202610healthy2",
+                actionType,
+                LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1)));
+        var before = fixture.queryForMap("SELECT * FROM order_stock_action WHERE id=1");
+        StockClient stock = mock(StockClient.class);
+        when(stock.reservation("202610action1")).thenReturn(fact("202610action1", target));
+        when(stock.reservation("202610healthy2")).thenReturn(fact("202610healthy2", target));
+
+        new OrderStockActionRecovery(mapper, stock).recoverDue();
+
+        assertUnknownAction(
+            before, fixture.queryForMap("SELECT * FROM order_stock_action WHERE id=1"));
+        assertEquals(
+            "SUCCEEDED",
+            fixture.queryForObject(
+                "SELECT status FROM order_stock_action WHERE id=2", String.class));
+        verify(stock, never()).reservation("202610action1");
+        verify(stock).reservation("202610healthy2");
+        verify(stock, never()).confirm(anyString(), any(StockClient.Action.class));
+        verify(stock, never()).rollback(anyString(), any(StockClient.Action.class));
+      }
+    }
+  }
+
+  @Test
+  void blankStoredOrdersCannotBeCompletedByTheirCanonicalLookingKeys() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      for (String orderNo : List.of("", " \t")) {
+        fixture.update("DELETE FROM order_stock_action");
+        assertEquals(
+            1,
+            mapper.insert(
+                1L, orderNo, actionType, LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1)));
+        var before = fixture.queryForMap("SELECT * FROM order_stock_action");
+        StockClient stock = mock(StockClient.class);
+        when(stock.reservation(orderNo))
+            .thenReturn(fact(orderNo, "CONFIRM".equals(actionType) ? "CONFIRMED" : "ROLLED_BACK"));
+
+        new OrderStockActionRecovery(mapper, stock).recoverDue();
+
+        assertUnknownAction(before, fixture.queryForMap("SELECT * FROM order_stock_action"));
+        verifyNoInteractions(stock);
+      }
+    }
+  }
+
   /** 错单只按原UNKNOWN重试更新元数据，原动作身份不能变化。 */
   private static void assertUnknownAction(Map<String, Object> before, Map<String, Object> after) {
     assertSameIdentity(before, after);

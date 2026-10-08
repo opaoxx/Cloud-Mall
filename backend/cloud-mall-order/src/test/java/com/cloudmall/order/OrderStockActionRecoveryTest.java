@@ -174,6 +174,51 @@ class OrderStockActionRecoveryTest {
     }
   }
 
+  @Test
+  void keysMustMatchTheExactOriginalOrderAndSupportedDirection() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      String opposite = "CONFIRM".equals(actionType) ? "ROLLBACK" : "CONFIRM";
+      for (String operationKey :
+          java.util.Arrays.asList(
+              null,
+              "",
+              " \t",
+              "order-2:" + actionType,
+              "order-1:" + opposite,
+              "ORDER-1:" + actionType,
+              "órder-1:" + actionType,
+              "order-1:" + actionType.toLowerCase(java.util.Locale.ROOT),
+              "order-1:" + actionType + " ")) {
+        for (String current : List.of("RESERVED", "CONFIRMED", "ROLLED_BACK", "REJECTED")) {
+          setUp();
+          due(actionType, "order-1", operationKey);
+          when(stockClient.reservation("order-1")).thenReturn(status(current));
+          recovery.recoverDue();
+          org.mockito.Mockito.verifyNoInteractions(stockClient);
+          verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+          verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+        }
+      }
+    }
+  }
+
+  @Test
+  void missingOriginalOrderCannotBeAuthorizedByAnApparentlyMatchingKey() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      for (String orderNo : java.util.Arrays.asList(null, "", " \t")) {
+        setUp();
+        due(actionType, orderNo, orderNo + ":" + actionType);
+        when(stockClient.reservation(orderNo))
+            .thenReturn(
+                stockFact(orderNo, "CONFIRM".equals(actionType) ? "CONFIRMED" : "ROLLED_BACK"));
+        recovery.recoverDue();
+        org.mockito.Mockito.verifyNoInteractions(stockClient);
+        verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+        verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
   /** 构造具有指定身份的库存响应，不从请求路径补全字段。 */
   private static ApiResponse<StockReservationStatusVO> stockFact(String orderNo, String state) {
     StockReservationStatusVO fact = new StockReservationStatusVO();
@@ -183,11 +228,16 @@ class OrderStockActionRecoveryTest {
   }
 
   private void due(String actionType) {
+    due(actionType, "order-1", "order-1:" + actionType);
+  }
+
+  /** 构造原始动作元组，非法键不由测试工厂自动修正。 */
+  private void due(String actionType, String orderNo, String operationKey) {
     OrderStockActionPO action = new OrderStockActionPO();
     action.id = 1L;
-    action.orderNo = "order-1";
+    action.orderNo = orderNo;
     action.actionType = actionType;
-    action.operationKey = "order-1:" + actionType;
+    action.operationKey = operationKey;
     action.attempts = 0;
     when(actionMapper.findDue(any(LocalDateTime.class), anyInt())).thenReturn(List.of(action));
   }

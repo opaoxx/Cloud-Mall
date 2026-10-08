@@ -55,6 +55,12 @@ public class OrderStockActionRecovery {
       if (!"CONFIRM".equals(action.actionType) && !"ROLLBACK".equals(action.actionType)) {
         throw new IllegalStateException("库存动作类型不受支持: " + action.actionType);
       }
+      // 即使库存已到目标终态，也必须先核验原订单/方向与持久操作键绑定。
+      if (action.orderNo == null
+          || action.orderNo.isBlank()
+          || !Objects.equals(action.operationKey, action.orderNo + ":" + action.actionType)) {
+        throw new IllegalStateException("库存动作操作键与原订单或类型不匹配");
+      }
       // 1. 先查询库存事实；已到达目标终态直接完成，无需重新写入。
       String target = "CONFIRM".equals(action.actionType) ? "CONFIRMED" : "ROLLED_BACK";
       String opposite = "CONFIRM".equals(action.actionType) ? "ROLLED_BACK" : "CONFIRMED";
