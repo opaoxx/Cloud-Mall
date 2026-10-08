@@ -19,12 +19,26 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api/cart")
 public class CartServiceImpl implements CartService {
   /** 执行 ofDays 相关操作。 */
   private static final Duration TTL = Duration.ofDays(30);
+
+  /** add最多三轮确认未写后的重读，未知Redis执行结果不得重试。 */
+  private static final int ADD_COMPARE_ATTEMPTS = 3;
+
+  /** 仅比较原JSON字节并写原序列化结果，不用cjson解析Long/金额/时间。 */
+  private static final DefaultRedisScript<Long> ADD_COMPARE_WRITE =
+      new DefaultRedisScript<>(
+          "local current=redis.call('HGET',KEYS[1],ARGV[1]); "
+              + "if ARGV[2]=='0' then if current then return 0 end "
+              + "elseif current~=ARGV[3] then return 0 end; "
+              + "redis.call('HSET',KEYS[1],ARGV[1],ARGV[4]); "
+              + "redis.call('PEXPIRE',KEYS[1],ARGV[5]); return 1",
+          Long.class);
 
   /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
@@ -55,11 +69,11 @@ public class CartServiceImpl implements CartService {
   }
 
   /**
-   * 使用当前商品事实新增或安全合并购物车数量，拒绝时保持原Redis项及TTL。
+   * 使用当前商品事实条件合并数量；确定竞争失败不写，执行结果未知不重复应用。
    *
    * @param request 原SKU与正int数量请求，客户端商品摘要不作为事实
    * @return 同一持久化项构造的购物车响应
-   * @throws BizException 非法请求/合并溢出为400，非正存量数据为500，Redis故障为503
+   * @throws BizException 非法请求/合并溢出为400，非正存量/未知结果为500，竞争耗尽为409，Redis故障为503
    */
   @PostMapping("/items")
   public ApiResponse<?> add(@RequestBody CartItemDTO request) {
@@ -67,31 +81,31 @@ public class CartServiceImpl implements CartService {
     if (request.skuId == null || request.quantity < 1)
       throw new BizException(ErrorCodes.INVALID, "购物车数量必须为正数", 400);
     ProductClient.SkuView current = currentSku(request.skuId);
-    // 2. 读取原项，新项保持原规则；存量先核数量并用long求和避免int回绕。
-    Map<String, CartItemPO> items = readMap();
-    CartItemPO item = items.get(String.valueOf(request.skuId));
-    if (item == null) {
-      // 从请求构造新项，但商品摘要只信任商品服务的当前 SKU 事实。
-      item = toPersistence(request);
+    // 2. 每轮取得同次原始JSON/合法PO，确认未写的竞争才重读并重算。
+    String cartKey = key();
+    String skuField = String.valueOf(request.skuId);
+    for (int attempt = 0; attempt < ADD_COMPARE_ATTEMPTS; attempt++) {
+      Map<String, String> originalValues = new HashMap<>();
+      CartItemPO item = readMap(cartKey, originalValues).get(skuField);
+      if (item == null) {
+        item = toPersistence(request);
+        item.checked = true;
+        item.addedAt = OffsetDateTime.now(ZoneOffset.ofHours(8)).toString();
+      } else {
+        if (item.quantity < 1) throw new BizException(ErrorCodes.INTERNAL, "购物车数量数据损坏", 500);
+        long mergedQuantity = (long) item.quantity + request.quantity;
+        if (mergedQuantity > Integer.MAX_VALUE)
+          throw new BizException(ErrorCodes.INVALID, "购物车数量超过支持范围", 400);
+        item.quantity = (int) mergedQuantity;
+      }
       item.productId = current.productId();
       item.productName = current.productName();
       item.unitPrice = current.unitPrice();
-      // 首次响应和 Redis 存储必须读取同一个完整 PO。
-      item.checked = true;
-      item.addedAt = OffsetDateTime.now(ZoneOffset.ofHours(8)).toString();
-    } else {
-      if (item.quantity < 1) throw new BizException(ErrorCodes.INTERNAL, "购物车数量数据损坏", 500);
-      long mergedQuantity = (long) item.quantity + request.quantity;
-      if (mergedQuantity > Integer.MAX_VALUE)
-        throw new BizException(ErrorCodes.INVALID, "购物车数量超过支持范围", 400);
-      item.quantity = (int) mergedQuantity;
-      item.productId = current.productId();
-      item.productName = current.productName();
-      item.unitPrice = current.unitPrice();
+      // 3. 条件写和TTL同脚本执行，只有此原JSON仍成立才返回本次响应。
+      if (compareWrite(cartKey, skuField, originalValues.get(skuField), item))
+        return ApiResponse.ok(CartItemVO.from(item));
     }
-    // 3. 持久化并从同一 PO 构造响应，避免首次添加与随后读取不一致。
-    write(item);
-    return ApiResponse.ok(CartItemVO.from(item));
+    throw new BizException(ErrorCodes.CONFLICT, "购物车已发生变化，请重试", 409);
   }
 
   @PutMapping("/items/{skuId}")
@@ -214,9 +228,14 @@ public class CartServiceImpl implements CartService {
 
   /** 完整校验Hash原字段与PO的SKU绑定后返回，坏行沿原500拒绝，不清洗或写回。 */
   private Map<String, CartItemPO> readMap() {
+    return readMap(key(), null);
+  }
+
+  /** 同次HGETALL保留原始JSON快照供add条件写，其他读仍沿原完整身份门。 */
+  private Map<String, CartItemPO> readMap(String cartKey, Map<String, String> originalValues) {
     // 1. 原Hash读取保持Redis异常503，结果只在当前调用内构造。
     Map<String, CartItemPO> result = new LinkedHashMap<>();
-    redisOperation(() -> redis.opsForHash().entries(key()))
+    redisOperation(() -> redis.opsForHash().entries(cartKey))
         .forEach(
             (field, value) -> {
               try {
@@ -228,6 +247,8 @@ public class CartServiceImpl implements CartService {
                     || !Objects.equals(field, String.valueOf(item.skuId)))
                   throw new IllegalArgumentException("购物车Hash字段与SKU身份不一致");
                 result.put((String) field, item);
+                if (originalValues != null)
+                  originalValues.put((String) field, String.valueOf(value));
               } catch (Exception invalidItem) {
                 throw new BizException(ErrorCodes.INTERNAL, "购物车数据损坏", 500);
               }
@@ -270,17 +291,42 @@ public class CartServiceImpl implements CartService {
     // 1. 接收并整理 write 的业务请求。
     // 2. 执行 write 的核心业务校验与状态处理。
     // 3. 返回 write 的处理结果。
-    String json;
+    String json = serializeCartItem(item);
+    redisOperation(
+        () -> {
+          redis.opsForHash().put(key(), String.valueOf(item.skuId), json);
+          redis.expire(key(), TTL);
+          return null;
+        });
+  }
+
+  /** 保留原Jackson和保存异常语义，其他写路径不改变HSET/expire行为。 */
+  private String serializeCartItem(CartItemPO item) {
     try {
-      json = mapper.writeValueAsString(item);
-    } catch (Exception e) {
+      return mapper.writeValueAsString(item);
+    } catch (Exception serializationFailure) {
       throw new BizException(ErrorCodes.INTERNAL, "购物车保存失败", 500);
     }
-    redisOperation(() -> {
-      redis.opsForHash().put(key(), String.valueOf(item.skuId), json);
-      redis.expire(key(), TTL);
-      return null;
-    });
+  }
+
+  /** 只有脚本明确0才可重试，执行异常或未知结果不能猜未应用。 */
+  private boolean compareWrite(
+      String cartKey, String skuField, String expectedJson, CartItemPO item) {
+    String updatedJson = serializeCartItem(item);
+    Long result =
+        redisOperation(
+            () ->
+                redis.execute(
+                    ADD_COMPARE_WRITE,
+                    List.of(cartKey),
+                    skuField,
+                    expectedJson == null ? "0" : "1",
+                    expectedJson == null ? "" : expectedJson,
+                    updatedJson,
+                    String.valueOf(TTL.toMillis())));
+    if (Long.valueOf(1).equals(result)) return true;
+    if (Long.valueOf(0).equals(result)) return false;
+    throw new BizException(ErrorCodes.INTERNAL, "购物车更新结果未知", 500);
   }
 
   /** Redis 故障统一按已评审的可重试依赖错误返回。 */
