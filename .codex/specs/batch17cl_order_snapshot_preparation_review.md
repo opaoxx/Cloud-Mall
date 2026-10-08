@@ -4,7 +4,7 @@
 
 结论：**GO，限定普通 `Order.create` 在创建 intent/调用 Stock 前完成地址和全部 SKU JSON 快照序列化。**
 
-当前地址快照在 Stock 预扣后才序列化，SKU 快照在订单/前项明细写入后逐项序列化；Jackson 失败会留下独立 intent 或部分本地事实并进入补偿。本批只调整普通创建的本地准备时序。
+当前地址快照在 Stock 预扣后才序列化，SKU 快照在订单/前项明细写入后逐项序列化；Jackson 失败前可能已执行订单/前项明细 SQL，本地事务回滚后独立 RESERVED intent 仍保留并进入库存补偿。本批只调整普通创建的本地准备时序。
 
 不修改秒杀 consumer、Cart、Stock、Pay、Seata、消息、表结构、字段、DTO、金额/时间/状态机或历史数据。
 
