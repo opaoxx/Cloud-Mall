@@ -306,6 +306,8 @@ Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改�
 
 订单 timeout dispatcher 对读取到的 PO 额外要求 eventId/orderNo 非空白；`event_id`/`order_no` 的既有 NOT NULL DDL、索引、扫描和历史行保持，不依赖该 guard 自动修复数据库坏值。
 
+订单 timeout payload 身份校验只读 JSON 中已存在的 eventId/eventType/orderNo，缺失保持兼容；`payload JSON NOT NULL` DDL、字段、索引和历史 JSON 不变，不新增身份列或回填缺失键。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`

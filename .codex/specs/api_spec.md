@@ -196,6 +196,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单 timeout dispatcher 在当前 PO 的 attempts、event_type、status 门之后，还必须要求 eventId 与 orderNo 非 null 且非空白；不满足时只告警跳过，不解析、不发送、不完成或失败写，后续候选继续。该 guard 不新增扫描过滤、接口字段或历史修复。
 
+订单 timeout dispatcher 在解析 payload 后、发送前仅核验 payload 已存在的 eventId、eventType、orderNo 是否为 String 并分别精确等于 outbox row 身份；缺失字段保持旧兼容，失配按原 failure/退避且不发送。不得补写、trim、转换或新增消息字段。
+
 订单 outbox 发布完成 UPDATE 还必须在执行时精确确认 `event_type=ORDER_TIMEOUT` 且 `attempts>=0`；失败记录 UPDATE 精确确认 event_type，保留既有 attempts 非负条件。扫描后类型或计数变化时返回原 0 行语义，不改写异常行；不新增 proof 投影或公开 API。
 
 订单 outbox dispatcher 在入口、扫描/候选检查、发布确认等待和完成/失败写入前检查线程中断；明确中断恢复标志并停止当前及后续候选，不新增 failure/complete、不撤回已发送消息。普通网络超时仍沿既有退避，不把所有 InterruptedIOException 当作取消。
