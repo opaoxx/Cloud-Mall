@@ -43,4 +43,22 @@ class OrderStockActionInsertTest {
     }
     verifyNoInteractions(jdbc);
   }
+
+  @Test
+  void invalidYearsAreRejectedBeforeAnyJdbcAccess() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    OrderStockActionMapper mapper = new OrderStockActionMapper(jdbc);
+    for (LocalDateTime invalidTime :
+        List.of(
+            LocalDateTime.of(999, 12, 31, 23, 59, 59),
+            LocalDateTime.of(0, 1, 1, 0, 0),
+            LocalDateTime.of(10000, 1, 1, 0, 0),
+            LocalDateTime.MIN,
+            LocalDateTime.MAX)) {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> mapper.insert(1L, "order-time", "CONFIRM", invalidTime));
+    }
+    verifyNoInteractions(jdbc);
+  }
 }

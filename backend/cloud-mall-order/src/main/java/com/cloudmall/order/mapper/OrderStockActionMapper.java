@@ -1,7 +1,9 @@
 package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderStockActionPO;
+import com.cloudmall.order.util.OrderCreationTime;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -37,9 +39,9 @@ public class OrderStockActionMapper {
    * @param id 正的动作主键
    * @param orderNo 非空白且最多64个code point的原订单号，不做归一化
    * @param actionType 精确CONFIRM或ROLLBACK方向
-   * @param occurredAt 原调用方提供的非null时间，绑定语义保持不变
+   * @param occurredAt 上海语义的非null本地时间，年份1000..9999，向下截到毫秒
    * @return 原INSERT更新行数
-   * @throws IllegalArgumentException 输入不满足身份、类型或必填约束，执行SQL前拒绝
+   * @throws IllegalArgumentException 输入或年份范围不合法，执行SQL前拒绝
    */
   public int insert(long id, String orderNo, String actionType, LocalDateTime occurredAt) {
     // 1. 独立于MySQL sql_mode验证输入，避免截断或默认化污染首次事实。
@@ -51,7 +53,10 @@ public class OrderStockActionMapper {
         || occurredAt == null) {
       throw new IllegalArgumentException("库存动作主键、订单号、方向或发生时间不合法");
     }
-    // 2. 保留plain INSERT、原key和时间绑定，唯一键及其他SQL异常原样传播。
+    // 2. SQL前统一上海毫秒时间和年份范围，避免数据库舍入跨秒/月或默认化。
+    LocalDateTime normalizedTime =
+        OrderCreationTime.normalize(occurredAt.atOffset(ZoneOffset.ofHours(8))).toLocalDateTime();
+    // 3. 保留plain INSERT和原key，三个时间列共用规范值，SQL异常原样传播。
     return jdbcTemplate.update(
         "INSERT INTO order_stock_action(id,order_no,action_type,operation_key,status,attempts,"
             + "next_retry_at,created_at,updated_at) VALUES(?,?,?,?, 'PENDING',0,?,?,?)",
@@ -59,9 +64,9 @@ public class OrderStockActionMapper {
         orderNo,
         actionType,
         orderNo + ":" + actionType,
-        occurredAt,
-        occurredAt,
-        occurredAt);
+        normalizedTime,
+        normalizedTime,
+        normalizedTime);
   }
 
   /**

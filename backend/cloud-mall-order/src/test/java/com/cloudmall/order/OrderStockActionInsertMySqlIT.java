@@ -186,6 +186,113 @@ class OrderStockActionInsertMySqlIT {
         DataAccessException.class, () -> mapper.insert(3L, "order-3", "CONFIRM", occurredAt));
   }
 
+  @Test
+  void submillisecondTimesAreFlooredBeforeDatabaseRoundingInBothModes() throws Exception {
+    List<LocalDateTime[]> times =
+        List.of(
+            new LocalDateTime[] {
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 999_499_000),
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 999_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 999_500_000),
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 999_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 999_999_999),
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 999_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(2026, 10, 31, 23, 59, 59, 999_500_000),
+              LocalDateTime.of(2026, 10, 31, 23, 59, 59, 999_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(2026, 12, 31, 23, 59, 59, 999_999_999),
+              LocalDateTime.of(2026, 12, 31, 23, 59, 59, 999_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999_500_000),
+              LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(1000, 1, 1, 0, 0, 0, 123_999_000),
+              LocalDateTime.of(1000, 1, 1, 0, 0, 0, 123_000_000)
+            },
+            new LocalDateTime[] {
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 123_000_000),
+              LocalDateTime.of(2026, 10, 8, 12, 0, 0, 123_000_000)
+            });
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderStockActionMapper(modeJdbc);
+      List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        for (LocalDateTime[] sample : times) {
+          checks.add(
+              () -> {
+                modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+                modeJdbc.update("DELETE FROM order_stock_action");
+                assertEquals(
+                    1,
+                    assertDoesNotThrow(
+                        () -> modeMapper.insert(1L, "order-time", "CONFIRM", sample[0])));
+                var row =
+                    modeJdbc.queryForMap(
+                        "SELECT id,order_no,action_type,operation_key,status,attempts FROM"
+                            + " order_stock_action");
+                assertEquals("order-time", row.get("order_no"));
+                assertEquals("CONFIRM", row.get("action_type"));
+                assertEquals("order-time:CONFIRM", row.get("operation_key"));
+                assertEquals("PENDING", row.get("status"));
+                assertEquals(0, ((Number) row.get("attempts")).intValue());
+                for (String column : List.of("next_retry_at", "created_at", "updated_at")) {
+                  assertEquals(
+                      sample[1],
+                      modeJdbc.queryForObject(
+                          "SELECT " + column + " FROM order_stock_action", LocalDateTime.class),
+                      mode + column + sample[0]);
+                }
+              });
+        }
+      }
+      assertAll(checks);
+    }
+  }
+
+  @Test
+  void outOfRangeTimesFailBeforeSqlAndPreserveThePreviousRow() throws Exception {
+    List<LocalDateTime> invalidTimes =
+        List.of(
+            LocalDateTime.of(999, 12, 31, 23, 59, 59),
+            LocalDateTime.of(0, 1, 1, 0, 0),
+            LocalDateTime.of(10000, 1, 1, 0, 0),
+            LocalDateTime.MIN,
+            LocalDateTime.MAX);
+    LocalDateTime validTime = LocalDateTime.of(2026, 10, 8, 12, 0, 0, 123_000_000);
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderStockActionMapper(modeJdbc);
+      List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        for (LocalDateTime invalid : invalidTimes) {
+          checks.add(
+              () -> {
+                modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+                modeJdbc.update("DELETE FROM order_stock_action");
+                assertEquals(1, modeMapper.insert(7L, "keeper-time", "CONFIRM", validTime));
+                var before = modeJdbc.queryForList("SELECT * FROM order_stock_action ORDER BY id");
+                assertThrows(
+                    IllegalArgumentException.class,
+                    () -> modeMapper.insert(1L, "invalid-time", "ROLLBACK", invalid));
+                assertEquals(
+                    before, modeJdbc.queryForList("SELECT * FROM order_stock_action ORDER BY id"));
+              });
+        }
+      }
+      assertAll(checks);
+    }
+  }
+
   /** 原库只读表清单及校验和。 */
   private static List<Map<String, Object>> fingerprint() {
     List<Map<String, Object>> result =
