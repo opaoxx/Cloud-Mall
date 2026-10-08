@@ -90,14 +90,27 @@ public class OrderOutboxMapper {
         eventId);
   }
 
-  /** 记录发布失败并推迟下一次重试，保持原 eventId。 */
+  /**
+   * 记录最多512个完整Unicode错误字符并推迟原事件重试。
+   *
+   * @param eventId 原超时事件唯一标识
+   * @param error 原失败文本，可为null，内容不做归一化
+   * @param nextRetryAt 原调用方提供的上海重试时间
+   * @return PENDING匹配的更新行数，其他状态为0
+   */
   public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
         "UPDATE order_outbox SET attempts=attempts+1,last_error=?,next_retry_at=?,updated_at=?"
             + " WHERE event_id=? AND status='PENDING'",
-        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        clipOutboxError(error),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
         eventId);
+  }
+
+  /** 按VARCHAR512字符列宽取完整code point，不分裂有效代理对或修复原异常输入。 */
+  private static String clipOutboxError(String error) {
+    if (error == null || error.codePointCount(0, error.length()) <= 512) return error;
+    return error.substring(0, error.offsetByCodePoints(0, 512));
   }
 }

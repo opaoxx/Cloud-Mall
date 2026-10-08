@@ -5,7 +5,6 @@ import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -156,12 +155,12 @@ public class OrderOutboxDispatcher {
     return value == null ? null : String.valueOf(value);
   }
 
+  /** 保留原异常消息或类名兜底，不做有损字节截断，持久化列宽由Mapper保护。 */
   private static String compactError(Exception exception) {
     String message = exception.getMessage();
     if (message == null || message.isBlank()) {
       message = exception.getClass().getSimpleName();
     }
-    byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
-    return new String(bytes, 0, Math.min(bytes.length, 1000), StandardCharsets.UTF_8);
+    return message;
   }
 }
