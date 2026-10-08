@@ -131,6 +131,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 购物车 Redis hash 每条 field 必须与 JSON 项的 `skuId` 精确一致；字段身份缺失、类型错误、别名或错 SKU 按原购物车数据损坏 500 处理，不继续读写或刷新 TTL。显式删除接口仍可按请求 SKU field 删除指定坏项。
 
+购物车 settlement preview 会先校验 selected/checked 项数量；任一已选项为非正数时返回既有数据损坏 500，不调用商品服务、不写入或刷新 Redis。未选中的坏项不影响本次预览，合法项的既有失效项与金额响应结构保持。
+
 ## 7. 订单服务接口
 
 | 方法 | 路径 | 请求 | 响应/说明 |
