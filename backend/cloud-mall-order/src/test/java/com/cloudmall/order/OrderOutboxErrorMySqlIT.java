@@ -89,6 +89,111 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void negativeRowsCannotFillTheScanLimitAndStarveEligibleEvents() {
+    LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(2).withNano(0);
+    for (int rowIndex = 1; rowIndex <= 50; rowIndex++) {
+      OrderOutboxPO invalid = pendingOutbox();
+      invalid.id = (long) rowIndex;
+      invalid.eventId = "invalid-head-" + rowIndex;
+      invalid.orderNo = "202610-invalid-" + rowIndex;
+      invalid.attempts = rowIndex % 2 == 0 ? -1 : Integer.MIN_VALUE;
+      invalid.nextRetryAt = dueAt;
+      invalid.lastError = "keep invalid head";
+      assertEquals(1, mapper.insert(invalid));
+    }
+    var invalidBefore =
+        fixture.queryForList("SELECT * FROM order_outbox WHERE attempts<0 ORDER BY id");
+    OrderOutboxPO first = pendingOutbox();
+    first.id = 101L;
+    first.eventId = "eligible-zero";
+    first.orderNo = "202610-eligible-zero";
+    first.nextRetryAt = dueAt.plusSeconds(1);
+    OrderOutboxPO second = pendingOutbox();
+    second.id = 102L;
+    second.eventId = "eligible-maximum";
+    second.orderNo = "202610-eligible-max";
+    second.attempts = Integer.MAX_VALUE;
+    second.nextRetryAt = dueAt.plusSeconds(1);
+    assertEquals(1, mapper.insert(first));
+    assertEquals(1, mapper.insert(second));
+    List<String> expectedIds = List.of(first.eventId, second.eventId);
+    List<String> scannedIds =
+        mapper.findPendingOutbox(50).stream().map(row -> row.eventId).toList();
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    List<String> sentIds = new ArrayList<>();
+    doAnswer(
+            invocation -> {
+              CorrelationData correlation = invocation.getArgument(4);
+              sentIds.add(correlation.getId());
+              correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+              return null;
+            })
+        .when(rabbit)
+        .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    dispatcher(rabbit).dispatchPending();
+    var invalidAfter =
+        fixture.queryForList("SELECT * FROM order_outbox WHERE attempts<0 ORDER BY id");
+    List<Map<String, Object>> healthy =
+        fixture.queryForList(
+            "SELECT status,attempts FROM order_outbox WHERE id IN (101,102) ORDER BY id");
+    List<OrderOutboxPO> remaining = mapper.findPendingOutbox(50);
+    assertAll(
+        () -> assertEquals(expectedIds, scannedIds),
+        () -> assertEquals(expectedIds, sentIds),
+        () -> assertEquals(invalidBefore, invalidAfter),
+        () ->
+            assertEquals(
+                List.of("PUBLISHED", "PUBLISHED"),
+                healthy.stream().map(row -> row.get("status")).toList()),
+        () -> assertEquals(0, ((Number) healthy.get(0).get("attempts")).intValue()),
+        () -> assertEquals(Integer.MAX_VALUE, ((Number) healthy.get(1).get("attempts")).intValue()),
+        () -> assertTrue(remaining.isEmpty()));
+  }
+
+  @Test
+  void eligibleScanRetainsDueStatusOrderingAndLimitSemantics() {
+    LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(3).withNano(0);
+    List<Long> ids = List.of(1L, 2L, 3L, 4L, 15L, 12L, 11L);
+    for (int rowIndex = 0; rowIndex < ids.size(); rowIndex++) {
+      OrderOutboxPO outbox = pendingOutbox();
+      outbox.id = ids.get(rowIndex);
+      outbox.eventId = "scan-order-" + outbox.id;
+      outbox.orderNo = "202610-scan-" + outbox.id;
+      outbox.nextRetryAt = dueAt;
+      if (rowIndex == 0) outbox.attempts = -1;
+      else if (rowIndex == 1) {
+        outbox.status = "PUBLISHED";
+        outbox.publishedAt = outbox.createdAt;
+      } else if (rowIndex == 2) outbox.status = "OTHER";
+      else if (rowIndex == 3)
+        outbox.nextRetryAt = LocalDateTime.now(ZoneOffset.ofHours(8)).plusHours(1);
+      else if (rowIndex == 4) {
+        outbox.attempts = Integer.MAX_VALUE;
+        outbox.nextRetryAt = dueAt.plusSeconds(1);
+      } else if (rowIndex == 6) outbox.attempts = Integer.MAX_VALUE - 1;
+      assertEquals(1, mapper.insert(outbox));
+    }
+    var before = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    List<OrderOutboxPO> allEligible = mapper.findPendingOutbox(50);
+    assertEquals(List.of(11L, 12L, 15L), allEligible.stream().map(row -> row.id).toList());
+    assertEquals(
+        List.of(Integer.MAX_VALUE - 1, 0, Integer.MAX_VALUE),
+        allEligible.stream().map(row -> row.attempts).toList());
+    assertEquals(
+        List.of(11L, 12L), mapper.findPendingOutbox(2).stream().map(row -> row.id).toList());
+    for (int limit : List.of(0, -1, Integer.MIN_VALUE, 1))
+      assertEquals(
+          List.of(11L), mapper.findPendingOutbox(limit).stream().map(row -> row.id).toList());
+    assertEquals(before, fixture.queryForList("SELECT * FROM order_outbox ORDER BY id"));
+    fixture.execute("DROP TABLE order_outbox");
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    OrderOutboxDispatcher dispatcher = dispatcher(rabbit);
+    clearInvocations(rabbit);
+    assertThrows(org.springframework.dao.DataAccessException.class, dispatcher::dispatchPending);
+    verifyNoInteractions(rabbit);
+  }
+
+  @Test
   void aFailureRecordSqlErrorMustNotPreventTheFollowingCandidate() {
     OrderOutboxPO first = pendingOutbox();
     first.lastError = "keep first fact";
