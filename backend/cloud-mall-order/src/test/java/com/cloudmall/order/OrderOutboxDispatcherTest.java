@@ -227,6 +227,7 @@ class OrderOutboxDispatcherTest {
     OrderOutboxPO outbox = new OrderOutboxPO();
     outbox.eventId = "event-1";
     outbox.eventType = "ORDER_TIMEOUT";
+    outbox.status = "PENDING";
     outbox.orderNo = "202609event1";
     outbox.payload = "{\"expireAt\":\"2099-01-01T00:00:00+08:00\",\"traceId\":\"trace-1\"}";
     outbox.attempts = 0;
@@ -267,6 +268,7 @@ class OrderOutboxDispatcherTest {
     OrderOutboxPO outbox = new OrderOutboxPO();
     outbox.eventId = "event-retry-1";
     outbox.eventType = "ORDER_TIMEOUT";
+    outbox.status = "PENDING";
     outbox.orderNo = "202609retry1";
     outbox.payload = "{\"expireAt\":\"2099-01-01T00:00:00+08:00\"}";
     outbox.attempts = 0;
@@ -335,6 +337,7 @@ class OrderOutboxDispatcherTest {
       OrderOutboxPO healthy = new OrderOutboxPO();
       healthy.eventId = "valid-maximum";
       healthy.eventType = "ORDER_TIMEOUT";
+      healthy.status = "PENDING";
       healthy.orderNo = "202610-valid";
       healthy.attempts = Integer.MAX_VALUE;
       healthy.payload = "{\"expireAt\":\"2099-01-01T00:00:00+08:00\"}";
@@ -685,6 +688,65 @@ class OrderOutboxDispatcherTest {
   }
 
   @Test
+  void nonPendingSnapshotsNeverParsePublishOrWrite() {
+    for (String status :
+        java.util.Arrays.asList(null, "PUBLISHED", "OTHER", "pending", "PENDING ", "PÉNDING", "")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      ObjectMapper json = org.mockito.Mockito.spy(new ObjectMapper());
+      OrderOutboxPO invalid = candidate("invalid-status");
+      invalid.status = status;
+      invalid.payload = "not-json";
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(invalid));
+      OrderOutboxDispatcher dispatcher =
+          new OrderOutboxDispatcher(mapper, rabbit, json, new MockEnvironment());
+      org.mockito.Mockito.clearInvocations(rabbit);
+      dispatcher.dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      org.mockito.Mockito.verifyNoInteractions(json, rabbit);
+      org.junit.jupiter.api.Assertions.assertEquals(status, invalid.status);
+      org.junit.jupiter.api.Assertions.assertEquals("not-json", invalid.payload);
+    }
+  }
+
+  @Test
+  void anInvalidStatusSnapshotDoesNotBlockTheFollowingPendingEvent() {
+    for (String status :
+        java.util.Arrays.asList(null, "PUBLISHED", "OTHER", "pending", "PENDING ")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO invalid = candidate("invalid-status-first");
+      invalid.status = status;
+      invalid.payload = "not-json";
+      OrderOutboxPO healthy = candidate("valid-status-second");
+      healthy.attempts = Integer.MAX_VALUE;
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(invalid, healthy));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                org.junit.jupiter.api.Assertions.assertEquals(healthy.eventId, correlation.getId());
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+          .dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(healthy.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
   void nonTimeoutTypeSnapshotsNeverParsePublishOrWrite() {
     for (String type :
         java.util.Arrays.asList(
@@ -749,6 +811,7 @@ class OrderOutboxDispatcherTest {
     OrderOutboxPO outbox = new OrderOutboxPO();
     outbox.eventId = eventId;
     outbox.eventType = "ORDER_TIMEOUT";
+    outbox.status = "PENDING";
     outbox.orderNo = "202610" + eventId;
     outbox.attempts = 0;
     outbox.payload = "{\"expireAt\":\"2099-01-01T00:00:00+08:00\"}";

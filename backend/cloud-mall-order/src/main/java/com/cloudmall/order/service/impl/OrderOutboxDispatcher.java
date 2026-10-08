@@ -65,7 +65,8 @@ public class OrderOutboxDispatcher {
     this.orderOutboxMapper = orderOutboxMapper;
     this.rabbitTemplate = rabbitTemplate;
     this.objectMapper = objectMapper;
-    this.batchSize = environment.getProperty("cloudmall.order.outbox.batch-size", Integer.class, 50);
+    this.batchSize =
+        environment.getProperty("cloudmall.order.outbox.batch-size", Integer.class, 50);
     this.confirmTimeoutMillis =
         environment.getProperty("cloudmall.order.outbox.confirm-timeout-ms", Long.class, 5000L);
     this.retryDelaySeconds =
@@ -105,7 +106,7 @@ public class OrderOutboxDispatcher {
     }
   }
 
-  /** 只处理计数可解释的当前快照；保留原eventId，只有确认且未被退回时才结束重试。 */
+  /** 只处理计数可解释且类型/状态精确的当前快照；原eventId只在确认且未退回时结束重试。 */
   private void dispatchOne(OrderOutboxPO outbox) {
     if (Thread.currentThread().isInterrupted()) return;
     if (outbox.attempts == null || outbox.attempts < 0) {
@@ -114,6 +115,10 @@ public class OrderOutboxDispatcher {
     }
     if (!"ORDER_TIMEOUT".equals(outbox.eventType)) {
       log.warn("订单超时outbox事件类型不可信，保留该项，eventId={}, eventType={}", outbox.eventId, outbox.eventType);
+      return;
+    }
+    if (!"PENDING".equals(outbox.status)) {
+      log.warn("订单超时outbox状态快照不可信，保留该项，eventId={}, status={}", outbox.eventId, outbox.status);
       return;
     }
     try {

@@ -53,18 +53,18 @@ public class OrderOutboxMapper {
   }
 
   /**
-   * 在LIMIT前排除负计数和非精确超时类型，查询已提交并到达重试时间的超时候选。
+   * 在LIMIT前精确匹配待发布状态/超时类型并排除负计数，查询已提交并到期的超时候选。
    *
    * @param limit 本轮候选上限，非正值沿原规则归一为1
    * @return 按原重试时间及主键顺序的非负计数候选，不修改未入选事实
    */
   public List<OrderOutboxPO> findPendingOutbox(int limit) {
     return jdbcTemplate.query(
-        "SELECT id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,"
-            + "last_error,published_at,created_at,updated_at FROM order_outbox"
-            + " WHERE status='PENDING' AND next_retry_at<=? AND attempts>=0"
-            + " AND BINARY event_type=BINARY 'ORDER_TIMEOUT'"
-            + " ORDER BY next_retry_at,id LIMIT ?",
+        "SELECT"
+            + " id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,last_error,published_at,created_at,updated_at"
+            + " FROM order_outbox WHERE CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND"
+            + " next_retry_at<=? AND attempts>=0 AND BINARY event_type=BINARY 'ORDER_TIMEOUT' ORDER"
+            + " BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderOutboxPO outbox = new OrderOutboxPO();
           outbox.id = resultSet.getLong("id");
@@ -104,11 +104,11 @@ public class OrderOutboxMapper {
         eventId);
   }
 
-  /** 仅在 publisher confirm 成功后标记事件已发布。 */
+  /** 仅在 publisher confirm 成功后将精确PENDING状态的事件标记为已发布。 */
   public int markOutboxPublished(String eventId, LocalDateTime publishedAt) {
     return jdbcTemplate.update(
         "UPDATE order_outbox SET status='PUBLISHED',published_at=?,updated_at=?,last_error=NULL"
-            + " WHERE event_id=? AND status='PENDING'",
+            + " WHERE event_id=? AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY)",
         publishedAt,
         publishedAt,
         eventId);
@@ -120,13 +120,13 @@ public class OrderOutboxMapper {
    * @param eventId 原超时事件唯一标识
    * @param error 原失败文本，可为null，内容不做归一化
    * @param nextRetryAt 原调用方提供的上海重试时间
-   * @return PENDING且次数非负的匹配行数，负值、其他状态或未命中为0
+   * @return 精确PENDING且次数非负的匹配行数，负值、状态别名、其他状态或未命中为0
    */
   public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
-        "UPDATE order_outbox SET attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,"
-            + "last_error=?,next_retry_at=?,updated_at=?"
-            + " WHERE event_id=? AND status='PENDING' AND attempts>=0",
+        "UPDATE order_outbox SET attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE"
+            + " attempts END,last_error=?,next_retry_at=?,updated_at=? WHERE event_id=?"
+            + " AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND attempts>=0",
         clipOutboxError(error),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),

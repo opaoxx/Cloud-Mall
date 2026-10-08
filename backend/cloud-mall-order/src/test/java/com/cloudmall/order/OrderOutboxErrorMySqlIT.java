@@ -89,6 +89,98 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void statusAliasesCannotBePublishedAsPendingEvents() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String status : List.of("pending", "PENDING ", "PÉNDING", "", "OTHER", "PUBLISHED")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO invalid = pendingOutbox();
+      invalid.status = status;
+      invalid.lastError = "keep status evidence";
+      OrderOutboxPO healthy = pendingOutbox();
+      healthy.id = 2L;
+      healthy.eventId = "timeout-after-other-status";
+      healthy.orderNo = "202610-valid-timeout";
+      healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+      assertEquals(1, mapper.insert(invalid));
+      assertEquals(1, mapper.insert(healthy));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      List<String> sent = new ArrayList<>();
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                sent.add(correlation.getId());
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      dispatcher(rabbit).dispatchPending();
+      var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+      checks.add(() -> assertEquals(before, after, status));
+      checks.add(() -> assertEquals(List.of(healthy.eventId), sent, status));
+      assertEquals(
+          "PUBLISHED",
+          fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void statusAliasesCannotOccupyThePendingScanWindow() {
+    LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(2).withNano(0);
+    for (int rowIndex = 1; rowIndex <= 50; rowIndex++) {
+      OrderOutboxPO invalid = pendingOutbox();
+      invalid.id = (long) rowIndex;
+      invalid.eventId = "wrong-status-head-" + rowIndex;
+      invalid.orderNo = "202610-wrong-status-" + rowIndex;
+      invalid.status = rowIndex % 2 == 0 ? "pending" : "PENDING ";
+      invalid.nextRetryAt = dueAt;
+      assertEquals(1, mapper.insert(invalid));
+    }
+    var before = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    OrderOutboxPO valid = pendingOutbox();
+    valid.id = 100L;
+    valid.eventId = "timeout-after-status-window";
+    valid.orderNo = "202610-after-status-window";
+    valid.nextRetryAt = dueAt.plusSeconds(1);
+    valid.attempts = Integer.MAX_VALUE;
+    assertEquals(1, mapper.insert(valid));
+    List<OrderOutboxPO> selected = mapper.findPendingOutbox(50);
+    assertAll(
+        () ->
+            assertEquals(
+                List.of(valid.eventId), selected.stream().map(row -> row.eventId).toList()),
+        () ->
+            assertEquals(
+                before,
+                fixture.queryForList("SELECT * FROM order_outbox WHERE id<100 ORDER BY id")));
+  }
+
+  @Test
+  void pendingStatusAliasesCannotBeMutatedByCompletionOrFailureWrites() {
+    for (String status : List.of("pending", "PENDING ", "PÉNDING", "", "OTHER", "PUBLISHED")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO outbox = pendingOutbox();
+      outbox.status = status;
+      outbox.lastError = "preserve status evidence";
+      assertEquals(1, mapper.insert(outbox));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox");
+      int failed =
+          mapper.recordOutboxFailure(
+              outbox.eventId, "new error", outbox.nextRetryAt.plusMinutes(1));
+      var afterFailure = fixture.queryForMap("SELECT * FROM order_outbox");
+      int completed = mapper.markOutboxPublished(outbox.eventId, outbox.createdAt.plusMinutes(1));
+      var afterCompletion = fixture.queryForMap("SELECT * FROM order_outbox");
+      assertAll(
+          () -> assertEquals(0, completed, status),
+          () -> assertEquals(before, afterCompletion, status),
+          () -> assertEquals(0, failed, status),
+          () -> assertEquals(before, afterFailure, status));
+    }
+  }
+
+  @Test
   void nonTimeoutEventTypesCannotBePublishedAsTimeouts() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (String type : List.of("PAY_NOTIFY", "order_timeout", "ORDER_TIMEOUT ", "")) {
@@ -159,7 +251,7 @@ class OrderOutboxErrorMySqlIT {
 
   @Test
   void zeroPublicationUpdateNeedsExactPublishedEvidenceInsteadOfSilentCompletion() {
-    for (String state : List.of("OTHER", "PUBLISHED", "MISSING", "ALIAS")) {
+    for (String state : List.of("OTHER", "PUBLISHED", "MISSING", "ALIAS", "pending", "PENDING ")) {
       fixture.update("DELETE FROM order_outbox");
       OrderOutboxPO first = pendingOutbox();
       first.lastError = "keep publication fact";
@@ -190,7 +282,7 @@ class OrderOutboxErrorMySqlIT {
                           first.eventId.toUpperCase(java.util.Locale.ROOT));
                   } else if ("MISSING".equals(state))
                     fixture.update("DELETE FROM order_outbox WHERE id=1");
-                  else fixture.update("UPDATE order_outbox SET status='OTHER' WHERE id=1");
+                  else fixture.update("UPDATE order_outbox SET status=? WHERE id=1", state);
                   established.set(fixture.queryForList("SELECT * FROM order_outbox WHERE id=1"));
                 }
                 correlation.getFuture().set(new CorrelationData.Confirm(true, null));
@@ -423,8 +515,9 @@ class OrderOutboxErrorMySqlIT {
     assertEquals(1, mapper.insert(second));
     var firstBefore = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
     fixture.execute(
-        "CREATE TRIGGER cs_failure_record BEFORE UPDATE ON order_outbox FOR EACH ROW BEGIN "
-            + "IF OLD.id=1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='first failure write rejected'; END IF; END");
+        "CREATE TRIGGER cs_failure_record BEFORE UPDATE ON order_outbox FOR EACH ROW BEGIN IF"
+            + " OLD.id=1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='first failure write"
+            + " rejected'; END IF; END");
     RabbitTemplate rabbit = failingRabbit("broker unavailable");
     RuntimeException failure = null;
     try {
@@ -460,8 +553,9 @@ class OrderOutboxErrorMySqlIT {
     assertEquals(1, mapper.insert(second));
     var firstBefore = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
     fixture.execute(
-        "CREATE TRIGGER cs_published_record BEFORE UPDATE ON order_outbox FOR EACH ROW BEGIN "
-            + "IF OLD.id=1 AND NEW.status='PUBLISHED' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='first published write rejected'; END IF; END");
+        "CREATE TRIGGER cs_published_record BEFORE UPDATE ON order_outbox FOR EACH ROW BEGIN IF"
+            + " OLD.id=1 AND NEW.status='PUBLISHED' THEN SIGNAL SQLSTATE '45000' SET"
+            + " MESSAGE_TEXT='first published write rejected'; END IF; END");
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
     doAnswer(
             invocation -> {
@@ -803,8 +897,8 @@ class OrderOutboxErrorMySqlIT {
     assertEquals(1, mapper.insert(pendingOutbox()));
     var before = fixture.queryForMap("SELECT * FROM order_outbox");
     fixture.execute(
-        "CREATE TRIGGER cm17au_write_failure BEFORE UPDATE ON order_outbox"
-            + " FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='cm17au failure record rejected'");
+        "CREATE TRIGGER cm17au_write_failure BEFORE UPDATE ON order_outbox FOR EACH ROW SIGNAL"
+            + " SQLSTATE '45000' SET MESSAGE_TEXT='cm17au failure record rejected'");
     RabbitTemplate rabbit = failingRabbit("中".repeat(333) + "😀");
     var dispatcher = dispatcher(rabbit);
     assertDoesNotThrow(dispatcher::dispatchPending);
