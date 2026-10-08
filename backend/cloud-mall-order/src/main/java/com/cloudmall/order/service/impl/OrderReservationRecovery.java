@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -56,7 +57,7 @@ public class OrderReservationRecovery {
     this.objectMapper = objectMapper;
   }
 
-  /** 扫描已超时但尚未和订单提交绑定的预扣意图。 */
+  /** 扫描陈旧预扣意图，隔离单条数据库故障；扫描查询失败仍向外传播。 */
   @Scheduled(fixedDelayString = "${cloudmall.order.reservation-recovery-interval-ms:30000}")
   public void recoverStaleReservations() {
     // 1. 留出正常远程调用与本地事务提交时间，避免抢先处理进行中的请求。
@@ -66,9 +67,13 @@ public class OrderReservationRecovery {
         reservationIntentMapper.findRecoverable(staleBefore, now, 50);
     // 2. 为每条意图领取一分钟的恢复租约，多实例可安全重复扫描。
     for (OrderReservationIntentPO intent : recoverable) {
-      if (reservationIntentMapper.claimRecovery(intent.orderNo, now, now.plusMinutes(1)) != 1)
-        continue;
-      recoverOne(intent);
+      try {
+        if (reservationIntentMapper.claimRecovery(intent.orderNo, now, now.plusMinutes(1)) != 1)
+          continue;
+        recoverOne(intent);
+      } catch (DataAccessException databaseFailure) {
+        log.warn("普通预扣恢复单条数据库操作失败，本次跳过，orderNo={}", intent.orderNo, databaseFailure);
+      }
     }
   }
 
@@ -109,11 +114,14 @@ public class OrderReservationRecovery {
         throw new IllegalStateException("库存预扣状态需要人工核对: " + status);
       }
       reservationIntentMapper.markReleased(intent.orderNo, LocalDateTime.now(BUSINESS_ZONE));
+    } catch (DataAccessException databaseFailure) {
+      // 数据库写结果未知时不追加失败写或重复RPC，由候选边界保留原事实。
+      throw databaseFailure;
     } catch (Exception recoveryFailure) {
+      // 先保存原失败日志，错误记录写本身失败也不得遮蔽原业务原因。
+      log.warn("普通订单预扣恢复失败，保留原意图待重试，orderNo={}", intent.orderNo, recoveryFailure);
       LocalDateTime retryAt = LocalDateTime.now(BUSINESS_ZONE).plusMinutes(1);
-      reservationIntentMapper.recordFailure(
-          intent.orderNo, recoveryFailure.toString(), retryAt);
-      log.warn("普通订单预扣恢复失败，稍后重试，orderNo={}", intent.orderNo, recoveryFailure);
+      reservationIntentMapper.recordFailure(intent.orderNo, recoveryFailure.toString(), retryAt);
     }
   }
 

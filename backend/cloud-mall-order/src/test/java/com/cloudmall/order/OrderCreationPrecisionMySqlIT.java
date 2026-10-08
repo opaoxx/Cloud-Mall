@@ -372,12 +372,154 @@ class OrderCreationPrecisionMySqlIT {
     assertNoRecoveryOrderOrMessage(original);
   }
 
+  @Test
+  void failedClaimLeavesFirstIntentUntouchedAndLaterIntentCanFinish() {
+    var first = insertStaleRecoveryIntent("badclaim", 1L);
+    var second = insertStaleRecoveryIntent("healthy", 2L);
+    var before = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    fixture.execute(
+        "CREATE TRIGGER cm17ar_claim_failure BEFORE UPDATE ON order_reservation_intent"
+            + " FOR EACH ROW BEGIN IF OLD.id=1 THEN SIGNAL SQLSTATE '45000'"
+            + " SET MESSAGE_TEXT='cm17ar claim rejected'; END IF; END");
+    StockClient stock = mock(StockClient.class);
+    doReturn(ApiResponse.ok(recoveryStatus(second.orderNo, "ROLLED_BACK")))
+        .when(stock)
+        .reservation(second.orderNo);
+    var recovery =
+        new OrderReservationRecovery(
+            stock,
+            new OrderReservationIntentMapper(fixture),
+            new OrderSqlMapper(fixture),
+            new ObjectMapper());
+
+    assertDoesNotThrow(recovery::recoverStaleReservations);
+
+    assertEquals(before, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1"));
+    assertEquals(
+        "RELEASED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE id=2", String.class));
+    verify(stock, never()).reservation(first.orderNo);
+    verify(stock).reservation(second.orderNo);
+    verify(stock, never()).reserve(any());
+    verify(stock, never()).rollback(anyString());
+  }
+
+  @Test
+  void failedReleaseWritesOnceWithoutExtraFailureWriteAndLaterIntentCanFinish() {
+    var first = insertStaleRecoveryIntent("badrelease", 1L);
+    var second = insertStaleRecoveryIntent("healthy", 2L);
+    var before = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    fixture.execute(
+        "CREATE TRIGGER cm17ar_release_failure BEFORE UPDATE ON order_reservation_intent"
+            + " FOR EACH ROW BEGIN IF OLD.id=1 AND NEW.status='RELEASED' THEN SIGNAL SQLSTATE '45000'"
+            + " SET MESSAGE_TEXT='cm17ar release rejected'; END IF; END");
+    StockClient stock = mock(StockClient.class);
+    doReturn(ApiResponse.ok(recoveryStatus(first.orderNo, "RESERVED")))
+        .when(stock)
+        .reservation(first.orderNo);
+    doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stock).rollback(first.orderNo);
+    doReturn(ApiResponse.ok(recoveryStatus(second.orderNo, "ROLLED_BACK")))
+        .when(stock)
+        .reservation(second.orderNo);
+    var observedMapper = spy(new OrderReservationIntentMapper(fixture));
+    var recovery =
+        new OrderReservationRecovery(
+            stock, observedMapper, new OrderSqlMapper(fixture), new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+
+    var after = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    assertHeldRecoveryFacts(before, after);
+    assertEquals(
+        "RELEASED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE id=2", String.class));
+    verify(observedMapper).markReleased(eq(first.orderNo), any());
+    verify(observedMapper, never()).recordFailure(eq(first.orderNo), anyString(), any());
+    verify(stock).rollback(first.orderNo);
+    verify(stock).reservation(second.orderNo);
+    verify(stock, never()).reserve(any());
+  }
+
+  @Test
+  void failedFailureRecordKeepsLeaseAndLaterIntentCanFinish() {
+    var first = insertStaleRecoveryIntent("badrecord", 1L);
+    var second = insertStaleRecoveryIntent("healthy", 2L);
+    var before = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    fixture.execute(
+        "CREATE TRIGGER cm17ar_record_failure BEFORE UPDATE ON order_reservation_intent"
+            + " FOR EACH ROW BEGIN IF OLD.id=1 AND NEW.last_error IS NOT NULL THEN SIGNAL SQLSTATE '45000'"
+            + " SET MESSAGE_TEXT='cm17ar record rejected'; END IF; END");
+    StockClient stock = mock(StockClient.class);
+    doReturn(ApiResponse.ok(recoveryStatus(first.orderNo + "other", "ROLLED_BACK")))
+        .when(stock)
+        .reservation(first.orderNo);
+    doReturn(ApiResponse.ok(recoveryStatus(second.orderNo, "ROLLED_BACK")))
+        .when(stock)
+        .reservation(second.orderNo);
+    var observedMapper = spy(new OrderReservationIntentMapper(fixture));
+    var recovery =
+        new OrderReservationRecovery(
+            stock, observedMapper, new OrderSqlMapper(fixture), new ObjectMapper());
+
+    assertDoesNotThrow(recovery::recoverStaleReservations);
+
+    assertHeldRecoveryFacts(
+        before, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1"));
+    assertEquals(
+        "RELEASED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE id=2", String.class));
+    verify(observedMapper).recordFailure(eq(first.orderNo), anyString(), any());
+    verify(stock).reservation(second.orderNo);
+    verify(stock, never()).reserve(any());
+    verify(stock, never()).rollback(anyString());
+  }
+
+  @Test
+  void missingIntentTableStillPropagatesScanFailureWithoutStockCalls() {
+    fixture.execute("DROP TABLE order_reservation_intent");
+    StockClient stock = mock(StockClient.class);
+    var recovery =
+        new OrderReservationRecovery(
+            stock,
+            new OrderReservationIntentMapper(fixture),
+            new OrderSqlMapper(fixture),
+            new ObjectMapper());
+    assertThrows(
+        org.springframework.dao.DataAccessException.class, recovery::recoverStaleReservations);
+    verifyNoInteractions(stock);
+  }
+
+  /** 数据库失败只能留下已提交的认领元数据，不得猜终态或追加失败写。 */
+  private void assertHeldRecoveryFacts(Map<String, Object> before, Map<String, Object> after) {
+    for (String column :
+        List.of(
+            "id",
+            "order_no",
+            "user_id",
+            "idempotency_key",
+            "items_snapshot",
+            "status",
+            "created_at")) {
+      assertEquals(before.get(column), after.get(column), column);
+    }
+    assertNull(after.get("last_error"));
+    assertNotNull(after.get("next_retry_at"));
+  }
+
   /** 按当前上海时间创建真正陈旧的原意图，物理月表仍在本例隔离库内。 */
   private OrderReservationIntentPO insertStaleRecoveryIntent(String suffix) {
+    return insertStaleRecoveryIntent(suffix, 1L);
+  }
+
+  /** 构造同批可独立恢复的意图，主键与请求键互不冲突。 */
+  private OrderReservationIntentPO insertStaleRecoveryIntent(String suffix, long intentId) {
     OrderReservationIntentPO original = new OrderReservationIntentPO();
-    original.id = 1L;
+    original.id = intentId;
     original.userId = 7L;
-    original.idempotencyKey = "recovery-identity";
+    original.idempotencyKey = "recovery-identity-" + suffix;
     original.itemsSnapshot = "[{\"skuId\":7,\"quantity\":1}]";
     original.status = "RESERVE_UNKNOWN";
     original.createdAt =

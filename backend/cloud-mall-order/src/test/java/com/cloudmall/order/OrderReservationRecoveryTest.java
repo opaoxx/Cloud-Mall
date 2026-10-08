@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 
 class OrderReservationRecoveryTest {
   @Test
@@ -208,6 +209,136 @@ class OrderReservationRecoveryTest {
         verify(intentMapper).recordFailure(eq(original.orderNo), anyString(), any());
       }
     }
+  }
+
+  @Test
+  void candidateDatabaseFailuresDoNotAbortOtherReservationsOrWriteTwice() {
+    for (String phase : List.of("claim", "read", "release", "committed", "record")) {
+      StockClient stockClient = mock(StockClient.class);
+      OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
+      OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+      OrderReservationIntentPO first = intent("202609firstfailure");
+      OrderReservationIntentPO second = intent("202609secondhealthy");
+      when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(first, second));
+      when(intentMapper.claimRecovery(anyString(), any(), any())).thenReturn(1);
+      doReturn(ApiResponse.ok(stockStatus(first.orderNo, "ROLLED_BACK")))
+          .when(stockClient)
+          .reservation(first.orderNo);
+      doReturn(ApiResponse.ok(stockStatus(second.orderNo, "ROLLED_BACK")))
+          .when(stockClient)
+          .reservation(second.orderNo);
+      var databaseFailure = new DataAccessResourceFailureException("candidate database failure");
+      switch (phase) {
+        case "claim" ->
+            when(intentMapper.claimRecovery(eq(first.orderNo), any(), any()))
+                .thenThrow(databaseFailure);
+        case "read" ->
+            when(orderSqlMapper.orderExists("mall_order_202609", first.orderNo))
+                .thenThrow(databaseFailure);
+        case "release" -> {
+          doReturn(ApiResponse.ok(stockStatus(first.orderNo, "RESERVED")))
+              .when(stockClient)
+              .reservation(first.orderNo);
+          doReturn(ApiResponse.ok(java.util.Map.of("rolledBack", true)))
+              .when(stockClient)
+              .rollback(first.orderNo);
+          when(intentMapper.markReleased(eq(first.orderNo), any())).thenThrow(databaseFailure);
+        }
+        case "committed" -> {
+          when(orderSqlMapper.orderExists("mall_order_202609", first.orderNo)).thenReturn(true);
+          when(intentMapper.forceCommitted(eq(first.orderNo), any())).thenThrow(databaseFailure);
+        }
+        case "record" -> {
+          doReturn(ApiResponse.ok(stockStatus("202609other", "ROLLED_BACK")))
+              .when(stockClient)
+              .reservation(first.orderNo);
+          when(intentMapper.recordFailure(eq(first.orderNo), anyString(), any()))
+              .thenThrow(databaseFailure);
+        }
+        default -> throw new AssertionError("Unexpected test phase");
+      }
+
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+          () ->
+              new OrderReservationRecovery(
+                      stockClient, intentMapper, orderSqlMapper, new ObjectMapper())
+                  .recoverStaleReservations());
+
+      verify(stockClient).reservation(second.orderNo);
+      verify(intentMapper).markReleased(eq(second.orderNo), any());
+      verify(stockClient, never()).reserve(any());
+      if ("record".equals(phase)) {
+        verify(intentMapper).recordFailure(eq(first.orderNo), anyString(), any());
+      } else {
+        verify(intentMapper, never()).recordFailure(eq(first.orderNo), anyString(), any());
+      }
+      if ("release".equals(phase)) {
+        verify(stockClient).rollback(first.orderNo);
+        verify(intentMapper).markReleased(eq(first.orderNo), any());
+      } else {
+        verify(stockClient, never()).rollback(anyString());
+        verify(intentMapper, never()).markReleased(eq(first.orderNo), any());
+      }
+    }
+  }
+
+  @Test
+  void scanDatabaseFailureStillPropagatesBeforeAnyCandidateOrStockCall() {
+    StockClient stockClient = mock(StockClient.class);
+    OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    var failure = new DataAccessResourceFailureException("scan database failure");
+    when(intentMapper.findRecoverable(any(), any(), anyInt())).thenThrow(failure);
+    var recovery =
+        new OrderReservationRecovery(stockClient, intentMapper, orderSqlMapper, new ObjectMapper());
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        org.junit.jupiter.api.Assertions.assertThrows(
+            DataAccessResourceFailureException.class, recovery::recoverStaleReservations));
+    org.mockito.Mockito.verifyNoInteractions(stockClient, orderSqlMapper);
+    verify(intentMapper, never()).claimRecovery(anyString(), any(), any());
+  }
+
+  @Test
+  void nonDatabaseClaimFailureIsNotSwallowedAsARecoverableDatabaseFault() {
+    StockClient stockClient = mock(StockClient.class);
+    OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    var first = intent("202609firstfailure");
+    var second = intent("202609secondhealthy");
+    when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(first, second));
+    var failure = new IllegalStateException("programming failure");
+    when(intentMapper.claimRecovery(eq(first.orderNo), any(), any())).thenThrow(failure);
+    var recovery =
+        new OrderReservationRecovery(stockClient, intentMapper, orderSqlMapper, new ObjectMapper());
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class, recovery::recoverStaleReservations));
+    verify(intentMapper, never()).claimRecovery(eq(second.orderNo), any(), any());
+    verify(intentMapper, never()).recordFailure(anyString(), anyString(), any());
+    org.mockito.Mockito.verifyNoInteractions(stockClient);
+  }
+
+  @Test
+  void fatalErrorStillStopsTheBatchWithoutRecordingOrContinuing() {
+    StockClient stockClient = mock(StockClient.class);
+    OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
+    OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
+    var first = intent("202609firstfailure");
+    var second = intent("202609secondhealthy");
+    when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(first, second));
+    when(intentMapper.claimRecovery(eq(first.orderNo), any(), any())).thenReturn(1);
+    var failure = new AssertionError("fatal recovery failure");
+    org.mockito.Mockito.doThrow(failure).when(stockClient).reservation(first.orderNo);
+    var recovery =
+        new OrderReservationRecovery(stockClient, intentMapper, orderSqlMapper, new ObjectMapper());
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        org.junit.jupiter.api.Assertions.assertThrows(
+            AssertionError.class, recovery::recoverStaleReservations));
+    verify(intentMapper, never()).claimRecovery(eq(second.orderNo), any(), any());
+    verify(intentMapper, never()).recordFailure(anyString(), anyString(), any());
   }
 
   private static StockReservationStatusVO stockStatus(String orderNo, String status) {
