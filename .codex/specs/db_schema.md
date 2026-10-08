@@ -290,7 +290,7 @@ Dispatcher 只对读取到的 outbox PO 快照执行非负 attempts guard；数�
 
 Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行占据候选窗口；该过滤不改变列、索引或历史行，dispatcher 仍需保留读取快照 guard。
 
-订单 outbox 的状态条件在扫描、PUBLISHED CAS 和 failure 更新中使用 BINARY 精确 `PENDING`；`status VARCHAR(32)` DDL、索引和既有状态值不变，历史别名状态不由本批修复。
+订单 outbox 的状态条件在扫描、PUBLISHED CAS 和 failure 更新中使用 `CAST(status AS BINARY)=CAST('PENDING' AS BINARY)` 精确匹配；`status VARCHAR(32)` DDL、索引和既有状态值不变，历史别名状态不由本批修复。该语法避免 MySQL 8.0 的 BINARY 表达式弃用警告；event_type 的既有 BINARY 条件边界保持。
 
 订单 timeout dispatcher 的扫描在 LIMIT 前以 BINARY 精确匹配 `event_type='ORDER_TIMEOUT'`；`event_type VARCHAR(64) NOT NULL` DDL 与索引不变，其他类型记录保留原事实并等待专属处理器。
 
