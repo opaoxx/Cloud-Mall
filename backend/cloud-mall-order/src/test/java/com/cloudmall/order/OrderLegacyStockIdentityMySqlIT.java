@@ -206,6 +206,83 @@ class OrderLegacyStockIdentityMySqlIT {
     verifyNoInteractions(stock);
   }
 
+  @Test
+  void statusLookupDistinguishesAliasesFromAnActuallyMissingAction() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    String orderNo = "202610legacy1";
+    for (String actionStatus : List.of("PENDING", "UNKNOWN", "SUCCEEDED", "CONFLICT")) {
+      seed("PAID");
+      assertEquals(1, mapper.insert(1L, orderNo, "CONFIRM", LocalDateTime.of(2026, 10, 8, 10, 0)));
+      fixture.update("UPDATE order_stock_action SET status=? WHERE id=1", actionStatus);
+      var before = fixtureSnapshot();
+      assertEquals(actionStatus, mapper.statusForOrder(orderNo));
+      for (String alias : List.of("202610LEGACY1", "202610légacy1", orderNo + " ")) {
+        assertEquals(
+            1,
+            fixture.queryForObject(
+                "SELECT COUNT(*) FROM order_stock_action WHERE order_no=?", Integer.class, alias));
+        String result = mapper.statusForOrder(alias);
+        checks.add(() -> assertEquals("UNKNOWN", result, actionStatus + alias));
+      }
+      assertNull(mapper.statusForOrder("202610missing"));
+      assertNull(mapper.statusForOrder(null));
+      assertNull(mapper.statusForOrder(""));
+      assertEquals(before, fixtureSnapshot());
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void storedActionAliasesNeverAuthorizeAnOrderOrFallBackToLegacyStock() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED")) {
+      String target = "CANCELLED".equals(orderStatus) ? "ROLLED_BACK" : "CONFIRMED";
+      String actionType = "CANCELLED".equals(orderStatus) ? "ROLLBACK" : "CONFIRM";
+      when(stock.reservation("202610legacy1")).thenReturn(fact("202610legacy1", target));
+      for (String storedOrderNo : List.of("202610LEGACY1", "202610légacy1", "202610legacy1 ")) {
+        for (String actionStatus : List.of("PENDING", "UNKNOWN", "SUCCEEDED", "CONFLICT")) {
+          seed(orderStatus);
+          assertEquals(
+              1,
+              mapper.insert(1L, storedOrderNo, actionType, LocalDateTime.of(2026, 10, 8, 10, 0)));
+          fixture.update("UPDATE order_stock_action SET status=? WHERE id=1", actionStatus);
+          assertEquals(
+              1,
+              fixture.queryForObject(
+                  "SELECT COUNT(*) FROM order_stock_action WHERE order_no='202610legacy1'",
+                  Integer.class));
+          var before = fixtureSnapshot();
+
+          var response = paymentState(8L);
+
+          Object reportedStatus = response.get("stockActionStatus");
+          checks.add(
+              () ->
+                  assertEquals(
+                      "UNKNOWN", reportedStatus, orderStatus + storedOrderNo + actionStatus));
+          assertResponseFacts(response, orderStatus);
+          assertEquals(before, fixtureSnapshot());
+        }
+      }
+    }
+    // A binary filter returning null would query this valid Stock response and falsely succeed.
+    verifyNoInteractions(stock);
+    assertAll(checks);
+  }
+
+  @Test
+  void lookupSqlFailureStillPropagatesInsteadOfBeingGuessedUnknown() {
+    seed("PAID");
+    fixture.execute("DROP TABLE order_stock_action");
+    assertThrows(
+        org.springframework.dao.DataAccessException.class,
+        () -> mapper.statusForOrder("202610legacy1"));
+    assertThrows(
+        org.springframework.dao.DataAccessException.class,
+        () -> service.paymentState("202610legacy1", 8L));
+    verifyNoInteractions(stock);
+  }
+
   /** 保留源模板定义，只在本例随机数据库创建两张固定月表。 */
   private void cloneTemplate(String template, String target) {
     String ddl =

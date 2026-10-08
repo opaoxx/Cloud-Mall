@@ -3,6 +3,7 @@ package com.cloudmall.order.mapper;
 import com.cloudmall.order.domain.po.OrderStockActionPO;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -39,11 +40,26 @@ public class OrderStockActionMapper {
         occurredAt, occurredAt, occurredAt);
   }
 
-  /** 按订单号读取最终库存动作状态。 */
+  /**
+   * 读取原订单库存动作状态，别名候选保持UNKNOWN，不误当作无动作进入兜底。
+   *
+   * @param orderNo 原查询订单号，不进行裁剪或归一化
+   * @return 精确匹配的原状态、别名命中的UNKNOWN，或真正无候选时的null
+   */
   public String statusForOrder(String orderNo) {
-    List<String> statuses = jdbcTemplate.queryForList(
-        "SELECT status FROM order_stock_action WHERE order_no=?", String.class, orderNo);
-    return statuses.isEmpty() ? null : statuses.get(0);
+    List<OrderStockActionPO> actions =
+        jdbcTemplate.query(
+            "SELECT order_no,status FROM order_stock_action WHERE order_no=?",
+            (resultSet, rowNumber) -> {
+              OrderStockActionPO action = new OrderStockActionPO();
+              action.orderNo = resultSet.getString("order_no");
+              action.status = resultSet.getString("status");
+              return action;
+            },
+            orderNo);
+    if (actions.isEmpty()) return null;
+    OrderStockActionPO action = actions.get(0);
+    return Objects.equals(orderNo, action.orderNo) ? action.status : "UNKNOWN";
   }
 
   /**
