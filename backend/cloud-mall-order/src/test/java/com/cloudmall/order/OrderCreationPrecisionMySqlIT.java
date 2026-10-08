@@ -1912,6 +1912,111 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void untrustedSeckillProductResponsesCannotCommitOrdersOrResolveHeldRecoveryRows() throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String fault :
+        List.of(
+            "wrong-sku", "missing-sku", "bad-code", "null-code", "null-envelope", "null-data")) {
+      Map<String, Object> event = timeEvent("202612-product-" + fault);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      saveRecovery(5000 + sequence++, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+      Long responseSku = 7L;
+      if ("wrong-sku".equals(fault)) responseSku = 8L;
+      else if ("missing-sku".equals(fault)) responseSku = null;
+      ApiResponse<ProductClient.SkuView> response =
+          ApiResponse.ok(
+              new ProductClient.SkuView(
+                  responseSku,
+                  9L,
+                  "untrusted seckill product",
+                  "SKU-OTHER",
+                  new BigDecimal("77.70"),
+                  Map.of()));
+      if ("bad-code".equals(fault)) response.code = "BROKEN";
+      else if ("null-code".equals(fault)) response.code = null;
+      else if ("null-envelope".equals(fault)) response = null;
+      else if ("null-data".equals(fault)) response = ApiResponse.ok(null);
+      doReturn(response).when(products).sku(7L);
+      clearInvocations(products);
+      var before = fixtureFacts();
+      IllegalStateException failure = null;
+      try {
+        service.consumeSeckill(event);
+      } catch (IllegalStateException rejected) {
+        failure = rejected;
+      }
+      IllegalStateException captured = failure;
+      var after = fixtureFacts();
+      checks.add(() -> assertNotNull(captured, fault));
+      if (captured != null)
+        checks.add(() -> assertInstanceOf(IllegalStateException.class, captured.getCause(), fault));
+      checks.add(() -> assertEquals(before, after, fault));
+      verify(products).sku(7L);
+      verifyNoMoreInteractions(products);
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock, cart);
+  }
+
+  @Test
+  void correctedProductResponseRetriesTheSameSeckillMessageThenCommittedReplaySkipsProduct()
+      throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    Map<String, Object> event = timeEvent("202612-corrected-product");
+    event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(5100, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+    var before = fixtureFacts();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    8L, 9L, "wrong product", "SKU-8", new BigDecimal("77.70"), Map.of())))
+        .when(products)
+        .sku(7L);
+    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+    assertEquals(before, fixtureFacts());
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L,
+                    9L,
+                    "current product",
+                    "SKU-7",
+                    new BigDecimal("12.30"),
+                    Map.of("color", "blue"))))
+        .when(products)
+        .sku(7L);
+    service.consumeSeckill(event);
+    String orderNo = String.valueOf(event.get("orderNo"));
+    Map<String, Object> detail =
+        fixture.queryForMap(
+            "SELECT sku_id, quantity, unit_price, line_amount FROM mall_order_item_202612 WHERE order_no=?",
+            orderNo);
+    assertEquals(7L, ((Number) detail.get("sku_id")).longValue());
+    assertEquals(1, ((Number) detail.get("quantity")).intValue());
+    assertEquals(new BigDecimal("12.30"), detail.get("unit_price"));
+    assertEquals(new BigDecimal("12.30"), detail.get("line_amount"));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?", String.class, orderNo));
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(event.get("eventId"))).get("status"));
+    assertPersistedCreation(orderNo, LocalDateTime.parse("2026-12-31T23:59:59.999"));
+    var committed = fixtureFacts();
+    clearInvocations(products);
+    doThrow(new IllegalStateException("Product must not be read for committed replay"))
+        .when(products)
+        .sku(anyLong());
+    event.remove("occurredAt");
+    service.consumeSeckill(event);
+    verifyNoInteractions(products);
+    assertEquals(committed, fixtureFacts());
+  }
+
+  @Test
   void committedDuplicateStillSucceedsWhenLegacyRedeliveryHasNoTime() {
     Map<String, Object> event = timeEvent("202612-committed-legacy");
     event.put("occurredAt", "2026-12-31T23:59:59.999500+08:00");

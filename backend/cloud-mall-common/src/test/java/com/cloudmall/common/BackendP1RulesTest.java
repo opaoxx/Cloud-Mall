@@ -53,16 +53,13 @@ class BackendP1RulesTest {
   }
 
   @Test
-  void seckillConsumerRejectsFailuresAndQueueHasDeadLetterRetrySemantics() throws Exception {
-    String order = source("cloud-mall-order", "OrderServiceImpl.java");
-    String compact = compact(order);
+  void seckillQueueRetainsDeadLetterRetrySemantics() throws Exception {
+    // 消费失败/cause由Order模块实际Service测试验证，这里仅守队列重试与死信配置。
     String messaging = source("cloud-mall-order", "OrderMessagingConfiguration.java");
     String config =
         Files.readString(
             Path.of("..", "cloud-mall-order", "src", "main", "resources", "application.yml")
                 .normalize());
-    assertTrue(compact.contains("catch(Exceptione){thrownewIllegalStateException"));
-    assertTrue(order.contains("交由 RabbitMQ 重试或死信"));
     assertTrue(messaging.contains("x-dead-letter-exchange"));
     assertTrue(messaging.contains("SECKILL_DLQ"));
     assertTrue(config.contains("default-requeue-rejected: false"));
