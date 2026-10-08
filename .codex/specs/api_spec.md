@@ -141,6 +141,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项；并发变更保留最新项，比较失败仍返回原成功 null。脚本结果未知返回 INTERNAL/500，Redis 依赖故障保持既有 503，不自动重试或猜测删除结果。
 
+订单创建成功末尾先使用内部 snapshot GET 预采样，提交后的 afterCommit 仅使用原 DTO 调用 cleanup POST，不再 GET；GET 缺项返回 code=0/data=null，POST 仅在原 JSON bytes 精确匹配时返回 data=true，否则返回 data=false；请求 proof 失败为 400，结果未知为 500，Redis 依赖故障为 503。该内部契约不改变公开 Cart DELETE、订单 JSON 或错误码。
+
 购物车 all/preview 的商品摘要刷新采用有限 compare-write；确认冲突返回 COMMON_CONFLICT/409，脚本结果未知为 INTERNAL/500，Redis 依赖故障保持既有 503。Product 原 404/失效项语义和请求/响应字段保持不变。
 
 ## 7. 订单服务接口
