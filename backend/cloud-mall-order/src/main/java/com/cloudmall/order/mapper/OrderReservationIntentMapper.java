@@ -134,12 +134,19 @@ public class OrderReservationIntentMapper {
         updatedAt);
   }
 
-  /** 保存最近的恢复错误及重试时间。 */
+  /**
+   * 保存最近恢复错误的前512个完整Unicode字符及原重试时间。
+   *
+   * @param orderNo 原意图订单号
+   * @param error 原错误文本，可为null，不做内容归一化
+   * @param nextRetryAt 原调用方提供的上海重试时间
+   * @return 匹配非终态意图的更新行数，其他状态为0
+   */
   public int recordFailure(String orderNo, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET last_error=?,next_retry_at=?,updated_at=?"
             + " WHERE order_no=? AND status IN ('INIT','RESERVE_UNKNOWN','RESERVED')",
-        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        clipIntentError(error),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
         orderNo);
@@ -150,16 +157,28 @@ public class OrderReservationIntentMapper {
     return updateStatus(orderNo, "RESERVED", "COMMITTED", updatedAt);
   }
 
-  /** 标记远程预扣响应未知，保持原订单号和快照供恢复任务查询。 */
-  public int markReserveUnknown(
-      String orderNo, String error, LocalDateTime nextRetryAt) {
+  /**
+   * 将INIT预扣响应标记为未知，保持原身份并安全保存最多512个Unicode错误字符。
+   *
+   * @param orderNo 原意图订单号
+   * @param error 原错误文本，可为null
+   * @param nextRetryAt 原调用方提供的上海重试时间
+   * @return INIT匹配为1，其他状态为0
+   */
+  public int markReserveUnknown(String orderNo, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET status='RESERVE_UNKNOWN',last_error=?,"
             + "next_retry_at=?,updated_at=? WHERE order_no=? AND status='INIT'",
-        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        clipIntentError(error),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
         orderNo);
+  }
+
+  /** 按VARCHAR512字符列宽截断，不分裂有效代理对，不替换或修复原异常Unicode输入。 */
+  private static String clipIntentError(String error) {
+    if (error == null || error.codePointCount(0, error.length()) <= 512) return error;
+    return error.substring(0, error.offsetByCodePoints(0, 512));
   }
 
   /** 将已确认回滚的意图标记为已释放。 */

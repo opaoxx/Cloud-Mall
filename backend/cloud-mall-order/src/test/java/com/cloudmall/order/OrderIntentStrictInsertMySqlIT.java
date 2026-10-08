@@ -288,6 +288,103 @@ class OrderIntentStrictInsertMySqlIT {
     }
   }
 
+  @Test
+  void recoveryFailureTextUsesCompleteUnicodeCharactersInBothSqlModes() throws Exception {
+    assertErrorTextRoundTrips(false);
+  }
+
+  @Test
+  void unknownReserveTextUsesCompleteUnicodeCharactersInBothSqlModes() throws Exception {
+    assertErrorTextRoundTrips(true);
+  }
+
+  @Test
+  void errorTextChangesDoNotWeakenTheExistingStateConditions() {
+    LocalDateTime retryAt = LocalDateTime.parse("2026-10-09T12:00:00.456");
+    for (String state :
+        List.of("INIT", "RESERVE_UNKNOWN", "RESERVED", "COMMITTED", "RELEASED", "OTHER")) {
+      fixture.update("DELETE FROM order_reservation_intent");
+      var original = validIntent();
+      original.status = state;
+      assertEquals(1, mapper.insertIfAbsent(original));
+      var before = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+      boolean recoverable = List.of("INIT", "RESERVE_UNKNOWN", "RESERVED").contains(state);
+      assertEquals(
+          recoverable ? 1 : 0, mapper.recordFailure(original.orderNo, "state gate", retryAt));
+      var afterFailure = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+      if (recoverable) {
+        assertEquals(state, afterFailure.get("status"));
+        assertEquals("state gate", afterFailure.get("last_error"));
+        assertEquals(retryAt, mapper.findByUserAndKey(7L, "original").get(0).nextRetryAt);
+      } else {
+        assertEquals(before, afterFailure);
+      }
+      assertEquals(
+          "INIT".equals(state) ? 1 : 0,
+          mapper.markReserveUnknown(original.orderNo, "unknown gate", retryAt));
+      var afterUnknown = fixture.queryForMap("SELECT * FROM order_reservation_intent");
+      if ("INIT".equals(state)) {
+        assertEquals("RESERVE_UNKNOWN", afterUnknown.get("status"));
+        assertEquals("unknown gate", afterUnknown.get("last_error"));
+      } else {
+        assertEquals(afterFailure, afterUnknown);
+      }
+    }
+  }
+
+  /** 真实VARCHAR512的两处错误写入必须精确保留完整字符，不分裂合法UTF-16代理对。 */
+  private void assertErrorTextRoundTrips(boolean reserveUnknown) throws Exception {
+    List<String[]> samples =
+        List.of(
+            new String[] {null, null},
+            new String[] {"", ""},
+            new String[] {" \t", " \t"},
+            new String[] {"短消息😀", "短消息😀"},
+            new String[] {"a".repeat(511) + "😀", "a".repeat(511) + "😀"},
+            new String[] {"😀".repeat(512), "😀".repeat(512)},
+            new String[] {"😀".repeat(513), "😀".repeat(512)},
+            new String[] {"a".repeat(510) + "😀中尾", "a".repeat(510) + "😀中"},
+            new String[] {"a".repeat(512), "a".repeat(512)},
+            new String[] {"a".repeat(513), "a".repeat(512)},
+            new String[] {"中".repeat(512), "中".repeat(512)},
+            new String[] {"中".repeat(513), "中".repeat(512)});
+    LocalDateTime retryAt = LocalDateTime.parse("2026-10-09T12:00:00.456");
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderReservationIntentMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (String[] sample : samples) {
+          modeJdbc.update("DELETE FROM order_reservation_intent");
+          var original = validIntent();
+          assertEquals(1, modeMapper.insertIfAbsent(original));
+          var before = modeJdbc.queryForMap("SELECT * FROM order_reservation_intent");
+          int changed =
+              assertDoesNotThrow(
+                  () ->
+                      reserveUnknown
+                          ? modeMapper.markReserveUnknown(original.orderNo, sample[0], retryAt)
+                          : modeMapper.recordFailure(original.orderNo, sample[0], retryAt));
+          assertEquals(1, changed);
+          var after = modeJdbc.queryForMap("SELECT * FROM order_reservation_intent");
+          assertEquals(sample[1], after.get("last_error"));
+          assertEquals(reserveUnknown ? "RESERVE_UNKNOWN" : "INIT", after.get("status"));
+          for (String column :
+              List.of(
+                  "id", "order_no", "user_id", "idempotency_key", "items_snapshot", "created_at")) {
+            assertEquals(before.get(column), after.get(column), column);
+          }
+          var stored = modeMapper.findByUserAndKey(7L, "original").get(0);
+          assertEquals(retryAt, stored.nextRetryAt);
+          assertNotNull(stored.updatedAt);
+          if (stored.lastError != null) {
+            assertTrue(stored.lastError.codePointCount(0, stored.lastError.length()) <= 512);
+          }
+        }
+      }
+    }
+  }
+
   /** 使用同一真实连接切换SQL mode，每个非法输入均必须拒绝且保持零行。 */
   private void assertRejectedInBothModes(List<Consumer<OrderReservationIntentPO>> corruptions)
       throws Exception {
