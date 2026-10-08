@@ -417,7 +417,9 @@ class OrderCreationPrecisionMySqlIT {
             + " FOR EACH ROW BEGIN IF OLD.id=1 AND NEW.status='RELEASED' THEN SIGNAL SQLSTATE '45000'"
             + " SET MESSAGE_TEXT='cm17ar release rejected'; END IF; END");
     StockClient stock = mock(StockClient.class);
-    doReturn(ApiResponse.ok(recoveryStatus(first.orderNo, "RESERVED")))
+    doReturn(
+            ApiResponse.ok(recoveryStatus(first.orderNo, "RESERVED")),
+            ApiResponse.ok(recoveryStatus(first.orderNo, "ROLLED_BACK")))
         .when(stock)
         .reservation(first.orderNo);
     doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stock).rollback(first.orderNo);

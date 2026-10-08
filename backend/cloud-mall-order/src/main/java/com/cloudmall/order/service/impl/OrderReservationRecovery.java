@@ -134,13 +134,17 @@ public class OrderReservationRecovery {
       }
       if ("RESERVED".equals(status) || "ALREADY_RESERVED".equals(status)) {
         if (Thread.currentThread().isInterrupted()) return;
-        // 4. 已确认预扣才调用幂等回滚，随后结束意图。
+        // 4. 已确认预扣才调用幂等回滚；成功响应仍须由原订单持久终态证明。
         ApiResponse<?> rollbackResult =
             OrderStockCircuitBreaker.call(
                 OrderStockCircuitBreaker.ACTION, () -> stockClient.rollback(intent.orderNo));
         if (Thread.currentThread().isInterrupted()) return;
         if (rollbackResult == null || !"0".equals(rollbackResult.code))
           throw new IllegalStateException("库存回滚结果未确认");
+        String afterRollback = reservationStatus(intent.orderNo);
+        if (Thread.currentThread().isInterrupted()) return;
+        if (!"ROLLED_BACK".equals(afterRollback) && !"REJECTED".equals(afterRollback))
+          throw new IllegalStateException("库存回滚后的持久终态待确认: " + afterRollback);
       } else if (!"REJECTED".equals(status) && !"ROLLED_BACK".equals(status)) {
         throw new IllegalStateException("库存预扣状态需要人工核对: " + status);
       }

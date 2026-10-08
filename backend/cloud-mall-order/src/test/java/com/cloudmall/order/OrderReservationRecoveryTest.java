@@ -40,7 +40,9 @@ class OrderReservationRecoveryTest {
     when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(intent));
     when(intentMapper.claimRecovery(eq(intent.orderNo), any(), any())).thenReturn(1);
     when(orderSqlMapper.orderExists("mall_order_202609", intent.orderNo)).thenReturn(false);
-    doReturn(ApiResponse.ok(stockStatus(intent.orderNo, "RESERVED")))
+    doReturn(
+            ApiResponse.ok(stockStatus(intent.orderNo, "RESERVED")),
+            ApiResponse.ok(stockStatus(intent.orderNo, "ROLLED_BACK")))
         .when(stockClient)
         .reservation(intent.orderNo);
     doReturn(ApiResponse.ok(java.util.Map.of("rolledBack", true)))
@@ -51,7 +53,7 @@ class OrderReservationRecoveryTest {
 
     recovery.recoverStaleReservations();
 
-    verify(stockClient).reservation(intent.orderNo);
+    verify(stockClient, org.mockito.Mockito.times(2)).reservation(intent.orderNo);
     verify(stockClient, never()).reserve(any());
     verify(stockClient).rollback(intent.orderNo);
     verify(intentMapper).markReleased(eq(intent.orderNo), any(LocalDateTime.class));
@@ -71,6 +73,7 @@ class OrderReservationRecoveryTest {
 
     recovery.recoverStaleReservations();
 
+    org.mockito.Mockito.verifyNoInteractions(stockClient);
     verify(stockClient, never()).reserve(any());
     verify(stockClient, never()).rollback(anyString());
     verify(intentMapper).forceCommitted(eq(intent.orderNo), any(LocalDateTime.class));
@@ -92,6 +95,7 @@ class OrderReservationRecoveryTest {
 
     recovery.recoverStaleReservations();
 
+    verify(stockClient).reservation(intent.orderNo);
     verify(stockClient, never()).rollback(anyString());
     verify(intentMapper).markReleased(eq(intent.orderNo), any(LocalDateTime.class));
   }
@@ -119,6 +123,7 @@ class OrderReservationRecoveryTest {
     verify(stockClient).reserve(replay.capture());
     org.junit.jupiter.api.Assertions.assertEquals(intent.orderNo, replay.getValue().orderNo());
     org.junit.jupiter.api.Assertions.assertEquals(7L, replay.getValue().items().get(0).skuId());
+    verify(stockClient, org.mockito.Mockito.times(2)).reservation(intent.orderNo);
     verify(stockClient, never()).rollback(anyString());
     verify(intentMapper).markReleased(eq(intent.orderNo), any(LocalDateTime.class));
   }
@@ -195,7 +200,9 @@ class OrderReservationRecoveryTest {
       OrderReservationIntentPO original = intent("202609recovermatching");
       when(intentMapper.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(original));
       when(intentMapper.claimRecovery(eq(original.orderNo), any(), any())).thenReturn(1);
-      doReturn(ApiResponse.ok(stockStatus(original.orderNo, state)))
+      doReturn(
+              ApiResponse.ok(stockStatus(original.orderNo, state)),
+              ApiResponse.ok(stockStatus(original.orderNo, "ROLLED_BACK")))
           .when(stockClient)
           .reservation(original.orderNo);
       doReturn(ApiResponse.ok(java.util.Map.of("rolledBack", true)))
@@ -243,7 +250,9 @@ class OrderReservationRecoveryTest {
             when(orderSqlMapper.orderExists("mall_order_202609", first.orderNo))
                 .thenThrow(databaseFailure);
         case "release" -> {
-          doReturn(ApiResponse.ok(stockStatus(first.orderNo, "RESERVED")))
+          doReturn(
+                  ApiResponse.ok(stockStatus(first.orderNo, "RESERVED")),
+                  ApiResponse.ok(stockStatus(first.orderNo, "ROLLED_BACK")))
               .when(stockClient)
               .reservation(first.orderNo);
           doReturn(ApiResponse.ok(java.util.Map.of("rolledBack", true)))
