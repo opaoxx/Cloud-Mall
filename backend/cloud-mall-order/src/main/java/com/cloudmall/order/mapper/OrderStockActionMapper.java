@@ -54,8 +54,7 @@ public class OrderStockActionMapper {
       throw new IllegalArgumentException("库存动作主键、订单号、方向或发生时间不合法");
     }
     // 2. SQL前统一上海毫秒时间和年份范围，避免数据库舍入跨秒/月或默认化。
-    LocalDateTime normalizedTime =
-        OrderCreationTime.normalize(occurredAt.atOffset(ZoneOffset.ofHours(8))).toLocalDateTime();
+    LocalDateTime normalizedTime = normalizeActionTime(occurredAt);
     // 3. 保留plain INSERT和原key，三个时间列共用规范值，SQL异常原样传播。
     return jdbcTemplate.update(
         "INSERT INTO order_stock_action(id,order_no,action_type,operation_key,status,attempts,"
@@ -122,11 +121,13 @@ public class OrderStockActionMapper {
   /**
    * 按到期时间取得有限数量的待恢复动作，在LIMIT前排除负计数记录。
    *
-   * @param now 原调用方提供的上海扫描时间
+   * @param now 原调用方提供的上海扫描时间，向下毫秒规范化后共用谓词
    * @param limit 原候选数量上限，沿既有规则至少为1
    * @return 按重试时间和主键排序的非负计数待恢复动作
+   * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public List<OrderStockActionPO> findDue(LocalDateTime now, int limit) {
+    LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.query(
         "SELECT id,order_no,action_type,operation_key,status,attempts,next_retry_at"
             + " FROM order_stock_action WHERE status IN ('PENDING','UNKNOWN')"
@@ -143,8 +144,8 @@ public class OrderStockActionMapper {
           action.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
           return action;
         },
-        now,
-        now,
+        normalizedNow,
+        normalizedNow,
         Math.max(1, limit));
   }
 
@@ -153,21 +154,24 @@ public class OrderStockActionMapper {
    *
    * @param id 原动作主键
    * @param owner 本次认领的独立标识
-   * @param now 原调用方提供的上海认领时间
+   * @param now 原调用方提供的上海认领时间，向下毫秒后派生30秒租约
    * @return 原租约条件匹配的更新行数，负计数或不匹配为0
+   * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int claim(long id, String owner, LocalDateTime now) {
+    LocalDateTime normalizedNow = normalizeActionTime(now);
+    LocalDateTime leaseUntil = normalizeActionTime(normalizedNow.plusSeconds(30));
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET lease_owner=?,lease_until=?,"
             + "attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,"
             + "updated_at=? WHERE id=? AND status IN ('PENDING','UNKNOWN')"
             + " AND attempts>=0 AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)",
         owner,
-        now.plusSeconds(30),
-        now,
+        leaseUntil,
+        normalizedNow,
         id,
-        now,
-        now);
+        normalizedNow,
+        normalizedNow);
   }
 
   /**
@@ -177,11 +181,13 @@ public class OrderStockActionMapper {
    * @param owner 本次认领标识，按原字符串精确比较
    * @param status 原调用方决定的目标状态
    * @param error 原错误文本，可为null
-   * @param now 本次完成写的新鲜上海时间，同时用于更新和租约判断
+   * @param now 本次完成写的新鲜上海时间，同一规范毫秒值用于更新和租约判断
    * @return 非负计数且有效租约匹配的更新行数，不匹配或空白标识为0
+   * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int finish(long id, String owner, String status, String error, LocalDateTime now) {
     if (owner == null || owner.isBlank()) return 0;
+    LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status=?,last_error=?,lease_owner=NULL,lease_until=NULL,"
             + "updated_at=? WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
@@ -189,10 +195,10 @@ public class OrderStockActionMapper {
             + " AND attempts>=0",
         status,
         shorten(error),
-        now,
+        normalizedNow,
         id,
         owner,
-        now);
+        normalizedNow);
   }
 
   /**
@@ -201,12 +207,15 @@ public class OrderStockActionMapper {
    * @param id 原动作主键
    * @param owner 本次认领标识，按原字符串精确比较
    * @param error 原错误文本，可为null
-   * @param retryAt 原调用方提供的下次重试时间
-   * @param now 本次重试写的新鲜上海时间，同时用于更新和租约判断
+   * @param retryAt 原调用方提供的下次重试时间，规范毫秒值只用于延期
+   * @param now 本次重试写的新鲜上海时间，同一规范毫秒值用于更新和租约判断
    * @return 非负计数且有效租约匹配的更新行数，不匹配或空白标识为0
+   * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int retry(long id, String owner, String error, LocalDateTime retryAt, LocalDateTime now) {
     if (owner == null || owner.isBlank()) return 0;
+    LocalDateTime normalizedRetryAt = normalizeActionTime(retryAt);
+    LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status='UNKNOWN',last_error=?,next_retry_at=?,"
             + "lease_owner=NULL,lease_until=NULL,updated_at=?"
@@ -214,11 +223,18 @@ public class OrderStockActionMapper {
             + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
             + " AND attempts>=0",
         shorten(error),
-        retryAt,
-        now,
+        normalizedRetryAt,
+        normalizedNow,
         id,
         owner,
-        now);
+        normalizedNow);
+  }
+
+  /** 同调用参数按上海local字段解释并floor毫秒；null/越界均在SQL前拒绝，不采新时钟。 */
+  private static LocalDateTime normalizeActionTime(LocalDateTime timestamp) {
+    return OrderCreationTime.normalize(
+            timestamp == null ? null : timestamp.atOffset(ZoneOffset.ofHours(8)))
+        .toLocalDateTime();
   }
 
   /** 按VARCHAR512字符列宽保留完整code point，不拆有效代理对或归一化原错误文本。 */
