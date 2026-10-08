@@ -192,7 +192,7 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单 outbox 的完成写与失败写在既有 `event_id=?` 候选条件上追加 `CAST(event_id AS BINARY)=CAST(? AS BINARY)`，同一原 eventId 绑定两次；大小写、重音或尾空格别名不得改写其他事件。0 行完成继续 publication proof，0 行失败保持原返回语义，不改变扫描、消息或公开 API。
 
-订单 timeout outbox 扫描在 LIMIT 前还必须分别筛选 eventId 与 orderNo 两列各自至少包含一个非 Java whitespace 字符；使用 Java17 固定正则和 prepared 参数，不 trim/归一化。空白身份候选不占窗口，其他扫描、写入、proof 和公开 API 语义保持。
+订单 timeout outbox 扫描在 LIMIT 前还必须分别筛选 eventId 与 orderNo 两列各自至少包含一个非 Java whitespace 字符；Java17 固定正则以 UTF-8 HEX prepared 参数传入，SQL 用 `UNHEX` 恢复 pattern，不依赖 JDBC/session 反斜杠配置，不 trim/归一化。空白身份候选不占窗口，其他扫描、写入、proof 和公开 API 语义保持。
 
 订单 timeout dispatcher 在当前 PO 的 attempts、event_type、status 门之后，还必须要求 eventId 与 orderNo 非 null 且非空白；不满足时只告警跳过，不解析、不发送、不完成或失败写，后续候选继续。该 guard 不新增扫描过滤、接口字段或历史修复。
 
