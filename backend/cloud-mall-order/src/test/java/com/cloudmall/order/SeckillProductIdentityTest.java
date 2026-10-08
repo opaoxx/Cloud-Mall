@@ -474,6 +474,50 @@ class SeckillProductIdentityTest {
     }
   }
 
+  @Test
+  void conflictEvidenceWriteFailureKeepsTheRabbitRetryChannel() {
+    Fixture fixture = new Fixture();
+    fixture.event.put("skuId", new BigDecimal("7.5"));
+    RuntimeException unavailable =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "raw evidence write unavailable");
+    doThrow(unavailable)
+        .when(fixture.dedup)
+        .recordConflictEvent(
+            anyLong(),
+            anyLong(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            any());
+    IllegalStateException failure =
+        assertThrows(
+            IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+    assertSame(unavailable, failure.getCause());
+    verify(fixture.dedup)
+        .recordConflictEvent(
+            anyLong(),
+            eq(8L),
+            eq(fixture.key),
+            eq(fixture.hash),
+            eq(fixture.orderNo),
+            eq(fixture.eventId),
+            anyString(),
+            anyString(),
+            any());
+    verifyNoMoreInteractions(fixture.dedup);
+    verifyNoInteractions(
+        fixture.products,
+        fixture.orders,
+        fixture.outbox,
+        fixture.recovery,
+        fixture.stock,
+        fixture.cart);
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());

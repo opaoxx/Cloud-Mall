@@ -1344,6 +1344,316 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void conflictEvidenceRetainsExactNumericTextAndTheFirstWriter() throws Exception {
+    SeckillOrderDedupMapper conflicts =
+        (SeckillOrderDedupMapper) ReflectionTestUtils.getField(service, "seckillOrderDedupMapper");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String payload :
+        List.of(
+            "{\"n\":18446744073709551624,\"negative\":-18446744073709551624}",
+            "{\"decimal\":0.123456789012345678901234567890,\"nested\":[18446744073709551624,{\"tail\":8.000}]}",
+            "  {\"text\":\"汉字😀\\\"\\\\\\n\", \"n\":18446744073709551624, \"nullable\":null}  ",
+            "{}")) {
+      String eventId = "raw-evidence-" + sequence;
+      String key = "raw-key-" + sequence;
+      long rowId = 7100 + sequence++;
+      assertEquals(
+          1,
+          conflicts.recordConflictEvent(
+              rowId,
+              8L,
+              key,
+              "a".repeat(64),
+              "202612-raw",
+              eventId,
+              "非法核心维度",
+              payload,
+              LocalDateTime.parse("2026-12-31T23:59:59.999")));
+      Map<String, Object> first =
+          fixture.queryForMap(
+              "SELECT * FROM seckill_order_dedup_conflict WHERE event_id=?", eventId);
+      checks.add(() -> assertEquals(payload, first.get("raw_payload"), eventId));
+      assertEquals("RECORDED", first.get("status"));
+      assertEquals(
+          0,
+          conflicts.recordConflictEvent(
+              rowId + 100,
+              8L,
+              key,
+              "a".repeat(64),
+              "202612-other",
+              eventId,
+              "非法核心维度",
+              "{\"changed\":true}",
+              LocalDateTime.parse("2027-01-01T00:00:00")));
+      assertEquals(
+          first,
+          fixture.queryForMap(
+              "SELECT * FROM seckill_order_dedup_conflict WHERE event_id=?", eventId));
+      assertEquals(
+          0,
+          conflicts.recordConflictEvent(
+              rowId + 200,
+              8L,
+              key,
+              "a".repeat(64),
+              "202612-other",
+              eventId + "-alias",
+              "非法核心维度",
+              "{\"changed\":true}",
+              LocalDateTime.parse("2027-01-01T00:00:00")));
+      assertEquals(
+          first,
+          fixture.queryForMap(
+              "SELECT * FROM seckill_order_dedup_conflict WHERE event_id=?", eventId));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void rawPayloadMigrationPreservesLegacyRowsAndMatchesFreshSchema() throws Exception {
+    fixture.execute("ALTER TABLE seckill_order_dedup_conflict DROP COLUMN raw_payload");
+    fixture.update(
+        "INSERT INTO seckill_order_dedup_conflict "
+            + "(id,event_id,user_id,idempotency_key,request_hash,conflict_type,payload,status,created_at,updated_at) "
+            + "VALUES (7200,'legacy-raw',8,'legacy-raw',?,'INVALID_PAYLOAD',?,'RECORDED',?,?)",
+        "a".repeat(64),
+        "{\"n\":18446744073709551624}",
+        LocalDateTime.parse("2026-12-31T23:59:59.999"),
+        LocalDateTime.parse("2026-12-31T23:59:59.999"));
+    Map<String, Object> legacy =
+        fixture.queryForMap("SELECT * FROM seckill_order_dedup_conflict WHERE id=7200");
+    List<Map<String, Object>> indexes =
+        fixture.queryForList(
+            "SELECT index_name,non_unique,seq_in_index,column_name FROM information_schema.statistics "
+                + "WHERE table_schema=DATABASE() AND table_name='seckill_order_dedup_conflict' ORDER BY index_name,seq_in_index");
+    runRawPayloadMigration();
+    runRawPayloadMigration();
+    SeckillOrderDedupMapper conflicts = new SeckillOrderDedupMapper(fixture);
+    conflicts.ensureTable();
+    conflicts.ensureTable();
+    Map<String, Object> upgraded =
+        fixture.queryForMap("SELECT * FROM seckill_order_dedup_conflict WHERE id=7200");
+    assertTrue(upgraded.containsKey("raw_payload"));
+    assertNull(upgraded.remove("raw_payload"));
+    assertEquals(legacy, upgraded);
+    assertEquals(
+        indexes,
+        fixture.queryForList(
+            "SELECT index_name,non_unique,seq_in_index,column_name FROM information_schema.statistics "
+                + "WHERE table_schema=DATABASE() AND table_name='seckill_order_dedup_conflict' ORDER BY index_name,seq_in_index"));
+    assertEquals(
+        0,
+        conflicts.recordConflictEvent(
+            7201,
+            8L,
+            "legacy-raw",
+            "a".repeat(64),
+            "202612-legacy",
+            "legacy-raw",
+            "非法字段",
+            "{\"corrected\":true}",
+            LocalDateTime.now()));
+    assertNull(
+        fixture
+            .queryForMap("SELECT * FROM seckill_order_dedup_conflict WHERE id=7200")
+            .get("raw_payload"));
+    fixture.execute("DROP TABLE seckill_order_dedup_conflict");
+    String freshDdl =
+        java.nio.file.Files.readAllLines(databaseScript("schema.sql")).stream()
+            .filter(
+                line ->
+                    line.startsWith("CREATE TABLE IF NOT EXISTS seckill_order_dedup_conflict ("))
+            .findFirst()
+            .orElseThrow();
+    fixture.execute(freshDdl);
+    conflicts.ensureTable();
+    runRawPayloadMigration();
+    assertEquals(
+        1,
+        conflicts.recordConflictEvent(
+            7202,
+            8L,
+            "default-raw",
+            "b".repeat(64),
+            "202612-default",
+            "default-raw",
+            "非法字段",
+            LocalDateTime.now()));
+    assertEquals(
+        "{}",
+        fixture.queryForObject(
+            "SELECT raw_payload FROM seckill_order_dedup_conflict WHERE id=7202", String.class));
+  }
+
+  @Test
+  void rawPayloadSchemaAndWriteFailuresNeverFallBackOrCommitPartialEvidence() throws Exception {
+    SeckillOrderDedupMapper conflicts = new SeckillOrderDedupMapper(fixture);
+    fixture.execute("ALTER TABLE seckill_order_dedup_conflict DROP COLUMN raw_payload");
+    var missingColumnFacts = fixtureFacts();
+    assertThrows(
+        org.springframework.dao.DataAccessException.class,
+        () ->
+            conflicts.recordConflictEvent(
+                7300,
+                8L,
+                "missing-raw",
+                "a".repeat(64),
+                "202612-missing",
+                "missing-raw",
+                "非法字段",
+                "{}",
+                LocalDateTime.now()));
+    assertEquals(missingColumnFacts, fixtureFacts());
+    fixture.execute(
+        "ALTER TABLE seckill_order_dedup_conflict ADD COLUMN raw_payload VARCHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL");
+    var incompatibleFacts = fixtureFacts();
+    assertThrows(IllegalStateException.class, conflicts::ensureTable);
+    assertThrows(RuntimeException.class, this::runRawPayloadMigration);
+    assertEquals(incompatibleFacts, fixtureFacts());
+    fixture.execute("ALTER TABLE seckill_order_dedup_conflict DROP COLUMN raw_payload");
+    conflicts.ensureTable();
+    var before = fixtureFacts();
+    assertThrows(
+        org.springframework.dao.DataAccessException.class,
+        () ->
+            conflicts.recordConflictEvent(
+                7301,
+                8L,
+                "bad-json",
+                "a".repeat(64),
+                "202612-bad",
+                "bad-json",
+                "非法字段",
+                "{invalid",
+                LocalDateTime.now()));
+    assertEquals(before, fixtureFacts());
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            transaction.execute(
+                status -> {
+                  assertEquals(
+                      1,
+                      conflicts.recordConflictEvent(
+                          7302,
+                          8L,
+                          "rollback-raw",
+                          "a".repeat(64),
+                          "202612-rollback",
+                          "rollback-raw",
+                          "非法字段",
+                          "{\"n\":18446744073709551624}",
+                          LocalDateTime.now()));
+                  throw new IllegalStateException("rollback complete evidence row");
+                }));
+    assertEquals(before, fixtureFacts());
+    fixture.execute(
+        "CREATE TRIGGER cn_reject_conflict BEFORE INSERT ON seckill_order_dedup_conflict FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='controlled evidence failure'");
+    Map<String, Object> invalid = timeEvent("202612-evidence-failure");
+    invalid.put("skuId", new BigDecimal("7.5"));
+    IllegalStateException failure =
+        assertThrows(IllegalStateException.class, () -> service.consumeSeckill(invalid));
+    assertInstanceOf(org.springframework.dao.DataAccessException.class, failure.getCause());
+    assertEquals(before, fixtureFacts());
+    verifyNoInteractions(
+        ReflectionTestUtils.getField(service, "products"),
+        ReflectionTestUtils.getField(service, "stock"),
+        ReflectionTestUtils.getField(service, "cart"));
+    fixture.execute("DROP TRIGGER cn_reject_conflict");
+  }
+
+  @Test
+  void concurrentLegacyColumnPreparationRechecksTheActualDuplicateColumn() throws Exception {
+    fixture.execute("ALTER TABLE seckill_order_dedup_conflict DROP COLUMN raw_payload");
+    JdbcTemplate parallelSql =
+        spy(new JdbcTemplate(new DriverManagerDataSource(isolatedUrl, "root", "root")));
+    java.util.concurrent.CountDownLatch bothMissing = new java.util.concurrent.CountDownLatch(2);
+    java.util.concurrent.atomic.AtomicInteger duplicateColumns =
+        new java.util.concurrent.atomic.AtomicInteger();
+    doAnswer(
+            invocation -> {
+              List<?> columns = (List<?>) invocation.callRealMethod();
+              String query = invocation.getArgument(0);
+              if (query.contains("information_schema.columns") && columns.isEmpty()) {
+                bothMissing.countDown();
+                assertTrue(bothMissing.await(10, java.util.concurrent.TimeUnit.SECONDS));
+              }
+              return columns;
+            })
+        .when(parallelSql)
+        .queryForList(anyString());
+    doAnswer(
+            invocation -> {
+              try {
+                return invocation.callRealMethod();
+              } catch (org.springframework.dao.DataAccessException failure) {
+                for (Throwable cause = failure; cause != null; cause = cause.getCause())
+                  if (cause instanceof java.sql.SQLException sqlFailure
+                      && sqlFailure.getErrorCode() == 1060) duplicateColumns.incrementAndGet();
+                throw failure;
+              }
+            })
+        .when(parallelSql)
+        .execute(startsWith("ALTER TABLE seckill_order_dedup_conflict ADD COLUMN raw_payload"));
+    var before = fixtureFacts();
+    java.util.concurrent.ExecutorService executor =
+        java.util.concurrent.Executors.newFixedThreadPool(2);
+    try {
+      var first = executor.submit(() -> new SeckillOrderDedupMapper(parallelSql).ensureTable());
+      var second = executor.submit(() -> new SeckillOrderDedupMapper(parallelSql).ensureTable());
+      first.get(20, java.util.concurrent.TimeUnit.SECONDS);
+      second.get(20, java.util.concurrent.TimeUnit.SECONDS);
+    } finally {
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS));
+    }
+    assertEquals(1, duplicateColumns.get());
+    assertEquals(before, fixtureFacts());
+    assertEquals(
+        1,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                + "AND table_name='seckill_order_dedup_conflict' AND column_name='raw_payload' AND data_type='longtext' "
+                + "AND character_set_name='utf8mb4' AND collation_name='utf8mb4_bin' AND is_nullable='YES'",
+            Integer.class));
+  }
+
+  /** 仅读取仓库数据库脚本，不使用Agent专有绝对路径。 */
+  private java.nio.file.Path databaseScript(String fileName) {
+    for (java.nio.file.Path root =
+            java.nio.file.Path.of(System.getProperty("user.dir")).toAbsolutePath();
+        root != null;
+        root = root.getParent()) {
+      java.nio.file.Path candidate = root.resolve("backend/database").resolve(fileName);
+      if (java.nio.file.Files.isRegularFile(candidate)) return candidate;
+    }
+    throw new IllegalStateException("未找到数据库脚本: " + fileName);
+  }
+
+  /** 同一隔离库连接运行真实脚本及DELIMITER分段，不替换USE或连接到原业务库。 */
+  private void runRawPayloadMigration() throws Exception {
+    String script =
+        java.nio.file.Files.readString(databaseScript("migrate_seckill_conflict_raw_payload.sql"));
+    assertFalse(java.util.regex.Pattern.compile("(?im)^\\s*USE\\s").matcher(script).find());
+    String[] parts = script.split("(?m)^DELIMITER \\$\\$\\s*$|^DELIMITER ;\\s*$");
+    try (java.sql.Connection connection =
+        new DriverManagerDataSource(isolatedUrl, "root", "root").getConnection()) {
+      assertEquals(database, connection.getCatalog());
+      for (int partIndex = 0; partIndex < parts.length; partIndex++) {
+        var resource =
+            new org.springframework.core.io.support.EncodedResource(
+                new org.springframework.core.io.ByteArrayResource(
+                    parts[partIndex].getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                java.nio.charset.StandardCharsets.UTF_8);
+        org.springframework.jdbc.datasource.init.ScriptUtils.executeSqlScript(
+            connection, resource, false, false, "--", partIndex % 2 == 0 ? ";" : "$$", "/*", "*/");
+      }
+    }
+  }
+
+  @Test
   void lossyNumericSeckillIdentitiesCannotAuthorizeAliasOrdersOrResolveHeldFacts()
       throws Exception {
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
@@ -1384,7 +1694,7 @@ class OrderCreationPrecisionMySqlIT {
         checks.add(() -> assertEquals(0, productCalls, label));
         List<Map<String, Object>> conflicts =
             fixture.queryForList(
-                "SELECT user_id, conflict_type, payload FROM seckill_order_dedup_conflict WHERE event_id=?",
+                "SELECT user_id, conflict_type, payload, raw_payload FROM seckill_order_dedup_conflict WHERE event_id=?",
                 incoming.get("eventId"));
         checks.add(() -> assertEquals(1, conflicts.size(), label));
         if (!conflicts.isEmpty()) {
@@ -1402,7 +1712,11 @@ class OrderCreationPrecisionMySqlIT {
               json.readTree(String.valueOf(conflict.get("payload"))).path(field).asText();
           if ("fraction".equals(fault))
             checks.add(() -> assertEquals(originalNumber, recordedNumber, label));
-          // 原JSON列的大数精度另立待修；本批核入库前原载荷和既有SQL表示，不冒称原数值保真。
+          checks.add(
+              () ->
+                  assertEquals(
+                      json.writeValueAsString(incoming), conflict.get("raw_payload"), label));
+          // JSON结构化视图保留原数据库表示，取证原数值从raw_payload读取。
           String databaseJson =
               fixture.queryForObject(
                   "SELECT CAST(? AS JSON)", String.class, json.writeValueAsString(incoming));

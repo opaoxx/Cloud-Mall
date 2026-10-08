@@ -86,6 +86,17 @@ Get-Content -Raw backend/database/migrate_product_read_indexes.sql |
 
 ### 2. 启动后端
 
+已有数据库在启动订单消费者前执行冲突证据增列迁移（可重复执行）：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 backend/database/migrate_seckill_conflict_raw_payload.sql |
+  docker exec -i cloud-mall-mysql mysql --default-character-set=utf8mb4 -uroot -proot cloudmall_order
+```
+
+先备份冲突表。迁移仅增加可空 `raw_payload`，不回填历史记录；订单初始化也会检查并补充该列，结构不兼容时启动失败。
+取证优先读取非空 `raw_payload`（当前 Map 序列化后的完整文本）；历史 `NULL` 只能使用旧 `payload JSON` 视图，大数精度可能已经丢失。
+回退代码时保留新列和已写证据，不删除证据数据。该文本不代表 RabbitMQ 原始消息字节，也不能恢复接收前已丢失的数值精度。
+
 使用 IntelliJ IDEA 导入根目录 `pom.xml`，再分别启动各服务的 `*Application`。
 
 项目使用 JDK 17 目标版本。使用 JDK 21 临时运行 Seata 相关服务时，需要添加：
