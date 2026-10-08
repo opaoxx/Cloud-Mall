@@ -347,6 +347,141 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void uncertainReserve409AndBadErrorBodiesKeepTheirOriginalIntentRecoverable() {
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    List<String> bodies = new ArrayList<>();
+    for (String code : uncertainReservationCodes())
+      bodies.add(code == null ? "{\"code\":null}" : "{\"code\":\"" + code + "\"}");
+    bodies.addAll(List.of("not-json", "{}", "null"));
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int caseNumber = 0;
+    for (String body : bodies) {
+      clearInvocations(stock);
+      feign.FeignException remoteFailure = mock(feign.FeignException.class);
+      when(remoteFailure.status()).thenReturn(409);
+      when(remoteFailure.contentUTF8()).thenReturn(body);
+      doThrow(remoteFailure).when(stock).reserve(any());
+      String key = "reserve-ambiguous-409-" + caseNumber++;
+      BizException returned =
+          assertThrows(BizException.class, () -> service.create(key, normalRequest()));
+      Map<String, Object> intent =
+          fixture.queryForMap(
+              "SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+      checks.add(() -> assertEquals(202, returned.getHttpStatus(), body));
+      checks.add(() -> assertEquals("ORDER_RESERVATION_UNKNOWN", returned.getCode(), body));
+      checks.add(() -> assertEquals("RESERVE_UNKNOWN", intent.get("status"), body));
+      checks.add(() -> assertNotNull(intent.get("last_error"), body));
+      checks.add(() -> assertNotNull(intent.get("next_retry_at"), body));
+      checks.add(() -> assertEquals(1, returned.getSuppressed().length, body));
+      if (returned.getSuppressed().length > 0)
+        checks.add(() -> assertSame(remoteFailure, returned.getSuppressed()[0], body));
+      verify(stock).reserve(any());
+      verify(stock, never()).rollback(anyString());
+      verify(stock, never()).reservation(anyString());
+      assertFailedCreateHasNoCommittedArtifacts();
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void nonzeroReserveEnvelopeIsNotDurableRejectionWithoutItsDedicatedCode() {
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int caseNumber = 0;
+    for (String code : uncertainReservationCodes()) {
+      clearInvocations(stock);
+      doReturn(ApiResponse.error(code, "reserve unknown")).when(stock).reserve(any());
+      String key = "reserve-ambiguous-envelope-" + caseNumber++;
+      BizException returned =
+          assertThrows(BizException.class, () -> service.create(key, normalRequest()));
+      Map<String, Object> intent =
+          fixture.queryForMap(
+              "SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+      checks.add(() -> assertEquals(202, returned.getHttpStatus(), String.valueOf(code)));
+      checks.add(
+          () ->
+              assertEquals("ORDER_RESERVATION_UNKNOWN", returned.getCode(), String.valueOf(code)));
+      checks.add(() -> assertEquals("RESERVE_UNKNOWN", intent.get("status"), String.valueOf(code)));
+      checks.add(() -> assertNotNull(intent.get("last_error"), String.valueOf(code)));
+      checks.add(() -> assertNotNull(intent.get("next_retry_at"), String.valueOf(code)));
+      verify(stock).reserve(any());
+      verify(stock, never()).rollback(anyString());
+      verify(stock, never()).reservation(anyString());
+      assertFailedCreateHasNoCommittedArtifacts();
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void dedicatedDurableRejectionWorksFor409AndDecodedEnvelopeButNot500() {
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String transport : List.of("409", "envelope", "500")) {
+      clearInvocations(stock);
+      if ("envelope".equals(transport)) {
+        doReturn(ApiResponse.error("ORDER_STOCK_RESERVATION_REJECTED", "durable rejected"))
+            .when(stock)
+            .reserve(any());
+      } else {
+        feign.FeignException failure = mock(feign.FeignException.class);
+        when(failure.status()).thenReturn(Integer.parseInt(transport));
+        when(failure.contentUTF8()).thenReturn("{\"code\":\"ORDER_STOCK_RESERVATION_REJECTED\"}");
+        doThrow(failure).when(stock).reserve(any());
+      }
+      String key = "reserve-durable-rejected-" + transport;
+      BizException returned =
+          assertThrows(BizException.class, () -> service.create(key, normalRequest()));
+      Map<String, Object> intent =
+          fixture.queryForMap(
+              "SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+      boolean definitive = !"500".equals(transport);
+      checks.add(() -> assertEquals(definitive ? 409 : 202, returned.getHttpStatus(), transport));
+      checks.add(
+          () ->
+              assertEquals(
+                  definitive ? ErrorCodes.STOCK : "ORDER_RESERVATION_UNKNOWN",
+                  returned.getCode(),
+                  transport));
+      checks.add(
+          () ->
+              assertEquals(
+                  definitive ? "RELEASED" : "RESERVE_UNKNOWN", intent.get("status"), transport));
+      if (definitive) {
+        checks.add(() -> assertNull(intent.get("last_error"), transport));
+        checks.add(() -> assertNull(intent.get("next_retry_at"), transport));
+      } else {
+        assertNotNull(intent.get("last_error"));
+        assertNotNull(intent.get("next_retry_at"));
+      }
+      verify(stock).reserve(any());
+      verify(stock, never()).rollback(anyString());
+      verify(stock, never()).reservation(anyString());
+      assertFailedCreateHasNoCommittedArtifacts();
+    }
+    assertAll(checks);
+  }
+
+  /** 普通错误码、类型/大小写别名与未知值不能证明Stock已持久拒绝。 */
+  private static List<String> uncertainReservationCodes() {
+    return java.util.Arrays.asList(
+        ErrorCodes.STOCK,
+        ErrorCodes.CONFLICT,
+        ErrorCodes.DUPLICATE,
+        "ORDER_RESERVATION_KEY_REUSED",
+        ErrorCodes.INTERNAL,
+        "UNEXPECTED",
+        null,
+        "",
+        " ",
+        "order_stock_reservation_rejected",
+        "ORDER_STOCK_RESERVATION_REJECTED ",
+        "ÓRDER_STOCK_RESERVATION_REJECTED");
+  }
+
+  @Test
   void normalCreateUsesOneTruncatedShanghaiMillisecondForAllCreatedFields() throws Exception {
     AuthContext.set(7L, "USER");
     ApiResponse<?> response =

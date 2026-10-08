@@ -107,6 +107,82 @@ class OrderFailureHandlingTest {
   }
 
   @Test
+  void ambiguous409PreservesRemoteEvidenceWithoutReleasingOrContinuingCreation() {
+    for (String code :
+        List.of(
+            "COMMON_CONFLICT",
+            "ORDER_DUPLICATE_REQUEST",
+            "ORDER_RESERVATION_KEY_REUSED",
+            "ORDER_STOCK_NOT_ENOUGH")) {
+      StockClient stockClient = mock(StockClient.class);
+      ProductClient productClient = mock(ProductClient.class);
+      UserClient userClient = mock(UserClient.class);
+      OrderSqlMapper orders = mock(OrderSqlMapper.class);
+      when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
+      when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+      FeignException remoteFailure = mock(FeignException.class);
+      when(remoteFailure.status()).thenReturn(409);
+      when(remoteFailure.contentUTF8()).thenReturn("{\"code\":\"" + code + "\"}");
+      doThrow(remoteFailure).when(stockClient).reserve(any());
+      OrderServiceImpl target = service(stockClient, productClient, userClient, orders);
+      OrderReservationIntentService intents =
+          (OrderReservationIntentService)
+              ReflectionTestUtils.getField(target, "reservationIntentService");
+      AuthContext.set(8L, "USER");
+      BizException returned =
+          assertThrows(BizException.class, () -> target.create("ambiguous-409", orderRequest()));
+      assertEquals(202, returned.getHttpStatus());
+      assertEquals("ORDER_RESERVATION_UNKNOWN", returned.getCode());
+      assertEquals(1, returned.getSuppressed().length);
+      org.junit.jupiter.api.Assertions.assertSame(remoteFailure, returned.getSuppressed()[0]);
+      verify(stockClient).reserve(any());
+      verify(stockClient, never()).reservation(anyString());
+      verify(stockClient, never()).rollback(anyString());
+      verify(intents).markReserveUnknown(anyString(), anyString());
+      verify(intents, never()).markReleased(anyString());
+      verify(intents, never()).markReserved(anyString());
+      verify(orders, never()).insertOrder(anyString(), any(OrderPO.class));
+    }
+  }
+
+  @Test
+  void failureRecordingAnUnknownConflictDoesNotHideItsOriginal202AndCause() {
+    StockClient stockClient = mock(StockClient.class);
+    ProductClient products = mock(ProductClient.class);
+    UserClient users = mock(UserClient.class);
+    OrderSqlMapper orders = mock(OrderSqlMapper.class);
+    when(products.sku(7L)).thenReturn(ApiResponse.ok(sku()));
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+    FeignException remoteFailure = mock(FeignException.class);
+    when(remoteFailure.status()).thenReturn(409);
+    when(remoteFailure.contentUTF8()).thenReturn("{\"code\":\"COMMON_CONFLICT\"}");
+    doThrow(remoteFailure).when(stockClient).reserve(any());
+    OrderServiceImpl target = service(stockClient, products, users, orders);
+    OrderReservationIntentService intents =
+        (OrderReservationIntentService)
+            ReflectionTestUtils.getField(target, "reservationIntentService");
+    DataAccessResourceFailureException recordingFailure =
+        new DataAccessResourceFailureException("intent write unavailable");
+    doThrow(recordingFailure).when(intents).markReserveUnknown(anyString(), anyString());
+    AuthContext.set(8L, "USER");
+    BizException returned =
+        assertThrows(
+            BizException.class, () -> target.create("conflict-record-failure", orderRequest()));
+    assertEquals(202, returned.getHttpStatus());
+    assertEquals("ORDER_RESERVATION_UNKNOWN", returned.getCode());
+    assertEquals(2, returned.getSuppressed().length);
+    org.junit.jupiter.api.Assertions.assertSame(remoteFailure, returned.getSuppressed()[0]);
+    org.junit.jupiter.api.Assertions.assertSame(recordingFailure, returned.getSuppressed()[1]);
+    verify(intents).markReserveUnknown(anyString(), anyString());
+    verify(intents, never()).markReleased(anyString());
+    verify(intents, never()).markReserved(anyString());
+    verify(stockClient).reserve(any());
+    verify(stockClient, never()).reservation(anyString());
+    verify(stockClient, never()).rollback(anyString());
+    verify(orders, never()).insertOrder(anyString(), any(OrderPO.class));
+  }
+
+  @Test
   void malformedStock409CannotReleaseAnUnknownReservationIntent() {
     StockClient stockClient = mock(StockClient.class);
     ProductClient productClient = mock(ProductClient.class);
@@ -121,12 +197,13 @@ class OrderFailureHandlingTest {
     doThrow(malformed).when(stockClient).reserve(any());
     OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
     OrderReservationIntentService intentService =
-        (OrderReservationIntentService) ReflectionTestUtils.getField(
-            orderService, "reservationIntentService");
+        (OrderReservationIntentService)
+            ReflectionTestUtils.getField(orderService, "reservationIntentService");
 
     AuthContext.set(8L, "USER");
-    BizException result = assertThrows(BizException.class,
-        () -> orderService.create("malformed-409", orderRequest()));
+    BizException result =
+        assertThrows(
+            BizException.class, () -> orderService.create("malformed-409", orderRequest()));
 
     assertEquals("ORDER_RESERVATION_UNKNOWN", result.getCode());
     assertEquals(202, result.getHttpStatus());

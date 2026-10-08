@@ -59,6 +59,9 @@ public class OrderServiceImpl implements OrderService {
   /** 执行 ofPattern 相关操作。 */
   private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
 
+  /** Stock已持久化REJECTED的专用错误码，普通冲突不能授权结束预扣意图。 */
+  private static final String DURABLE_RESERVATION_REJECTED = "ORDER_STOCK_RESERVATION_REJECTED";
+
   /** 常规订单创建的单次时钟来源；默认系统上海偏移，隔离测试可注入固定时刻。 */
   private Clock creationClock = Clock.system(ZoneOffset.ofHours(8));
 
@@ -192,26 +195,27 @@ public class OrderServiceImpl implements OrderService {
       // 1. 预扣请求始终使用已提交意图中的原订单号，网络结果未知时也可安全恢复。
       ApiResponse<?> reserved;
       try {
-        reserved = OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.RESERVE,
-            () -> stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL")));
+        reserved =
+            OrderStockCircuitBreaker.call(
+                OrderStockCircuitBreaker.RESERVE,
+                () -> stock.reserve(new StockClient.Reservation(orderNo, lines, "NORMAL")));
       } catch (RuntimeException remoteFailure) {
         if (remoteFailure instanceof FeignException feignFailure
             && feignFailure.status() == 409
-            && Set.of(ErrorCodes.STOCK, ErrorCodes.CONFLICT, ErrorCodes.DUPLICATE,
-                    "ORDER_RESERVATION_KEY_REUSED")
-                .contains(remoteCode(feignFailure))) {
+            && DURABLE_RESERVATION_REJECTED.equals(remoteCode(feignFailure))) {
           definiteRejection = true;
           reservationIntentService.markReleased(orderNo);
           throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
         }
-        BizException unknown =
-            new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
+        BizException unknown = new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
         unknown.addSuppressed(remoteFailure);
         throw unknown;
       }
-      if (reserved == null)
-        throw new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
+      if (reserved == null) throw new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
       if (!"0".equals(reserved.code)) {
+        // 非零响应不等于持久拒绝，只有专用证据才能结束原预扣意图。
+        if (!DURABLE_RESERVATION_REJECTED.equals(reserved.code))
+          throw new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
         definiteRejection = true;
         reservationIntentService.markReleased(orderNo);
         throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
