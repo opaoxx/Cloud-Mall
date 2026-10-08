@@ -568,6 +568,39 @@ class OrderLegacyStockIdentityMySqlIT {
     verifyNoInteractions(stock);
   }
 
+  @Test
+  void malformedActionStatusesRemainUnknownWithoutLegacyFallback() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    when(stock.reservation("202610legacy1")).thenReturn(fact("202610legacy1", "CONFIRMED"));
+    for (String state :
+        List.of(
+            "",
+            " \t",
+            "pending",
+            "unknown",
+            "succeeded",
+            "conflict",
+            "SUCCEEDED ",
+            "CONFLICT ",
+            "SÚCCEEDED",
+            "OTHER")) {
+      seed("PAID");
+      assertEquals(
+          1, mapper.insert(1L, "202610legacy1", "CONFIRM", LocalDateTime.of(2026, 10, 8, 10, 0)));
+      fixture.update("UPDATE order_stock_action SET status=? WHERE id=1", state);
+      var before = fixtureSnapshot();
+      String plain = mapper.statusForOrder("202610legacy1");
+      String expected = mapper.statusForOrder("202610legacy1", "CONFIRM");
+      Object reported = paymentState(8L).get("stockActionStatus");
+      checks.add(() -> assertEquals("UNKNOWN", plain, state));
+      checks.add(() -> assertEquals("UNKNOWN", expected, state));
+      checks.add(() -> assertEquals("UNKNOWN", reported, state));
+      assertEquals(before, fixtureSnapshot());
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
   /** 保留源模板定义，只在本例随机数据库创建两张固定月表。 */
   private void cloneTemplate(String template, String target) {
     String ddl =

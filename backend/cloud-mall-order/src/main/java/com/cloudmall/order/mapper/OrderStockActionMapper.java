@@ -69,7 +69,7 @@ public class OrderStockActionMapper {
   }
 
   /**
-   * 核验原订单、合法类型及操作键后读取动作状态，保留旧签名不限制订单期望方向。
+   * 核验原订单、合法类型及操作键后读取精确合法动作状态，保留旧签名不限制订单期望方向。
    *
    * @param orderNo 原查询订单号，不进行裁剪或归一化
    * @return 可信动作的原状态、不可信候选的UNKNOWN，或真正无候选时的null
@@ -111,7 +111,8 @@ public class OrderStockActionMapper {
     if (!Objects.equals(orderNo, action.orderNo)
         || (!"CONFIRM".equals(action.actionType) && !"ROLLBACK".equals(action.actionType))
         || !Objects.equals(action.operationKey, action.orderNo + ":" + action.actionType)
-        || (requireExpectedType && !Objects.equals(expectedActionType, action.actionType))) {
+        || (requireExpectedType && !Objects.equals(expectedActionType, action.actionType))
+        || !validActionStatus(action.status)) {
       return "UNKNOWN";
     }
     // 3. 仅可信候选返回原状态，沿既有状态优先级，不执行任何写入或额外查询。
@@ -131,6 +132,7 @@ public class OrderStockActionMapper {
     return jdbcTemplate.query(
         "SELECT id,order_no,action_type,operation_key,status,attempts,next_retry_at"
             + " FROM order_stock_action WHERE status IN ('PENDING','UNKNOWN')"
+            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0 AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)"
             + " ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
@@ -166,6 +168,7 @@ public class OrderStockActionMapper {
         "UPDATE order_stock_action SET lease_owner=?,lease_until=?,"
             + "attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,"
             + "updated_at=? WHERE id=? AND status IN ('PENDING','UNKNOWN')"
+            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0 AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)",
         owner,
         leaseUntil,
@@ -180,19 +183,21 @@ public class OrderStockActionMapper {
    *
    * @param id 原动作主键
    * @param owner 非空白且最多128个code point的认领标识，按原字符串精确比较
-   * @param status 原调用方决定的目标状态
+   * @param status 精确SUCCEEDED或CONFLICT目标，其他值在SQL前返回0
    * @param error 原错误文本，可为null
    * @param now 本次完成写的新鲜上海时间，同一规范毫秒值用于更新和租约判断
-   * @return 非负计数且有效租约匹配的更新行数，不匹配或非法标识为0
+   * @return 合法源/目标状态及有效租约匹配的更新行数，不匹配或非法入参为0
    * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public int finish(long id, String owner, String status, String error, LocalDateTime now) {
     if (!validOwner(owner)) return 0;
+    if (!validTerminalStatus(status)) return 0;
     LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status=?,last_error=?,lease_owner=NULL,lease_until=NULL,"
             + "updated_at=? WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
             + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
+            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0",
         status,
         shorten(error),
@@ -222,6 +227,7 @@ public class OrderStockActionMapper {
             + "lease_owner=NULL,lease_until=NULL,updated_at=?"
             + " WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
             + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
+            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0",
         shorten(error),
         normalizedRetryAt,
@@ -229,6 +235,16 @@ public class OrderStockActionMapper {
         id,
         owner,
         normalizedNow);
+  }
+
+  /** 仅沿既有四种精确状态读取，坏/null状态保持UNKNOWN而不是缺行兜底。 */
+  private static boolean validActionStatus(String status) {
+    return "PENDING".equals(status) || "UNKNOWN".equals(status) || validTerminalStatus(status);
+  }
+
+  /** 完成接口只允许两种终态，不允许把源状态或别名写作完成结果。 */
+  private static boolean validTerminalStatus(String status) {
+    return "SUCCEEDED".equals(status) || "CONFLICT".equals(status);
   }
 
   /** 按owner列字符宽度先拒不可信标识；不裁剪、归一化或约束UUID格式。 */

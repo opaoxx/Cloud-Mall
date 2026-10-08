@@ -62,6 +62,25 @@ class OrderStockActionReadIntegrityTest {
     verifyNoMoreInteractions(emptyJdbc);
   }
 
+  @Test
+  void missingOrMalformedStatusNeverLooksLikeAnAbsentAction() {
+    for (String status :
+        Arrays.asList(null, "", " \t", "succeeded", "SUCCEEDED ", "SÚCCEEDED", "OTHER")) {
+      JdbcTemplate jdbc = mock(JdbcTemplate.class);
+      OrderStockActionPO action = completeAction();
+      action.status = status;
+      when(jdbc.query(
+              anyString(), ArgumentMatchers.<RowMapper<OrderStockActionPO>>any(), eq("order-1")))
+          .thenReturn(List.of(action));
+      OrderStockActionMapper mapper = new OrderStockActionMapper(jdbc);
+      assertEquals("UNKNOWN", mapper.statusForOrder("order-1"));
+      assertEquals("UNKNOWN", mapper.statusForOrder("order-1", "CONFIRM"));
+      verify(jdbc, times(2))
+          .query(anyString(), ArgumentMatchers.<RowMapper<OrderStockActionPO>>any(), eq("order-1"));
+      verifyNoMoreInteractions(jdbc);
+    }
+  }
+
   /** 完整合法动作仅作读取证据，不模拟订单或库存状态写入。 */
   private static OrderStockActionPO completeAction() {
     OrderStockActionPO action = new OrderStockActionPO();
