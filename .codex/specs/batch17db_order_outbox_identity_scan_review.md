@@ -12,7 +12,7 @@ DA/CR 只保护 dispatcher 当前 PO，坏身份行仍可能在 SQL LIMIT 50 前
 
 `[^\x{0009}-\x{000D}\x{001C}-\x{0020}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}-\x{2029}\x{205F}\x{3000}]`
 
-SQL 使用 `REGEXP_LIKE(event_id, CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c')` 与 orderNo 同样表达式；Java 以 `HexFormat.of().formatHex(NONBLANK_IDENTITY_PATTERN.getBytes(StandardCharsets.UTF_8))` 绑定 ASCII `hexPattern`，参数顺序为 `due, hexPattern, hexPattern, limit`。服务器通过 UNHEX 恢复原 UTF-8 pattern，并显式使用文本 `utf8mb4_bin` 避免列与参数隐式 collation 冲突；pattern 不是 binary datatype，不 CAST BINARY、不改列排序规则；不使用 TRIM、ICU `[:space:]` 宽类或 BINARY regex。该模式与 Java 17 `String.isBlank` 的 25 个 whitespace code points 对齐，允许任一非空白字符原样保留。
+SQL 使用 `REGEXP_LIKE(event_id, CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c')` 与 orderNo 同样表达式；Java 以 `HexFormat.of().formatHex(NONBLANK_IDENTITY_PATTERN.getBytes(StandardCharsets.UTF_8))` 绑定 ASCII `hexPattern`，参数顺序为 `due, hexPattern, hexPattern, limit`。服务器通过 UNHEX 恢复 `hexPattern` 对应的原 UTF-8 pattern，并显式使用文本 `utf8mb4_bin` 避免列与参数隐式 collation 冲突；该文本 pattern 不是 binary datatype，不 CAST BINARY、不改列排序规则；不使用 TRIM、ICU `[:space:]` 宽类或 BINARY regex。该模式与 Java 17 `String.isBlank` 的 25 个 whitespace code points 对齐，允许任一非空白字符原样保留。
 
 保留方法签名、原 due 值和 limit 值、status/type/attempts、排序和投影；SQL 新增两个相同 pattern 绑定，参数顺序为 `due, pattern, pattern, limit`。NULL 仅 unit seam 验证，真实 Schema NOT NULL 不改。regex 查询异常继续传播，不自动降级。
 
