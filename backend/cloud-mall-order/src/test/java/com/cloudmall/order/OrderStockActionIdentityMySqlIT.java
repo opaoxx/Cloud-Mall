@@ -174,7 +174,7 @@ class OrderStockActionIdentityMySqlIT {
         List.of("", " \t", "confirm", "rollback", "CONFIRM ", "ROLLBACK ", "CANCEL", "OTHER")) {
       fixture.update("DELETE FROM order_stock_action");
       LocalDateTime created = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1);
-      assertEquals(1, mapper.insert(1L, "202610unknown1", actionType, created));
+      insertHistoricalAction(1L, "202610unknown1", actionType, created);
       var before = fixture.queryForMap("SELECT * FROM order_stock_action");
       StockClient stock = mock(StockClient.class);
       when(stock.reservation("202610unknown1")).thenReturn(fact("202610unknown1", "ROLLED_BACK"));
@@ -189,7 +189,7 @@ class OrderStockActionIdentityMySqlIT {
   @Test
   void unsupportedFirstTypeDoesNotPreventAHealthyActionFromCompleting() {
     LocalDateTime created = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1);
-    assertEquals(1, mapper.insert(1L, "202610unknown1", "confirm", created));
+    insertHistoricalAction(1L, "202610unknown1", "confirm", created);
     assertEquals(1, mapper.insert(2L, "202610healthy2", "CONFIRM", created));
     var firstBefore = fixture.queryForMap("SELECT * FROM order_stock_action WHERE id=1");
     StockClient stock = mock(StockClient.class);
@@ -266,10 +266,8 @@ class OrderStockActionIdentityMySqlIT {
     for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
       for (String orderNo : List.of("", " \t")) {
         fixture.update("DELETE FROM order_stock_action");
-        assertEquals(
-            1,
-            mapper.insert(
-                1L, orderNo, actionType, LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1)));
+        insertHistoricalAction(
+            1L, orderNo, actionType, LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1));
         var before = fixture.queryForMap("SELECT * FROM order_stock_action");
         StockClient stock = mock(StockClient.class);
         when(stock.reservation(orderNo))
@@ -281,6 +279,18 @@ class OrderStockActionIdentityMySqlIT {
         verifyNoInteractions(stock);
       }
     }
+  }
+
+  /** 仅在自行创建的随机库模拟旧坏行；新生产入口始终先写合法初始记录。 */
+  private void insertHistoricalAction(
+      long actionId, String historicalOrderNo, String historicalType, LocalDateTime createdAt) {
+    assertEquals(1, mapper.insert(actionId, "202610fixture1", "CONFIRM", createdAt));
+    fixture.update(
+        "UPDATE order_stock_action SET order_no=?,action_type=?,operation_key=? WHERE id=?",
+        historicalOrderNo,
+        historicalType,
+        historicalOrderNo + ":" + historicalType,
+        actionId);
   }
 
   /** 错单只按原UNKNOWN重试更新元数据，原动作身份不能变化。 */

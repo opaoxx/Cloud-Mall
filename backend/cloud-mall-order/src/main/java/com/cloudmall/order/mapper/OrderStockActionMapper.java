@@ -31,13 +31,37 @@ public class OrderStockActionMapper {
             + "KEY idx_order_stock_action_retry(status,next_retry_at,lease_until))");
   }
 
-  /** 与订单状态 CAS 在同一事务中插入唯一动作。 */
+  /**
+   * 校验物理身份和必填字段后，与订单状态CAS在原事务中插入唯一动作。
+   *
+   * @param id 正的动作主键
+   * @param orderNo 非空白且最多64个code point的原订单号，不做归一化
+   * @param actionType 精确CONFIRM或ROLLBACK方向
+   * @param occurredAt 原调用方提供的非null时间，绑定语义保持不变
+   * @return 原INSERT更新行数
+   * @throws IllegalArgumentException 输入不满足身份、类型或必填约束，执行SQL前拒绝
+   */
   public int insert(long id, String orderNo, String actionType, LocalDateTime occurredAt) {
+    // 1. 独立于MySQL sql_mode验证输入，避免截断或默认化污染首次事实。
+    if (id <= 0
+        || orderNo == null
+        || orderNo.isBlank()
+        || orderNo.codePointCount(0, orderNo.length()) > 64
+        || (!"CONFIRM".equals(actionType) && !"ROLLBACK".equals(actionType))
+        || occurredAt == null) {
+      throw new IllegalArgumentException("库存动作主键、订单号、方向或发生时间不合法");
+    }
+    // 2. 保留plain INSERT、原key和时间绑定，唯一键及其他SQL异常原样传播。
     return jdbcTemplate.update(
         "INSERT INTO order_stock_action(id,order_no,action_type,operation_key,status,attempts,"
             + "next_retry_at,created_at,updated_at) VALUES(?,?,?,?, 'PENDING',0,?,?,?)",
-        id, orderNo, actionType, orderNo + ":" + actionType,
-        occurredAt, occurredAt, occurredAt);
+        id,
+        orderNo,
+        actionType,
+        orderNo + ":" + actionType,
+        occurredAt,
+        occurredAt,
+        occurredAt);
   }
 
   /**

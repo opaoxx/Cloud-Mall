@@ -443,9 +443,12 @@ class OrderLegacyStockIdentityMySqlIT {
     for (String[] tuple : invalidTuples) {
       for (String actionStatus : List.of("PENDING", "UNKNOWN", "SUCCEEDED", "CONFLICT")) {
         seed("PAID");
-        assertEquals(1, mapper.insert(1L, orderNo, tuple[0], LocalDateTime.of(2026, 10, 8, 10, 0)));
+        assertEquals(
+            1, mapper.insert(1L, orderNo, "CONFIRM", LocalDateTime.of(2026, 10, 8, 10, 0)));
+        // 模拟历史坏字段只在随机fixture参数更新，避免绕过新生产写前门。
         fixture.update(
-            "UPDATE order_stock_action SET operation_key=?,status=? WHERE id=1",
+            "UPDATE order_stock_action SET action_type=?,operation_key=?,status=? WHERE id=1",
+            tuple[0],
             tuple[1],
             actionStatus);
         var before = fixtureSnapshot();
