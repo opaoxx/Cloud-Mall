@@ -139,6 +139,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 购物车 PUT/checked 对目标 field 使用有限 compare-write；目标缺失返回 404，三轮确认冲突返回 COMMON_CONFLICT/409，脚本结果未知为 INTERNAL/500，Redis 依赖故障保持既有 503。请求和响应字段保持不变。
 
+clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项；并发变更保留最新项，比较失败仍返回原成功 null。脚本结果未知返回 INTERNAL/500，Redis 依赖故障保持既有 503，不自动重试或猜测删除结果。
+
 ## 7. 订单服务接口
 
 | 方法 | 路径 | 请求 | 响应/说明 |
