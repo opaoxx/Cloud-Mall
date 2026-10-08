@@ -778,6 +778,188 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void missingOrNegativeProductPricesCannotAuthorizeOrdinaryOrderFacts() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String fault : List.of("null", "negative", "later-negative")) {
+      BigDecimal firstPrice =
+          "null".equals(fault)
+              ? null
+              : "negative".equals(fault) ? new BigDecimal("-12.30") : BigDecimal.TEN;
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", firstPrice, Map.of())))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      if ("later-negative".equals(fault)) {
+        OrderItemDTO second = new OrderItemDTO();
+        second.skuId = 8L;
+        second.quantity = 1;
+        request.items = List.of(request.items.get(0), second);
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        8L, 9L, "second", "SKU-8", new BigDecimal("-0.01"), Map.of())))
+            .when(products)
+            .sku(8L);
+      }
+      clearInvocations(products, stock, cart);
+      var before = fixtureFacts();
+      RuntimeException failure = null;
+      try {
+        transaction.execute(status -> service.create("bad-product-price-" + fault, request));
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+      RuntimeException captured = failure;
+      var after = fixtureFacts();
+      long stockCalls = mockingDetails(stock).getInvocations().size();
+      long cartWrites =
+          mockingDetails(cart).getInvocations().stream()
+              .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+              .count();
+      checks.add(() -> assertInstanceOf(BizException.class, captured, fault));
+      if (captured instanceof BizException controlled) {
+        checks.add(() -> assertEquals(500, controlled.getHttpStatus(), fault));
+        checks.add(() -> assertEquals(ErrorCodes.INTERNAL, controlled.getCode(), fault));
+      }
+      checks.add(() -> assertEquals(before, after, fault));
+      checks.add(() -> assertEquals(0, stockCalls, fault));
+      checks.add(() -> assertEquals(0, cartWrites, fault));
+      verify(products).sku(7L);
+      if ("later-negative".equals(fault)) verify(products).sku(8L);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void missingOrNegativeSeckillPricesRollBackClaimsAndNeverResolveHeldRows() throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String fault : List.of("null", "negative")) {
+      Map<String, Object> event = timeEvent("202612-bad-price-" + fault);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      saveRecovery(6000 + sequence++, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+      BigDecimal price = "null".equals(fault) ? null : new BigDecimal("-12.30");
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", price, Map.of())))
+          .when(products)
+          .sku(7L);
+      clearInvocations(products);
+      var before = fixtureFacts();
+      IllegalStateException failure = null;
+      try {
+        service.consumeSeckill(event);
+      } catch (IllegalStateException rejected) {
+        failure = rejected;
+      }
+      IllegalStateException captured = failure;
+      var after = fixtureFacts();
+      checks.add(() -> assertNotNull(captured, fault));
+      if (captured != null)
+        checks.add(() -> assertInstanceOf(IllegalStateException.class, captured.getCause(), fault));
+      checks.add(() -> assertEquals(before, after, fault));
+      verify(products).sku(7L);
+      verifyNoMoreInteractions(products);
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock, cart);
+  }
+
+  @Test
+  void correctedSeckillPriceCanRetryAndLegalZeroAndScientificPricesKeepSqlValues()
+      throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    Map<String, Object> retry = timeEvent("202612-corrected-price");
+    retry.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(6100, String.valueOf(retry.get("eventId")), retry, "QUARANTINED");
+    var before = fixtureFacts();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("-1.00"), Map.of())))
+        .when(products)
+        .sku(7L);
+    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(retry));
+    assertEquals(before, fixtureFacts());
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("12.30"), Map.of())))
+        .when(products)
+        .sku(7L);
+    service.consumeSeckill(retry);
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(retry.get("eventId"))).get("status"));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+            String.class,
+            retry.get("orderNo")));
+    assertPersistedCreation(
+        String.valueOf(retry.get("orderNo")), LocalDateTime.parse("2026-12-31T23:59:59.999"));
+    AuthContext.set(7L, "USER");
+    int sequence = 0;
+    for (String representation : List.of("0.00", "-0.0000", "1E+1", "12.3000")) {
+      BigDecimal price = new BigDecimal(representation);
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", price, Map.of())))
+          .when(products)
+          .sku(7L);
+      ApiResponse<?> ordinary =
+          transaction.execute(
+              status -> service.create("legal-price-" + representation, normalRequest()));
+      String ordinaryNo = ((OrderVO) ordinary.data).orderNo;
+      assertEquals(
+          0,
+          price.compareTo(
+              fixture.queryForObject(
+                  "SELECT total_amount FROM mall_order_202612 WHERE order_no=?",
+                  BigDecimal.class,
+                  ordinaryNo)));
+      assertEquals(
+          0,
+          price.compareTo(
+              fixture.queryForObject(
+                  "SELECT unit_price FROM mall_order_item_202612 WHERE order_no=?",
+                  BigDecimal.class,
+                  ordinaryNo)));
+      Map<String, Object> seckill = timeEvent("202612-legal-price-" + sequence++);
+      seckill.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      service.consumeSeckill(seckill);
+      assertEquals(
+          0,
+          price.compareTo(
+              fixture.queryForObject(
+                  "SELECT total_amount FROM mall_order_202612 WHERE order_no=?",
+                  BigDecimal.class,
+                  seckill.get("orderNo"))));
+      assertEquals(
+          0,
+          price.compareTo(
+              fixture.queryForObject(
+                  "SELECT unit_price FROM mall_order_item_202612 WHERE order_no=?",
+                  BigDecimal.class,
+                  seckill.get("orderNo"))));
+      assertEquals(
+          "COMMITTED",
+          fixture.queryForObject(
+              "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+              String.class,
+              seckill.get("orderNo")));
+    }
+  }
+
+  @Test
   void matchingProductIdentityUsesTheCurrentPriceAndSameSkuForStockAndSqlDetails() {
     AuthContext.set(7L, "USER");
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");

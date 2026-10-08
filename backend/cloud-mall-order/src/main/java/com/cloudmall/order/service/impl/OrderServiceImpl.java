@@ -135,7 +135,7 @@ public class OrderServiceImpl implements OrderService {
    * @param key 与原用户绑定的幂等请求键
    * @param req 购买商品数量及原收货地址请求
    * @return 创建成功或既有幂等重放的订单摘要
-   * @throws BizException 请求非法400，商品缺失404，响应SKU不可信500，幂等/库存冲突409，预扣待确认202
+   * @throws BizException 请求非法400，商品缺失404，响应SKU或价格不可信500，幂等/库存冲突409，预扣待确认202
    */
   @Transactional
   @PostMapping("/orders")
@@ -186,6 +186,8 @@ public class OrderServiceImpl implements OrderService {
       // 商品事实必须属于本次请求SKU，错/缺响应身份不得授权金额、意图或库存。
       if (!Objects.equals(item.skuId, skuView.skuId()))
         throw new BizException(ErrorCodes.INTERNAL, "商品SKU响应身份不可信", 500);
+      if (!hasNonnegativeProductPrice(skuView.unitPrice()))
+        throw new BizException(ErrorCodes.INTERNAL, "商品价格不可信", 500);
       BigDecimal line = skuView.unitPrice().multiply(BigDecimal.valueOf(item.quantity));
       total = total.add(line);
       lines.add(new StockClient.Line(item.skuId, item.quantity));
@@ -305,6 +307,11 @@ public class OrderServiceImpl implements OrderService {
       }
       throw creationFailure;
     }
+  }
+
+  /** 只核原BigDecimal存在且数值非负；零价沿原兼容行为，不重建、舍入或改变scale。 */
+  private static boolean hasNonnegativeProductPrice(BigDecimal unitPrice) {
+    return unitPrice != null && unitPrice.signum() >= 0;
   }
 
   /** 创建入口只读采样。只对购买聚合数量与原JSON正int数量一致的项提供不可变证明； long安全承载Java List中正int请求的总和，超int仅跳过清理，不改变订单流程。 */
@@ -823,6 +830,8 @@ public class OrderServiceImpl implements OrderService {
       if (!"0".equals(productResponse.code)
           || !Objects.equals(Long.valueOf(skuId), productSku.skuId()))
         throw new IllegalStateException("秒杀商品响应状态或SKU身份不可信: " + skuId);
+      if (!hasNonnegativeProductPrice(productSku.unitPrice()))
+        throw new IllegalStateException("秒杀商品价格不可信: " + skuId);
       OrderPO order = new OrderPO();
       order.id = id();
       order.orderNo = orderNo;

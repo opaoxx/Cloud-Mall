@@ -116,6 +116,63 @@ class OrderProductIdentityTest {
     verifyNoInteractions(fixture.cart);
   }
 
+  @Test
+  void nullAndNegativePricesCannotAuthorizeIntentStockOrOrderWrites() {
+    for (String fault : List.of("null", "negative", "later-negative")) {
+      Fixture fixture = new Fixture();
+      BigDecimal firstPrice =
+          "null".equals(fault)
+              ? null
+              : "negative".equals(fault) ? new BigDecimal("-0.001") : BigDecimal.TEN;
+      doReturn(ApiResponse.ok(product(7L, firstPrice))).when(fixture.products).sku(7L);
+      if ("later-negative".equals(fault))
+        doReturn(ApiResponse.ok(product(8L, new BigDecimal("-1E-10"))))
+            .when(fixture.products)
+            .sku(8L);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () ->
+                  fixture.service.create(
+                      "untrusted-price-" + fault, request("later-negative".equals(fault))));
+      assertEquals(500, failure.getHttpStatus());
+      assertEquals(ErrorCodes.INTERNAL, failure.getCode());
+      assertTrue(failure.getMessage().contains("价格"));
+      fixture.verifyNoBusinessWrites();
+    }
+    Fixture identityFirst = new Fixture();
+    doReturn(ApiResponse.ok(product(8L, null))).when(identityFirst.products).sku(7L);
+    BizException failure =
+        assertThrows(
+            BizException.class,
+            () -> identityFirst.service.create("identity-before-price", request(false)));
+    assertTrue(failure.getMessage().contains("SKU"));
+    identityFirst.verifyNoBusinessWrites();
+  }
+
+  @Test
+  void zeroAndPositiveDecimalRepresentationsAreNotNormalizedOrRounded() {
+    for (String representation : List.of("0.00", "-0.0000", "1E+1", "0012.3000")) {
+      Fixture fixture = new Fixture();
+      BigDecimal price = new BigDecimal(representation);
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      CreateOrderDTO request = request(false);
+      request.items.get(0).quantity = 3;
+      assertEquals("0", fixture.service.create("legal-price-" + representation, request).code);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      verify(fixture.orders).insertOrder(anyString(), order.capture());
+      assertSame(price, detail.getValue().unitPrice);
+      BigDecimal expectedLine = price.multiply(BigDecimal.valueOf(3));
+      assertEquals(expectedLine, detail.getValue().lineAmount);
+      assertEquals(BigDecimal.ZERO.add(expectedLine), order.getValue().totalAmount);
+      assertEquals(order.getValue().totalAmount, order.getValue().payAmount);
+      verify(fixture.stock).reserve(any());
+      verifyNoInteractions(fixture.cart);
+    }
+  }
+
   /** 原商品事实对象，不转换身份或规范化金额。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());

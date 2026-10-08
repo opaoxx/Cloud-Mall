@@ -152,6 +152,58 @@ class SeckillProductIdentityTest {
     fatal.verifyNoOrderOrCompletionWrites();
   }
 
+  @Test
+  void nullAndNegativePricesFailBeforeOrdersOrCompletionWithControlledCauses() {
+    for (String fault : List.of("null", "negative")) {
+      Fixture fixture = new Fixture();
+      BigDecimal price = "null".equals(fault) ? null : new BigDecimal("-12.30");
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertInstanceOf(IllegalStateException.class, failure.getCause());
+      assertTrue(failure.getCause().getMessage().contains("价格"));
+      fixture.verifyNoOrderOrCompletionWrites();
+    }
+    Fixture identityFirst = new Fixture();
+    doReturn(ApiResponse.ok(product(8L, null))).when(identityFirst.products).sku(7L);
+    IllegalStateException failure =
+        assertThrows(
+            IllegalStateException.class,
+            () -> identityFirst.service.consumeSeckill(identityFirst.event));
+    assertTrue(failure.getCause().getMessage().contains("SKU"));
+    identityFirst.verifyNoOrderOrCompletionWrites();
+  }
+
+  @Test
+  void zeroAndPositivePricesKeepTheirOriginalObjectAndScaleForSeckillWrites() {
+    for (String representation : List.of("0.00", "-0.0000", "1E+1", "12.3000")) {
+      Fixture fixture = new Fixture();
+      BigDecimal price = new BigDecimal(representation);
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      fixture.service.consumeSeckill(fixture.event);
+      var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      verify(fixture.orders).insertOrder(anyString(), order.capture());
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      assertSame(price, order.getValue().totalAmount);
+      assertSame(price, order.getValue().payAmount);
+      assertSame(price, detail.getValue().unitPrice);
+      assertSame(price, detail.getValue().lineAmount);
+      assertEquals(1, detail.getValue().quantity);
+      verify(fixture.dedup).markCommitted(eq(8L), eq(fixture.key), any());
+      verify(fixture.recovery)
+          .markResolved(
+              eq(fixture.eventId),
+              eq(fixture.orderNo),
+              eq(8L),
+              eq(fixture.key),
+              eq(fixture.hash),
+              any());
+      verifyNoInteractions(fixture.stock, fixture.cart);
+    }
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
