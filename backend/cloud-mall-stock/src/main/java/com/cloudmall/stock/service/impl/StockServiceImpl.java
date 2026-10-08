@@ -425,6 +425,10 @@ public class StockServiceImpl implements StockService {
       throw new BizException(ErrorCodes.INVALID, "秒杀参数不完整", 400);
     if (!String.valueOf(userId).equals(requestUserId))
       throw new BizException(ErrorCodes.FORBIDDEN, "秒杀用户归属校验失败", 403);
+    if (idempotencyKey.isBlank()
+        || idempotencyKey.codePointCount(0, idempotencyKey.length()) > 128) {
+      throw new BizException(ErrorCodes.INVALID, "秒杀幂等键不能为空且不能超过128个字符", 400);
+    }
     Entry sentinelEntry;
     try {
       sentinelEntry = SeckillSentinelConfiguration.enter();

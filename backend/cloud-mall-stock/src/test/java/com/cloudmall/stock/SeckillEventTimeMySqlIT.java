@@ -116,6 +116,144 @@ class SeckillEventTimeMySqlIT {
   }
 
   @Test
+  void claimInsertRejectsLossyColumnValuesInStrictAndNonStrictModes() throws Exception {
+    OffsetDateTime created = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var isolatedJdbc =
+          new JdbcTemplate(
+              new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+      var strictMapper = new StockSqlMapper(isolatedJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        isolatedJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (String[] invalid :
+            List.of(
+                new String[] {"o".repeat(65), "key", "a".repeat(64)},
+                new String[] {"order", "k".repeat(129), "a".repeat(64)},
+                new String[] {"order", "key", "a".repeat(65)},
+                new String[] {null, "key", "a".repeat(64)},
+                new String[] {"order", null, "a".repeat(64)},
+                new String[] {" ", "key", "a".repeat(64)},
+                new String[] {"order", " ", "a".repeat(64)})) {
+          isolatedJdbc.execute("DELETE FROM seckill_reservation");
+          assertThrows(
+              RuntimeException.class,
+              () ->
+                  strictMapper.insertSeckillPendingIgnore(
+                      11, 7, 7, invalid[0], invalid[1], "{}", invalid[2], created));
+          assertEquals(
+              0,
+              isolatedJdbc.queryForObject(
+                  "SELECT COUNT(*) FROM seckill_reservation", Integer.class));
+        }
+        assertThrows(
+            RuntimeException.class,
+            () ->
+                strictMapper.insertSeckillPendingIgnore(
+                    11, 7, 7, "order", "key", "{}", "a".repeat(64), null));
+        assertEquals(
+            0,
+            isolatedJdbc.queryForObject("SELECT COUNT(*) FROM seckill_reservation", Integer.class));
+      }
+    }
+  }
+
+  @Test
+  void invalidStockKeysFailBeforeClaimOrRedisWhileUnicodeBoundaryRemainsValid() {
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    HashOperations<String, Object, Object> operations = mock(HashOperations.class);
+    when(redis.opsForHash()).thenReturn(operations);
+    when(operations.entries(anyString())).thenReturn(Map.of());
+    var stock = new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+    ReflectionTestUtils.setField(
+        stock,
+        "seckillRequestClaimService",
+        transactionProxy(new SeckillRequestClaimService(mapper)));
+    AuthContext.set(7L, "USER");
+    for (String key : List.of("", " ", "k".repeat(129), "😀".repeat(129))) {
+      clearInvocations(redis, operations);
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class, () -> stock.seckill(request(key)));
+      assertEquals(400, failure.getHttpStatus());
+      verifyNoInteractions(redis, operations);
+      assertEquals(
+          0, fixture.queryForObject("SELECT COUNT(*) FROM seckill_reservation", Integer.class));
+    }
+    String key = "😀".repeat(128);
+    assertEquals(
+        503,
+        assertThrows(
+                com.cloudmall.common.error.BizException.class, () -> stock.seckill(request(key)))
+            .getHttpStatus());
+    assertEquals(
+        key,
+        fixture.queryForObject("SELECT idempotency_key FROM seckill_reservation", String.class));
+  }
+
+  @Test
+  void strictClaimInsertKeepsColumnBoundariesAndNullableHistoryContract() {
+    OffsetDateTime created = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    String orderNo = "o".repeat(64);
+    String key = "😀".repeat(128);
+    assertEquals(1, mapper.insertSeckillPendingIgnore(11, 7, 7, orderNo, key, null, null, created));
+    Map<String, Object> before = fixture.queryForMap("SELECT * FROM seckill_reservation");
+    assertEquals(orderNo, before.get("order_no"));
+    assertEquals(key, before.get("idempotency_key"));
+    assertNull(before.get("request_payload"));
+    assertNull(before.get("request_hash"));
+    assertEquals(
+        0,
+        mapper.insertSeckillPendingIgnore(
+            11, 7, 7, "candidate", key, "{}", "a".repeat(64), created.plusSeconds(1)));
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
+    assertThrows(
+        org.springframework.dao.DataAccessException.class,
+        () ->
+            mapper.insertSeckillPendingIgnore(
+                11, 7, 8, "bad-json", "bad-json", "{invalid", "a".repeat(64), created));
+    assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
+  }
+
+  @Test
+  void concurrentExactClaimStillReturnsOneOriginalFactAfterStrictInsert() throws Exception {
+    var claims = transactionProxy(new SeckillRequestClaimService(mapper));
+    var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+    var ready = new java.util.concurrent.CountDownLatch(2);
+    var release = new java.util.concurrent.CountDownLatch(1);
+    OffsetDateTime created = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");
+    String hash = SeckillRequestFingerprint.hash(11, 7, 7, 1, "{}");
+    try {
+      var first =
+          executor.submit(
+              () -> {
+                ready.countDown();
+                assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                return claims.claim(
+                    11, 7, 7, "202610-race-first", "strict-race", "{}", hash, created);
+              });
+      var second =
+          executor.submit(
+              () -> {
+                ready.countDown();
+                assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                return claims.claim(
+                    11, 7, 7, "202610-race-second", "strict-race", "{}", hash, created);
+              });
+      assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+      release.countDown();
+      assertEquals(
+          first.get(15, java.util.concurrent.TimeUnit.SECONDS),
+          second.get(15, java.util.concurrent.TimeUnit.SECONDS));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM seckill_reservation", Integer.class));
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
   void claimKeyAliasesCannotReuseOrModifyAnotherExactRequestIdentity() {
     var claims = transactionProxy(new SeckillRequestClaimService(mapper));
     OffsetDateTime created = OffsetDateTime.parse("2026-10-07T12:00:00+08:00");

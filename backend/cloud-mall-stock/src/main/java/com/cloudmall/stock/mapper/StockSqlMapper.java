@@ -7,6 +7,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -604,25 +605,80 @@ public class StockSqlMapper {
         orderNo, idempotencyKey, requestPayload, requestHash, occurredAt, occurredAt);
   }
 
-  /** 原子认领全局秒杀幂等键；重复请求保留首次订单号和载荷。 */
+  /**
+   * 原子认领全局秒杀幂等键，仅忽略真正重复键；字段/数据库错误不得静默截断。
+   *
+   * @param activityId 活动主键
+   * @param skuId SKU主键
+   * @param userId 请求用户
+   * @param orderNo 原候选订单号，最多64个Unicode字符
+   * @param idempotencyKey 原请求键，最多128个Unicode字符
+   * @param requestPayload 原载荷，兼容已有nullable列
+   * @param requestHash 原指纹，非null时最多64个Unicode字符
+   * @param occurredAt 调用方提供的原认领时间，不得为null
+   * @return 首次插入为1，唯一键重复为0
+   */
   public int insertSeckillPendingIgnore(
-      long activityId, long skuId, long userId, String orderNo, String idempotencyKey,
-      String requestPayload, String requestHash, OffsetDateTime occurredAt) {
-    return update(
-        "INSERT IGNORE INTO seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_hash,request_payload,created_at,updated_at)"
-            + " VALUES(?,?,?,?,?,?, 'PENDING',?,?,?,?)",
-        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), activityId, skuId, userId,
-        orderNo, idempotencyKey, requestHash, requestPayload, occurredAt, occurredAt);
+      long activityId,
+      long skuId,
+      long userId,
+      String orderNo,
+      String idempotencyKey,
+      String requestPayload,
+      String requestHash,
+      OffsetDateTime occurredAt) {
+    requireSeckillClaimIdentifier(orderNo, 64, "orderNo");
+    requireSeckillClaimIdentifier(idempotencyKey, 128, "idempotencyKey");
+    if (requestHash != null && requestHash.codePointCount(0, requestHash.length()) > 64) {
+      throw new IllegalArgumentException("秒杀认领requestHash超过列宽");
+    }
+    if (occurredAt == null) throw new IllegalArgumentException("秒杀认领时间不能为空");
+    try {
+      return update(
+          "INSERT INTO seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_hash,request_payload,created_at,updated_at)"
+              + " VALUES(?,?,?,?,?,?, 'PENDING',?,?,?,?)",
+          Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
+          activityId,
+          skuId,
+          userId,
+          orderNo,
+          idempotencyKey,
+          requestHash,
+          requestPayload,
+          occurredAt,
+          occurredAt);
+    } catch (DuplicateKeyException duplicateKey) {
+      return 0;
+    }
+  }
+
+  /** 按MySQL字符列宽核验必要身份字段，禁止默认值/截断，非BMP字符按单个code point计数。 */
+  private static void requireSeckillClaimIdentifier(
+      String value, int maximumCharacters, String fieldName) {
+    if (value == null
+        || value.isBlank()
+        || value.codePointCount(0, value.length()) > maximumCharacters) {
+      throw new IllegalArgumentException("秒杀认领字段不符合列约束: " + fieldName);
+    }
   }
 
   /** 在 Redis 预扣成功后同事务写入 ACCEPTED 和 outbox。 */
   public int acceptSeckillAndInsertOutbox(
-      long userId, String idempotencyKey, String orderNo, String eventId, String payload,
-      String requestHash, OffsetDateTime occurredAt) {
-    int accepted = update(
-        "UPDATE seckill_reservation SET status='ACCEPTED',updated_at=? WHERE user_id=?"
-            + " AND idempotency_key=? AND order_no=? AND status IN ('PENDING','UNKNOWN')",
-        occurredAt, userId, idempotencyKey, orderNo);
+      long userId,
+      String idempotencyKey,
+      String orderNo,
+      String eventId,
+      String payload,
+      String requestHash,
+      OffsetDateTime occurredAt) {
+    int accepted =
+        update(
+            "UPDATE seckill_reservation SET status='ACCEPTED',updated_at=? WHERE user_id=?"
+                + " AND idempotency_key=? AND order_no=? AND status IN ('PENDING','UNKNOWN')",
+            occurredAt,
+            userId,
+            idempotencyKey,
+            orderNo);
     if (accepted != 1) return 0;
     return update(
         "INSERT INTO seckill_order_outbox(id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts,next_retry_at,created_at,updated_at)"

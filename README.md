@@ -748,6 +748,12 @@ outbox payload 若已包含 `eventId/requestHash`，投递前必须核验：事�
 
 `SeckillEventTimeMySqlIT` 验证三类别名冲突、精确重试、不同用户独立，以及 metadata 缺失后的重试调用边界。现有唯一索引未迁移，别名键仍不能保证共存，不自动改键或迁移历史记录；Redis 为替身。
 
+### 秒杀认领严格插入与幂等键长度（第17轮AL）
+
+Order 与 Stock 秒杀入口按 Unicode code point 数限制幂等键最多128个字符，空白或超长输入在地址查询、认领及 Redis 操作前返回原参数错误400。Stock 认领 Mapper 同时校验订单号/键/指纹的列宽，普通 INSERT 仅对真正 DuplicateKey 返回重复结果，其他 SQL 错误传播，避免 INSERT IGNORE 静默截断首次事实。
+
+`SeckillEventTimeMySqlIT` 验证严格/非严格 SQL 模式、128 emoji 键、nullable 历史列、精确重放与并发首事实；`SeckillSentinelFeignMappingTest` 验证公开入口提前拒绝与合法键原样传递。原列结构、历史数据及错误响应转换不变；本轮完成构建和隔离验证，现有服务尚未重启。
+
 ## 验证命令
 
 ```bash

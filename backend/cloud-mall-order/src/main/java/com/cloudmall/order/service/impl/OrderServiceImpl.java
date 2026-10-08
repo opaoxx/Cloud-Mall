@@ -486,11 +486,11 @@ public class OrderServiceImpl implements OrderService {
     long userId = AuthContext.requireUserId();
     if (key == null
         || key.isBlank()
+        || key.codePointCount(0, key.length()) > 128
         || req == null
         || req.activityId == null
         || req.skuId == null
-        || req.addressId == null)
-      bad("秒杀参数不完整");
+        || req.addressId == null) bad("秒杀参数不完整");
     Entry sentinelEntry;
     try {
       sentinelEntry = SeckillSentinelConfiguration.enter(userId, req.activityId);
