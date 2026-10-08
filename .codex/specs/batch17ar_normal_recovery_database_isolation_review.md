@@ -22,7 +22,7 @@
 
 - `claimRecovery` 返回非 1：继续下一条，不改变当前行。
 - 当前候选任一数据库操作抛 `DataAccessException`：记录 warn 并继续下一条；不得执行本候选后续 RPC、库存动作或补偿写入，不强制清理租约，不猜测数据库提交结果。
-- 非 `DataAccessException` 的 RuntimeException、Error 或中断语义不被本轮吞掉，继续沿既有外层异常路径传播；不得把所有 RuntimeException 视为数据库故障。
+- `claimRecovery` 自身抛出的非 `DataAccessException` RuntimeException、Error 或中断语义不被本轮吞掉，继续沿既有外层异常路径传播；`recoverOne` 内已定义的业务、RPC、解析和身份校验异常仍按第 3.2 节记录一次失败，不得把所有 RuntimeException 视为数据库故障。
 
 该隔离只保护候选之间的循环推进，不提供数据库全局故障下的成功保证，也不新增重试次数或后台补偿线程。
 
