@@ -162,6 +162,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单创建时服务端重新读取商品价格、上下架、库存和地址；禁止信任前端金额。顺序固定为：鉴权与 `Idempotency-Key` 绑定 → 校验地址归属及商品快照 → 在独立已提交本地事务中创建 `INIT` 预扣意图 → 调用库存预扣 → 在独立本地事务中标记 `RESERVED` → 在本地事务中保存订单、超时 outbox 并标记 `COMMITTED`。地址校验失败不得调用库存。若库存调用成功但进程在写入 `RESERVED` 前崩溃，恢复任务使用原 `orderNo` 重试同一预扣请求取得幂等结果，再回滚；若订单已提交则只推进/确认 `COMMITTED`。库存已预扣但订单保存失败时，接口必须按原 `orderNo` 发起回滚，并由预扣意图恢复任务兜底。订单状态：`PENDING_PAYMENT`、`PAID`、`CANCELLED`、`COMPLETED`。
 
+普通订单创建在使用商品价格、构造订单明细或库存请求前，必须精确核对每个 Product 响应 `data.skuId` 与请求 `skuId`；null、错 SKU 或身份无法确认按既有 INTERNAL/500 失败，不得用请求值猜测、继续写订单或预扣库存。匹配时仍使用原请求 SKU 顺序/数量和 Product 返回的原价格；本条不扩展秒杀、价格范围或 Product 其他字段校验。
+
 订单本地事务实际提交后，才清理原用户的去重 SKU 购物车快照；事务回滚时不得删除购物车。清理使用提交前捕获的用户与 SKU 快照逐 SKU执行一次。Cart 返回 null、非 0 或 RuntimeException 时逐项告警并继续后续 SKU，不回滚已提交订单或库存；本批不提供持久重试或并发新增 SKU 的条件删除保障。该条款不改变本节既有 JSON、错误码、订单与库存步骤。
 
 订单列表的 `page`、`pageSize`、`startTime`、`endTime` 和可选 `status` 共同确定查询窗口；服务端先把带任意合法 ISO-8601 offset 的 `startTime/endTime` 按 same instant 规范到 `Asia/Shanghai`（`+08:00`），再计算月份范围，并使用左闭右开 `[start,end)` 时间条件，避免非 `+08:00` 请求在月初漏查前一月。`page` 与 `pageSize` 使用正数，服务端以 `long` 计算 `(page-1)*pageSize` 并在溢出或超出可接受深度时返回 `COMMON_INVALID_ARGUMENT`。响应必须保持 `items/page/pageSize/total` 结构，`total` 是所有命中月份的精确计数。由于不同物理月份的 `created_at` 区间按分片不变量严格不重叠，跨月查询按月份倒序遍历：先逐月 `COUNT`，根据计数跳过完整月份，仅对承载目标页的月份执行有界 `LIMIT/OFFSET` 批次，并在批次内使用 `created_at DESC, order_no DESC` 稳定排序；内存只保留目标页和当前批次，不得先把所有月份订单读入 JVM 后排序或 `subList`。若检测到订单落在错误月份，作为数据异常告警并使查询失败，不通过全量扫描默默兜底。任一命中月份不存在、不可访问或查询失败时，整个请求返回 `ORDER_QUERY_SHARD_UNAVAILABLE`（HTTP 503），不得返回部分 `items` 或部分 `total`。读路径不得为缺失历史月份偷偷建表；未来月份由定时任务预建，具体规则见数据库和架构规格。
