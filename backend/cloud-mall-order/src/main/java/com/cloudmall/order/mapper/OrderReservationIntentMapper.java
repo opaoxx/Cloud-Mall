@@ -4,6 +4,7 @@ import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -33,22 +34,59 @@ public class OrderReservationIntentMapper {
             + "KEY idx_intent_user(user_id,created_at))");
   }
 
-  /** 写入新的 INIT 意图；同一用户幂等键只允许一个意图。 */
+  /**
+   * 严格保存新预扣意图，禁止必填字段默认化或字符串静默截断。
+   *
+   * @param intent 调用方已构造的完整意图，nullable恢复字段保持原值
+   * @return 首次插入为1，唯一键重复为0，不修改首事实
+   * @throws IllegalArgumentException 必填字段缺失、身份空白或字符串超过物理列宽
+   */
   public int insertIfAbsent(OrderReservationIntentPO intent) {
-    return jdbcTemplate.update(
-        "INSERT IGNORE INTO order_reservation_intent(id,order_no,user_id,idempotency_key,"
-            + "items_snapshot,status,last_error,next_retry_at,created_at,updated_at)"
-            + " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        intent.id,
-        intent.orderNo,
-        intent.userId,
-        intent.idempotencyKey,
-        intent.itemsSnapshot,
-        intent.status,
-        intent.lastError,
-        intent.nextRetryAt,
-        intent.createdAt,
-        intent.updatedAt);
+    // 1. 先校验物理必填字段，非strict会话也不得产生默认化恢复事实。
+    if (intent == null
+        || intent.id == null
+        || intent.userId == null
+        || intent.itemsSnapshot == null
+        || intent.createdAt == null
+        || intent.updatedAt == null) {
+      throw new IllegalArgumentException("订单预扣意图缺少必填字段");
+    }
+    requireIntentIdentifier(intent.orderNo, 64, "orderNo");
+    requireIntentIdentifier(intent.idempotencyKey, 128, "idempotencyKey");
+    requireIntentIdentifier(intent.status, 32, "status");
+    if (intent.lastError != null
+        && intent.lastError.codePointCount(0, intent.lastError.length()) > 512) {
+      throw new IllegalArgumentException("订单预扣意图lastError超过列宽");
+    }
+    // 2. 普通INSERT保留真实JSON/SQL错误，只将唯一键重复视为已有认领。
+    try {
+      return jdbcTemplate.update(
+          "INSERT INTO order_reservation_intent(id,order_no,user_id,idempotency_key,"
+              + "items_snapshot,status,last_error,next_retry_at,created_at,updated_at)"
+              + " VALUES(?,?,?,?,?,?,?,?,?,?)",
+          intent.id,
+          intent.orderNo,
+          intent.userId,
+          intent.idempotencyKey,
+          intent.itemsSnapshot,
+          intent.status,
+          intent.lastError,
+          intent.nextRetryAt,
+          intent.createdAt,
+          intent.updatedAt);
+    } catch (DuplicateKeyException duplicateKey) {
+      return 0;
+    }
+  }
+
+  /** 按数据库Unicode字符宽度核验身份，不trim、不改大小写或业务状态。 */
+  private static void requireIntentIdentifier(
+      String fieldValue, int maximumCharacters, String fieldName) {
+    if (fieldValue == null
+        || fieldValue.isBlank()
+        || fieldValue.codePointCount(0, fieldValue.length()) > maximumCharacters) {
+      throw new IllegalArgumentException("订单预扣意图字段不符合列约束: " + fieldName);
+    }
   }
 
   /** 按用户与幂等键读取已有意图。 */
