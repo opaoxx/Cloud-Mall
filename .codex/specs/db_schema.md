@@ -298,6 +298,8 @@ Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改�
 
 发布完成 proof 只读 `event_id,status` 当前事实；`markOutboxPublished` 影响行数 0 不直接代表成功，只有唯一精确 event_id 且 status=PUBLISHED 才可幂等收敛。该读取不新增列、索引或状态写入。
 
+订单 outbox 完成/失败更新保留 `event_id` 索引候选，并使用 `CAST(event_id AS BINARY)=CAST(? AS BINARY)` 精确核验身份；`event_id VARCHAR(128) UNIQUE NOT NULL`、索引和历史数据不变，不新增列或迁移。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`
