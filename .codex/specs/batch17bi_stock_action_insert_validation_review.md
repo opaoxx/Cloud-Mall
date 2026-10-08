@@ -33,7 +33,7 @@
 - 保留 plain INSERT、唯一键冲突的 `DuplicateKeyException` 原传播、表不存在/连接/约束/JSON 等数据库异常原传播；不把错误转成 0。
 - 不新增 INSERT IGNORE、repair SQL、默认值、schema CHECK 或迁移。
 - 非 strict 模式也必须在 SQL 前拒绝本轮非法字段，不能依赖数据库截断/默认化行为。
-- 生产业务入口只传合法正主键、合法方向、原订单号和真实时间；测试构造历史坏 action 时，先插入合法行再在隔离夹具中更新坏字段，不增加业务 repair 路径。
+- 正常业务调用参数和方向/订单号/时间语义保持；Mapper 独立验证主键。共享 `OrderServiceImpl.id()` 生成器的极值不在本批修复，本批不承诺所有生成路径都已保证合法。测试构造历史坏 action 时，先插入合法行再在隔离夹具中更新坏字段，不增加业务 repair 路径。
 
 ## 4. 与既有读取/恢复边界
 
@@ -44,7 +44,7 @@
 
 ## 5. 验收矩阵
 
-1. 真实 MySQL strict/non-strict 下，非法正负 id、required null、blank/超宽 orderNo、未知/blank actionType、null occurredAt 均在 SQL 前拒绝且零行；不伪造 schema 可为 NOT NULL 时间列写 null 的真实夹具。
+1. 真实 MySQL strict/non-strict 下，非正 id、required null、blank/超宽 orderNo、未知/blank actionType、null occurredAt 均在 SQL 前拒绝且零行；不伪造 schema 可为 NOT NULL 时间列写 null 的真实夹具。
 2. 合法 64 ASCII/BMP/非 BMP code point orderNo、`CONFIRM/ROLLBACK` 和空格但 nonblank 原值成功写入；原 orderNo/type/key、status、三列时间绑定和行数正确。
 3. 精确重复/唯一键冲突仍传播原 DuplicateKeyException；表缺失、连接、约束等数据库错误原传播，不吞错。
 4. 回归 AW/AX/BG 及 action reader、Recovery、transaction、creation 测试；历史坏 type/orderNo 夹具通过合法插入后参数更新构造，生产无修复 SQL。
