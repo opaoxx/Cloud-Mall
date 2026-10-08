@@ -302,7 +302,7 @@ Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改�
 
 订单 outbox 完成/失败更新保留 `event_id` 索引候选，并使用 `CAST(event_id AS BINARY)=CAST(? AS BINARY)` 精确核验身份；`event_id VARCHAR(128) UNIQUE NOT NULL`、索引和历史数据不变，不新增列或迁移。
 
-订单 outbox 扫描可在 LIMIT 前使用 Java17 whitespace 对齐的 `REGEXP_LIKE` eligibility 排除空白 eventId/orderNo；pattern 以 UTF-8 HEX 参数经 `UNHEX` 恢复，避免 session 反斜杠模式差异。NOT NULL/字段宽度/索引/历史行不变，扫描不自动修复坏身份。
+订单 outbox 扫描可在 LIMIT 前使用 Java17 whitespace 对齐的 `REGEXP_LIKE` eligibility 排除空白 eventId/orderNo；pattern 以 UTF-8 HEX 参数经 `UNHEX` 恢复并显式 `COLLATE utf8mb4_bin`，避免 session 反斜杠与隐式 collation 差异。pattern 仍为 UTF-8 文本，不 CAST BINARY、不改列排序规则；NOT NULL/字段宽度/索引/历史行不变，扫描不自动修复坏身份。
 
 订单 timeout dispatcher 对读取到的 PO 额外要求 eventId/orderNo 非空白；`event_id`/`order_no` 的既有 NOT NULL DDL、索引、扫描和历史行保持，不依赖该 guard 自动修复数据库坏值。
 
