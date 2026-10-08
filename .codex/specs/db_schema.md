@@ -244,6 +244,8 @@
 
 唯一约束：`uk_seckill_conflict_event(event_id)`、`uk_seckill_conflict_fingerprint(user_id,idempotency_key,request_hash,conflict_type)`。重复冲突消息按唯一键幂等记录；`RECORDED` 表示消息已确认且不重试，`REVIEWED/RESOLVED` 只由人工对账流程推进。`payload` 是结构化 JSON 视图，`raw_payload` 是当前序列化文本证据，不参与唯一键或幂等匹配。该表与 `seckill_message_recovery` 分工明确：前者记录主队列即时冲突，后者记录 DLQ 的可重放/隔离状态。
 
+冲突台账只接受成功序列化的 payload；序列化失败不得写入伪造证据或确认消息。event_id/request_hash 的派生必须基于同一成功 payload，既有唯一键和历史 `serializationError` 行不自动迁移。
+
 ### 5.4 `order_reservation_intent`
 
 记录普通订单在跨服务库存预扣期间的可恢复意图，避免地址校验后、库存预扣后订单本地写入失败时留下孤立预扣。该表不按订单月分片，以便恢复任务扫描所有未完成意图；`order_no` 全局唯一，`(user_id,idempotency_key)` 组合唯一。
