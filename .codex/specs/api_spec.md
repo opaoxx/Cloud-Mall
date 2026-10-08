@@ -182,6 +182,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单超时 outbox 扫描在既有状态和到期时间条件后、LIMIT 前增加 `attempts>=0` eligibility；负计数不得占满候选窗口，也不被自动修复或删除。排序、limit 归一、Rabbit 和失败退避语义保持不变。
 
+订单超时 outbox 扫描还必须在 LIMIT 前以 BINARY 精确筛选 `event_type='ORDER_TIMEOUT'`；dispatcher 对当前 PO 再做精确类型 guard，别名/其他类型只告警跳过，不解析、发送或写完成/失败。其他事件类型需独立 handler，不由 timeout exchange 处理器猜测。
+
 订单 outbox 扫描 SQL 故障继续向外传播；单候选 DataAccessException 只隔离当前候选并继续后续候选。`markOutboxPublished` 或 failure 写入的数据库异常不得被普通发送 catch 转换为第二次 failure 写入，不猜测已确认消息状态；非数据库发送/解析异常保持原一次退避记录，Error 不捕获。
 
 订单 outbox publisher confirm 后，`markOutboxPublished` 仅返回 1 才直接完成；返回 0 只允许通过 event_id/status=PUBLISHED 的唯一只读 proof 确认 peer 已完成，否则按数据库并发证明失败隔离，不写 failure、不重发、不改变 outbox。非 0/1 不查询；该 proof 不保证 MQ 与数据库原子性。
