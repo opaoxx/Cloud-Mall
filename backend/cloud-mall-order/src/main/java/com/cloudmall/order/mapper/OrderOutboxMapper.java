@@ -105,15 +105,18 @@ public class OrderOutboxMapper {
    * 只读查询完成状态候选，数据库排序规则命中后仍由业务层核验精确原标识。
    *
    * @param eventId 原消息事件标识
-   * @return eventId/status部分投影，不用于重新投递，不修改状态或原文
+   * @return eventId/status/type/orderNo/attempts部分投影，不用于重投，不读取或修改载荷及时间
    */
   public List<OrderOutboxPO> findPublicationFacts(String eventId) {
     return jdbcTemplate.query(
-        "SELECT event_id,status FROM order_outbox WHERE event_id=?",
+        "SELECT event_id,status,event_type,order_no,attempts FROM order_outbox WHERE event_id=?",
         (resultSet, rowNumber) -> {
           OrderOutboxPO fact = new OrderOutboxPO();
           fact.eventId = resultSet.getString("event_id");
           fact.status = resultSet.getString("status");
+          fact.eventType = resultSet.getString("event_type");
+          fact.orderNo = resultSet.getString("order_no");
+          fact.attempts = resultSet.getObject("attempts", Integer.class);
           return fact;
         },
         eventId);

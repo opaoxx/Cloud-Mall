@@ -173,7 +173,7 @@ public class OrderOutboxDispatcher {
       if (publishedRows == 1) return;
       if (publishedRows != 0)
         throw new OptimisticLockingFailureException("订单超时outbox完成更新行数不可信: " + outbox.eventId);
-      // 0可能是同事件已由其他投递者完成；仅接受精确身份的唯一PUBLISHED事实。
+      // 0可能是peer完成；唯一PUBLISHED事实还须绑定原订单/类型及可解释的非负计数。
       List<OrderOutboxPO> publicationFacts = orderOutboxMapper.findPublicationFacts(outbox.eventId);
       if (Thread.currentThread().isInterrupted()) return;
       if (publicationFacts == null
@@ -181,7 +181,11 @@ public class OrderOutboxDispatcher {
           || publicationFacts.get(0) == null
           || outbox.eventId == null
           || !outbox.eventId.equals(publicationFacts.get(0).eventId)
-          || !"PUBLISHED".equals(publicationFacts.get(0).status))
+          || !"PUBLISHED".equals(publicationFacts.get(0).status)
+          || !outbox.orderNo.equals(publicationFacts.get(0).orderNo)
+          || !"ORDER_TIMEOUT".equals(publicationFacts.get(0).eventType)
+          || publicationFacts.get(0).attempts == null
+          || publicationFacts.get(0).attempts < 0)
         throw new OptimisticLockingFailureException("订单超时outbox发布完成事实不可信: " + outbox.eventId);
     } catch (DataAccessException databaseFailure) {
       if (interrupted(databaseFailure)) return;

@@ -515,6 +515,116 @@ class OrderOutboxDispatcherTest {
   }
 
   @Test
+  void zeroProofRequiresOriginalOrderTypeAndAnInterpretableCounter() {
+    for (String proof :
+        List.of(
+            "order-null",
+            "order-other",
+            "order-case",
+            "order-trailing",
+            "type-null",
+            "type-other",
+            "type-case",
+            "type-accent",
+            "type-trailing",
+            "counter-null",
+            "counter-negative",
+            "counter-min",
+            "counter-zero",
+            "counter-one",
+            "counter-max")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO first = candidate("first-bound-proof");
+      OrderOutboxPO second = candidate("after-bound-proof");
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(first, second));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      org.mockito.Mockito.when(
+              mapper.markOutboxPublished(
+                  org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class)))
+          .thenReturn(0);
+      OrderOutboxPO fact = candidate(first.eventId);
+      fact.status = "PUBLISHED";
+      if (proof.startsWith("order-"))
+        fact.orderNo =
+            switch (proof) {
+              case "order-null" -> null;
+              case "order-other" -> "202610-different-order";
+              case "order-case" -> first.orderNo.toUpperCase(java.util.Locale.ROOT);
+              default -> first.orderNo + " ";
+            };
+      else if (proof.startsWith("type-"))
+        fact.eventType =
+            switch (proof) {
+              case "type-null" -> null;
+              case "type-other" -> "PAY_NOTIFY";
+              case "type-case" -> "order_timeout";
+              case "type-accent" -> "ORDER_TÍMEOUT";
+              default -> "ORDER_TIMEOUT ";
+            };
+      else
+        fact.attempts =
+            switch (proof) {
+              case "counter-null" -> null;
+              case "counter-negative" -> -1;
+              case "counter-min" -> Integer.MIN_VALUE;
+              case "counter-one" -> 1;
+              case "counter-max" -> Integer.MAX_VALUE;
+              default -> 0;
+            };
+      org.mockito.Mockito.when(mapper.findPublicationFacts(first.eventId))
+          .thenReturn(List.of(fact));
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+            .dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      long proofFailures =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getThrowableProxy() != null
+                          && event
+                              .getThrowableProxy()
+                              .getClassName()
+                              .endsWith("OptimisticLockingFailureException"))
+              .count();
+      boolean validCounter = List.of("counter-zero", "counter-one", "counter-max").contains(proof);
+      org.junit.jupiter.api.Assertions.assertEquals(validCounter ? 0 : 1, proofFailures, proof);
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class));
+      verify(mapper).findPublicationFacts(first.eventId);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(second.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit, times(2))
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
   void zeroCompletionOnlyAcceptsUniqueExactPublishedEvidence() {
     for (String proof : List.of("published", "pending", "other", "missing", "alias", "multiple")) {
       OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
@@ -530,6 +640,9 @@ class OrderOutboxDispatcherTest {
                   org.mockito.ArgumentMatchers.eq(first.eventId), any(LocalDateTime.class)))
           .thenReturn(0);
       OrderOutboxPO fact = new OrderOutboxPO();
+      fact.eventType = first.eventType;
+      fact.orderNo = first.orderNo;
+      fact.attempts = first.attempts;
       fact.eventId =
           "alias".equals(proof) ? first.eventId.toUpperCase(java.util.Locale.ROOT) : first.eventId;
       fact.status =
@@ -653,6 +766,9 @@ class OrderOutboxDispatcherTest {
                   OrderOutboxPO fact = new OrderOutboxPO();
                   fact.eventId = first.eventId;
                   fact.status = "PUBLISHED";
+                  fact.eventType = first.eventType;
+                  fact.orderNo = first.orderNo;
+                  fact.attempts = first.attempts;
                   Thread.currentThread().interrupt();
                   return List.of(fact);
                 })

@@ -772,6 +772,115 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void zeroCompletionProofMustRemainBoundToOrderTypeAndNonnegativeCounter() {
+    for (String state :
+        List.of(
+            "type-other",
+            "type-case",
+            "type-accent",
+            "type-trailing",
+            "order-other",
+            "order-case",
+            "order-trailing",
+            "negative",
+            "peer-one",
+            "peer-max")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO first = pendingOutbox();
+      first.lastError = "keep publication fact";
+      OrderOutboxPO second = pendingOutbox();
+      second.id = 2L;
+      second.eventId = "after-zero-publication";
+      second.orderNo = "202610-after-zero";
+      second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+      assertEquals(1, mapper.insert(first));
+      assertEquals(1, mapper.insert(second));
+      java.util.concurrent.atomic.AtomicReference<List<Map<String, Object>>> established =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      List<String> sentIds = new ArrayList<>();
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                sentIds.add(correlation.getId());
+                if (first.eventId.equals(correlation.getId())) {
+                  assertEquals(
+                      1,
+                      mapper.markOutboxPublished(
+                          first.eventId, LocalDateTime.now(ZoneOffset.ofHours(8))));
+                  if (state.startsWith("type-")) {
+                    String type =
+                        switch (state) {
+                          case "type-other" -> "PAY_NOTIFY";
+                          case "type-case" -> "order_timeout";
+                          case "type-accent" -> "ORDER_TÍMEOUT";
+                          default -> "ORDER_TIMEOUT ";
+                        };
+                    fixture.update("UPDATE order_outbox SET event_type=? WHERE id=1", type);
+                  } else if (state.startsWith("order-")) {
+                    String orderNo =
+                        switch (state) {
+                          case "order-other" -> "202610-different-order";
+                          case "order-case" -> first.orderNo.toUpperCase(java.util.Locale.ROOT);
+                          default -> first.orderNo + " ";
+                        };
+                    fixture.update("UPDATE order_outbox SET order_no=? WHERE id=1", orderNo);
+                  } else {
+                    int attempts =
+                        "negative".equals(state)
+                            ? -1
+                            : "peer-one".equals(state) ? 1 : Integer.MAX_VALUE;
+                    fixture.update("UPDATE order_outbox SET attempts=? WHERE id=1", attempts);
+                  }
+                  established.set(fixture.queryForList("SELECT * FROM order_outbox WHERE id=1"));
+                }
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        dispatcher(rabbit).dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      long completionFailures =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getLevel() == ch.qos.logback.classic.Level.WARN
+                          && event.getThrowableProxy() != null
+                          && event
+                              .getThrowableProxy()
+                              .getClassName()
+                              .endsWith("OptimisticLockingFailureException"))
+              .count();
+      assertAll(
+          () -> assertEquals(state.startsWith("peer-") ? 0 : 1, completionFailures, state),
+          () ->
+              assertEquals(
+                  established.get(),
+                  fixture.queryForList("SELECT * FROM order_outbox WHERE id=1"),
+                  state),
+          () -> assertEquals(List.of(first.eventId, second.eventId), sentIds, state),
+          () ->
+              assertEquals(
+                  "PUBLISHED",
+                  fixture.queryForObject(
+                      "SELECT status FROM order_outbox WHERE id=2", String.class),
+                  state));
+    }
+  }
+
+  @Test
   void zeroPublicationUpdateNeedsExactPublishedEvidenceInsteadOfSilentCompletion() {
     for (String state : List.of("OTHER", "PUBLISHED", "MISSING", "ALIAS", "pending", "PENDING ")) {
       fixture.update("DELETE FROM order_outbox");
