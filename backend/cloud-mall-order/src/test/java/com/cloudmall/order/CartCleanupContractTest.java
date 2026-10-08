@@ -1,23 +1,27 @@
 package com.cloudmall.order;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.order.feign.CartClient;
+import java.lang.reflect.Method;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 
+/** 清理时序变化不得改变Cart的SKU路径或原用户Header契约。 */
 class CartCleanupContractTest {
   @Test
-  void orderCreationDeletesOnlySubmittedSkusFromCart() throws Exception {
-    String source =
-        Files.readString(
-            Path.of("src/main/java/com/cloudmall/order/service/impl/OrderServiceImpl.java"));
-    assertTrue(compact(source).contains("cart.deleteItem(item.skuId,userId)"));
-    assertTrue(source.contains("订单创建成功但购物车清理失败"));
-  }
-
-  /** 执行 compact 相关操作。 */
-  private static String compact(String source) {
-    return source.replaceAll("\\s+", "");
+  void cartDeletePreservesSkuPathOriginalUserHeaderAndResponseEnvelope() throws Exception {
+    Method deleteItem = CartClient.class.getMethod("deleteItem", Long.class, Long.class);
+    assertArrayEquals(
+        new String[] {"/api/cart/items/{skuId}"},
+        deleteItem.getAnnotation(DeleteMapping.class).value());
+    assertEquals("skuId", deleteItem.getParameters()[0].getAnnotation(PathVariable.class).value());
+    assertEquals(
+        "X-User-Id", deleteItem.getParameters()[1].getAnnotation(RequestHeader.class).value());
+    assertEquals(ApiResponse.class, deleteItem.getReturnType());
   }
 }

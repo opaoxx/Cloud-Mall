@@ -10,6 +10,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
+import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
@@ -679,6 +680,171 @@ class OrderCreationPrecisionMySqlIT {
     CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
     int cartCalls = mockingDetails(cart).getInvocations().size();
     checks.add(() -> assertEquals(0, cartCalls, key));
+  }
+
+  @Test
+  void cartCleanupWaitsForCommitAndObservesCommittedOrderAndIntent() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    java.util.concurrent.atomic.AtomicInteger visibleOrders =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
+    java.util.concurrent.atomic.AtomicReference<String> visibleIntent =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    doAnswer(
+            invocation -> {
+              JdbcTemplate independent =
+                  new JdbcTemplate(new DriverManagerDataSource(isolatedUrl, "root", "root"));
+              visibleOrders.set(
+                  independent.queryForObject(
+                      "SELECT COUNT(*) FROM mall_order_202612", Integer.class));
+              visibleIntent.set(
+                  independent.queryForObject(
+                      "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-after-commit'",
+                      String.class));
+              return ApiResponse.ok(null);
+            })
+        .when(cart)
+        .deleteItem(anyLong(), anyLong());
+    java.util.concurrent.atomic.AtomicInteger callsBeforeCommit =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
+    ApiResponse<?> result =
+        transaction.execute(
+            status -> {
+              ApiResponse<?> created = service.create("cart-after-commit", normalRequest());
+              callsBeforeCommit.set(mockingDetails(cart).getInvocations().size());
+              return created;
+            });
+    assertAll(
+        () -> assertEquals("0", result.code),
+        () -> assertEquals(0, callsBeforeCommit.get()),
+        () -> assertEquals(1, visibleOrders.get()),
+        () -> assertEquals("COMMITTED", visibleIntent.get()));
+    verify(cart).deleteItem(7L, 7L);
+  }
+
+  @Test
+  void outerRollbackNeverDeletesCartOrPretendsTheOrderCommitted() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    transaction.execute(
+        status -> {
+          assertEquals("0", service.create("cart-rollback", normalRequest()).code);
+          status.setRollbackOnly();
+          return null;
+        });
+    assertFailedCreateHasNoCommittedArtifacts();
+    assertEquals(
+        "RESERVED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-rollback'",
+            String.class));
+    verifyNoInteractions(cart);
+    verify(stock, never()).rollback(anyString());
+  }
+
+  @Test
+  void lateLocalReadFailureRollsBackWithoutRemovingCartItems() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    OrderSqlMapper observedOrders = spy(new OrderSqlMapper(fixture));
+    org.springframework.dao.DataAccessResourceFailureException original =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "late order read unavailable");
+    doThrow(original).when(observedOrders).findOrder(anyString(), anyString());
+    ReflectionTestUtils.setField(service, "orderSqlMapper", observedOrders);
+    doReturn(ApiResponse.ok("rolled back")).when(stock).rollback(anyString());
+    doAnswer(invocation -> ApiResponse.ok(recoveryStatus(invocation.getArgument(0), "ROLLED_BACK")))
+        .when(stock)
+        .reservation(anyString());
+    RuntimeException returned =
+        assertThrows(
+            RuntimeException.class,
+            () -> service.create("cart-late-read-failure", normalRequest()));
+    assertSame(original, returned);
+    assertFailedCreateHasNoCommittedArtifacts();
+    assertEquals(
+        "RELEASED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-late-read-failure'",
+            String.class));
+    verify(stock).rollback(anyString());
+    verify(stock).reservation(anyString());
+    verifyNoInteractions(cart);
+  }
+
+  @Test
+  void postCommitCartFailuresDoNotCompensateOrdersAndLaterSkuStillCleansUp() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    when(products.sku(8L))
+        .thenReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(8L, 9L, "商品8", "SKU-8", BigDecimal.TEN, Map.of())));
+    doReturn(ApiResponse.ok("rolled back")).when(stock).rollback(anyString());
+    doAnswer(invocation -> ApiResponse.ok(recoveryStatus(invocation.getArgument(0), "ROLLED_BACK")))
+        .when(stock)
+        .reservation(anyString());
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String failure : List.of("null", "nonzero", "runtime")) {
+      resetReservationSuccessFixture();
+      clearInvocations(stock, cart);
+      doAnswer(
+              invocation -> {
+                Long skuId = invocation.getArgument(0);
+                if (skuId.equals(8L)) return ApiResponse.ok(null);
+                return switch (failure) {
+                  case "null" -> null;
+                  case "nonzero" -> ApiResponse.error("503", "cart unavailable");
+                  case "runtime" -> throw new IllegalStateException("cart unavailable");
+                  default -> throw new AssertionError(failure);
+                };
+              })
+          .when(cart)
+          .deleteItem(anyLong(), anyLong());
+      CreateOrderDTO request = normalRequest();
+      OrderItemDTO secondItem = new OrderItemDTO();
+      secondItem.skuId = 8L;
+      secondItem.quantity = 1;
+      request.items = List.of(request.items.get(0), secondItem);
+      RuntimeException returnedFailure = null;
+      ApiResponse<?> returned = null;
+      try {
+        returned = service.create("cart-failure-" + failure, request);
+      } catch (RuntimeException failed) {
+        returnedFailure = failed;
+      }
+      RuntimeException observedFailure = returnedFailure;
+      ApiResponse<?> observedResult = returned;
+      Integer orders =
+          fixture.queryForObject("SELECT COUNT(*) FROM mall_order_202612", Integer.class);
+      String intentStatus =
+          fixture.queryForObject(
+              "SELECT status FROM order_reservation_intent WHERE idempotency_key=?",
+              String.class,
+              "cart-failure-" + failure);
+      int secondCalls =
+          (int)
+              mockingDetails(cart).getInvocations().stream()
+                  .filter(invocation -> Long.valueOf(8L).equals(invocation.getArgument(0)))
+                  .count();
+      int stockRollbacks =
+          (int)
+              mockingDetails(stock).getInvocations().stream()
+                  .filter(invocation -> invocation.getMethod().getName().equals("rollback"))
+                  .count();
+      checks.add(() -> assertNull(observedFailure, failure));
+      checks.add(() -> assertNotNull(observedResult, failure));
+      if (observedResult != null) checks.add(() -> assertEquals("0", observedResult.code, failure));
+      checks.add(() -> assertEquals(1, orders, failure));
+      checks.add(() -> assertEquals("COMMITTED", intentStatus, failure));
+      checks.add(() -> assertEquals(1, secondCalls, failure));
+      checks.add(() -> assertEquals(0, stockRollbacks, failure));
+    }
+    assertAll(checks);
   }
 
   @Test

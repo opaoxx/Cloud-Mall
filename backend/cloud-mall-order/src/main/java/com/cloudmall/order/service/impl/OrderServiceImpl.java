@@ -50,6 +50,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
@@ -265,14 +267,10 @@ public class OrderServiceImpl implements OrderService {
       idempotency.createdAt = created.toLocalDateTime();
       orderSqlMapper.insertIdempotency(idempotency);
       orderOutboxMapper.insert(timeoutOutbox(orderNo, created, expire));
-      for (OrderItemDTO item : req.items) {
-        ApiResponse<?> removed = cart.deleteItem(item.skuId, userId);
-        if (removed == null || !"0".equals(removed.code))
-          throw new BizException(ErrorCodes.INTERNAL, "订单创建成功但购物车清理失败", 500);
-      }
       OrderVO createdOrder = find(orderNo);
       if (reservationIntentMapper.markCommitted(orderNo, now().toLocalDateTime()) != 1)
         throw new BizException(ErrorCodes.CONFLICT, "库存预扣意图未能提交", 409);
+      registerCartCleanup(orderNo, userId, req.items);
       return ApiResponse.ok(createdOrder);
     } catch (RuntimeException creationFailure) {
       // 3. 只有成功响应才能同步回滚并结束意图；响应丢失须保留 INIT 等待恢复。
@@ -280,13 +278,45 @@ public class OrderServiceImpl implements OrderService {
         compensateFailedCreate(orderNo, creationFailure);
       } else if (!definiteRejection) {
         try {
-          reservationIntentService.markReserveUnknown(
-              orderNo, "预扣结果待确认: " + creationFailure);
+          reservationIntentService.markReserveUnknown(orderNo, "预扣结果待确认: " + creationFailure);
         } catch (RuntimeException recordFailure) {
           creationFailure.addSuppressed(recordFailure);
         }
       }
       throw creationFailure;
+    }
+  }
+
+  /** 捕获原用户与不可变去重SKU快照，仅在真实事务提交后清理，失败保留购物车并告警。 */
+  private void registerCartCleanup(String orderNo, long userId, List<OrderItemDTO> items) {
+    try {
+      // 1. 无实际事务或同步上下文时不能证明提交，禁止提前删除购物车。
+      if (!TransactionSynchronizationManager.isActualTransactionActive()
+          || !TransactionSynchronizationManager.isSynchronizationActive()) {
+        log.warn("订单购物车清理缺少实际事务上下文，保留购物车，orderNo={}", orderNo);
+        return;
+      }
+      // 2. 捕获原值，回调不重读请求或晚期鉴权；每个SKU最多删除一次。
+      List<Long> purchasedSkuIds = items.stream().map(item -> item.skuId).distinct().toList();
+      TransactionSynchronizationManager.registerSynchronization(
+          new TransactionSynchronization() {
+            /** 订单已提交后逐SKU清理；普通失败隔离，Error保持传播。 */
+            @Override
+            public void afterCommit() {
+              // 3. 远端清理失败不得反向回滚已提交订单或库存，继续后续SKU。
+              for (Long skuId : purchasedSkuIds) {
+                try {
+                  ApiResponse<?> removed = cart.deleteItem(skuId, userId);
+                  if (removed == null || !"0".equals(removed.code))
+                    throw new IllegalStateException("购物车清理响应未确认");
+                } catch (RuntimeException cleanupFailure) {
+                  log.warn("订单提交后购物车清理失败，orderNo={}，skuId={}", orderNo, skuId, cleanupFailure);
+                }
+              }
+            }
+          });
+    } catch (RuntimeException registrationFailure) {
+      log.warn("订单购物车清理回调注册失败，保留购物车，orderNo={}", orderNo, registrationFailure);
     }
   }
 
