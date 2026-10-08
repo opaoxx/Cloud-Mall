@@ -91,17 +91,18 @@ public class OrderOutboxMapper {
   }
 
   /**
-   * 记录最多512个完整Unicode错误字符并推迟原事件重试。
+   * 记录最多512个完整Unicode错误字符并推迟原事件重试；非负次数在INT上限饱和，负值不猜测修复。
    *
    * @param eventId 原超时事件唯一标识
    * @param error 原失败文本，可为null，内容不做归一化
    * @param nextRetryAt 原调用方提供的上海重试时间
-   * @return PENDING匹配的更新行数，其他状态为0
+   * @return PENDING且次数非负的匹配行数，负值、其他状态或未命中为0
    */
   public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
-        "UPDATE order_outbox SET attempts=attempts+1,last_error=?,next_retry_at=?,updated_at=?"
-            + " WHERE event_id=? AND status='PENDING'",
+        "UPDATE order_outbox SET attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,"
+            + "last_error=?,next_retry_at=?,updated_at=?"
+            + " WHERE event_id=? AND status='PENDING' AND attempts>=0",
         clipOutboxError(error),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),

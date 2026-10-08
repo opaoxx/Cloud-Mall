@@ -89,6 +89,171 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void failureCountersSaturateWithoutSqlWarningsAndDoNotRepairNegativeFacts() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    LocalDateTime retryAt = LocalDateTime.of(2026, 10, 9, 12, 0, 0, 456_000_000);
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderOutboxMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (int attempts : List.of(0, 19, Integer.MAX_VALUE - 1, Integer.MAX_VALUE, -1)) {
+          modeJdbc.update("DELETE FROM order_outbox");
+          OrderOutboxPO outbox = pendingOutbox();
+          outbox.attempts = attempts;
+          assertEquals(1, modeMapper.insert(outbox));
+          var before = modeJdbc.queryForMap("SELECT * FROM order_outbox");
+          RuntimeException failure = null;
+          int affected = -2;
+          try {
+            affected = modeMapper.recordOutboxFailure(outbox.eventId, "counter failure😀", retryAt);
+          } catch (RuntimeException rejected) {
+            failure = rejected;
+          }
+          var warnings = modeJdbc.queryForList("SHOW WARNINGS");
+          var after = modeJdbc.queryForMap("SELECT * FROM order_outbox");
+          RuntimeException captured = failure;
+          int result = affected;
+          String label = mode + ":" + attempts;
+          checks.add(() -> assertNull(captured, label));
+          checks.add(() -> assertTrue(warnings.isEmpty(), label));
+          checks.add(() -> assertEquals(attempts < 0 ? 0 : 1, result, label));
+          if (attempts < 0) checks.add(() -> assertEquals(before, after, label));
+          else {
+            checks.add(
+                () ->
+                    assertEquals(
+                        Math.min((long) attempts + 1L, Integer.MAX_VALUE),
+                        ((Number) after.get("attempts")).longValue(),
+                        label));
+            checks.add(() -> assertEquals("counter failure😀", after.get("last_error"), label));
+            checks.add(() -> assertUnchangedEvent(before, after));
+            checks.add(() -> assertEquals("PENDING", after.get("status"), label));
+            LocalDateTime storedRetry =
+                modeJdbc.queryForObject(
+                    "SELECT next_retry_at FROM order_outbox", LocalDateTime.class);
+            checks.add(() -> assertEquals(retryAt, storedRetry, label));
+          }
+        }
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void aSaturatedFailureCounterCannotStopTheFollowingPendingEvent() throws Exception {
+    OrderOutboxPO first = pendingOutbox();
+    first.attempts = Integer.MAX_VALUE;
+    OrderOutboxPO second = pendingOutbox();
+    second.id = 2L;
+    second.eventId = "timeout-following-event";
+    second.orderNo = "202610-following";
+    second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+    assertEquals(1, mapper.insert(first));
+    assertEquals(1, mapper.insert(second));
+    var before = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    RabbitTemplate rabbit = failingRabbit("broker unavailable😀");
+    RuntimeException failure = null;
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      modeJdbc.execute("SET SESSION sql_mode='STRICT_TRANS_TABLES'");
+      var realDispatcher =
+          new OrderOutboxDispatcher(
+              new OrderOutboxMapper(modeJdbc), rabbit, new ObjectMapper(), new MockEnvironment());
+      try {
+        realDispatcher.dispatchPending();
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+    }
+    var after = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    RuntimeException captured = failure;
+    assertAll(
+        () -> assertNull(captured),
+        () -> assertEquals(Integer.MAX_VALUE, ((Number) after.get(0).get("attempts")).intValue()),
+        () -> assertEquals(1, ((Number) after.get(1).get("attempts")).intValue()),
+        () -> assertEquals("broker unavailable😀", after.get(0).get("last_error")),
+        () -> assertEquals("broker unavailable😀", after.get(1).get("last_error")),
+        () ->
+            verify(rabbit, times(2))
+                .convertAndSend(
+                    anyString(), anyString(), any(), any(), any(CorrelationData.class)));
+    for (int rowIndex = 0; rowIndex < after.size(); rowIndex++) {
+      assertUnchangedEvent(before.get(rowIndex), after.get(rowIndex));
+      assertEquals("PENDING", after.get(rowIndex).get("status"));
+      assertTrue(
+          fixture
+              .queryForObject(
+                  "SELECT next_retry_at FROM order_outbox WHERE id=?",
+                  LocalDateTime.class,
+                  after.get(rowIndex).get("id"))
+              .isAfter(LocalDateTime.now(ZoneOffset.ofHours(8))));
+    }
+  }
+
+  @Test
+  void concurrentFailureWritesAndRepeatedMaximumPreserveTheEvent() throws Exception {
+    for (int attempts : List.of(0, Integer.MAX_VALUE - 1)) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO outbox = pendingOutbox();
+      outbox.attempts = attempts;
+      assertEquals(1, mapper.insert(outbox));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox");
+      LocalDateTime retryAt = LocalDateTime.now(ZoneOffset.ofHours(8)).plusMinutes(1).withNano(0);
+      java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(2);
+      java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.ExecutorService executor =
+          java.util.concurrent.Executors.newFixedThreadPool(2);
+      try {
+        var first =
+            executor.submit(
+                () -> {
+                  ready.countDown();
+                  assertTrue(start.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                  return mapper.recordOutboxFailure(outbox.eventId, "first failure😀", retryAt);
+                });
+        var second =
+            executor.submit(
+                () -> {
+                  ready.countDown();
+                  assertTrue(start.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                  return mapper.recordOutboxFailure(
+                      outbox.eventId, "second failure😀", retryAt.plusSeconds(1));
+                });
+        assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        start.countDown();
+        assertEquals(1, first.get(10, java.util.concurrent.TimeUnit.SECONDS));
+        assertEquals(1, second.get(10, java.util.concurrent.TimeUnit.SECONDS));
+      } finally {
+        start.countDown();
+        executor.shutdownNow();
+        assertTrue(executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS));
+      }
+      var after = fixture.queryForMap("SELECT * FROM order_outbox");
+      assertUnchangedEvent(before, after);
+      assertEquals("PENDING", after.get("status"));
+      assertEquals(
+          Math.min((long) attempts + 2L, Integer.MAX_VALUE),
+          ((Number) after.get("attempts")).longValue());
+      String error = String.valueOf(after.get("last_error"));
+      assertTrue(List.of("first failure😀", "second failure😀").contains(error));
+      assertEquals(
+          "first failure😀".equals(error) ? retryAt : retryAt.plusSeconds(1),
+          fixture.queryForObject("SELECT next_retry_at FROM order_outbox", LocalDateTime.class));
+      if (attempts == Integer.MAX_VALUE - 1) {
+        for (int repeatIndex = 0; repeatIndex < 2; repeatIndex++) {
+          assertEquals(1, mapper.recordOutboxFailure(outbox.eventId, null, retryAt.plusMinutes(1)));
+          assertEquals(
+              Integer.MAX_VALUE,
+              fixture.queryForObject("SELECT attempts FROM order_outbox", Integer.class));
+          assertNull(fixture.queryForMap("SELECT * FROM order_outbox").get("last_error"));
+          assertUnchangedEvent(before, fixture.queryForMap("SELECT * FROM order_outbox"));
+        }
+      }
+    }
+  }
+
+  @Test
   void mapperPreservesCompleteCharactersAndNullsInBothSqlModes() throws Exception {
     List<String[]> samples =
         List.of(
