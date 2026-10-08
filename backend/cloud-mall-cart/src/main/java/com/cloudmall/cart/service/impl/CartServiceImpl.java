@@ -67,12 +67,17 @@ public class CartServiceImpl implements CartService {
     this.products = products;
   }
 
+  /**
+   * 按原JSON条件刷新商品摘要后返回购物车，冲突时要求客户端重新读取。
+   *
+   * @return 原购物车项数组，商品失效项继续可见
+   * @throws BizException 已确认刷新冲突为409，坏数据或未知结果为500，Redis故障为503
+   */
   @GetMapping
-  /** 执行 all 相关操作。 */
   public ApiResponse<?> all() {
-    // 1. 接收并整理 all 的业务请求。
-    // 2. 执行 all 的核心业务校验与状态处理。
-    // 3. 返回 all 的处理结果。
+    // 1. 在刷新流程中读取同次完整Hash与原JSON快照。
+    // 2. 每项商品事实只在原快照仍成立时写入，失败停止后续刷新。
+    // 3. 返回成功刷新的同一项数组，失效商品沿原可见语义保留。
     return ApiResponse.ok(refreshItems().stream().map(CartItemVO::from).toList());
   }
 
@@ -196,14 +201,16 @@ public class CartServiceImpl implements CartService {
    *
    * @param body 原skuIds选择，空集合继续按checked选中项处理
    * @return 原items/invalidItems和金额字符串响应
-   * @throws BizException 已选数量损坏为500，Redis依赖失败为503，商品错误沿原分类
+   * @throws BizException 刷新冲突为409，已选数量损坏或未知结果为500，Redis失败为503，商品失效沿原分类
    */
   @PostMapping("/settlement/preview")
   public ApiResponse<?> preview(@RequestBody Map<String, List<Long>> body) {
     // 1. 保留显式SKU和checked选择，只预检本次选中集合。
     Set<Long> selected = new HashSet<>(body.getOrDefault("skuIds", List.of()));
+    String cartKey = key();
+    Map<String, String> originalValues = new HashMap<>();
     List<CartItemPO> items =
-        readItems().stream()
+        readMap(cartKey, originalValues).values().stream()
             .filter(
                 item ->
                     selected.isEmpty()
@@ -217,15 +224,9 @@ public class CartServiceImpl implements CartService {
     List<Map<String, Object>> invalid = new ArrayList<>();
     BigDecimal total = BigDecimal.ZERO;
     for (CartItemPO item : items) {
+      ProductClient.SkuView current;
       try {
-        ProductClient.SkuView current = currentSku(item.skuId);
-        item.productId = current.productId();
-        item.productName = current.productName();
-        item.unitPrice = current.unitPrice();
-        write(item);
-        total =
-            total.add(
-                new BigDecimal(current.unitPrice()).multiply(BigDecimal.valueOf(item.quantity)));
+        current = currentSku(item.skuId);
       } catch (BizException invalidSku) {
         if (invalidSku.getHttpStatus() >= 500) throw invalidSku;
         invalid.add(
@@ -236,7 +237,13 @@ public class CartServiceImpl implements CartService {
                 invalidSku.getCode(),
                 "message",
                 invalidSku.getMessage()));
+        continue;
       }
+      // 条件写和金额在商品失效catch之外，409/未知结果不能当作invalidItems吞掉。
+      refreshItem(cartKey, originalValues.get(String.valueOf(item.skuId)), item, current);
+      total =
+          total.add(
+              new BigDecimal(current.unitPrice()).multiply(BigDecimal.valueOf(item.quantity)));
     }
     // 3. 返回原字段/金额格式，不把预览当作库存锁定或下单价格依据。
     return ApiResponse.ok(
@@ -264,7 +271,7 @@ public class CartServiceImpl implements CartService {
     return readMap(key(), null);
   }
 
-  /** 同次HGETALL保留原始JSON快照供add条件写，其他读仍沿原完整身份门。 */
+  /** 同次HGETALL保留原始JSON快照供条件写/删，所有读仍沿原完整身份门。 */
   private Map<String, CartItemPO> readMap(String cartKey, Map<String, String> originalValues) {
     // 1. 原Hash读取保持Redis异常503，结果只在当前调用内构造。
     Map<String, CartItemPO> result = new LinkedHashMap<>();
@@ -290,50 +297,38 @@ public class CartServiceImpl implements CartService {
     return result;
   }
 
-  /** 执行 readItems 相关操作。 */
-  private List<CartItemPO> readItems() {
-    // 1. 接收并整理 readItems 的业务请求。
-    // 2. 执行 readItems 的核心业务校验与状态处理。
-    // 3. 返回 readItems 的处理结果。
-    return new ArrayList<>(readMap().values());
-  }
-
-  /** 执行 refreshItems 相关操作。 */
+  /** 同次完整快照上的逐项摘要刷新，已确认冲突停止请求，商品失效项仍保留可见。 */
   private List<CartItemPO> refreshItems() {
-    // 1. 接收并整理 refreshItems 的业务请求。
-    // 2. 执行 refreshItems 的核心业务校验与状态处理。
-    // 3. 返回 refreshItems 的处理结果。
-    List<CartItemPO> items = readItems();
+    // 1. 读取完整合法PO与原JSON，绑定本次原用户Cart键。
+    String cartKey = key();
+    Map<String, String> originalValues = new HashMap<>();
+    List<CartItemPO> items = new ArrayList<>(readMap(cartKey, originalValues).values());
+    // 2. 仅商品读取保留原失效语义，条件写异常直接传播。
     for (CartItemPO item : items) {
+      ProductClient.SkuView current;
       try {
-        ProductClient.SkuView current = currentSku(item.skuId);
-        item.productId = current.productId();
-        item.productName = current.productName();
-        item.unitPrice = current.unitPrice();
-        write(item);
-      } catch (BizException ignored) {
-        if (ignored.getHttpStatus() >= 500) throw ignored;
-        // Keep an invalid cart item visible so the settlement flow can report it.
+        current = currentSku(item.skuId);
+      } catch (BizException invalidSku) {
+        if (invalidSku.getHttpStatus() >= 500) throw invalidSku;
+        continue;
       }
+      refreshItem(cartKey, originalValues.get(String.valueOf(item.skuId)), item, current);
     }
+    // 3. 前序成功不整批回滚，成功响应只由当前快照项构造。
     return items;
   }
 
-  /** 执行 write 相关操作。 */
-  private void write(CartItemPO item) {
-    // 1. 接收并整理 write 的业务请求。
-    // 2. 执行 write 的核心业务校验与状态处理。
-    // 3. 返回 write 的处理结果。
-    String json = serializeCartItem(item);
-    redisOperation(
-        () -> {
-          redis.opsForHash().put(key(), String.valueOf(item.skuId), json);
-          redis.expire(key(), TTL);
-          return null;
-        });
+  /** 只更新当前商品摘要，保留快照数量/勾选/时间。每项仅一次原JSON条件写，0冲突抛409； 未知结果或依赖异常原样传播，不重读、不补偿前序刷新。 */
+  private void refreshItem(
+      String cartKey, String expectedJson, CartItemPO item, ProductClient.SkuView current) {
+    item.productId = current.productId();
+    item.productName = current.productName();
+    item.unitPrice = current.unitPrice();
+    if (!compareWrite(cartKey, String.valueOf(item.skuId), expectedJson, item))
+      throw new BizException(ErrorCodes.CONFLICT, "购物车已发生变化，请重试", 409);
   }
 
-  /** 保留原Jackson和保存异常语义，其他写路径不改变HSET/expire行为。 */
+  /** 保留原Jackson序列化及保存异常语义，条件脚本不解析业务JSON。 */
   private String serializeCartItem(CartItemPO item) {
     try {
       return mapper.writeValueAsString(item);

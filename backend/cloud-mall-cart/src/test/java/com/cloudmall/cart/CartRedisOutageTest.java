@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.feign.ProductClient;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 
 class CartRedisOutageTest {
   private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
@@ -47,12 +49,14 @@ class CartRedisOutageTest {
   void refreshWriteFailureCannotBeSilentlyIgnored() {
     AuthContext.set(33L, "USER");
     when(redis.opsForHash()).thenReturn(hashes);
-    when(hashes.entries("cart:33")).thenReturn(Map.of("22",
-        "{\"skuId\":22,\"productId\":11,\"quantity\":1,\"checked\":true}"));
-    when(products.getSku(22L)).thenReturn(ApiResponse.ok(
-        new ProductClient.SkuView(22L, 11L, "keyboard", "1.00", Map.of())));
-    doThrow(new RedisConnectionFailureException("redis down"))
-        .when(hashes).put(any(), any(), any());
+    when(hashes.entries("cart:33"))
+        .thenReturn(
+            Map.of("22", "{\"skuId\":22,\"productId\":11,\"quantity\":1,\"checked\":true}"));
+    when(products.getSku(22L))
+        .thenReturn(
+            ApiResponse.ok(new ProductClient.SkuView(22L, 11L, "keyboard", "1.00", Map.of())));
+    when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
+        .thenThrow(new RedisConnectionFailureException("redis down"));
 
     BizException failure = assertThrows(BizException.class, cart::all);
 
@@ -64,15 +68,18 @@ class CartRedisOutageTest {
   void settlementPreviewDoesNotReportRedisFailureAsInvalidSku() {
     AuthContext.set(33L, "USER");
     when(redis.opsForHash()).thenReturn(hashes);
-    when(hashes.entries("cart:33")).thenReturn(Map.of("22",
-        "{\"skuId\":22,\"productId\":11,\"quantity\":1,\"checked\":true}"));
-    when(products.getSku(22L)).thenReturn(ApiResponse.ok(
-        new ProductClient.SkuView(22L, 11L, "keyboard", "1.00", Map.of())));
-    doThrow(new RedisConnectionFailureException("redis down"))
-        .when(hashes).put(any(), any(), any());
+    when(hashes.entries("cart:33"))
+        .thenReturn(
+            Map.of("22", "{\"skuId\":22,\"productId\":11,\"quantity\":1,\"checked\":true}"));
+    when(products.getSku(22L))
+        .thenReturn(
+            ApiResponse.ok(new ProductClient.SkuView(22L, 11L, "keyboard", "1.00", Map.of())));
+    when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
+        .thenThrow(new RedisConnectionFailureException("redis down"));
 
-    BizException failure = assertThrows(BizException.class,
-        () -> cart.preview(Map.of("skuIds", java.util.List.of(22L))));
+    BizException failure =
+        assertThrows(
+            BizException.class, () -> cart.preview(Map.of("skuIds", java.util.List.of(22L))));
 
     assertEquals(503, failure.getHttpStatus());
   }
