@@ -104,13 +104,21 @@ public class OrderOutboxMapper {
         eventId);
   }
 
-  /** 仅在 publisher confirm 成功后将精确PENDING状态的事件标记为已发布。 */
+  /**
+   * 仅在publisher confirm成功后将精确原事件身份且PENDING状态的事件标记为已发布。
+   *
+   * @param eventId 原消息事件标识，不做大小写、重音或空格归一化
+   * @param publishedAt 调用方提供的上海发布时间
+   * @return 精确原身份且PENDING的匹配行数，身份/状态不匹配或缺失为0
+   */
   public int markOutboxPublished(String eventId, LocalDateTime publishedAt) {
     return jdbcTemplate.update(
         "UPDATE order_outbox SET status='PUBLISHED',published_at=?,updated_at=?,last_error=NULL"
-            + " WHERE event_id=? AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY)",
+            + " WHERE event_id=? AND CAST(event_id AS BINARY)=CAST(? AS BINARY)"
+            + " AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY)",
         publishedAt,
         publishedAt,
+        eventId,
         eventId);
   }
 
@@ -120,16 +128,18 @@ public class OrderOutboxMapper {
    * @param eventId 原超时事件唯一标识
    * @param error 原失败文本，可为null，内容不做归一化
    * @param nextRetryAt 原调用方提供的上海重试时间
-   * @return 精确PENDING且次数非负的匹配行数，负值、状态别名、其他状态或未命中为0
+   * @return 原事件身份精确、精确PENDING且次数非负的匹配行数，身份/状态别名、负值或未命中为0
    */
   public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
     return jdbcTemplate.update(
         "UPDATE order_outbox SET attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE"
             + " attempts END,last_error=?,next_retry_at=?,updated_at=? WHERE event_id=?"
+            + " AND CAST(event_id AS BINARY)=CAST(? AS BINARY)"
             + " AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND attempts>=0",
         clipOutboxError(error),
         nextRetryAt,
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
+        eventId,
         eventId);
   }
 

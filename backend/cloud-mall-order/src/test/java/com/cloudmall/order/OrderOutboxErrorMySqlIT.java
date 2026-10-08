@@ -89,6 +89,118 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void eventIdAliasesCannotMutateTheOriginalEventThroughEitherUpdate() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String alias :
+        Arrays.asList("timeout-event", "Timeout-Évent", "Timeout-Event ", "missing", null)) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO original = pendingOutbox();
+      original.eventId = "Timeout-Event";
+      original.lastError = "preserve exact identity";
+      assertEquals(1, mapper.insert(original));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox");
+      int failed =
+          mapper.recordOutboxFailure(alias, "alias failure", original.nextRetryAt.plusMinutes(1));
+      var afterFailure = fixture.queryForMap("SELECT * FROM order_outbox");
+      int completed = mapper.markOutboxPublished(alias, original.createdAt.plusMinutes(1));
+      var afterCompletion = fixture.queryForMap("SELECT * FROM order_outbox");
+      checks.add(() -> assertEquals(0, failed, String.valueOf(alias)));
+      checks.add(() -> assertEquals(before, afterFailure, String.valueOf(alias)));
+      checks.add(() -> assertEquals(0, completed, String.valueOf(alias)));
+      checks.add(() -> assertEquals(before, afterCompletion, String.valueOf(alias)));
+    }
+    for (String exactId : List.of("Timeout-Event", "事件😀A", " event ")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO original = pendingOutbox();
+      original.eventId = exactId;
+      assertEquals(1, mapper.insert(original));
+      assertEquals(
+          1,
+          mapper.recordOutboxFailure(
+              exactId, "exact failure😀", original.nextRetryAt.plusMinutes(1)));
+      assertEquals(1, mapper.markOutboxPublished(exactId, original.createdAt.plusMinutes(1)));
+      var after = fixture.queryForMap("SELECT * FROM order_outbox");
+      checks.add(() -> assertEquals(exactId, after.get("event_id")));
+      checks.add(() -> assertEquals("PUBLISHED", after.get("status")));
+      checks.add(() -> assertEquals(1, ((Number) after.get("attempts")).intValue()));
+      checks.add(() -> assertNull(after.get("last_error")));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void identityChangesDuringSendCannotBeCompletedOrRetriedAsTheOriginalEvent() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String alias :
+        List.of("TIMEOUT-ERROR-EVENT", "timeout-errór-event", "timeout-error-event ")) {
+      for (boolean acknowledged : List.of(true, false)) {
+        fixture.update("DELETE FROM order_outbox");
+        OrderOutboxPO first = pendingOutbox();
+        first.lastError = "preserve changed identity";
+        OrderOutboxPO second = pendingOutbox();
+        second.id = 2L;
+        second.eventId = "after-changed-event-identity";
+        second.orderNo = "202610-after-changed-identity";
+        second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+        assertEquals(1, mapper.insert(first));
+        assertEquals(1, mapper.insert(second));
+        java.util.concurrent.atomic.AtomicReference<Map<String, Object>> established =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        List<String> sentIds = new ArrayList<>();
+        doAnswer(
+                invocation -> {
+                  CorrelationData correlation = invocation.getArgument(4);
+                  sentIds.add(correlation.getId());
+                  if (first.eventId.equals(correlation.getId())) {
+                    assertEquals(
+                        1, fixture.update("UPDATE order_outbox SET event_id=? WHERE id=1", alias));
+                    established.set(fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1"));
+                    if (!acknowledged) throw new IllegalStateException("controlled send failure");
+                  }
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                  return null;
+                })
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+            new ch.qos.logback.core.read.ListAppender<>();
+        warnings.start();
+        logger.addAppender(warnings);
+        try {
+          dispatcher(rabbit).dispatchPending();
+        } finally {
+          logger.detachAppender(warnings);
+          warnings.stop();
+        }
+        long completionFailures =
+            warnings.list.stream()
+                .filter(
+                    event ->
+                        event.getLevel() == ch.qos.logback.classic.Level.WARN
+                            && event.getThrowableProxy() != null
+                            && event
+                                .getThrowableProxy()
+                                .getClassName()
+                                .endsWith("OptimisticLockingFailureException"))
+                .count();
+        var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        String secondStatus =
+            fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+        String label = alias + ":" + acknowledged;
+        checks.add(() -> assertEquals(established.get(), after, label));
+        checks.add(() -> assertEquals(List.of(first.eventId, second.eventId), sentIds, label));
+        checks.add(() -> assertEquals(acknowledged ? 1 : 0, completionFailures, label));
+        checks.add(() -> assertEquals("PUBLISHED", secondStatus, label));
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void statusAliasesCannotBePublishedAsPendingEvents() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (String status : List.of("pending", "PENDING ", "PÉNDING", "", "OTHER", "PUBLISHED")) {
