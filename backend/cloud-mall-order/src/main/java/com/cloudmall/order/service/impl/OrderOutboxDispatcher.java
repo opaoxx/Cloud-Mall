@@ -106,7 +106,7 @@ public class OrderOutboxDispatcher {
     }
   }
 
-  /** 只处理计数可解释且类型/状态精确的当前快照；原eventId只在确认且未退回时结束重试。 */
+  /** 只处理计数可解释、类型/状态精确且必填身份非空白的当前快照；原eventId只在确认且未退回时结束重试。 */
   private void dispatchOne(OrderOutboxPO outbox) {
     if (Thread.currentThread().isInterrupted()) return;
     if (outbox.attempts == null || outbox.attempts < 0) {
@@ -119,6 +119,13 @@ public class OrderOutboxDispatcher {
     }
     if (!"PENDING".equals(outbox.status)) {
       log.warn("订单超时outbox状态快照不可信，保留该项，eventId={}, status={}", outbox.eventId, outbox.status);
+      return;
+    }
+    if (outbox.eventId == null
+        || outbox.eventId.isBlank()
+        || outbox.orderNo == null
+        || outbox.orderNo.isBlank()) {
+      log.warn("订单超时outbox必填身份缺失，保留该项，eventId={}, orderNo={}", outbox.eventId, outbox.orderNo);
       return;
     }
     try {

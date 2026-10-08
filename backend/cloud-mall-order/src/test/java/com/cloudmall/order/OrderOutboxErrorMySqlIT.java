@@ -89,6 +89,48 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void blankRequiredIdentitiesCannotBePublishedOrWrittenWhileHealthyEventsContinue() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String column : List.of("eventId", "orderNo")) {
+      for (String blank : List.of("", " ", "\t\r\n", "\u2003")) {
+        fixture.update("DELETE FROM order_outbox");
+        OrderOutboxPO invalid = pendingOutbox();
+        if ("eventId".equals(column)) invalid.eventId = blank;
+        else invalid.orderNo = blank;
+        invalid.lastError = "preserve blank identity evidence";
+        OrderOutboxPO healthy = pendingOutbox();
+        healthy.id = 2L;
+        healthy.eventId = "timeout-after-blank-identity";
+        healthy.orderNo = "202610-valid-identity";
+        healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+        assertEquals(1, mapper.insert(invalid));
+        assertEquals(1, mapper.insert(healthy));
+        var before = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        List<String> sentIds = new ArrayList<>();
+        doAnswer(
+                invocation -> {
+                  CorrelationData correlation = invocation.getArgument(4);
+                  sentIds.add(correlation.getId());
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                  return null;
+                })
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        dispatcher(rabbit).dispatchPending();
+        var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        String healthyStatus =
+            fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+        String label = column + ":" + blank.codePoints().boxed().toList();
+        checks.add(() -> assertEquals(before, after, label));
+        checks.add(() -> assertEquals(List.of(healthy.eventId), sentIds, label));
+        checks.add(() -> assertEquals("PUBLISHED", healthyStatus, label));
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void ineligibleTypesAndNegativeCountersCannotBeMutatedByEitherUpdate() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (Map.Entry<String, Integer> invalid :
