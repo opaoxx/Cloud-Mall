@@ -86,7 +86,7 @@ class OrderFailureHandlingTest {
     ProductClient productClient = mock(ProductClient.class);
     UserClient userClient = mock(UserClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
-    when(orderSqlMapper.findIdempotentOrderNos(8L, "circuit-open")).thenReturn(List.of());
+    when(orderSqlMapper.findIdempotentOrders(8L, "circuit-open")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
@@ -112,7 +112,7 @@ class OrderFailureHandlingTest {
     ProductClient productClient = mock(ProductClient.class);
     UserClient userClient = mock(UserClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
-    when(orderSqlMapper.findIdempotentOrderNos(8L, "malformed-409")).thenReturn(List.of());
+    when(orderSqlMapper.findIdempotentOrders(8L, "malformed-409")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     FeignException malformed = mock(FeignException.class);
@@ -141,7 +141,7 @@ class OrderFailureHandlingTest {
     ProductClient productClient = mock(ProductClient.class);
     UserClient userClient = mock(UserClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
-    when(orderSqlMapper.findIdempotentOrderNos(8L, "invalid-address")).thenReturn(List.of());
+    when(orderSqlMapper.findIdempotentOrders(8L, "invalid-address")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of()));
     OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
@@ -158,7 +158,7 @@ class OrderFailureHandlingTest {
     ProductClient productClient = mock(ProductClient.class);
     UserClient userClient = mock(UserClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
-    when(orderSqlMapper.findIdempotentOrderNos(8L, "database-failure")).thenReturn(List.of());
+    when(orderSqlMapper.findIdempotentOrders(8L, "database-failure")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     doReturn(ApiResponse.ok(Map.of("reserved", true))).when(stockClient).reserve(any());
@@ -182,7 +182,7 @@ class OrderFailureHandlingTest {
     ProductClient productClient = mock(ProductClient.class);
     UserClient userClient = mock(UserClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
-    when(orderSqlMapper.findIdempotentOrderNos(8L, "unknown-result")).thenReturn(List.of());
+    when(orderSqlMapper.findIdempotentOrders(8L, "unknown-result")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     doThrow(new IllegalStateException("read timeout")).when(stockClient).reserve(any());
@@ -210,7 +210,7 @@ class OrderFailureHandlingTest {
     ProductClient productClient = mock(ProductClient.class);
     UserClient userClient = mock(UserClient.class);
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
-    when(orderSqlMapper.findIdempotentOrderNos(8L, "product-timeout")).thenReturn(List.of());
+    when(orderSqlMapper.findIdempotentOrders(8L, "product-timeout")).thenReturn(List.of());
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     Request productRequest =
         Request.create(

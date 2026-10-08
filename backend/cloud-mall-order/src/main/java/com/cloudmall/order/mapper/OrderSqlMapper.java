@@ -99,11 +99,40 @@ public class OrderSqlMapper {
     jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS " + table + " LIKE " + template);
   }
 
-  /** 查询用户幂等键已关联的订单号。 */
+  /**
+   * 兼容读取数据库排序规则命中的候选订单号，普通创建使用完整身份查询。
+   *
+   * @param userId 请求用户主键
+   * @param idempotencyKey 原始请求键
+   * @return 候选订单号，业务入口仍需核验持久化原键
+   */
   public List<String> findIdempotentOrderNos(Long userId, String idempotencyKey) {
+    return findIdempotentOrders(userId, idempotencyKey).stream()
+        .map(existingOrder -> existingOrder.orderNo)
+        .collect(java.util.stream.Collectors.toList());
+  }
+
+  /**
+   * 读取数据库排序规则命中的原幂等候选，由Service精确核验原始键。
+   *
+   * @param userId 请求用户主键
+   * @param idempotencyKey 原始请求键，不做大小写或空白归一化
+   * @return 持久幂等事实；不存在时为空列表
+   */
+  public List<OrderIdempotencyPO> findIdempotentOrders(Long userId, String idempotencyKey) {
     return query(
-        "select order_no from order_idempotency where user_id=? and idempotency_key=?",
-        (resultSet, rowNumber) -> resultSet.getString(1),
+        "select id,user_id,idempotency_key,order_no,created_at from order_idempotency"
+            + " where user_id=? and idempotency_key=?",
+        (resultSet, rowNumber) -> {
+          OrderIdempotencyPO existingOrder = new OrderIdempotencyPO();
+          existingOrder.id = resultSet.getLong("id");
+          existingOrder.userId = resultSet.getLong("user_id");
+          existingOrder.idempotencyKey = resultSet.getString("idempotency_key");
+          existingOrder.orderNo = resultSet.getString("order_no");
+          existingOrder.createdAt =
+              resultSet.getObject("created_at", java.time.LocalDateTime.class);
+          return existingOrder;
+        },
         userId,
         idempotencyKey);
   }

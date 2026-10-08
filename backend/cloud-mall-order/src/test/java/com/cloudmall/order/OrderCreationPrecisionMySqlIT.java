@@ -6,8 +6,11 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.common.error.BizException;
+import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
+import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
@@ -201,6 +204,108 @@ class OrderCreationPrecisionMySqlIT {
             order.get("order_no")));
     assertPersistedCreation(
         String.valueOf(order.get("order_no")), expectedCreated.toLocalDateTime());
+  }
+
+  @Test
+  void completedNormalOrderAliasesCannotReplayTheOriginalOrder() {
+    AuthContext.set(7L, "USER");
+    ApiResponse<?> original =
+        transaction.execute(status -> service.create("Key-Case", normalRequest()));
+    assertEquals("0", original.code);
+    var before = fixtureFacts();
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    UserClient users = (UserClient) ReflectionTestUtils.getField(service, "users");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    clearInvocations(stock, products, users, cart);
+    OrderSqlMapper identityMapper = new OrderSqlMapper(fixture);
+    var originalIdentity = identityMapper.findIdempotentOrders(7L, "Key-Case").get(0);
+    assertEquals("Key-Case", originalIdentity.idempotencyKey);
+    assertEquals(7L, originalIdentity.userId);
+    assertEquals(((OrderVO) original.data).orderNo, originalIdentity.orderNo);
+    assertEquals(LocalDateTime.parse("2026-12-31T23:59:59.999"), originalIdentity.createdAt);
+    assertEquals(
+        List.of(originalIdentity.orderNo), identityMapper.findIdempotentOrderNos(7L, "Key-Case"));
+    for (String alias : List.of("KEY-CASE", "Kéy-Case", "Key-Case ")) {
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> transaction.execute(status -> service.create(alias, normalRequest())));
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(ErrorCodes.DUPLICATE, failure.getCode());
+      verifyNoInteractions(stock, products, users, cart);
+      assertEquals(before, fixtureFacts());
+    }
+    ApiResponse<?> replay =
+        transaction.execute(status -> service.create("Key-Case", normalRequest()));
+    assertEquals("0", replay.code);
+    assertEquals(((OrderVO) original.data).orderNo, ((OrderVO) replay.data).orderNo);
+    verifyNoInteractions(stock, products, users, cart);
+    assertEquals(before, fixtureFacts());
+  }
+
+  @Test
+  void committedIntentAliasesCannotReplayWhenIdempotencyProjectionIsMissing() {
+    AuthContext.set(7L, "USER");
+    ApiResponse<?> original =
+        transaction.execute(status -> service.create("Key-Case", normalRequest()));
+    assertEquals("0", original.code);
+    fixture.update("DELETE FROM order_idempotency");
+    var before = fixtureFacts();
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    UserClient users = (UserClient) ReflectionTestUtils.getField(service, "users");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    for (String alias : List.of("KEY-CASE", "Kéy-Case", "Key-Case ")) {
+      clearInvocations(stock, products, users, cart);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> transaction.execute(status -> service.create(alias, normalRequest())));
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(ErrorCodes.DUPLICATE, failure.getCode());
+      verify(users).addresses();
+      verify(products).sku(7L);
+      verifyNoInteractions(stock, cart);
+      assertEquals(before, fixtureFacts());
+    }
+    clearInvocations(stock, products, users, cart);
+    ApiResponse<?> replay =
+        transaction.execute(status -> service.create("Key-Case", normalRequest()));
+    assertEquals("0", replay.code);
+    assertEquals(((OrderVO) original.data).orderNo, ((OrderVO) replay.data).orderNo);
+    verifyNoInteractions(stock, cart);
+    assertEquals(before, fixtureFacts());
+  }
+
+  @Test
+  void identicalNormalOrderKeysRemainIndependentAcrossUsers() {
+    AuthContext.set(7L, "USER");
+    ApiResponse<?> first =
+        transaction.execute(status -> service.create("same-key", normalRequest()));
+    assertEquals("0", first.code);
+    AuthContext.set(8L, "USER");
+    ApiResponse<?> second =
+        transaction.execute(status -> service.create("same-key", normalRequest()));
+    assertEquals("0", second.code);
+    assertNotEquals(((OrderVO) first.data).orderNo, ((OrderVO) second.data).orderNo);
+    assertEquals(7L, ((OrderVO) first.data).userId);
+    assertEquals(8L, ((OrderVO) second.data).userId);
+    assertEquals(
+        2, fixture.queryForObject("SELECT COUNT(*) FROM order_idempotency", Integer.class));
+    assertEquals(
+        2, fixture.queryForObject("SELECT COUNT(*) FROM order_reservation_intent", Integer.class));
+    verify((StockClient) ReflectionTestUtils.getField(service, "stock"), times(2)).reserve(any());
+  }
+
+  /** 对比隔离库全部业务事实，拒绝/重放不得写新意图、订单、幂等或outbox。 */
+  private Map<String, List<Map<String, Object>>> fixtureFacts() {
+    Map<String, List<Map<String, Object>>> facts = new java.util.LinkedHashMap<>();
+    for (String table : fixture.queryForList("SHOW TABLES", String.class)) {
+      if (!table.matches("[A-Za-z0-9_]+")) throw new IllegalStateException("非法隔离表名");
+      facts.put(table, fixture.queryForList("SELECT * FROM " + table + " ORDER BY id"));
+    }
+    return facts;
   }
 
   @Test

@@ -10,6 +10,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
+import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.feign.CartClient;
@@ -104,7 +105,7 @@ class NormalOrderIdempotencyKeyTest {
       BizException result = assertThrows(BizException.class, () -> service.create(key, request()));
       assertEquals(202, result.getHttpStatus());
       assertEquals("ORDER_RESERVATION_UNKNOWN", result.getCode());
-      verify(orders).findIdempotentOrderNos(8L, key);
+      verify(orders).findIdempotentOrders(8L, key);
       var captured = ArgumentCaptor.forClass(OrderReservationIntentPO.class);
       verify(intents).createIntent(captured.capture());
       assertEquals(key, captured.getValue().idempotencyKey);
@@ -120,7 +121,7 @@ class NormalOrderIdempotencyKeyTest {
     for (String key : List.of("k".repeat(128), "😀".repeat(128))) {
       setup();
       String orderNo = "202610-existing";
-      when(orders.findIdempotentOrderNos(8L, key)).thenReturn(List.of(orderNo));
+      when(orders.findIdempotentOrders(8L, key)).thenReturn(List.of(storedIdentity(key, orderNo)));
       when(orders.findOrder("mall_order_202610", orderNo))
           .thenReturn(
               List.of(
@@ -140,11 +141,39 @@ class NormalOrderIdempotencyKeyTest {
       ApiResponse<?> response = service.create(key, request());
       assertEquals("0", response.code);
       assertEquals(orderNo, ((OrderVO) response.data).orderNo);
-      verify(orders).findIdempotentOrderNos(8L, key);
+      verify(orders).findIdempotentOrders(8L, key);
       verifyNoInteractions(stock, products, users, cart, intents);
       verify(orders, never()).insertOrder(anyString(), any());
       verify(orders, never()).insertIdempotency(any());
     }
+  }
+
+  @Test
+  void aliasesAndMissingStoredKeysFailBeforeAnyOldOrderReadOrRpc() {
+    for (String storedKey : Arrays.asList("KEY-CASE", "Kéy-Case", "Key-Case ", "", null)) {
+      setup();
+      when(orders.findIdempotentOrders(8L, "Key-Case"))
+          .thenReturn(List.of(storedIdentity(storedKey, "202610-existing")));
+      BizException failure =
+          assertThrows(BizException.class, () -> service.create("Key-Case", request()));
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(ErrorCodes.DUPLICATE, failure.getCode());
+      verify(orders, never()).findOrder(anyString(), anyString());
+      verify(orders, never()).insertOrder(anyString(), any());
+      verify(orders, never()).insertIdempotency(any());
+      verifyNoInteractions(stock, products, users, cart, intents);
+    }
+  }
+
+  /** 构造已持久化的原始键与订单号，用于完整身份查询替身。 */
+  private static OrderIdempotencyPO storedIdentity(String key, String orderNo) {
+    OrderIdempotencyPO identity = new OrderIdempotencyPO();
+    identity.id = 1L;
+    identity.userId = 8L;
+    identity.idempotencyKey = key;
+    identity.orderNo = orderNo;
+    identity.createdAt = java.time.LocalDateTime.parse("2026-10-08T12:00:00");
+    return identity;
   }
 
   /** 非法键必须在任何依赖调用前拒绝，不能形成持久认领或库存动作。 */

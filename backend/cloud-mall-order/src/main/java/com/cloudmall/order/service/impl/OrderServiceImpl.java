@@ -130,8 +130,12 @@ public class OrderServiceImpl implements OrderService {
     long userId = AuthContext.requireUserId();
     if (key == null || key.isBlank()) bad("Idempotency-Key不能为空");
     if (key.codePointCount(0, key.length()) > 128) bad("Idempotency-Key不能超过128个字符");
-    List<String> old = orderSqlMapper.findIdempotentOrderNos(userId, key);
-    if (!old.isEmpty()) return ApiResponse.ok(find(old.get(0)));
+    List<OrderIdempotencyPO> existingOrders = orderSqlMapper.findIdempotentOrders(userId, key);
+    if (!existingOrders.isEmpty()) {
+      OrderIdempotencyPO existingOrder = existingOrders.get(0);
+      requireExactIdempotencyKey(key, existingOrder.idempotencyKey);
+      return ApiResponse.ok(find(existingOrder.orderNo));
+    }
     if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
       bad("订单商品和地址不能为空");
     Map<String, Object> address = findAddress(req.addressId);
@@ -170,9 +174,14 @@ public class OrderServiceImpl implements OrderService {
     intent.createdAt = created.toLocalDateTime();
     intent.updatedAt = intent.createdAt;
     if (!reservationIntentService.createIntent(intent)) {
-      List<OrderReservationIntentPO> existing = reservationIntentService.findByUserAndKey(userId, key);
-      if (!existing.isEmpty() && "COMMITTED".equals(existing.get(0).status))
-        return ApiResponse.ok(find(existing.get(0).orderNo));
+      List<OrderReservationIntentPO> existing =
+          reservationIntentService.findByUserAndKey(userId, key);
+      if (!existing.isEmpty()) {
+        OrderReservationIntentPO existingIntent = existing.get(0);
+        requireExactIdempotencyKey(key, existingIntent.idempotencyKey);
+        if ("COMMITTED".equals(existingIntent.status))
+          return ApiResponse.ok(find(existingIntent.orderNo));
+      }
       throw new BizException(ErrorCodes.DUPLICATE, "同一幂等请求仍在处理中或已失败", 409);
     }
 
@@ -270,6 +279,13 @@ public class OrderServiceImpl implements OrderService {
         }
       }
       throw creationFailure;
+    }
+  }
+
+  /** 数据库排序规则命中只表示候选；原键不精确相等时拒绝重放，不修改旧事实。 */
+  private static void requireExactIdempotencyKey(String requestedKey, String storedKey) {
+    if (!Objects.equals(requestedKey, storedKey)) {
+      throw new BizException(ErrorCodes.DUPLICATE, "Idempotency-Key与已有请求不完全一致", 409);
     }
   }
 
