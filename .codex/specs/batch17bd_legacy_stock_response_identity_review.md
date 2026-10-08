@@ -10,7 +10,7 @@
 
 ## 2. Legacy 响应身份门
 
-在既有响应成功且 `response.data != null` 后、计算 expected/opposite 状态之前，执行：
+在既有响应成功且 `response.data != null` 后、比较 expected/opposite 与响应 status 之前，执行：
 
 ```java
 Objects.equals(order.orderNo, response.data.orderNo)
@@ -32,7 +32,7 @@ Stock envelope 非成功、data 缺失、Feign/熔断异常继续返回原 `UNKN
 1. 先按现有 `find(orderNo)` 和用户归属校验执行；跨用户请求必须先返回 403，不调用 Stock。
 2. `orderStockActionMapper.statusForOrder(orderNo)` 非 null 时，继续直接使用已有 action 状态，不进入 Legacy 查询，本轮不改变 action 优先级。
 3. 仅 action 状态为 null 时调用 `legacyStockActionStatus(order)`；`PENDING_PAYMENT` 继续直接返回 `NONE`，不调用 Stock。
-4. 非待支付订单继续按现有状态计算 expected/opposite：CANCELLED 期望 ROLLED_BACK，其他既有支付/完成终态保持期望 CONFIRMED。
+4. 非待支付订单继续在现有位置按订单状态计算 expected/opposite：CANCELLED 期望 ROLLED_BACK，其他既有支付/完成终态保持期望 CONFIRMED；本轮不移动该本地计算。
 5. 响应身份正确后，期望状态返回 `SUCCEEDED`，相反状态或 REJECTED 返回 `CONFLICT`，其他状态返回 `UNKNOWN`；身份错误一律 UNKNOWN。
 
 本方法全程只读：不得写 order、stock action、库存流水、支付事实或 repair 数据。
