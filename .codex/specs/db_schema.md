@@ -236,10 +236,11 @@
 | `existing_request_hash` | CHAR(64) | 原幂等记录哈希 |
 | `conflict_type` | VARCHAR(32) NOT NULL | `HASH_MISMATCH`/`ORDER_NO_MISMATCH`/`INVALID_PAYLOAD` |
 | `payload` | JSON NOT NULL | 原始冲突消息 |
+| `raw_payload` | LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL | 当前 ObjectMapper 序列化得到的完整 UTF-8 JSON 文本；历史行允许 NULL，不从 payload 伪造回填 |
 | `status` | VARCHAR(16) NOT NULL | `RECORDED`/`REVIEWED`/`RESOLVED` |
 | `created_at` / `updated_at` | DATETIME(3) NOT NULL | 审计时间 |
 
-唯一约束：`uk_seckill_conflict_event(event_id)`、`uk_seckill_conflict_fingerprint(user_id,idempotency_key,request_hash,conflict_type)`。重复冲突消息按唯一键幂等记录；`RECORDED` 表示消息已确认且不重试，`REVIEWED/RESOLVED` 只由人工对账流程推进。该表与 `seckill_message_recovery` 分工明确：前者记录主队列即时冲突，后者记录 DLQ 的可重放/隔离状态。
+唯一约束：`uk_seckill_conflict_event(event_id)`、`uk_seckill_conflict_fingerprint(user_id,idempotency_key,request_hash,conflict_type)`。重复冲突消息按唯一键幂等记录；`RECORDED` 表示消息已确认且不重试，`REVIEWED/RESOLVED` 只由人工对账流程推进。`payload` 是结构化 JSON 视图，`raw_payload` 是当前序列化文本证据，不参与唯一键或幂等匹配。该表与 `seckill_message_recovery` 分工明确：前者记录主队列即时冲突，后者记录 DLQ 的可重放/隔离状态。
 
 ### 5.4 `order_reservation_intent`
 
