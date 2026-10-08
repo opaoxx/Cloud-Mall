@@ -11,9 +11,12 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,32 +73,47 @@ public class OrderOutboxDispatcher {
   }
 
   /**
-   * 投递已提交的超时候选，单条数据库写异常告警并继续本批后项。
+   * 投递已提交的超时候选；保留明确中断信号并停止未来动作，单条数据库异常保原隔离。
    *
-   * @throws DataAccessException 扫描数据库失败，不能将扫描不可用伪装为单条跳过
+   * @throws DataAccessException 非中断扫描数据库失败，不能将扫描不可用伪装为单条跳过
    */
   @Scheduled(fixedDelayString = "${cloudmall.order.outbox.dispatch-interval-ms:1000}")
   public void dispatchPending() {
+    if (Thread.currentThread().isInterrupted()) return;
     // 1. 扫描失败继续传播，不生成虚假候选或吞掉数据库不可用。
-    List<OrderOutboxPO> pendingRows = orderOutboxMapper.findPendingOutbox(batchSize);
+    List<OrderOutboxPO> pendingRows;
+    try {
+      pendingRows = orderOutboxMapper.findPendingOutbox(batchSize);
+    } catch (RuntimeException scanFailure) {
+      if (interrupted(scanFailure)) return;
+      throw scanFailure;
+    }
+    if (Thread.currentThread().isInterrupted()) return;
     for (OrderOutboxPO pendingRow : pendingRows) {
+      if (Thread.currentThread().isInterrupted()) return;
       // 2. 只隔离明确的单候选数据库异常，不重发或追加本候选写入。
       try {
         dispatchOne(pendingRow);
       } catch (DataAccessException databaseFailure) {
+        if (interrupted(databaseFailure)) return;
         log.warn("订单超时outbox数据库写入失败，保留当前事实并继续后项，eventId={}", pendingRow.eventId, databaseFailure);
+      } catch (RuntimeException candidateFailure) {
+        if (interrupted(candidateFailure)) return;
+        throw candidateFailure;
       }
     }
   }
 
   /** 只处理计数可解释的当前快照；保留原eventId，只有确认且未被退回时才结束重试。 */
   private void dispatchOne(OrderOutboxPO outbox) {
+    if (Thread.currentThread().isInterrupted()) return;
     if (outbox.attempts == null || outbox.attempts < 0) {
       log.warn("订单超时outbox尝试次数快照非法，保留该项，eventId={}, attempts={}", outbox.eventId, outbox.attempts);
       return;
     }
     try {
       Map<String, Object> payload = parsePayload(outbox.payload);
+      if (Thread.currentThread().isInterrupted()) return;
       String expireAt = stringValue(payload.get("expireAt"));
       if (expireAt == null || expireAt.isBlank()) {
         throw new IllegalArgumentException("ORDER_TIMEOUT outbox 缺少 expireAt: " + outbox.eventId);
@@ -111,14 +129,17 @@ public class OrderOutboxDispatcher {
       envelope.put("payload", payload);
 
       CorrelationData correlationData = new CorrelationData(outbox.eventId);
+      if (Thread.currentThread().isInterrupted()) return;
       rabbitTemplate.convertAndSend(
           OrderMessagingConfiguration.TIMEOUT_EXCHANGE,
           "",
           envelope,
           message -> withTtl(message, ttlMillis),
           correlationData);
+      if (Thread.currentThread().isInterrupted()) return;
       CorrelationData.Confirm confirm =
           correlationData.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS);
+      if (Thread.currentThread().isInterrupted()) return;
       Message returnedMessage = correlationData.getReturnedMessage();
       if (confirm == null || !confirm.isAck() || returnedMessage != null) {
         String reason = confirm == null ? "未收到 publisher confirm" : confirm.getReason();
@@ -127,13 +148,17 @@ public class OrderOutboxDispatcher {
         }
         throw new IllegalStateException(reason);
       }
+      if (Thread.currentThread().isInterrupted()) return;
       orderOutboxMapper.markOutboxPublished(outbox.eventId, LocalDateTime.now(BUSINESS_ZONE));
     } catch (DataAccessException databaseFailure) {
+      if (interrupted(databaseFailure)) return;
       // 完成写的数据库失败不等于发送失败，交由候选边界处理而非再次写failure。
       throw databaseFailure;
     } catch (Exception exception) {
+      if (interrupted(exception)) return;
       LocalDateTime nextRetryAt = LocalDateTime.now(BUSINESS_ZONE).plusSeconds(retryDelaySeconds);
       String error = compactError(exception);
+      if (Thread.currentThread().isInterrupted()) return;
       orderOutboxMapper.recordOutboxFailure(outbox.eventId, error, nextRetryAt);
       log.warn(
           "订单超时 outbox 发布失败，将重试，eventId={}, nextRetryAt={}",
@@ -141,6 +166,19 @@ public class OrderOutboxDispatcher {
           nextRetryAt,
           exception);
     }
+  }
+
+  /** 仅识别当前标志或cause中的明确InterruptedException，保信号且防cause环，不把普通I/O超时当取消。 */
+  private static boolean interrupted(Throwable failure) {
+    if (Thread.currentThread().isInterrupted()) return true;
+    Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (Throwable cause = failure; cause != null && visited.add(cause); cause = cause.getCause()) {
+      if (cause instanceof InterruptedException) {
+        Thread.currentThread().interrupt();
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 解析本地事务写入的 JSON，非法内容进入失败重试和告警路径。 */

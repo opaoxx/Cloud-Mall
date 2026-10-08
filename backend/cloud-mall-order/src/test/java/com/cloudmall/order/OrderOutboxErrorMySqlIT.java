@@ -89,6 +89,72 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void interruptingAConfirmWaitPreservesAllRowsAndStopsTheFollowingEvent() throws Exception {
+    OrderOutboxPO first = pendingOutbox();
+    OrderOutboxPO second = pendingOutbox();
+    second.id = 2L;
+    second.eventId = "after-interrupted-confirm";
+    second.orderNo = "202610-after-interrupt";
+    second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+    assertEquals(1, mapper.insert(first));
+    assertEquals(1, mapper.insert(second));
+    var before = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    java.util.concurrent.CountDownLatch firstSent = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicBoolean signalAtExit =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    java.util.concurrent.atomic.AtomicReference<Throwable> unexpected =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    List<String> sentIds = new java.util.concurrent.CopyOnWriteArrayList<>();
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    doAnswer(
+            invocation -> {
+              CorrelationData correlation = invocation.getArgument(4);
+              sentIds.add(correlation.getId());
+              if (first.eventId.equals(correlation.getId())) firstSent.countDown();
+              else correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+              return null;
+            })
+        .when(rabbit)
+        .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    OrderOutboxDispatcher dispatcher =
+        new OrderOutboxDispatcher(
+            mapper,
+            rabbit,
+            new ObjectMapper(),
+            new MockEnvironment()
+                .withProperty("cloudmall.order.outbox.confirm-timeout-ms", "30000"));
+    Thread worker =
+        new Thread(
+            () -> {
+              try {
+                dispatcher.dispatchPending();
+              } catch (Throwable failure) {
+                unexpected.set(failure);
+              } finally {
+                signalAtExit.set(Thread.currentThread().isInterrupted());
+              }
+            },
+            "outbox-interrupted-confirm-test");
+    try {
+      worker.start();
+      assertTrue(firstSent.await(5, java.util.concurrent.TimeUnit.SECONDS));
+      worker.interrupt();
+      worker.join(10000);
+      assertFalse(worker.isAlive());
+    } finally {
+      worker.interrupt();
+      worker.join(5000);
+      assertFalse(worker.isAlive());
+    }
+    var after = fixture.queryForList("SELECT * FROM order_outbox ORDER BY id");
+    assertAll(
+        () -> assertNull(unexpected.get()),
+        () -> assertTrue(signalAtExit.get()),
+        () -> assertEquals(List.of(first.eventId), sentIds),
+        () -> assertEquals(before, after));
+  }
+
+  @Test
   void negativeRowsCannotFillTheScanLimitAndStarveEligibleEvents() {
     LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(2).withNano(0);
     for (int rowIndex = 1; rowIndex <= 50; rowIndex++) {
