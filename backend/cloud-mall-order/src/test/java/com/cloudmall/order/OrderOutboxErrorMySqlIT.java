@@ -89,6 +89,143 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void ineligibleTypesAndNegativeCountersCannotBeMutatedByEitherUpdate() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (Map.Entry<String, Integer> invalid :
+        List.of(
+            Map.entry("PAY_NOTIFY", 0),
+            Map.entry("order_timeout", 0),
+            Map.entry("ORDER_TIMEOUT ", 0),
+            Map.entry("ORDER_TÍMEOUT", 0),
+            Map.entry("", 0),
+            Map.entry("ORDER_TIMEOUT", -1),
+            Map.entry("ORDER_TIMEOUT", Integer.MIN_VALUE))) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO original = pendingOutbox();
+      original.eventType = invalid.getKey();
+      original.attempts = invalid.getValue();
+      original.lastError = "preserve eligibility evidence";
+      assertEquals(1, mapper.insert(original));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox");
+      int failed =
+          mapper.recordOutboxFailure(
+              original.eventId, "new error", original.nextRetryAt.plusMinutes(1));
+      var afterFailure = fixture.queryForMap("SELECT * FROM order_outbox");
+      int completed =
+          mapper.markOutboxPublished(original.eventId, original.createdAt.plusMinutes(1));
+      var afterCompletion = fixture.queryForMap("SELECT * FROM order_outbox");
+      String label = invalid.toString();
+      checks.add(() -> assertEquals(0, failed, label));
+      checks.add(() -> assertEquals(before, afterFailure, label));
+      checks.add(() -> assertEquals(0, completed, label));
+      checks.add(() -> assertEquals(before, afterCompletion, label));
+    }
+    for (int attempts : List.of(0, Integer.MAX_VALUE)) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO original = pendingOutbox();
+      original.attempts = attempts;
+      assertEquals(1, mapper.insert(original));
+      assertEquals(
+          1,
+          mapper.recordOutboxFailure(
+              original.eventId, "legal failure😀", original.nextRetryAt.plusMinutes(1)));
+      assertEquals(
+          1, mapper.markOutboxPublished(original.eventId, original.createdAt.plusMinutes(1)));
+      var after = fixture.queryForMap("SELECT * FROM order_outbox");
+      checks.add(() -> assertEquals("ORDER_TIMEOUT", after.get("event_type")));
+      checks.add(() -> assertEquals("PUBLISHED", after.get("status")));
+      checks.add(
+          () ->
+              assertEquals(
+                  Math.min((long) attempts + 1, Integer.MAX_VALUE),
+                  ((Number) after.get("attempts")).longValue()));
+      checks.add(() -> assertNull(after.get("last_error")));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void eligibilityChangesDuringSendCannotBeCompletedOrRetriedByTheTimeoutHandler() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (Map.Entry<String, Integer> changed :
+        List.of(
+            Map.entry("PAY_NOTIFY", 0),
+            Map.entry("order_timeout", 0),
+            Map.entry("ORDER_TIMEOUT ", 0),
+            Map.entry("ORDER_TÍMEOUT", 0),
+            Map.entry("ORDER_TIMEOUT", -1))) {
+      for (boolean acknowledged : List.of(true, false)) {
+        fixture.update("DELETE FROM order_outbox");
+        OrderOutboxPO first = pendingOutbox();
+        first.lastError = "preserve changed eligibility";
+        OrderOutboxPO second = pendingOutbox();
+        second.id = 2L;
+        second.eventId = "after-changed-event-eligibility";
+        second.orderNo = "202610-after-changed-eligibility";
+        second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+        assertEquals(1, mapper.insert(first));
+        assertEquals(1, mapper.insert(second));
+        java.util.concurrent.atomic.AtomicReference<Map<String, Object>> established =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        List<String> sentIds = new ArrayList<>();
+        doAnswer(
+                invocation -> {
+                  CorrelationData correlation = invocation.getArgument(4);
+                  sentIds.add(correlation.getId());
+                  if (first.eventId.equals(correlation.getId())) {
+                    assertEquals(
+                        1,
+                        fixture.update(
+                            "UPDATE order_outbox SET event_type=?,attempts=? WHERE id=1",
+                            changed.getKey(),
+                            changed.getValue()));
+                    established.set(fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1"));
+                    if (!acknowledged) throw new IllegalStateException("controlled send failure");
+                  }
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                  return null;
+                })
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+            new ch.qos.logback.core.read.ListAppender<>();
+        warnings.start();
+        logger.addAppender(warnings);
+        try {
+          dispatcher(rabbit).dispatchPending();
+        } finally {
+          logger.detachAppender(warnings);
+          warnings.stop();
+        }
+        long completionFailures =
+            warnings.list.stream()
+                .filter(
+                    event ->
+                        event.getLevel() == ch.qos.logback.classic.Level.WARN
+                            && event.getThrowableProxy() != null
+                            && event
+                                .getThrowableProxy()
+                                .getClassName()
+                                .endsWith("OptimisticLockingFailureException"))
+                .count();
+        var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        String secondStatus =
+            fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+        String label = changed + ":" + acknowledged;
+        checks.add(() -> assertEquals(established.get(), after, label));
+        checks.add(() -> assertEquals(List.of(first.eventId, second.eventId), sentIds, label));
+        checks.add(() -> assertEquals(acknowledged ? 1 : 0, completionFailures, label));
+        checks.add(() -> assertEquals("PUBLISHED", secondStatus, label));
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void eventIdAliasesCannotMutateTheOriginalEventThroughEitherUpdate() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (String alias :
