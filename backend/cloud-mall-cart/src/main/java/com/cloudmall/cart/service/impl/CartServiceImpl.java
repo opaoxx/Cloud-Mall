@@ -144,21 +144,29 @@ public class CartServiceImpl implements CartService {
     return ApiResponse.ok(null);
   }
 
+  /**
+   * 预检已选数量后读取当前商品事实并计算预览金额，坏数量不触发写回。
+   *
+   * @param body 原skuIds选择，空集合继续按checked选中项处理
+   * @return 原items/invalidItems和金额字符串响应
+   * @throws BizException 已选数量损坏为500，Redis依赖失败为503，商品错误沿原分类
+   */
   @PostMapping("/settlement/preview")
-  /** 执行 preview 相关操作。 */
   public ApiResponse<?> preview(@RequestBody Map<String, List<Long>> body) {
-    // 1. 接收并整理 preview 的业务请求。
-    // 2. 执行 preview 的核心业务校验与状态处理。
-    // 3. 返回 preview 的处理结果。
+    // 1. 保留显式SKU和checked选择，只预检本次选中集合。
     Set<Long> selected = new HashSet<>(body.getOrDefault("skuIds", List.of()));
     List<CartItemPO> items =
         readItems().stream()
             .filter(
-                i ->
+                item ->
                     selected.isEmpty()
-                        ? Boolean.TRUE.equals(i.checked)
-                        : selected.contains(i.skuId))
+                        ? Boolean.TRUE.equals(item.checked)
+                        : selected.contains(item.skuId))
             .collect(Collectors.toList());
+    for (CartItemPO item : items) {
+      if (item.quantity < 1) throw new BizException(ErrorCodes.INTERNAL, "购物车数量数据损坏", 500);
+    }
+    // 2. 全部数量合法后才查商品、刷新摘要与累加金额，原失效项语义保持。
     List<Map<String, Object>> invalid = new ArrayList<>();
     BigDecimal total = BigDecimal.ZERO;
     for (CartItemPO item : items) {
@@ -171,11 +179,19 @@ public class CartServiceImpl implements CartService {
         total =
             total.add(
                 new BigDecimal(current.unitPrice()).multiply(BigDecimal.valueOf(item.quantity)));
-      } catch (BizException e) {
-        if (e.getHttpStatus() >= 500) throw e;
-        invalid.add(Map.of("skuId", item.skuId, "code", e.getCode(), "message", e.getMessage()));
+      } catch (BizException invalidSku) {
+        if (invalidSku.getHttpStatus() >= 500) throw invalidSku;
+        invalid.add(
+            Map.of(
+                "skuId",
+                item.skuId,
+                "code",
+                invalidSku.getCode(),
+                "message",
+                invalidSku.getMessage()));
       }
     }
+    // 3. 返回原字段/金额格式，不把预览当作库存锁定或下单价格依据。
     return ApiResponse.ok(
         Map.of(
             "items",
