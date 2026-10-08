@@ -40,6 +40,12 @@ ClaimService 的 ForUpdate、exact key、原 hash 比较、alias 409 和并发�
 3. Stock 入口 blank/129 code point key 在 Sentinel/claim/Redis 前返回 400，数据库/Redis 零调用；128 emoji 可正常 claim。
 4. Mapper/Claim/Stock 的原 hash、payload、occurredAt、状态和事务回归通过；原库 checksum 不变。
 
-## 6. 明确排除
+## 6. Order 秒杀入口门
+
+OrderServiceImpl.seckill 必须在 Sentinel、用户地址查询和 Stock Feign 调用之前复用同一 key 参数门：idempotencyKey 为 null/blank 或 Unicode code point 数超过 128 时，沿现有参数错误 `INVALID`/HTTP 400 返回。该入口校验避免下游 Stock 的 INVALID400 被 Feign 异常转换为 503；不改变 Feign 错误转换、合法 128 code point（含非 BMP emoji）行为或其他 Order 接口。
+
+对应单测契约：超长 key 不得进入 Sentinel、users.addresses 或 Stock RPC；blank/null 继续原 400；合法 128 code point key 保持原调用链。Stock 侧 17AL Mapper/Claim 物理守卫仍独立保留，不能因 Order 入口门而删除。
+
+## 7. 明确排除
 
 本轮不新增 schema/API/状态，不改变时间/hash 算法，不迁移历史记录，不扩展通用 JSON/lease/网络错误处理；只防止新认领输入和 SQL 保存静默变形。
