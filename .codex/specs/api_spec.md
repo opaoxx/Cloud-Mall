@@ -135,6 +135,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 该商品事实的 unitPrice 必须是可由 BigDecimal 解析的原始金额字符串；null、空白或不可解析值按原 INTERNAL/500 处理，不写入或刷新当前项、不计入 preview 金额。合法字符串不做 scale/格式归一化，本条不定义金额范围上限。
 
+购物车 add 在三轮已确认并发 compare-write mismatch 后返回既有 COMMON_CONFLICT/409；脚本结果未知沿既有 INTERNAL/500，Redis 依赖故障沿既有 503，均不自动重试或猜测写入。请求和响应字段保持不变。
+
 ## 7. 订单服务接口
 
 | 方法 | 路径 | 请求 | 响应/说明 |
