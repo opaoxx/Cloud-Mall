@@ -41,6 +41,13 @@ public class CartServiceImpl implements CartService {
               + "redis.call('PEXPIRE',KEYS[1],ARGV[5]); return 1",
           Long.class);
 
+  /** 只删除仍与初读原JSON相同的field，不解析JSON、不续TTL或追删并发变更。 */
+  private static final DefaultRedisScript<Long> CART_COMPARE_DELETE =
+      new DefaultRedisScript<>(
+          "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end; "
+              + "return redis.call('HDEL',KEYS[1],ARGV[1])",
+          Long.class);
+
   /** 保存 redis 的业务状态或配置。 */
   private final StringRedisTemplate redis;
 
@@ -163,15 +170,24 @@ public class CartServiceImpl implements CartService {
     return ApiResponse.ok(updatedItem);
   }
 
+  /**
+   * 只清理初读已勾选且原JSON未变化的项，保留并发修改后的购物车项。
+   *
+   * @return 原成功空响应，缺失或已变更的候选跳过
+   * @throws BizException Hash数据损坏或删除结果未知为500，Redis故障为503；前序删除不回滚
+   */
   @DeleteMapping("/checked-items")
-  /** 执行 clearChecked 相关操作。 */
   public ApiResponse<?> clearChecked() {
-    // 1. 接收并整理 clearChecked 的业务请求。
-    // 2. 执行 clearChecked 的核心业务校验与状态处理。
-    // 3. 返回 clearChecked 的处理结果。
-    readItems().stream()
-        .filter(i -> Boolean.TRUE.equals(i.checked))
-        .forEach(i -> redisOperation(() -> redis.opsForHash().delete(key(), String.valueOf(i.skuId))));
+    // 1. 同次读取原JSON与PO，整张Hash身份校验通过后才授权删除。
+    String cartKey = key();
+    Map<String, String> originalValues = new HashMap<>();
+    Map<String, CartItemPO> items = readMap(cartKey, originalValues);
+    // 2. 仅对初读勾选项执行一次条件删除，不重读或追删已变更的项。
+    for (Map.Entry<String, CartItemPO> entry : items.entrySet()) {
+      if (Boolean.TRUE.equals(entry.getValue().checked))
+        compareDelete(cartKey, entry.getKey(), originalValues.get(entry.getKey()));
+    }
+    // 3. 保留成功null语义，不把逐项清理当作整张Hash事务。
     return ApiResponse.ok(null);
   }
 
@@ -359,6 +375,15 @@ public class CartServiceImpl implements CartService {
     if (Long.valueOf(1).equals(result)) return true;
     if (Long.valueOf(0).equals(result)) return false;
     throw new BizException(ErrorCodes.INTERNAL, "购物车更新结果未知", 500);
+  }
+
+  /** 原JSON精确相等才删除。0为缺失或变更的确定跳过，1为确定删除；其他返回或Redis异常 不猜测是否已应用、不重试，也不补偿已删除的前序候选。 */
+  private void compareDelete(String cartKey, String skuField, String expectedJson) {
+    Long result =
+        redisOperation(
+            () -> redis.execute(CART_COMPARE_DELETE, List.of(cartKey), skuField, expectedJson));
+    if (!Long.valueOf(0).equals(result) && !Long.valueOf(1).equals(result))
+      throw new BizException(ErrorCodes.INTERNAL, "购物车清理结果未知", 500);
   }
 
   /** Redis 故障统一按已评审的可重试依赖错误返回。 */
