@@ -89,6 +89,51 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void invalidCounterSnapshotsCannotPublishButFollowingHealthyEventsStillCan() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (int invalidCount : List.of(-1, Integer.MIN_VALUE)) {
+      for (int healthyCount : List.of(0, Integer.MAX_VALUE)) {
+        fixture.update("DELETE FROM order_outbox");
+        OrderOutboxPO invalid = pendingOutbox();
+        invalid.attempts = invalidCount;
+        invalid.lastError = "keep invalid counter fact";
+        OrderOutboxPO healthy = pendingOutbox();
+        healthy.id = 2L;
+        healthy.eventId = "healthy-after-invalid";
+        healthy.orderNo = "202610-healthy";
+        healthy.attempts = healthyCount;
+        healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+        assertEquals(1, mapper.insert(invalid));
+        assertEquals(1, mapper.insert(healthy));
+        var invalidBefore = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        List<String> published = new ArrayList<>();
+        doAnswer(
+                invocation -> {
+                  CorrelationData correlation = invocation.getArgument(4);
+                  published.add(correlation.getId());
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                  return null;
+                })
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        dispatcher(rabbit).dispatchPending();
+        var invalidAfter = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        var healthyAfter = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=2");
+        String label = invalidCount + ":" + healthyCount;
+        checks.add(() -> assertEquals(invalidBefore, invalidAfter, label));
+        checks.add(() -> assertEquals(List.of(healthy.eventId), published, label));
+        checks.add(() -> assertEquals("PUBLISHED", healthyAfter.get("status"), label));
+        checks.add(
+            () ->
+                assertEquals(
+                    healthyCount, ((Number) healthyAfter.get("attempts")).intValue(), label));
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void failureCountersSaturateWithoutSqlWarningsAndDoNotRepairNegativeFacts() throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     LocalDateTime retryAt = LocalDateTime.of(2026, 10, 9, 12, 0, 0, 456_000_000);

@@ -77,8 +77,12 @@ public class OrderOutboxDispatcher {
     }
   }
 
-  /** 保留原 eventId 投递，只有确认且未被退回时才结束重试。 */
+  /** 只处理计数可解释的当前快照；保留原eventId，只有确认且未被退回时才结束重试。 */
   private void dispatchOne(OrderOutboxPO outbox) {
+    if (outbox.attempts == null || outbox.attempts < 0) {
+      log.warn("订单超时outbox尝试次数快照非法，保留该项，eventId={}, attempts={}", outbox.eventId, outbox.attempts);
+      return;
+    }
     try {
       Map<String, Object> payload = parsePayload(outbox.payload);
       String expireAt = stringValue(payload.get("expireAt"));
