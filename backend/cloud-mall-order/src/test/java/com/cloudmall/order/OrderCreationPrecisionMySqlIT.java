@@ -1344,6 +1344,167 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void snapshotSerializationFailuresCannotLeaveIntentsOrReachStockAndSqlWrites() throws Exception {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    UserClient users = (UserClient) ReflectionTestUtils.getField(service, "users");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    OrderSqlMapper orderWrites =
+        spy((OrderSqlMapper) ReflectionTestUtils.getField(service, "orderSqlMapper"));
+    ReflectionTestUtils.setField(service, "orderSqlMapper", orderWrites);
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String fault : List.of("address", "first-sku", "later-sku")) {
+      Map<String, Object> address = Map.of("id", 9L, "receiver", "小明");
+      Map<String, String> first = Map.of("color", "blue");
+      Map<String, String> second = Map.of("size", "large");
+      Object rejectedSnapshot =
+          "address".equals(fault) ? address : "first-sku".equals(fault) ? first : second;
+      ObjectMapper serializer = spy(new ObjectMapper());
+      doThrow(
+              com.fasterxml.jackson.databind.JsonMappingException.fromUnexpectedIOE(
+                  new java.io.IOException("controlled snapshot serialization failure")))
+          .when(serializer)
+          .writeValueAsString(same(rejectedSnapshot));
+      ReflectionTestUtils.setField(service, "mapper", serializer);
+      doReturn(ApiResponse.ok(List.of(address))).when(users).addresses();
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", BigDecimal.TEN, first)))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      if ("later-sku".equals(fault)) {
+        OrderItemDTO next = new OrderItemDTO();
+        next.skuId = 8L;
+        next.quantity = 1;
+        request.items = List.of(request.items.get(0), next);
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(8L, 9L, "product", "SKU-8", BigDecimal.TEN, second)))
+            .when(products)
+            .sku(8L);
+      }
+      clearInvocations(stock, cart, orderWrites);
+      var before = fixtureFacts();
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () ->
+                  transaction.execute(status -> service.create("serialization-" + fault, request)));
+      var after = fixtureFacts();
+      long stockCalls = mockingDetails(stock).getInvocations().size();
+      long orderSqlWrites =
+          mockingDetails(orderWrites).getInvocations().stream()
+              .filter(invocation -> invocation.getMethod().getName().startsWith("insert"))
+              .count();
+      long cartPosts =
+          mockingDetails(cart).getInvocations().stream()
+              .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+              .count();
+      checks.add(() -> assertEquals(500, failure.getHttpStatus(), fault));
+      checks.add(() -> assertEquals(ErrorCodes.INTERNAL, failure.getCode(), fault));
+      checks.add(() -> assertEquals(before, after, fault));
+      checks.add(() -> assertEquals(0, stockCalls, fault));
+      checks.add(() -> assertEquals(0, orderSqlWrites, fault));
+      checks.add(() -> assertEquals(0, cartPosts, fault));
+      verify(serializer).writeValueAsString(same(rejectedSnapshot));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void preparedSnapshotsKeepOriginalJsonAcrossStockAndRealSqlCommit() throws Exception {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    UserClient users = (UserClient) ReflectionTestUtils.getField(service, "users");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    Map<String, Object> address = new java.util.LinkedHashMap<>();
+    address.put("id", 9L);
+    address.put("receiver", "原地址\"\\\n😀");
+    Map<String, String> originalSnapshot = new java.util.LinkedHashMap<>();
+    originalSnapshot.put("color", "蓝\"\\\n😀");
+    originalSnapshot.put("nullable", null);
+    ObjectMapper serializer = spy(new ObjectMapper());
+    String expectedAddress = serializer.writeValueAsString(address);
+    String expectedSku = serializer.writeValueAsString(originalSnapshot);
+    clearInvocations(serializer);
+    ReflectionTestUtils.setField(service, "mapper", serializer);
+    doReturn(ApiResponse.ok(List.of(address))).when(users).addresses();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("12.3000"), originalSnapshot)))
+        .when(products)
+        .sku(7L);
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(8L, 9L, "product", "SKU-8", BigDecimal.TEN, null)))
+        .when(products)
+        .sku(8L);
+    doAnswer(
+            invocation -> {
+              verify(serializer).writeValueAsString(same(address));
+              verify(serializer).writeValueAsString(same(originalSnapshot));
+              verify(serializer).writeValueAsString(isNull());
+              address.put("receiver", "later address");
+              originalSnapshot.put("color", "later sku");
+              StockClient.Reservation reservation = invocation.getArgument(0);
+              assertEquals(
+                  List.of(7L, 8L),
+                  reservation.items().stream().map(StockClient.Line::skuId).toList());
+              return ApiResponse.ok(Map.of("orderNo", reservation.orderNo(), "status", "RESERVED"));
+            })
+        .when(stock)
+        .reserve(any());
+    CreateOrderDTO request = normalRequest();
+    OrderItemDTO second = new OrderItemDTO();
+    second.skuId = 8L;
+    second.quantity = 2;
+    request.items = List.of(request.items.get(0), second);
+    ApiResponse<?> created =
+        transaction.execute(status -> service.create("prepared-snapshot-sql", request));
+    assertEquals("0", created.code);
+    String orderNo = ((OrderVO) created.data).orderNo;
+    String persistedAddress =
+        fixture.queryForObject(
+            "SELECT address_snapshot FROM mall_order_202612 WHERE order_no=?",
+            String.class,
+            orderNo);
+    assertEquals(serializer.readTree(expectedAddress), serializer.readTree(persistedAddress));
+    List<Map<String, Object>> details =
+        fixture.queryForList(
+            "SELECT sku_id, sku_snapshot, unit_price, quantity, line_amount FROM mall_order_item_202612 WHERE order_no=? ORDER BY sku_id",
+            orderNo);
+    assertEquals(2, details.size());
+    assertEquals(
+        serializer.readTree(expectedSku),
+        serializer.readTree(String.valueOf(details.get(0).get("sku_snapshot"))));
+    assertTrue(serializer.readTree(String.valueOf(details.get(1).get("sku_snapshot"))).isNull());
+    assertEquals(7L, ((Number) details.get(0).get("sku_id")).longValue());
+    assertEquals(8L, ((Number) details.get(1).get("sku_id")).longValue());
+    for (Map<String, Object> detail : details)
+      assertEquals(
+          ((BigDecimal) detail.get("unit_price"))
+              .multiply(BigDecimal.valueOf(((Number) detail.get("quantity")).longValue())),
+          detail.get("line_amount"));
+    assertEquals(
+        new BigDecimal("32.30"),
+        fixture.queryForObject(
+            "SELECT total_amount FROM mall_order_202612 WHERE order_no=?",
+            BigDecimal.class,
+            orderNo));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE order_no=?", String.class, orderNo));
+    assertPersistedCreation(orderNo, LocalDateTime.parse("2026-12-31T23:59:59.999"));
+    verify(serializer).writeValueAsString(same(address));
+    verify(serializer).writeValueAsString(same(originalSnapshot));
+    verify(serializer).writeValueAsString(isNull());
+  }
+
+  @Test
   void missingOrOverwideProductMetadataCannotReachStockOrLeaveOrderFacts() {
     AuthContext.set(7L, "USER");
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
@@ -2555,6 +2716,7 @@ class OrderCreationPrecisionMySqlIT {
     assertEquals(0, fixture.queryForObject("SELECT COUNT(*) FROM order_outbox", Integer.class));
   }
 
+  /** 核对订单、全部明细和超时outbox的同源时间，明细至少一条且不得只检查首项。 */
   private void assertPersistedCreation(String orderNo, LocalDateTime expected) throws Exception {
     String month = orderNo.substring(0, 6);
     Map<String, Object> order =
@@ -2562,12 +2724,14 @@ class OrderCreationPrecisionMySqlIT {
     assertEquals(expected, local(order.get("created_at")));
     assertEquals(expected, local(order.get("updated_at")));
     assertEquals(expected.plusMinutes(30), local(order.get("expire_at")));
-    assertEquals(
-        expected,
-        fixture.queryForObject(
+    List<LocalDateTime> itemCreationTimes =
+        fixture.queryForList(
             "SELECT created_at FROM mall_order_item_" + month + " WHERE order_no=?",
             LocalDateTime.class,
-            orderNo));
+            orderNo);
+    assertFalse(itemCreationTimes.isEmpty());
+    for (LocalDateTime itemCreationTime : itemCreationTimes)
+      assertEquals(expected, itemCreationTime);
     Map<String, Object> outbox =
         fixture.queryForMap("SELECT * FROM order_outbox WHERE order_no=?", orderNo);
     for (String field : List.of("created_at", "updated_at", "next_retry_at"))

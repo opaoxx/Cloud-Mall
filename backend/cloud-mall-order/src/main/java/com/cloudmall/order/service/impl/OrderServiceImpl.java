@@ -207,6 +207,10 @@ public class OrderServiceImpl implements OrderService {
       lines.add(new StockClient.Line(item.skuId, item.quantity));
       rows.add(new ItemRow(skuView, line, item.quantity));
     }
+    // 全集商品和金额校验通过后一次性准备JSON，序列化失败不得创建意图或预扣库存。
+    String addressSnapshotJson = toJson(address);
+    List<String> skuSnapshotJsons = new ArrayList<>(rows.size());
+    for (ItemRow row : rows) skuSnapshotJsons.add(toJson(row.sku.skuSnapshot()));
     OrderReservationIntentPO intent = new OrderReservationIntentPO();
     intent.id = id();
     intent.orderNo = orderNo;
@@ -273,14 +277,15 @@ public class OrderServiceImpl implements OrderService {
       order.status = "PENDING_PAYMENT";
       order.totalAmount = total;
       order.payAmount = total;
-      order.addressSnapshot = toJson(address);
+      order.addressSnapshot = addressSnapshotJson;
       order.expireAt = expire.toLocalDateTime();
       order.createdAt = created.toLocalDateTime();
       order.updatedAt = created.toLocalDateTime();
       orderSqlMapper.insertOrder(table, order);
       long orderId = orderSqlMapper.findOrderId(table, orderNo);
       String itemTable = table.replace("mall_order_", "mall_order_item_");
-      for (ItemRow row : rows) {
+      for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+        ItemRow row = rows.get(rowIndex);
         OrderItemPO orderItem = new OrderItemPO();
         orderItem.id = id();
         orderItem.orderId = orderId;
@@ -288,7 +293,7 @@ public class OrderServiceImpl implements OrderService {
         orderItem.productId = row.sku.productId();
         orderItem.skuId = row.sku.skuId();
         orderItem.productNameSnapshot = row.sku.productName();
-        orderItem.skuSnapshot = toJson(row.sku.skuSnapshot());
+        orderItem.skuSnapshot = skuSnapshotJsons.get(rowIndex);
         orderItem.unitPrice = row.sku.unitPrice();
         orderItem.quantity = row.quantity;
         orderItem.lineAmount = row.line;

@@ -388,6 +388,137 @@ class OrderProductIdentityTest {
     }
   }
 
+  @Test
+  void addressAndEverySkuSerializationFailurePrecedeIntentStockAndSql() throws Exception {
+    for (String fault : List.of("address", "first-sku", "later-sku")) {
+      Fixture fixture = new Fixture();
+      Map<String, Object> address = Map.of("id", 9L, "receiver", "小明");
+      Map<String, String> first = Map.of("color", "blue");
+      Map<String, String> second = Map.of("size", "large");
+      Object rejected =
+          "address".equals(fault) ? address : "first-sku".equals(fault) ? first : second;
+      ObjectMapper serializer = spy(new ObjectMapper());
+      doThrow(
+              com.fasterxml.jackson.databind.JsonMappingException.fromUnexpectedIOE(
+                  new java.io.IOException("controlled snapshot failure")))
+          .when(serializer)
+          .writeValueAsString(same(rejected));
+      ReflectionTestUtils.setField(fixture.service, "mapper", serializer);
+      doReturn(ApiResponse.ok(List.of(address))).when(fixture.users).addresses();
+      doReturn(
+              ApiResponse.ok(new ProductClient.SkuView(7L, 9L, "商品", "SKU", BigDecimal.TEN, first)))
+          .when(fixture.products)
+          .sku(7L);
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(8L, 9L, "商品", "SKU", BigDecimal.TEN, second)))
+          .when(fixture.products)
+          .sku(8L);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () ->
+                  fixture.service.create("snapshot-" + fault, request("later-sku".equals(fault))));
+      assertEquals(500, failure.getHttpStatus());
+      assertEquals(ErrorCodes.INTERNAL, failure.getCode());
+      assertEquals("地址快照生成失败", failure.getMessage());
+      assertNull(failure.getCause());
+      verify(serializer).writeValueAsString(same(rejected));
+      fixture.verifyNoBusinessWrites();
+    }
+  }
+
+  @Test
+  void serializedSnapshotsAreFrozenBeforeStockAndPersistedOnceInRequestOrder() throws Exception {
+    Fixture fixture = new Fixture();
+    Map<String, Object> address = new java.util.LinkedHashMap<>();
+    address.put("id", 9L);
+    address.put("receiver", "原地址\"\\\n😀");
+    Map<String, String> first = new java.util.LinkedHashMap<>();
+    first.put("color", "蓝\"\\\n😀");
+    first.put("nullable", null);
+    ObjectMapper serializer = spy(new ObjectMapper());
+    ReflectionTestUtils.setField(fixture.service, "mapper", serializer);
+    String expectedAddress = new ObjectMapper().writeValueAsString(address);
+    String expectedSku = new ObjectMapper().writeValueAsString(first);
+    doReturn(ApiResponse.ok(List.of(address))).when(fixture.users).addresses();
+    BigDecimal price = new BigDecimal("12.3000");
+    doReturn(ApiResponse.ok(new ProductClient.SkuView(7L, 9L, "商品", "SKU", price, first)))
+        .when(fixture.products)
+        .sku(7L);
+    doReturn(ApiResponse.ok(new ProductClient.SkuView(8L, 9L, "商品", "SKU", BigDecimal.TEN, null)))
+        .when(fixture.products)
+        .sku(8L);
+    doAnswer(
+            invocation -> {
+              verify(serializer).writeValueAsString(same(address));
+              verify(serializer).writeValueAsString(same(first));
+              verify(serializer).writeValueAsString(isNull());
+              address.put("receiver", "later address");
+              first.put("color", "later sku");
+              StockClient.Reservation reservation = invocation.getArgument(0);
+              return ApiResponse.ok(Map.of("orderNo", reservation.orderNo(), "status", "RESERVED"));
+            })
+        .when(fixture.stock)
+        .reserve(any());
+    assertEquals("0", fixture.service.create("prepared-snapshots", request(true)).code);
+    var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+    var items = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+    verify(fixture.orders).insertOrder(anyString(), order.capture());
+    verify(fixture.orders, times(2)).insertOrderItem(anyString(), items.capture());
+    assertEquals(expectedAddress, order.getValue().addressSnapshot);
+    assertEquals(
+        List.of(expectedSku, "null"),
+        items.getAllValues().stream().map(item -> item.skuSnapshot).toList());
+    assertEquals(List.of(7L, 8L), items.getAllValues().stream().map(item -> item.skuId).toList());
+    assertSame(price, items.getAllValues().get(0).unitPrice);
+    assertEquals(new BigDecimal("32.3000"), order.getValue().totalAmount);
+    verify(serializer).writeValueAsString(same(address));
+    verify(serializer).writeValueAsString(same(first));
+    verify(serializer).writeValueAsString(isNull());
+  }
+
+  @Test
+  void allProductGatesAndDirectReplayStillPrecedeSnapshotPreparation() throws Exception {
+    Fixture invalidProduct = new Fixture();
+    ObjectMapper blocked = spy(new ObjectMapper());
+    doThrow(
+            com.fasterxml.jackson.databind.JsonMappingException.fromUnexpectedIOE(
+                new java.io.IOException("must not serialize")))
+        .when(blocked)
+        .writeValueAsString(any());
+    ReflectionTestUtils.setField(invalidProduct.service, "mapper", blocked);
+    doReturn(ApiResponse.ok(new ProductClient.SkuView(8L, null, null, "SKU", BigDecimal.TEN, null)))
+        .when(invalidProduct.products)
+        .sku(8L);
+    BizException failure =
+        assertThrows(
+            BizException.class,
+            () -> invalidProduct.service.create("later-product-before-json", request(true)));
+    assertTrue(failure.getMessage().contains("必填信息"));
+    verifyNoInteractions(blocked);
+    invalidProduct.verifyNoBusinessWrites();
+    Fixture replay = new Fixture();
+    ObjectMapper unused = spy(new ObjectMapper());
+    ReflectionTestUtils.setField(replay.service, "mapper", unused);
+    com.cloudmall.order.domain.po.OrderIdempotencyPO existing =
+        new com.cloudmall.order.domain.po.OrderIdempotencyPO();
+    existing.userId = 8L;
+    existing.idempotencyKey = "existing-order";
+    existing.orderNo = "202612-existing-order";
+    doReturn(List.of(existing)).when(replay.orders).findIdempotentOrders(8L, "existing-order");
+    assertEquals("0", replay.service.create("existing-order", null).code);
+    verify(unused, never()).writeValueAsString(any());
+    verifyNoInteractions(
+        replay.products,
+        replay.users,
+        replay.stock,
+        replay.cart,
+        replay.intents,
+        replay.intentMapper,
+        replay.outbox);
+  }
+
   /** 原商品事实对象，不转换身份或规范化金额。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
