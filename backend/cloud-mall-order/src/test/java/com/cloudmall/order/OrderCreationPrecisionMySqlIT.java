@@ -165,6 +165,188 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void failedCreateCompensationCannotReleaseOnUnprovenStateOrWrongIdentity() {
+    installCompensationFailureTrigger();
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stock).rollback(anyString());
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    List<String> cases =
+        new ArrayList<>(
+            java.util.Arrays.asList(
+                null,
+                "",
+                "UNKNOWN",
+                "INIT",
+                "NOT_FOUND",
+                "RESERVED",
+                "ALREADY_RESERVED",
+                "CONFIRMED",
+                "rolled_back",
+                "ROLLED_BACK ",
+                "RÓLLED_BACK",
+                "rejected",
+                "REJECTED ",
+                "RÉJECTED"));
+    cases.addAll(
+        List.of(
+            "wrong-order",
+            "case-order",
+            "accent-order",
+            "trailing-order",
+            "null-order",
+            "blank-order"));
+    int caseNumber = 0;
+    for (String scenario : cases) {
+      clearInvocations(stock);
+      when(stock.reservation(anyString()))
+          .thenAnswer(
+              invocation -> {
+                String orderNo = invocation.getArgument(0);
+                String responseOrder = orderNo;
+                String responseState = scenario;
+                if (scenario != null && scenario.endsWith("-order")) {
+                  responseState = "ROLLED_BACK";
+                  responseOrder =
+                      switch (scenario) {
+                        case "wrong-order" -> orderNo + "other";
+                        case "case-order" ->
+                            orderNo.equals(orderNo.toUpperCase(java.util.Locale.ROOT))
+                                ? orderNo + "A"
+                                : orderNo.toUpperCase(java.util.Locale.ROOT);
+                        case "accent-order" -> orderNo + "é";
+                        case "trailing-order" -> orderNo + " ";
+                        case "null-order" -> null;
+                        case "blank-order" -> " ";
+                        default -> throw new AssertionError(scenario);
+                      };
+                }
+                return ApiResponse.ok(recoveryStatus(responseOrder, responseState));
+              });
+      String key = "sync-proof-bad-" + caseNumber++;
+      RuntimeException original =
+          assertThrows(RuntimeException.class, () -> service.create(key, normalRequest()));
+      Map<String, Object> intent =
+          fixture.queryForMap(
+              "SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+      String orderNo = (String) intent.get("order_no");
+      checks.add(() -> assertEquals("RESERVED", intent.get("status"), String.valueOf(scenario)));
+      checks.add(() -> assertNotNull(intent.get("last_error"), String.valueOf(scenario)));
+      checks.add(() -> assertNotNull(intent.get("next_retry_at"), String.valueOf(scenario)));
+      checks.add(() -> assertEquals(1, original.getSuppressed().length, String.valueOf(scenario)));
+      assertTrue(original.getMessage().contains("cm17bq create rejected"));
+      verify(stock).reserve(any());
+      verify(stock).rollback(orderNo);
+      int queryCount =
+          (int)
+              mockingDetails(stock).getInvocations().stream()
+                  .filter(invocation -> invocation.getMethod().getName().equals("reservation"))
+                  .count();
+      checks.add(() -> assertEquals(1, queryCount, String.valueOf(scenario)));
+      assertFailedCreateHasNoCommittedArtifacts();
+      assertEquals(7L, ((Number) intent.get("user_id")).longValue());
+      assertEquals(key, intent.get("idempotency_key"));
+      assertTrue(String.valueOf(intent.get("items_snapshot")).contains("skuId"));
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void failedCreateCompensationKeepsIntentWhenItsPostWriteQueryIsUnavailable() {
+    installCompensationFailureTrigger();
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stock).rollback(anyString());
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String failure : List.of("null-envelope", "null-data", "nonzero-code", "query-error")) {
+      clearInvocations(stock);
+      when(stock.reservation(anyString()))
+          .thenAnswer(
+              invocation -> {
+                return switch (failure) {
+                  case "null-envelope" -> null;
+                  case "null-data" -> ApiResponse.ok(null);
+                  case "nonzero-code" -> ApiResponse.error("503", "query unknown");
+                  case "query-error" ->
+                      throw new IllegalStateException("post-rollback query failed");
+                  default -> throw new AssertionError(failure);
+                };
+              });
+      String key = "sync-proof-query-" + failure;
+      RuntimeException original =
+          assertThrows(RuntimeException.class, () -> service.create(key, normalRequest()));
+      Map<String, Object> intent =
+          fixture.queryForMap(
+              "SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+      checks.add(() -> assertEquals("RESERVED", intent.get("status"), failure));
+      checks.add(() -> assertNotNull(intent.get("last_error"), failure));
+      checks.add(() -> assertNotNull(intent.get("next_retry_at"), failure));
+      checks.add(() -> assertEquals(1, original.getSuppressed().length, failure));
+      assertTrue(original.getMessage().contains("cm17bq create rejected"));
+      verify(stock).reserve(any());
+      verify(stock).rollback((String) intent.get("order_no"));
+      int queryCount =
+          (int)
+              mockingDetails(stock).getInvocations().stream()
+                  .filter(invocation -> invocation.getMethod().getName().equals("reservation"))
+                  .count();
+      checks.add(() -> assertEquals(1, queryCount, failure));
+      assertFailedCreateHasNoCommittedArtifacts();
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void failedCreateCompensationReleasesOnlyAfterExactOriginalTerminalProof() {
+    installCompensationFailureTrigger();
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stock).rollback(anyString());
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String state : List.of("ROLLED_BACK", "REJECTED")) {
+      clearInvocations(stock);
+      when(stock.reservation(anyString()))
+          .thenAnswer(
+              invocation -> ApiResponse.ok(recoveryStatus(invocation.getArgument(0), state)));
+      String key = "sync-proof-terminal-" + state;
+      RuntimeException original =
+          assertThrows(RuntimeException.class, () -> service.create(key, normalRequest()));
+      Map<String, Object> intent =
+          fixture.queryForMap(
+              "SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+      assertEquals("RELEASED", intent.get("status"));
+      assertNull(intent.get("last_error"));
+      assertNull(intent.get("next_retry_at"));
+      assertEquals(0, original.getSuppressed().length);
+      assertTrue(original.getMessage().contains("cm17bq create rejected"));
+      verify(stock).reserve(any());
+      verify(stock).rollback((String) intent.get("order_no"));
+      int queryCount =
+          (int)
+              mockingDetails(stock).getInvocations().stream()
+                  .filter(invocation -> invocation.getMethod().getName().equals("reservation"))
+                  .count();
+      checks.add(() -> assertEquals(1, queryCount, state));
+      assertFailedCreateHasNoCommittedArtifacts();
+    }
+    assertAll(checks);
+  }
+
+  /** 只在随机库用真实订单INSERT触发器制造预扣确认后的落库失败。 */
+  private void installCompensationFailureTrigger() {
+    fixture.execute(
+        "CREATE TRIGGER cm17bq_create_failure BEFORE INSERT ON mall_order_202612 FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='cm17bq create rejected'");
+  }
+
+  /** 本地订单事务失败后不残留订单、明细、幂等记录或timeout消息。 */
+  private void assertFailedCreateHasNoCommittedArtifacts() {
+    for (String table :
+        List.of("mall_order_202612", "mall_order_item_202612", "order_idempotency", "order_outbox"))
+      assertEquals(
+          0, fixture.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class), table);
+  }
+
+  @Test
   void normalCreateUsesOneTruncatedShanghaiMillisecondForAllCreatedFields() throws Exception {
     AuthContext.set(7L, "USER");
     ApiResponse<?> response =

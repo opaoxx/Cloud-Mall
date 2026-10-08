@@ -19,6 +19,7 @@ import com.cloudmall.order.domain.po.OrderPO;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.domain.vo.OrderItemVO;
 import com.cloudmall.order.domain.vo.OrderVO;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
@@ -883,13 +884,27 @@ public class OrderServiceImpl implements OrderService {
     return outbox;
   }
 
-  /** 尝试同步回滚失败订单的远端库存，保留原失败供调用方处理。 */
+  /** 同步回滚后核验原单持久终态，未知证明保留意图和原创建异常供恢复。 */
   private void compensateFailedCreate(String orderNo, RuntimeException creationFailure) {
     try {
-      ApiResponse<?> rollbackResult = OrderStockCircuitBreaker.call(
-          OrderStockCircuitBreaker.ACTION, () -> stock.rollback(orderNo));
+      // 1. 使用原订单号尝试一次同步回滚，失败响应不能授权后续完成。
+      ApiResponse<?> rollbackResult =
+          OrderStockCircuitBreaker.call(
+              OrderStockCircuitBreaker.ACTION, () -> stock.rollback(orderNo));
       if (rollbackResult == null || !"0".equals(rollbackResult.code))
         throw new BizException(ErrorCodes.INTERNAL, "订单失败后的库存回滚未确认", 500);
+      // 2. 成功响应后只读核验原单持久终态，不补全身份或猜测结算结果。
+      ApiResponse<StockReservationStatusVO> proof =
+          OrderStockCircuitBreaker.call(
+              OrderStockCircuitBreaker.STATUS, () -> stock.reservation(orderNo));
+      if (proof == null
+          || !"0".equals(proof.code)
+          || proof.data == null
+          || !Objects.equals(orderNo, proof.data.orderNo)
+          || (!"ROLLED_BACK".equals(proof.data.status) && !"REJECTED".equals(proof.data.status))) {
+        throw new BizException(ErrorCodes.INTERNAL, "订单失败后的库存回滚持久事实未确认", 500);
+      }
+      // 3. 只有完整证明才结束意图，失败沿原记录与suppressed保留创建异常。
       reservationIntentService.markReleased(orderNo);
     } catch (RuntimeException compensationFailure) {
       try {

@@ -163,17 +163,26 @@ class OrderFailureHandlingTest {
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     doReturn(ApiResponse.ok(Map.of("reserved", true))).when(stockClient).reserve(any());
     doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stockClient).rollback(anyString());
+    when(stockClient.reservation(anyString()))
+        .thenAnswer(invocation -> legacyStockFact(invocation.getArgument(0), "ROLLED_BACK"));
     when(orderSqlMapper.insertOrder(anyString(), any(OrderPO.class)))
         .thenThrow(new DataAccessResourceFailureException("database unavailable"));
     OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
 
     AuthContext.set(8L, "USER");
-    assertThrows(RuntimeException.class, () -> orderService.create("database-failure", orderRequest()));
+    assertThrows(
+        RuntimeException.class, () -> orderService.create("database-failure", orderRequest()));
 
     ArgumentCaptor<StockClient.Reservation> reservationCaptor =
         ArgumentCaptor.forClass(StockClient.Reservation.class);
     verify(stockClient).reserve(reservationCaptor.capture());
     verify(stockClient).rollback(reservationCaptor.getValue().orderNo());
+    verify(stockClient).reservation(reservationCaptor.getValue().orderNo());
+    OrderReservationIntentService intentService =
+        (OrderReservationIntentService)
+            ReflectionTestUtils.getField(orderService, "reservationIntentService");
+    verify(intentService).markReleased(reservationCaptor.getValue().orderNo());
+    verify(intentService, never()).recordFailure(anyString(), anyString());
   }
 
   @Test
