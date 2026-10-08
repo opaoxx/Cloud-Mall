@@ -1,0 +1,282 @@
+package com.cloudmall.order;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.common.error.BizException;
+import com.cloudmall.order.domain.po.OrderPO;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
+import com.cloudmall.order.feign.CartClient;
+import com.cloudmall.order.feign.ProductClient;
+import com.cloudmall.order.feign.StockClient;
+import com.cloudmall.order.feign.UserClient;
+import com.cloudmall.order.mapper.OrderSqlMapper;
+import com.cloudmall.order.mapper.OrderStockActionMapper;
+import com.cloudmall.order.service.impl.OrderServiceImpl;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.util.ReflectionTestUtils;
+
+/** 存量订单支付状态响应身份的真实只读SQL验证，Stock响应为替身。 */
+class OrderLegacyStockIdentityMySqlIT {
+  /** 原订单库只读核验和隔离库管理入口。 */
+  private static JdbcTemplate source;
+
+  /** 原订单库表清单和校验和。 */
+  private static List<Map<String, Object>> sourceFingerprint;
+
+  /** 本例自行创建、可精确清理的数据库名。 */
+  private String database;
+
+  /** 隔离库实际数据库事实验证入口。 */
+  private JdbcTemplate fixture;
+
+  /** 实际动作认领和状态持久层。 */
+  private OrderStockActionMapper mapper;
+
+  /** 隔离月表真实订单读取/准备入口。 */
+  private OrderSqlMapper sqlMapper;
+
+  /** 不发真实HTTP的库存响应替身。 */
+  private StockClient stock;
+
+  /** 本地Service与真实订单/动作Mapper组成的只读支付状态链。 */
+  private OrderServiceImpl service;
+
+  @BeforeAll
+  static void readOriginalDatabase() {
+    String url = System.getProperty("cloudmall.mysql.test.url");
+    if (url == null || !url.matches("jdbc:mysql://[^/]+/cloudmall_order(\\?.*)?"))
+      throw new IllegalStateException("显式IT需要cloudmall_order的cloudmall.mysql.test.url");
+    source = new JdbcTemplate(new DriverManagerDataSource(shanghaiUrl(url), "root", "root"));
+    sourceFingerprint = fingerprint();
+  }
+
+  @BeforeEach
+  void createFixture() {
+    database = "cm17bd_" + UUID.randomUUID().toString().replace("-", "");
+    source.execute(
+        "CREATE DATABASE " + database + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+    String isolatedUrl =
+        System.getProperty("cloudmall.mysql.test.url").replace("/cloudmall_order", "/" + database);
+    fixture =
+        new JdbcTemplate(new DriverManagerDataSource(shanghaiUrl(isolatedUrl), "root", "root"));
+    fixture.execute(
+        String.valueOf(
+            source.queryForMap("SHOW CREATE TABLE order_stock_action").get("Create Table")));
+    cloneTemplate("mall_order_template", "mall_order_202610");
+    cloneTemplate("mall_order_item_template", "mall_order_item_202610");
+    mapper = new OrderStockActionMapper(fixture);
+    sqlMapper = new OrderSqlMapper(fixture);
+    stock = mock(StockClient.class);
+    service =
+        new OrderServiceImpl(
+            stock,
+            mock(ProductClient.class),
+            mock(UserClient.class),
+            mock(CartClient.class),
+            sqlMapper,
+            new ObjectMapper());
+    ReflectionTestUtils.setField(service, "orderStockActionMapper", mapper);
+  }
+
+  @AfterEach
+  void removeFixture() {
+    AuthContext.clear();
+    if (database != null && database.matches("cm17bd_[0-9a-f]{32}")) {
+      source.execute("DROP DATABASE " + database);
+      assertEquals(
+          0,
+          source.queryForObject(
+              "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?",
+              Integer.class,
+              database));
+      System.out.println("CM17BD fixture dropped: " + database);
+      database = null;
+    }
+  }
+
+  @AfterAll
+  static void verifyOriginalDatabase() {
+    if (source != null) assertEquals(sourceFingerprint, fingerprint());
+    System.out.println("CM17BD original Order tables and checksums unchanged");
+  }
+
+  @Test
+  void wrongIdentitiesStayUnknownAndCorrectResponsesCanSettleWithoutAnyWrite() {
+    String orderNo = "202610legacy1";
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED")) {
+      String target = "CANCELLED".equals(orderStatus) ? "ROLLED_BACK" : "CONFIRMED";
+      for (String responseOrderNo :
+          java.util.Arrays.asList(
+              null, "", " \t", "202610other", "202610LEGACY1", "202610légacy1", orderNo + " ")) {
+        for (String responseStatus : List.of("CONFIRMED", "ROLLED_BACK", "REJECTED")) {
+          seed(orderStatus);
+          var before = fixtureSnapshot();
+          when(stock.reservation(orderNo)).thenReturn(fact(responseOrderNo, responseStatus));
+
+          var wrong = paymentState(8L);
+
+          assertEquals(
+              "UNKNOWN",
+              wrong.get("stockActionStatus"),
+              orderStatus + responseOrderNo + responseStatus);
+          assertResponseFacts(wrong, orderStatus);
+          assertEquals(before, fixtureSnapshot());
+          when(stock.reservation(orderNo)).thenReturn(fact(orderNo, target));
+          var matched = paymentState(8L);
+          assertEquals("SUCCEEDED", matched.get("stockActionStatus"));
+          assertResponseFacts(matched, orderStatus);
+          assertEquals(before, fixtureSnapshot());
+        }
+      }
+    }
+    verify(stock, never()).confirm(anyString(), any());
+    verify(stock, never()).rollback(anyString(), any());
+  }
+
+  @Test
+  void matchingIdentitiesKeepTheOriginalLegacyStateMatrixReadOnly() {
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED")) {
+      for (String responseStatus :
+          List.of("CONFIRMED", "ROLLED_BACK", "REJECTED", "RESERVED", "INIT", "NOT_FOUND")) {
+        seed(orderStatus);
+        var before = fixtureSnapshot();
+        when(stock.reservation("202610legacy1")).thenReturn(fact("202610legacy1", responseStatus));
+        var response = paymentState(8L);
+        String expected;
+        if ("REJECTED".equals(responseStatus)) expected = "CONFLICT";
+        else if ("CANCELLED".equals(orderStatus))
+          expected =
+              "ROLLED_BACK".equals(responseStatus)
+                  ? "SUCCEEDED"
+                  : "CONFIRMED".equals(responseStatus) ? "CONFLICT" : "UNKNOWN";
+        else
+          expected =
+              "CONFIRMED".equals(responseStatus)
+                  ? "SUCCEEDED"
+                  : "ROLLED_BACK".equals(responseStatus) ? "CONFLICT" : "UNKNOWN";
+        assertEquals(expected, response.get("stockActionStatus"));
+        assertResponseFacts(response, orderStatus);
+        assertEquals(before, fixtureSnapshot());
+      }
+    }
+    verify(stock, never()).confirm(anyString(), any());
+    verify(stock, never()).rollback(anyString(), any());
+  }
+
+  @Test
+  void pendingExistingActionsAndForbiddenCallersDoNotQueryLegacyStock() {
+    seed("PENDING_PAYMENT");
+    var beforePending = fixtureSnapshot();
+    assertEquals("NONE", paymentState(8L).get("stockActionStatus"));
+    assertEquals(beforePending, fixtureSnapshot());
+    verifyNoInteractions(stock);
+    for (String actionStatus : List.of("PENDING", "UNKNOWN", "SUCCEEDED", "CONFLICT")) {
+      seed("PAID");
+      assertEquals(
+          1, mapper.insert(1L, "202610legacy1", "CONFIRM", LocalDateTime.of(2026, 10, 8, 10, 0)));
+      fixture.update("UPDATE order_stock_action SET status=? WHERE id=1", actionStatus);
+      var beforeAction = fixtureSnapshot();
+      assertEquals(actionStatus, paymentState(8L).get("stockActionStatus"));
+      assertEquals(beforeAction, fixtureSnapshot());
+      verifyNoInteractions(stock);
+    }
+    seed("CANCELLED");
+    var beforeForbidden = fixtureSnapshot();
+    BizException forbidden =
+        assertThrows(BizException.class, () -> service.paymentState("202610legacy1", 9L));
+    assertEquals(403, forbidden.getHttpStatus());
+    assertEquals(beforeForbidden, fixtureSnapshot());
+    verifyNoInteractions(stock);
+  }
+
+  /** 保留源模板定义，只在本例随机数据库创建两张固定月表。 */
+  private void cloneTemplate(String template, String target) {
+    String ddl =
+        String.valueOf(source.queryForMap("SHOW CREATE TABLE " + template).get("Create Table"));
+    fixture.execute(
+        ddl.replace("CREATE TABLE `" + template + "`", "CREATE TABLE `" + target + "`"));
+  }
+
+  /** 以真实Mapper准备当前例的历史无动作订单，API读取期间不做任何夹具写入。 */
+  private void seed(String status) {
+    fixture.update("DELETE FROM order_stock_action");
+    fixture.update("DELETE FROM mall_order_202610");
+    OrderPO order = new OrderPO();
+    order.id = 1L;
+    order.orderNo = "202610legacy1";
+    order.userId = 8L;
+    order.status = status;
+    order.totalAmount = new BigDecimal("12.30");
+    order.payAmount = new BigDecimal("12.30");
+    order.addressSnapshot = "{\"receiver\":\"原快照\"}";
+    order.createdAt = LocalDateTime.of(2026, 10, 8, 10, 0, 0, 123_000_000);
+    order.updatedAt = order.createdAt;
+    order.expireAt = order.createdAt.plusMinutes(30);
+    assertEquals(1, sqlMapper.insertOrder("mall_order_202610", order));
+  }
+
+  /** 真实Service调用，只取既有payment-state字段，不发HTTP或写支付数据。 */
+  private Map<?, ?> paymentState(Long callerUserId) {
+    return (Map<?, ?>) service.paymentState("202610legacy1", callerUserId).data;
+  }
+
+  /** 所有参与查询的隔离表完整快照，验证错误或成功读都没有隐式repair。 */
+  private List<List<Map<String, Object>>> fixtureSnapshot() {
+    return List.of(
+        fixture.queryForList("SELECT * FROM mall_order_202610 ORDER BY id"),
+        fixture.queryForList("SELECT * FROM mall_order_item_202610 ORDER BY id"),
+        fixture.queryForList("SELECT * FROM order_stock_action ORDER BY id"));
+  }
+
+  /** 新身份门不改变原响应字段、金额BigDecimal或订单归属。 */
+  private static void assertResponseFacts(Map<?, ?> response, String orderStatus) {
+    assertEquals("202610legacy1", response.get("orderNo"));
+    assertEquals(orderStatus, response.get("status"));
+    assertEquals(8L, response.get("userId"));
+    assertEquals(new BigDecimal("12.30"), response.get("payAmount"));
+  }
+
+  /** 原Stock响应结构，不根据请求自动修复错误身份。 */
+  private static ApiResponse<StockReservationStatusVO> fact(String orderNo, String status) {
+    StockReservationStatusVO fact = new StockReservationStatusVO();
+    fact.orderNo = orderNo;
+    fact.status = status;
+    fact.items = List.of();
+    return ApiResponse.ok(fact);
+  }
+
+  /** 原库只读表清单及校验和。 */
+  private static List<Map<String, Object>> fingerprint() {
+    List<Map<String, Object>> result =
+        new ArrayList<>(source.queryForList("SHOW TABLES FROM cloudmall_order"));
+    for (String table : source.queryForList("SHOW TABLES FROM cloudmall_order", String.class)) {
+      if (!table.matches("[A-Za-z0-9_]+")) throw new IllegalStateException("非法源表名");
+      result.addAll(source.queryForList("CHECKSUM TABLE cloudmall_order." + table));
+    }
+    return result;
+  }
+
+  /** JDBC会话固定上海DATETIME语义。 */
+  private static String shanghaiUrl(String url) {
+    return url
+        + (url.contains("?") ? "&" : "?")
+        + "serverTimezone=Asia%2FShanghai&forceConnectionTimeZoneToSession=true";
+  }
+}

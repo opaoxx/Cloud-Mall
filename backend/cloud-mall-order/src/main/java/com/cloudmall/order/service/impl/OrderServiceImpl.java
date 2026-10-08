@@ -435,6 +435,8 @@ public class OrderServiceImpl implements OrderService {
               () -> stock.reservation(order.orderNo));
       if (response == null || !"0".equals(response.code) || response.data == null)
         return "UNKNOWN";
+      // 缺失或错单响应保持未知，不能借别单终态作为结清或退款依据。
+      if (!Objects.equals(order.orderNo, response.data.orderNo)) return "UNKNOWN";
       if (expected.equals(response.data.status)) return "SUCCEEDED";
       if (opposite.equals(response.data.status) || "REJECTED".equals(response.data.status))
         return "CONFLICT";

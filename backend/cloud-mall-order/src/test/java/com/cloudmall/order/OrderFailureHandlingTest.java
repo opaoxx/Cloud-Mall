@@ -14,6 +14,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.csp.sentinel.slots.block.RuleConstant;
+import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
+import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -29,16 +32,13 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import com.cloudmall.order.service.impl.StockCircuitOpenException;
-import com.alibaba.csp.sentinel.slots.block.RuleConstant;
-import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
-import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import feign.Request;
 import feign.FeignException;
+import feign.Request;
 import feign.RetryableException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -356,6 +356,7 @@ class OrderFailureHandlingTest {
     StockClient stockClient = mock(StockClient.class);
     orderWithStatus(orderSqlMapper, orderNo, "CANCELLED");
     StockReservationStatusVO stockStatus = new StockReservationStatusVO();
+    stockStatus.orderNo = orderNo;
     stockStatus.status = "CONFIRMED";
     when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(stockStatus));
     OrderServiceImpl orderService =
@@ -373,6 +374,7 @@ class OrderFailureHandlingTest {
     StockClient stockClient = mock(StockClient.class);
     orderWithStatus(orderSqlMapper, orderNo, "PAID");
     StockReservationStatusVO stockStatus = new StockReservationStatusVO();
+    stockStatus.orderNo = orderNo;
     stockStatus.status = "CONFIRMED";
     when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(stockStatus));
     OrderServiceImpl orderService =
@@ -381,6 +383,115 @@ class OrderFailureHandlingTest {
     ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
 
     assertEquals("SUCCEEDED", ((Map<?, ?>) response.data).get("stockActionStatus"));
+  }
+
+  @Test
+  void wrongLegacyStockIdentitiesNeverAuthorizeCompletionOrConflict() {
+    String orderNo = "202609legacyidentity";
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED")) {
+      for (String stockStatus :
+          List.of("CONFIRMED", "ROLLED_BACK", "REJECTED", "RESERVED", "INIT", "NOT_FOUND")) {
+        for (String responseOrderNo :
+            java.util.Arrays.asList(
+                null,
+                "",
+                " \t",
+                "202609other",
+                "202609LEGACYIDENTITY",
+                "202609légacyidentity",
+                orderNo + " ")) {
+          OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
+          orderWithStatus(sqlMapper, orderNo, orderStatus);
+          StockClient stockClient = mock(StockClient.class);
+          when(stockClient.reservation(orderNo))
+              .thenReturn(legacyStockFact(responseOrderNo, stockStatus));
+          OrderServiceImpl service =
+              service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
+
+          ApiResponse<?> response = service.paymentState(orderNo, 8L);
+
+          Map<?, ?> state = (Map<?, ?>) response.data;
+          assertEquals(
+              "UNKNOWN",
+              state.get("stockActionStatus"),
+              orderStatus + stockStatus + responseOrderNo);
+          assertEquals(orderNo, state.get("orderNo"));
+          assertEquals(orderStatus, state.get("status"));
+          assertEquals(8L, state.get("userId"));
+          assertEquals(new BigDecimal("12.30"), state.get("payAmount"));
+          verify(stockClient).reservation(orderNo);
+          verify(stockClient, never()).confirm(anyString(), any());
+          verify(stockClient, never()).rollback(anyString(), any());
+          verify(sqlMapper, never())
+              .updateStatus(anyString(), anyString(), anyString(), anyString(), any());
+        }
+      }
+    }
+  }
+
+  @Test
+  void matchingLegacyStockIdentitiesKeepTheOriginalStateMatrix() {
+    String orderNo = "202609legacymatrix";
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED")) {
+      String expected = "CANCELLED".equals(orderStatus) ? "ROLLED_BACK" : "CONFIRMED";
+      String opposite = "CANCELLED".equals(orderStatus) ? "CONFIRMED" : "ROLLED_BACK";
+      for (String stockStatus :
+          List.of("CONFIRMED", "ROLLED_BACK", "REJECTED", "RESERVED", "INIT", "NOT_FOUND")) {
+        OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
+        orderWithStatus(sqlMapper, orderNo, orderStatus);
+        StockClient stockClient = mock(StockClient.class);
+        when(stockClient.reservation(orderNo)).thenReturn(legacyStockFact(orderNo, stockStatus));
+        OrderServiceImpl service =
+            service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
+        String actionStatus =
+            expected.equals(stockStatus)
+                ? "SUCCEEDED"
+                : (opposite.equals(stockStatus) || "REJECTED".equals(stockStatus))
+                    ? "CONFLICT"
+                    : "UNKNOWN";
+        assertEquals(
+            actionStatus,
+            ((Map<?, ?>) service.paymentState(orderNo, 8L).data).get("stockActionStatus"));
+        verify(stockClient).reservation(orderNo);
+        verify(stockClient, never()).confirm(anyString(), any());
+        verify(stockClient, never()).rollback(anyString(), any());
+      }
+    }
+  }
+
+  @Test
+  void incompleteOrFailedLegacyStockRepliesStillRemainUnknown() {
+    String orderNo = "202609legacyunknown";
+    for (String phase : List.of("NULL_RESPONSE", "NULL_DATA", "ERROR_CODE", "EXCEPTION")) {
+      OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
+      orderWithStatus(sqlMapper, orderNo, "PAID");
+      StockClient stockClient = mock(StockClient.class);
+      if ("NULL_DATA".equals(phase))
+        when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(null));
+      else if ("ERROR_CODE".equals(phase)) {
+        var rejected = legacyStockFact(orderNo, "CONFIRMED");
+        rejected.code = "500";
+        when(stockClient.reservation(orderNo)).thenReturn(rejected);
+      } else if ("EXCEPTION".equals(phase))
+        doThrow(new IllegalStateException("Stock unknown")).when(stockClient).reservation(orderNo);
+      OrderServiceImpl service =
+          service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
+      assertEquals(
+          "UNKNOWN", ((Map<?, ?>) service.paymentState(orderNo, 8L).data).get("stockActionStatus"));
+      verify(stockClient).reservation(orderNo);
+      verify(stockClient, never()).confirm(anyString(), any());
+      verify(stockClient, never()).rollback(anyString(), any());
+    }
+  }
+
+  /** 保留原Stock响应身份，不根据请求路径补全缺失或错单字段。 */
+  private static ApiResponse<StockReservationStatusVO> legacyStockFact(
+      String orderNo, String stockStatus) {
+    StockReservationStatusVO fact = new StockReservationStatusVO();
+    fact.orderNo = orderNo;
+    fact.status = stockStatus;
+    fact.items = List.of();
+    return ApiResponse.ok(fact);
   }
 
   private static Message message(String payload) {
