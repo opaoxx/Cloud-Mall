@@ -689,6 +689,96 @@ class OrderOutboxDispatcherTest {
   }
 
   @Test
+  void presentPayloadIdentityMustBeAnExactStringBeforeTtlOrPublish() throws Exception {
+    for (String field : List.of("eventId", "eventType", "orderNo")) {
+      for (Object wrongValue :
+          java.util.Arrays.asList(
+              null, 42, false, List.of("wrong"), Map.of("key", "wrong"), "other")) {
+        OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+        RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+        OrderOutboxPO invalid = candidate("42");
+        invalid.orderNo = "42";
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("expireAt", "not-a-time");
+        payload.put(field, wrongValue);
+        invalid.payload = new ObjectMapper().writeValueAsString(payload);
+        org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(invalid));
+        OrderOutboxDispatcher dispatcher =
+            new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment());
+        org.mockito.Mockito.clearInvocations(rabbit);
+        dispatcher.dispatchPending();
+        ArgumentCaptor<String> error = ArgumentCaptor.forClass(String.class);
+        verify(mapper).findPendingOutbox(50);
+        verify(mapper)
+            .recordOutboxFailure(
+                org.mockito.ArgumentMatchers.eq(invalid.eventId),
+                error.capture(),
+                any(LocalDateTime.class));
+        org.junit.jupiter.api.Assertions.assertTrue(error.getValue().contains("载荷身份不一致"), field);
+        org.junit.jupiter.api.Assertions.assertTrue(error.getValue().contains(field), field);
+        org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+        org.mockito.Mockito.verifyNoInteractions(rabbit);
+      }
+    }
+  }
+
+  @Test
+  void matchingOrAbsentPayloadIdentityFieldsKeepLegacyCompatibilityAndOriginalValues()
+      throws Exception {
+    List<String> fields = List.of("eventId", "eventType", "orderNo");
+    for (int presenceMask = 0; presenceMask < 8; presenceMask++) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO healthy = candidate(" 事件😀 ");
+      healthy.orderNo = " 202610-original-order ";
+      Map<String, String> expectedIdentity =
+          Map.of(
+              "eventId",
+              healthy.eventId,
+              "eventType",
+              healthy.eventType,
+              "orderNo",
+              healthy.orderNo);
+      Map<String, Object> payload = new java.util.LinkedHashMap<>();
+      payload.put("expireAt", "2099-01-01T00:00:00+08:00");
+      payload.put("occurredAt", "2026-10-09T00:00:00+08:00");
+      payload.put("traceId", "original-trace");
+      for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++) {
+        if ((presenceMask & (1 << fieldIndex)) != 0) {
+          String field = fields.get(fieldIndex);
+          payload.put(field, expectedIdentity.get(field));
+        }
+      }
+      healthy.payload = new ObjectMapper().writeValueAsString(payload);
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(healthy));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                Map<String, Object> envelope = invocation.getArgument(2);
+                org.junit.jupiter.api.Assertions.assertEquals(healthy.eventId, correlation.getId());
+                org.junit.jupiter.api.Assertions.assertEquals(
+                    healthy.orderNo, envelope.get("orderNo"));
+                org.junit.jupiter.api.Assertions.assertEquals(payload, envelope.get("payload"));
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+          .dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(healthy.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
   void absentOrBlankIdentitySnapshotsNeverParsePublishOrWrite() {
     for (String field : List.of("eventId", "orderNo")) {
       for (String invalidIdentity : java.util.Arrays.asList(null, "", " ", "\t\r\n", "\u2003")) {

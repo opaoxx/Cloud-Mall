@@ -89,6 +89,130 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void conflictingPayloadIdentitiesCannotBePublishedAndUseTheOriginalRetryPath() throws Exception {
+    ObjectMapper json = new ObjectMapper();
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String field : List.of("eventId", "eventType", "orderNo")) {
+      OrderOutboxPO identity = pendingOutbox();
+      String expectedValue =
+          Map.of(
+                  "eventId",
+                  identity.eventId,
+                  "eventType",
+                  identity.eventType,
+                  "orderNo",
+                  identity.orderNo)
+              .get(field);
+      String caseAlias = expectedValue.toUpperCase(java.util.Locale.ROOT);
+      if (caseAlias.equals(expectedValue))
+        caseAlias = expectedValue.toLowerCase(java.util.Locale.ROOT);
+      List<Object> wrongValues =
+          new ArrayList<>(
+              Arrays.asList(
+                  null,
+                  42,
+                  false,
+                  List.of("wrong"),
+                  Map.of("identity", "wrong"),
+                  "other",
+                  "trailing "));
+      wrongValues.addAll(
+          List.of(caseAlias, expectedValue + " ", expectedValue.replaceFirst("[a-zA-Z]", "é")));
+      for (Object wrongValue : wrongValues) {
+        fixture.update("DELETE FROM order_outbox");
+        OrderOutboxPO invalid = pendingOutbox();
+        Map<String, Object> payload =
+            json.readValue(
+                invalid.payload,
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        payload.put("eventId", invalid.eventId);
+        payload.put("eventType", invalid.eventType);
+        payload.put("orderNo", invalid.orderNo);
+        payload.put(field, wrongValue);
+        invalid.payload = json.writeValueAsString(payload);
+        OrderOutboxPO healthy = pendingOutbox();
+        healthy.id = 2L;
+        healthy.eventId = "timeout-after-payload-conflict";
+        healthy.orderNo = "202610-after-payload-conflict";
+        healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+        assertEquals(1, mapper.insert(invalid));
+        assertEquals(1, mapper.insert(healthy));
+        var before = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        List<String> sentIds = new ArrayList<>();
+        doAnswer(
+                invocation -> {
+                  CorrelationData correlation = invocation.getArgument(4);
+                  sentIds.add(correlation.getId());
+                  correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                  return null;
+                })
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        dispatcher(rabbit).dispatchPending();
+        var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+        LocalDateTime retryAt =
+            fixture.queryForObject(
+                "SELECT next_retry_at FROM order_outbox WHERE id=1", LocalDateTime.class);
+        String healthyStatus =
+            fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+        String label = field + ":" + String.valueOf(wrongValue);
+        checks.add(() -> assertEquals("PENDING", after.get("status"), label));
+        checks.add(() -> assertEquals(1, ((Number) after.get("attempts")).intValue(), label));
+        checks.add(
+            () -> assertTrue(String.valueOf(after.get("last_error")).contains("载荷身份不一致"), label));
+        checks.add(() -> assertTrue(retryAt.isAfter(invalid.nextRetryAt), label));
+        checks.add(() -> assertUnchangedEvent(before, after));
+        checks.add(() -> assertEquals(List.of(healthy.eventId), sentIds, label));
+        checks.add(() -> assertEquals("PUBLISHED", healthyStatus, label));
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void matchingFullAndLegacyPayloadsKeepTheirStoredIdentityAndPublish() throws Exception {
+    ObjectMapper json = new ObjectMapper();
+    for (boolean fullIdentity : List.of(false, true)) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO outbox = pendingOutbox();
+      Map<String, Object> payload =
+          json.readValue(
+              outbox.payload,
+              new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+      if (fullIdentity) {
+        payload.put("eventId", outbox.eventId);
+        payload.put("eventType", outbox.eventType);
+        payload.put("orderNo", outbox.orderNo);
+      }
+      payload.put("traceId", "original-trace");
+      outbox.payload = json.writeValueAsString(payload);
+      assertEquals(1, mapper.insert(outbox));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox");
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                Map<String, Object> envelope = invocation.getArgument(2);
+                assertEquals(outbox.eventId, correlation.getId());
+                assertEquals(payload, envelope.get("payload"));
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      dispatcher(rabbit).dispatchPending();
+      var after = fixture.queryForMap("SELECT * FROM order_outbox");
+      assertEquals("PUBLISHED", after.get("status"));
+      assertEquals(0, ((Number) after.get("attempts")).intValue());
+      for (String column : List.of("event_id", "event_type", "order_no", "payload", "created_at"))
+        assertEquals(before.get(column), after.get(column), column);
+      verify(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
   void blankIdentityRowsCannotFillTheScanWindowAndStarveFollowingEvents() {
     LocalDateTime dueAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(2).withNano(0);
     List<String> blanks = List.of("", " ", "\t\r\n", "\u2003");

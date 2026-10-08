@@ -131,6 +131,7 @@ public class OrderOutboxDispatcher {
     try {
       Map<String, Object> payload = parsePayload(outbox.payload);
       if (Thread.currentThread().isInterrupted()) return;
+      validatePayloadIdentity(payload, outbox);
       String expireAt = stringValue(payload.get("expireAt"));
       if (expireAt == null || expireAt.isBlank()) {
         throw new IllegalArgumentException("ORDER_TIMEOUT outbox 缺少 expireAt: " + outbox.eventId);
@@ -225,6 +226,21 @@ public class OrderOutboxDispatcher {
     }
   }
 
+  /** 仅核验旧载荷中已存在的身份字段，不补键或重写；null根对象继续由原下游路径拒绝。 */
+  private static void validatePayloadIdentity(Map<String, Object> payload, OrderOutboxPO outbox) {
+    if (payload == null) return;
+    validatePayloadIdentityField(payload, "eventId", outbox.eventId);
+    validatePayloadIdentityField(payload, "eventType", outbox.eventType);
+    validatePayloadIdentityField(payload, "orderNo", outbox.orderNo);
+  }
+
+  /** 原身份已由PO门保证非null；equals(Object)拒绝null/非String及别名，不字符串化或归一化。 */
+  private static void validatePayloadIdentityField(
+      Map<String, Object> payload, String fieldName, String expectedValue) {
+    if (payload.containsKey(fieldName) && !expectedValue.equals(payload.get(fieldName)))
+      throw new IllegalArgumentException("订单超时outbox载荷身份不一致: " + fieldName);
+  }
+
   private static Message withTtl(Message message, long ttlMillis) {
     message.getMessageProperties().setExpiration(String.valueOf(Math.max(1L, ttlMillis)));
     return message;
@@ -232,7 +248,8 @@ public class OrderOutboxDispatcher {
 
   private static long remainingTtlMillis(String value) {
     OffsetDateTime expiration = parseExpiration(value);
-    return Math.max(1L, Duration.between(OffsetDateTime.now(ZoneOffset.ofHours(8)), expiration).toMillis());
+    return Math.max(
+        1L, Duration.between(OffsetDateTime.now(ZoneOffset.ofHours(8)), expiration).toMillis());
   }
 
   private static OffsetDateTime parseExpiration(String value) {
