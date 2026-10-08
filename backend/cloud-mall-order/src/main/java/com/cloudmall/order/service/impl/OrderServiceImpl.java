@@ -33,6 +33,7 @@ import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
 import com.cloudmall.order.util.OrderCreationTime;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
 import java.math.BigDecimal;
@@ -220,6 +221,8 @@ public class OrderServiceImpl implements OrderService {
         reservationIntentService.markReleased(orderNo);
         throw new BizException(ErrorCodes.STOCK, "库存不足", 409);
       }
+      if (!validReservationProof(orderNo, reserved.data))
+        throw new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
       reservationConfirmed = true;
       reservationIntentService.markReserved(orderNo);
 
@@ -284,6 +287,25 @@ public class OrderServiceImpl implements OrderService {
         }
       }
       throw creationFailure;
+    }
+  }
+
+  /** 只核JSON原始文本身份和已接受状态，坏结构不授权；转换失败保留原异常证据。 */
+  private boolean validReservationProof(String orderNo, Object data) {
+    try {
+      JsonNode proof = mapper.valueToTree(data);
+      if (proof == null || !proof.isObject()) return false;
+      JsonNode responseOrder = proof.path("orderNo");
+      JsonNode responseStatus = proof.path("status");
+      return responseOrder.isTextual()
+          && responseStatus.isTextual()
+          && Objects.equals(orderNo, responseOrder.textValue())
+          && ("RESERVED".equals(responseStatus.textValue())
+              || "ALREADY_RESERVED".equals(responseStatus.textValue()));
+    } catch (IllegalArgumentException malformedProof) {
+      BizException unknown = new BizException("ORDER_RESERVATION_UNKNOWN", "库存预扣结果待确认", 202);
+      unknown.addSuppressed(malformedProof);
+      throw unknown;
     }
   }
 

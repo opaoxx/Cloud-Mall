@@ -482,6 +482,206 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void successfulReserveEnvelopeMustMatchOriginalOrderAndAReservedState() {
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int caseNumber = 0;
+    for (String variant : List.of("other", "case", "accent", "trailing", "null", "blank")) {
+      resetReservationSuccessFixture();
+      clearInvocations(stock);
+      doAnswer(
+              invocation -> {
+                StockClient.Reservation request = invocation.getArgument(0);
+                String original = request.orderNo();
+                Object responseOrder =
+                    switch (variant) {
+                      case "other" -> original + "other";
+                      case "case" ->
+                          original.equals(original.toUpperCase(java.util.Locale.ROOT))
+                              ? original + "A"
+                              : original.toUpperCase(java.util.Locale.ROOT);
+                      case "accent" -> original + "é";
+                      case "trailing" -> original + " ";
+                      case "null" -> null;
+                      case "blank" -> " ";
+                      default -> throw new AssertionError(variant);
+                    };
+                Map<String, Object> response = new java.util.LinkedHashMap<>();
+                response.put("orderNo", responseOrder);
+                response.put("status", "RESERVED");
+                return ApiResponse.ok(response);
+              })
+          .when(stock)
+          .reserve(any());
+      collectUnknownReservationAssertions("success-identity-" + caseNumber++, checks);
+    }
+    for (String state :
+        java.util.Arrays.asList(
+            null,
+            "",
+            "UNKNOWN",
+            "INIT",
+            "NOT_FOUND",
+            "REJECTED",
+            "CONFIRMED",
+            "ROLLED_BACK",
+            "reserved",
+            "RESERVED ",
+            "RÉSERVED",
+            "already_reserved",
+            "ALREADY_RESERVED ")) {
+      resetReservationSuccessFixture();
+      clearInvocations(stock);
+      doAnswer(
+              invocation -> {
+                StockClient.Reservation request = invocation.getArgument(0);
+                Map<String, Object> response = new java.util.LinkedHashMap<>();
+                response.put("orderNo", request.orderNo());
+                response.put("status", state);
+                return ApiResponse.ok(response);
+              })
+          .when(stock)
+          .reserve(any());
+      collectUnknownReservationAssertions("success-state-" + caseNumber++, checks);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void successfulReserveEnvelopeCannotUseMissingScalarOrNonTextualProof() {
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String shape :
+        List.of(
+            "null",
+            "string",
+            "number",
+            "array",
+            "empty",
+            "missing-order",
+            "missing-status",
+            "numeric-order",
+            "boolean-order",
+            "numeric-status")) {
+      resetReservationSuccessFixture();
+      clearInvocations(stock);
+      doAnswer(
+              invocation -> {
+                StockClient.Reservation request = invocation.getArgument(0);
+                Object data =
+                    switch (shape) {
+                      case "null" -> null;
+                      case "string" -> "reserved";
+                      case "number" -> 123L;
+                      case "array" -> List.of();
+                      case "empty" -> Map.of();
+                      case "missing-order" -> Map.of("status", "RESERVED");
+                      case "missing-status" -> Map.of("orderNo", request.orderNo());
+                      case "numeric-order" -> Map.of("orderNo", 123L, "status", "RESERVED");
+                      case "boolean-order" -> Map.of("orderNo", true, "status", "RESERVED");
+                      case "numeric-status" -> Map.of("orderNo", request.orderNo(), "status", 1);
+                      default -> throw new AssertionError(shape);
+                    };
+                return ApiResponse.ok(data);
+              })
+          .when(stock)
+          .reserve(any());
+      collectUnknownReservationAssertions("success-shape-" + shape, checks);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void exactReservedAndAlreadyReservedProofKeepMapAndVoCompatibility() {
+    AuthContext.set(7L, "USER");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    for (String state : List.of("RESERVED", "ALREADY_RESERVED")) {
+      for (String shape : List.of("map", "vo")) {
+        resetReservationSuccessFixture();
+        clearInvocations(stock);
+        doAnswer(
+                invocation -> {
+                  StockClient.Reservation request = invocation.getArgument(0);
+                  return ApiResponse.ok(
+                      "map".equals(shape)
+                          ? Map.of("orderNo", request.orderNo(), "status", state)
+                          : recoveryStatus(request.orderNo(), state));
+                })
+            .when(stock)
+            .reserve(any());
+        ApiResponse<?> returned =
+            service.create("success-proof-" + state + "-" + shape, normalRequest());
+        assertEquals("0", returned.code);
+        String originalNo = ((OrderVO) returned.data).orderNo;
+        assertEquals(
+            "COMMITTED",
+            fixture.queryForObject(
+                "SELECT status FROM order_reservation_intent WHERE order_no=?",
+                String.class,
+                originalNo));
+        assertEquals(
+            1, fixture.queryForObject("SELECT COUNT(*) FROM mall_order_202612", Integer.class));
+        assertEquals(
+            1, fixture.queryForObject("SELECT COUNT(*) FROM order_idempotency", Integer.class));
+        assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM order_outbox", Integer.class));
+        verify(stock).reserve(any());
+        verify(stock, never()).reservation(anyString());
+        verify(stock, never()).rollback(anyString());
+      }
+    }
+  }
+
+  /** 只清理本例随机库里的创建事实，批量红灯断言不能误用下一样本的数据。 */
+  private void resetReservationSuccessFixture() {
+    for (String table :
+        List.of(
+            "mall_order_item_202612",
+            "mall_order_202612",
+            "order_idempotency",
+            "order_outbox",
+            "order_reservation_intent")) fixture.update("DELETE FROM " + table);
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    clearInvocations(cart);
+  }
+
+  /** 当场捕获原行和副作用，批量断言未知证明不能授权确认、落单或补偿。 */
+  private void collectUnknownReservationAssertions(
+      String key, List<org.junit.jupiter.api.function.Executable> checks) {
+    BizException unknown = null;
+    try {
+      service.create(key, normalRequest());
+    } catch (BizException failure) {
+      unknown = failure;
+    }
+    BizException captured = unknown;
+    Map<String, Object> intent =
+        fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE idempotency_key=?", key);
+    checks.add(() -> assertNotNull(captured, key));
+    if (captured != null) {
+      checks.add(() -> assertEquals(202, captured.getHttpStatus(), key));
+      checks.add(() -> assertEquals("ORDER_RESERVATION_UNKNOWN", captured.getCode(), key));
+    }
+    checks.add(() -> assertEquals("RESERVE_UNKNOWN", intent.get("status"), key));
+    checks.add(() -> assertNotNull(intent.get("last_error"), key));
+    checks.add(() -> assertNotNull(intent.get("next_retry_at"), key));
+    for (String table :
+        List.of(
+            "mall_order_202612", "mall_order_item_202612", "order_idempotency", "order_outbox")) {
+      Integer count = fixture.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
+      checks.add(() -> assertEquals(0, count, key + "/" + table));
+    }
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    verify(stock).reserve(any());
+    verify(stock, never()).reservation(anyString());
+    verify(stock, never()).rollback(anyString());
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    int cartCalls = mockingDetails(cart).getInvocations().size();
+    checks.add(() -> assertEquals(0, cartCalls, key));
+  }
+
+  @Test
   void normalCreateUsesOneTruncatedShanghaiMillisecondForAllCreatedFields() throws Exception {
     AuthContext.set(7L, "USER");
     ApiResponse<?> response =
@@ -1605,7 +1805,13 @@ class OrderCreationPrecisionMySqlIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 9L, "商品", "SKU-7", BigDecimal.TEN, Map.of())));
-    when(stock.reserve(any())).thenReturn(ApiResponse.ok(null));
+    doAnswer(
+            invocation -> {
+              StockClient.Reservation request = invocation.getArgument(0);
+              return ApiResponse.ok(Map.of("orderNo", request.orderNo(), "status", "RESERVED"));
+            })
+        .when(stock)
+        .reserve(any());
     when(cart.deleteItem(anyLong(), anyLong())).thenReturn(ApiResponse.ok(null));
     when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L, "receiver", "小明"))));
   }

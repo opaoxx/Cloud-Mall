@@ -125,7 +125,13 @@ class OrderCreateCompensationProofTest {
                   new ProductClient.SkuView(7L, 9L, "商品", "SKU-7", BigDecimal.TEN, Map.of())));
       when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
       when(intents.createIntent(any())).thenReturn(true);
-      doReturn(ApiResponse.ok("reserved")).when(stock).reserve(any());
+      doAnswer(
+              invocation -> {
+                StockClient.Reservation request = invocation.getArgument(0);
+                return ApiResponse.ok(Map.of("orderNo", request.orderNo(), "status", "RESERVED"));
+              })
+          .when(stock)
+          .reserve(any());
       when(orders.insertOrder(anyString(), any(OrderPO.class))).thenThrow(creationFailure);
       service =
           new OrderServiceImpl(

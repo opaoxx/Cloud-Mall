@@ -183,6 +183,84 @@ class OrderFailureHandlingTest {
   }
 
   @Test
+  void reservationProofConversionFailureKeeps202AndItsOriginalEvidence() {
+    StockClient stockClient = mock(StockClient.class);
+    ProductClient products = mock(ProductClient.class);
+    UserClient users = mock(UserClient.class);
+    OrderSqlMapper orders = mock(OrderSqlMapper.class);
+    when(products.sku(7L)).thenReturn(ApiResponse.ok(sku()));
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              StockClient.Reservation request = invocation.getArgument(0);
+              return ApiResponse.ok(Map.of("orderNo", request.orderNo(), "status", "RESERVED"));
+            })
+        .when(stockClient)
+        .reserve(any());
+    OrderServiceImpl target = service(stockClient, products, users, orders);
+    OrderReservationIntentService intents =
+        (OrderReservationIntentService)
+            ReflectionTestUtils.getField(target, "reservationIntentService");
+    ObjectMapper proofMapper = org.mockito.Mockito.spy(new ObjectMapper());
+    IllegalArgumentException malformed =
+        new IllegalArgumentException("proof cannot be represented as JSON");
+    doThrow(malformed).when(proofMapper).valueToTree(any());
+    ReflectionTestUtils.setField(target, "mapper", proofMapper);
+    AuthContext.set(8L, "USER");
+    BizException returned =
+        assertThrows(
+            BizException.class, () -> target.create("proof-conversion-failure", orderRequest()));
+    assertEquals(202, returned.getHttpStatus());
+    assertEquals("ORDER_RESERVATION_UNKNOWN", returned.getCode());
+    assertEquals(1, returned.getSuppressed().length);
+    org.junit.jupiter.api.Assertions.assertSame(malformed, returned.getSuppressed()[0]);
+    verify(intents).markReserveUnknown(anyString(), anyString());
+    verify(intents, never()).markReserved(anyString());
+    verify(intents, never()).markReleased(anyString());
+    verify(stockClient).reserve(any());
+    verify(stockClient, never()).reservation(anyString());
+    verify(stockClient, never()).rollback(anyString());
+    verify(orders, never()).insertOrder(anyString(), any(OrderPO.class));
+  }
+
+  @Test
+  void reservationProofDoesNotSwallowFatalErrorsOrGuessACompensation() {
+    StockClient stockClient = mock(StockClient.class);
+    ProductClient products = mock(ProductClient.class);
+    UserClient users = mock(UserClient.class);
+    OrderSqlMapper orders = mock(OrderSqlMapper.class);
+    when(products.sku(7L)).thenReturn(ApiResponse.ok(sku()));
+    when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              StockClient.Reservation request = invocation.getArgument(0);
+              return ApiResponse.ok(Map.of("orderNo", request.orderNo(), "status", "RESERVED"));
+            })
+        .when(stockClient)
+        .reserve(any());
+    OrderServiceImpl target = service(stockClient, products, users, orders);
+    OrderReservationIntentService intents =
+        (OrderReservationIntentService)
+            ReflectionTestUtils.getField(target, "reservationIntentService");
+    ObjectMapper proofMapper = org.mockito.Mockito.spy(new ObjectMapper());
+    AssertionError fatal = new AssertionError("fatal proof adapter error");
+    doThrow(fatal).when(proofMapper).valueToTree(any());
+    ReflectionTestUtils.setField(target, "mapper", proofMapper);
+    AuthContext.set(8L, "USER");
+    org.junit.jupiter.api.Assertions.assertSame(
+        fatal,
+        assertThrows(
+            AssertionError.class, () -> target.create("fatal-proof-error", orderRequest())));
+    verify(intents, never()).markReserveUnknown(anyString(), anyString());
+    verify(intents, never()).markReserved(anyString());
+    verify(intents, never()).markReleased(anyString());
+    verify(stockClient).reserve(any());
+    verify(stockClient, never()).reservation(anyString());
+    verify(stockClient, never()).rollback(anyString());
+    verify(orders, never()).insertOrder(anyString(), any(OrderPO.class));
+  }
+
+  @Test
   void malformedStock409CannotReleaseAnUnknownReservationIntent() {
     StockClient stockClient = mock(StockClient.class);
     ProductClient productClient = mock(ProductClient.class);
@@ -238,7 +316,13 @@ class OrderFailureHandlingTest {
     when(orderSqlMapper.findIdempotentOrders(8L, "database-failure")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
-    doReturn(ApiResponse.ok(Map.of("reserved", true))).when(stockClient).reserve(any());
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              StockClient.Reservation request = invocation.getArgument(0);
+              return ApiResponse.ok(Map.of("orderNo", request.orderNo(), "status", "RESERVED"));
+            })
+        .when(stockClient)
+        .reserve(any());
     doReturn(ApiResponse.ok(Map.of("rolledBack", true))).when(stockClient).rollback(anyString());
     when(stockClient.reservation(anyString()))
         .thenAnswer(invocation -> legacyStockFact(invocation.getArgument(0), "ROLLED_BACK"));
