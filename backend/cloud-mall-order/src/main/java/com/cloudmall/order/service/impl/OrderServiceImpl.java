@@ -129,6 +129,7 @@ public class OrderServiceImpl implements OrderService {
     // 3. 返回 create 的处理结果。
     long userId = AuthContext.requireUserId();
     if (key == null || key.isBlank()) bad("Idempotency-Key不能为空");
+    if (key.codePointCount(0, key.length()) > 128) bad("Idempotency-Key不能超过128个字符");
     List<String> old = orderSqlMapper.findIdempotentOrderNos(userId, key);
     if (!old.isEmpty()) return ApiResponse.ok(find(old.get(0)));
     if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
