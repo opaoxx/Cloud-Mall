@@ -288,6 +288,8 @@
 
 Dispatcher 只对读取到的 outbox PO 快照执行非负 attempts guard；数据库列仍为 `INT NOT NULL`，本批不通过 DDL、扫描过滤或历史修复处理异常负值。
 
+Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行占据候选窗口；该过滤不改变列、索引或历史行，dispatcher 仍需保留读取快照 guard。
+
 Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改变表事实，单候选写失败不追加未知状态或二次 failure 写，已 confirm 但终态更新失败保持原行供既有重试/人工核验；表结构和 SQL 条件不变。
 
 ### 5.6 `order_stock_action`

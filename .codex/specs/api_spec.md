@@ -180,6 +180,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单超时 outbox dispatcher 处理候选前必须检查已读 PO 的 `attempts` 非 null 且非负；坏快照只告警并跳过，不解析、不发送、不完成或写失败，后续候选继续。该 guard 不改变扫描 SQL、数据库字段或其他并发/字段校验语义。
 
+订单超时 outbox 扫描在既有状态和到期时间条件后、LIMIT 前增加 `attempts>=0` eligibility；负计数不得占满候选窗口，也不被自动修复或删除。排序、limit 归一、Rabbit 和失败退避语义保持不变。
+
 订单 outbox 扫描 SQL 故障继续向外传播；单候选 DataAccessException 只隔离当前候选并继续后续候选。`markOutboxPublished` 或 failure 写入的数据库异常不得被普通发送 catch 转换为第二次 failure 写入，不猜测已确认消息状态；非数据库发送/解析异常保持原一次退避记录，Error 不捕获。
 
 订单列表的 `page`、`pageSize`、`startTime`、`endTime` 和可选 `status` 共同确定查询窗口；服务端先把带任意合法 ISO-8601 offset 的 `startTime/endTime` 按 same instant 规范到 `Asia/Shanghai`（`+08:00`），再计算月份范围，并使用左闭右开 `[start,end)` 时间条件，避免非 `+08:00` 请求在月初漏查前一月。`page` 与 `pageSize` 使用正数，服务端以 `long` 计算 `(page-1)*pageSize` 并在溢出或超出可接受深度时返回 `COMMON_INVALID_ARGUMENT`。响应必须保持 `items/page/pageSize/total` 结构，`total` 是所有命中月份的精确计数。由于不同物理月份的 `created_at` 区间按分片不变量严格不重叠，跨月查询按月份倒序遍历：先逐月 `COUNT`，根据计数跳过完整月份，仅对承载目标页的月份执行有界 `LIMIT/OFFSET` 批次，并在批次内使用 `created_at DESC, order_no DESC` 稳定排序；内存只保留目标页和当前批次，不得先把所有月份订单读入 JVM 后排序或 `subList`。若检测到订单落在错误月份，作为数据异常告警并使查询失败，不通过全量扫描默默兜底。任一命中月份不存在、不可访问或查询失败时，整个请求返回 `ORDER_QUERY_SHARD_UNAVAILABLE`（HTTP 503），不得返回部分 `items` 或部分 `total`。读路径不得为缺失历史月份偷偷建表；未来月份由定时任务预建，具体规则见数据库和架构规格。
