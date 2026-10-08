@@ -1,5 +1,6 @@
 package com.cloudmall.cart.service.impl;
 
+import com.cloudmall.cart.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
@@ -9,6 +10,9 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -155,6 +159,73 @@ public class CartServiceImpl implements CartService {
     // 3. 返回 delete 的处理结果。
     redisOperation(() -> redis.opsForHash().delete(key(), String.valueOf(skuId)));
     return ApiResponse.ok(null);
+  }
+
+  /**
+   * 读取原用户的合法购物车项快照，不刷新商品、写入或续期。
+   *
+   * @param skuId 原SKU身份
+   * @return 原始JSON快照，目标缺失时data为null
+   * @throws BizException Hash身份损坏为500，Redis故障为503
+   */
+  @GetMapping("/items/{skuId}/cleanup-snapshot")
+  public ApiResponse<CartCleanupSnapshotDTO> cleanupSnapshot(@PathVariable Long skuId) {
+    // 1. 同次完整Hash校验并保存原始JSON，保持原用户上下文。
+    String cartKey = key();
+    Map<String, String> originalValues = new HashMap<>();
+    Map<String, CartItemPO> items = readMap(cartKey, originalValues);
+    // 2. 只有规范存在项提供证明，缺项不构造猜测快照。
+    String skuField = String.valueOf(skuId);
+    CartCleanupSnapshotDTO snapshot =
+        items.containsKey(skuField)
+            ? new CartCleanupSnapshotDTO(skuId, originalValues.get(skuField))
+            : null;
+    // 3. 返回不可变原值，不查询Product或刷新TTL。
+    return ApiResponse.ok(snapshot);
+  }
+
+  /**
+   * 使用跨服务原JSON证明条件清理，已缺失或变更的项保留且返回false。
+   *
+   * @param skuId 路径原SKU身份
+   * @param snapshot 提交前捕获的不可变原JSON证明
+   * @return true表示已删除，false表示目标已缺失或变化
+   * @throws BizException 不可信证明为400，删除结果未知为500，Redis故障为503
+   */
+  @PostMapping("/items/{skuId}/cleanup")
+  public ApiResponse<Boolean> cleanupItem(
+      @PathVariable Long skuId, @RequestBody CartCleanupSnapshotDTO snapshot) {
+    // 1. 路径、DTO和原JSON数值身份一致才授权Redis操作。
+    if (!validCleanupSnapshot(skuId, snapshot))
+      throw new BizException(ErrorCodes.INVALID, "购物车清理快照不可信", 400);
+    // 2. 每项一次原JSON条件删除，变更不重读、不无条件fallback、不续TTL。
+    boolean removed = compareDelete(key(), String.valueOf(skuId), snapshot.expectedJson());
+    // 3. 只返回已确认结果，执行未知或依赖故障不自动重复。
+    return ApiResponse.ok(removed);
+  }
+
+  /** 精确校验不可变证明的原数值SKU和完整JSON object，解析失败拒绝且零Redis操作。 */
+  private boolean validCleanupSnapshot(Long skuId, CartCleanupSnapshotDTO snapshot) {
+    if (skuId == null
+        || snapshot == null
+        || !Objects.equals(skuId, snapshot.skuId())
+        || snapshot.expectedJson() == null
+        || snapshot.expectedJson().isBlank()) return false;
+    try {
+      JsonNode proof =
+          mapper
+              .reader()
+              .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+              .readTree(snapshot.expectedJson());
+      JsonNode proofSku = proof == null ? null : proof.path("skuId");
+      return proof != null
+          && proof.isObject()
+          && proofSku.isIntegralNumber()
+          && proofSku.canConvertToLong()
+          && proofSku.longValue() == skuId.longValue();
+    } catch (JsonProcessingException malformedProof) {
+      return false;
+    }
   }
 
   /**
@@ -373,12 +444,13 @@ public class CartServiceImpl implements CartService {
   }
 
   /** 原JSON精确相等才删除。0为缺失或变更的确定跳过，1为确定删除；其他返回或Redis异常 不猜测是否已应用、不重试，也不补偿已删除的前序候选。 */
-  private void compareDelete(String cartKey, String skuField, String expectedJson) {
+  private boolean compareDelete(String cartKey, String skuField, String expectedJson) {
     Long result =
         redisOperation(
             () -> redis.execute(CART_COMPARE_DELETE, List.of(cartKey), skuField, expectedJson));
-    if (!Long.valueOf(0).equals(result) && !Long.valueOf(1).equals(result))
-      throw new BizException(ErrorCodes.INTERNAL, "购物车清理结果未知", 500);
+    if (Long.valueOf(1).equals(result)) return true;
+    if (Long.valueOf(0).equals(result)) return false;
+    throw new BizException(ErrorCodes.INTERNAL, "购物车清理结果未知", 500);
   }
 
   /** Redis 故障统一按已评审的可重试依赖错误返回。 */

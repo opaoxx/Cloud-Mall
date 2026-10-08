@@ -9,6 +9,7 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
+import com.cloudmall.order.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
@@ -701,17 +702,23 @@ class OrderCreationPrecisionMySqlIT {
                   independent.queryForObject(
                       "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-after-commit'",
                       String.class));
-              return ApiResponse.ok(null);
+              return ApiResponse.ok(true);
             })
         .when(cart)
-        .deleteItem(anyLong(), anyLong());
+        .cleanupItem(anyLong(), anyLong(), any());
     java.util.concurrent.atomic.AtomicInteger callsBeforeCommit =
         new java.util.concurrent.atomic.AtomicInteger(-1);
     ApiResponse<?> result =
         transaction.execute(
             status -> {
               ApiResponse<?> created = service.create("cart-after-commit", normalRequest());
-              callsBeforeCommit.set(mockingDetails(cart).getInvocations().size());
+              callsBeforeCommit.set(
+                  (int)
+                      mockingDetails(cart).getInvocations().stream()
+                          .filter(
+                              invocation ->
+                                  !invocation.getMethod().getName().equals("cleanupSnapshot"))
+                          .count());
               return created;
             });
     assertAll(
@@ -719,7 +726,52 @@ class OrderCreationPrecisionMySqlIT {
         () -> assertEquals(0, callsBeforeCommit.get()),
         () -> assertEquals(1, visibleOrders.get()),
         () -> assertEquals("COMMITTED", visibleIntent.get()));
-    verify(cart).deleteItem(7L, 7L);
+    verify(cart).cleanupItem(eq(7L), eq(7L), any());
+  }
+
+  @Test
+  void cleanupUsesPrecommitProofAndOriginalUserWithoutReadingTheChangedCartAgain() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    CartCleanupSnapshotDTO original =
+        new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":1,\"addedAt\":\"original\"}");
+    CartCleanupSnapshotDTO readded =
+        new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":4,\"addedAt\":\"readded\"}");
+    var current = new java.util.concurrent.atomic.AtomicReference<CartCleanupSnapshotDTO>(original);
+    doAnswer(invocation -> ApiResponse.ok(current.get())).when(cart).cleanupSnapshot(7L, 7L);
+    doAnswer(
+            invocation -> {
+              CartCleanupSnapshotDTO expected = invocation.getArgument(2);
+              boolean deleted = current.compareAndSet(expected, null);
+              return ApiResponse.ok(deleted);
+            })
+        .when(cart)
+        .cleanupItem(anyLong(), anyLong(), any());
+    CreateOrderDTO request = normalRequest();
+    ApiResponse<?> created =
+        transaction.execute(
+            status -> {
+              ApiResponse<?> response = service.create("cart-proof-before-commit", request);
+              verify(cart).cleanupSnapshot(7L, 7L);
+              verify(cart, never()).cleanupItem(anyLong(), anyLong(), any());
+              current.set(readded);
+              request.items.get(0).skuId = 999L;
+              AuthContext.set(99L, "USER");
+              return response;
+            });
+    assertEquals("0", created.code);
+    assertEquals(readded, current.get());
+    verify(cart).cleanupSnapshot(7L, 7L);
+    verify(cart).cleanupItem(7L, 7L, original);
+    verify(cart, never()).deleteItem(anyLong(), anyLong());
+    verifyNoMoreInteractions(cart);
+    assertEquals(
+        1, fixture.queryForObject("SELECT COUNT(*) FROM mall_order_202612", Integer.class));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-proof-before-commit'",
+            String.class));
   }
 
   @Test
@@ -739,7 +791,10 @@ class OrderCreationPrecisionMySqlIT {
         fixture.queryForObject(
             "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-rollback'",
             String.class));
-    verifyNoInteractions(cart);
+    verify(cart).cleanupSnapshot(7L, 7L);
+    verify(cart, never()).cleanupItem(anyLong(), anyLong(), any());
+    verify(cart, never()).deleteItem(anyLong(), anyLong());
+    verifyNoMoreInteractions(cart);
     verify(stock, never()).rollback(anyString());
   }
 
@@ -789,22 +844,23 @@ class OrderCreationPrecisionMySqlIT {
         .when(stock)
         .reservation(anyString());
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
-    for (String failure : List.of("null", "nonzero", "runtime")) {
+    for (String failure : List.of("null", "null-data", "nonzero", "runtime")) {
       resetReservationSuccessFixture();
       clearInvocations(stock, cart);
       doAnswer(
               invocation -> {
                 Long skuId = invocation.getArgument(0);
-                if (skuId.equals(8L)) return ApiResponse.ok(null);
+                if (skuId.equals(8L)) return ApiResponse.ok(true);
                 return switch (failure) {
                   case "null" -> null;
+                  case "null-data" -> ApiResponse.ok(null);
                   case "nonzero" -> ApiResponse.error("503", "cart unavailable");
                   case "runtime" -> throw new IllegalStateException("cart unavailable");
                   default -> throw new AssertionError(failure);
                 };
               })
           .when(cart)
-          .deleteItem(anyLong(), anyLong());
+          .cleanupItem(anyLong(), anyLong(), any());
       CreateOrderDTO request = normalRequest();
       OrderItemDTO secondItem = new OrderItemDTO();
       secondItem.skuId = 8L;
@@ -829,7 +885,10 @@ class OrderCreationPrecisionMySqlIT {
       int secondCalls =
           (int)
               mockingDetails(cart).getInvocations().stream()
-                  .filter(invocation -> Long.valueOf(8L).equals(invocation.getArgument(0)))
+                  .filter(
+                      invocation ->
+                          invocation.getMethod().getName().equals("cleanupItem")
+                              && Long.valueOf(8L).equals(invocation.getArgument(0)))
                   .count();
       int stockRollbacks =
           (int)
@@ -1978,7 +2037,15 @@ class OrderCreationPrecisionMySqlIT {
             })
         .when(stock)
         .reserve(any());
-    when(cart.deleteItem(anyLong(), anyLong())).thenReturn(ApiResponse.ok(null));
+    when(cart.cleanupSnapshot(anyLong(), anyLong()))
+        .thenAnswer(
+            invocation -> {
+              Long skuId = invocation.getArgument(0);
+              return ApiResponse.ok(
+                  new CartCleanupSnapshotDTO(
+                      skuId, "{\"skuId\":" + skuId + ",\"quantity\":1,\"checked\":true}"));
+            });
+    when(cart.cleanupItem(anyLong(), anyLong(), any())).thenReturn(ApiResponse.ok(true));
     when(users.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L, "receiver", "小明"))));
   }
 

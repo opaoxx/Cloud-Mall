@@ -8,6 +8,7 @@ import com.cloudmall.common.error.*;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.config.SeckillSentinelConfiguration;
+import com.cloudmall.order.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.domain.dto.OrderQueryWindow;
@@ -32,7 +33,9 @@ import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
 import com.cloudmall.order.util.OrderCreationTime;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import feign.FeignException;
@@ -287,7 +290,7 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 捕获原用户与不可变去重SKU快照，仅在真实事务提交后清理，失败保留购物车并告警。 */
+  /** 提交前捕获原用户与不可变原JSON快照，提交后仅条件删除未变项，失败逐项保留并告警。 */
   private void registerCartCleanup(String orderNo, long userId, List<OrderItemDTO> items) {
     try {
       // 1. 无实际事务或同步上下文时不能证明提交，禁止提前删除购物车。
@@ -298,16 +301,31 @@ public class OrderServiceImpl implements OrderService {
       }
       // 2. 捕获原值，回调不重读请求或晚期鉴权；每个SKU最多删除一次。
       List<Long> purchasedSkuIds = items.stream().map(item -> item.skuId).distinct().toList();
+      List<CartCleanupSnapshotDTO> captured = new ArrayList<>();
+      for (Long skuId : purchasedSkuIds) {
+        try {
+          ApiResponse<CartCleanupSnapshotDTO> response = cart.cleanupSnapshot(skuId, userId);
+          if (response == null
+              || !"0".equals(response.code)
+              || !validCartCleanupSnapshot(skuId, response.data))
+            throw new IllegalStateException("购物车清理快照未确认");
+          captured.add(response.data);
+        } catch (RuntimeException snapshotFailure) {
+          log.warn("订单购物车快照捕获失败，保留该项，orderNo={}，skuId={}", orderNo, skuId, snapshotFailure);
+        }
+      }
+      List<CartCleanupSnapshotDTO> cleanupSnapshots = List.copyOf(captured);
       TransactionSynchronizationManager.registerSynchronization(
           new TransactionSynchronization() {
             /** 订单已提交后逐SKU清理；普通失败隔离，Error保持传播。 */
             @Override
             public void afterCommit() {
               // 3. 远端清理失败不得反向回滚已提交订单或库存，继续后续SKU。
-              for (Long skuId : purchasedSkuIds) {
+              for (CartCleanupSnapshotDTO snapshot : cleanupSnapshots) {
+                Long skuId = snapshot.skuId();
                 try {
-                  ApiResponse<?> removed = cart.deleteItem(skuId, userId);
-                  if (removed == null || !"0".equals(removed.code))
+                  ApiResponse<Boolean> removed = cart.cleanupItem(skuId, userId, snapshot);
+                  if (removed == null || !"0".equals(removed.code) || removed.data == null)
                     throw new IllegalStateException("购物车清理响应未确认");
                 } catch (RuntimeException cleanupFailure) {
                   log.warn("订单提交后购物车清理失败，orderNo={}，skuId={}", orderNo, skuId, cleanupFailure);
@@ -317,6 +335,29 @@ public class OrderServiceImpl implements OrderService {
           });
     } catch (RuntimeException registrationFailure) {
       log.warn("订单购物车清理回调注册失败，保留购物车，orderNo={}", orderNo, registrationFailure);
+    }
+  }
+
+  /** 原DTO与原JSON数值SKU都须精确匹配请求，不从坏响应拼接或重建删除证明。 */
+  private boolean validCartCleanupSnapshot(Long skuId, CartCleanupSnapshotDTO snapshot) {
+    if (snapshot == null
+        || !Objects.equals(skuId, snapshot.skuId())
+        || snapshot.expectedJson() == null
+        || snapshot.expectedJson().isBlank()) return false;
+    try {
+      JsonNode proof =
+          mapper
+              .reader()
+              .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+              .readTree(snapshot.expectedJson());
+      JsonNode proofSku = proof == null ? null : proof.path("skuId");
+      return proof != null
+          && proof.isObject()
+          && proofSku.isIntegralNumber()
+          && proofSku.canConvertToLong()
+          && proofSku.longValue() == skuId.longValue();
+    } catch (JsonProcessingException malformedProof) {
+      return false;
     }
   }
 

@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.order.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
 import com.cloudmall.order.feign.CartClient;
@@ -57,7 +58,9 @@ class OrderCartCommitBoundaryTest {
       TransactionSynchronizationManager.initSynchronization();
       CreateOrderDTO request = request();
       assertEquals("0", fixture.service.create("callback-snapshot", request).code);
-      verifyNoInteractions(fixture.cart);
+      verify(fixture.cart).cleanupSnapshot(7L, 8L);
+      verify(fixture.cart).cleanupSnapshot(8L, 8L);
+      verify(fixture.cart, never()).cleanupItem(anyLong(), anyLong(), any());
       List<TransactionSynchronization> callbacks =
           TransactionSynchronizationManager.getSynchronizations();
       assertEquals(1, callbacks.size());
@@ -66,21 +69,138 @@ class OrderCartCommitBoundaryTest {
       AuthContext.set(99L, "USER");
       if (fatal) {
         AssertionError original = new AssertionError("fatal cart callback");
-        doThrow(original).when(fixture.cart).deleteItem(7L, 8L);
+        doThrow(original).when(fixture.cart).cleanupItem(7L, 8L, snapshot(7L));
         assertSame(
             original, assertThrows(AssertionError.class, () -> callbacks.get(0).afterCommit()));
-        verify(fixture.cart).deleteItem(7L, 8L);
-        verify(fixture.cart, never()).deleteItem(8L, 8L);
+        verify(fixture.cart).cleanupItem(7L, 8L, snapshot(7L));
+        verify(fixture.cart, never()).cleanupItem(8L, 8L, snapshot(8L));
       } else {
         callbacks.get(0).afterCommit();
-        verify(fixture.cart).deleteItem(7L, 8L);
-        verify(fixture.cart).deleteItem(8L, 8L);
+        verify(fixture.cart).cleanupItem(7L, 8L, snapshot(7L));
+        verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
         verifyNoMoreInteractions(fixture.cart);
       }
       verify(fixture.stock, never()).rollback(anyString());
       verify(fixture.stock, never()).reservation(anyString());
       clearContext();
     }
+  }
+
+  @Test
+  void anOlderCommitCallbackNeverUsesUnconditionalDeleteAgainstAReaddedItem() {
+    Fixture fixture = new Fixture();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.initSynchronization();
+    assertEquals("0", fixture.service.create("readded-after-commit", request()).code);
+    var currentItem = new java.util.concurrent.atomic.AtomicReference<String>("readded cart item");
+    doAnswer(
+            invocation -> {
+              currentItem.set(null);
+              return ApiResponse.ok(null);
+            })
+        .when(fixture.cart)
+        .deleteItem(7L, 8L);
+    doAnswer(
+            invocation -> {
+              CartCleanupSnapshotDTO original = invocation.getArgument(2);
+              boolean removed = currentItem.compareAndSet(original.expectedJson(), null);
+              return ApiResponse.ok(removed);
+            })
+        .when(fixture.cart)
+        .cleanupItem(anyLong(), anyLong(), any());
+    for (TransactionSynchronization callback :
+        TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+    assertAll(
+        () -> assertEquals("readded cart item", currentItem.get()),
+        () -> verify(fixture.cart, never()).deleteItem(anyLong(), anyLong()));
+    verify(fixture.cart).cleanupSnapshot(7L, 8L);
+    verify(fixture.cart).cleanupSnapshot(8L, 8L);
+    verify(fixture.cart).cleanupItem(7L, 8L, snapshot(7L));
+    verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+  }
+
+  @Test
+  void invalidSnapshotsNeverAuthorizeCleanupOrTriggerAnUnconditionalFallback() {
+    for (String fault :
+        List.of(
+            "null-response",
+            "nonzero",
+            "null-data",
+            "wrong-dto",
+            "blank",
+            "string-sku",
+            "wrong-json",
+            "decimal",
+            "overflow",
+            "array",
+            "trailing",
+            "runtime")) {
+      Fixture fixture = new Fixture();
+      TransactionSynchronizationManager.setActualTransactionActive(true);
+      TransactionSynchronizationManager.initSynchronization();
+      doAnswer(
+              invocation -> {
+                return switch (fault) {
+                  case "null-response" -> null;
+                  case "nonzero" -> ApiResponse.error("503", "unavailable");
+                  case "null-data" -> ApiResponse.ok(null);
+                  case "wrong-dto" ->
+                      ApiResponse.ok(new CartCleanupSnapshotDTO(99L, "{\"skuId\":7}"));
+                  case "blank" -> ApiResponse.ok(new CartCleanupSnapshotDTO(7L, " "));
+                  case "string-sku" ->
+                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":\"7\"}"));
+                  case "wrong-json" ->
+                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":8}"));
+                  case "decimal" ->
+                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7.0}"));
+                  case "overflow" ->
+                      ApiResponse.ok(
+                          new CartCleanupSnapshotDTO(7L, "{\"skuId\":18446744073709551623}"));
+                  case "array" -> ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "[]"));
+                  case "trailing" ->
+                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7} {}"));
+                  case "runtime" -> throw new IllegalStateException("snapshot unavailable");
+                  default -> throw new AssertionError(fault);
+                };
+              })
+          .when(fixture.cart)
+          .cleanupSnapshot(7L, 8L);
+      assertEquals("0", fixture.service.create("bad-snapshot-" + fault, request()).code);
+      for (TransactionSynchronization callback :
+          TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+      verify(fixture.cart).cleanupSnapshot(7L, 8L);
+      verify(fixture.cart).cleanupSnapshot(8L, 8L);
+      verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+      verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+      verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+      verifyNoMoreInteractions(fixture.cart);
+      verify(fixture.stock, never()).rollback(anyString());
+      clearContext();
+    }
+  }
+
+  @Test
+  void snapshotErrorsRemainFatalAndAreNotConvertedIntoCleanupPermission() {
+    Fixture fixture = new Fixture();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.initSynchronization();
+    AssertionError original = new AssertionError("fatal snapshot read");
+    doThrow(original).when(fixture.cart).cleanupSnapshot(7L, 8L);
+    assertSame(
+        original,
+        assertThrows(
+            AssertionError.class, () -> fixture.service.create("fatal-snapshot", request())));
+    verify(fixture.cart).cleanupSnapshot(7L, 8L);
+    verify(fixture.cart, never()).cleanupSnapshot(8L, 8L);
+    verify(fixture.cart, never()).cleanupItem(anyLong(), anyLong(), any());
+    verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+    assertTrue(TransactionSynchronizationManager.getSynchronizations().isEmpty());
+  }
+
+  /** 不可变原始JSON证明，不从回调时期的购物车重新读取。 */
+  private static CartCleanupSnapshotDTO snapshot(Long skuId) {
+    return new CartCleanupSnapshotDTO(
+        skuId, "{\"skuId\":" + skuId + ",\"quantity\":2,\"checked\":true}");
   }
 
   /** 实际创建编排，持久层和远端明确替身，不把人工同步上下文称作真实提交。 */
@@ -134,7 +254,9 @@ class OrderCartCommitBoundaryTest {
                           BigDecimal.TEN,
                           "address_snapshot",
                           "{}")));
-      when(cart.deleteItem(anyLong(), anyLong())).thenReturn(ApiResponse.ok(null));
+      when(cart.cleanupSnapshot(anyLong(), anyLong()))
+          .thenAnswer(invocation -> ApiResponse.ok(snapshot(invocation.getArgument(0))));
+      when(cart.cleanupItem(anyLong(), anyLong(), any())).thenReturn(ApiResponse.ok(true));
       service = new OrderServiceImpl(stock, products, users, cart, orders, new ObjectMapper());
       ReflectionTestUtils.setField(service, "reservationIntentService", intents);
       ReflectionTestUtils.setField(service, "reservationIntentMapper", intentMapper);
