@@ -15,7 +15,7 @@
 - 保留原请求非空和既有错误码；`items` 中每个 `skuId` 必须非空，`quantity` 必须为正 `int`。不满足时沿既有 400 返回，不访问 Cart/Product/Stock，也不写订单事实。
 - 仅为快照授权聚合同一 SKU 的购买数量，使用 `long` 求和；溢出 `Integer.MAX_VALUE` 时该 SKU 不取得可删除证明并保留购物车项，不新增订单数量上限或改变后续原始请求语义。
 - 聚合只用于证明，不修改传给 Product、Stock 或订单持久化的原始 `items`、顺序、数量和金额。
-- 已有幂等命中返回路径保持原顺序，直接返回且不执行本批 Cart 快照 GET。
+- 已有订单幂等投影命中返回路径保持原顺序，直接返回且不执行本批 Cart 快照 GET/POST。若该投影缺失而进入既有 `createIntent=false` 与 `findByUserAndKey` 的 COMMITTED/alias fallback，则保持原业务查询顺序，允许入口执行前置只读 GET；该 fallback 必须仍然零 POST/DELETE、零 Stock 调用，且不改变订单、intent、Cart 或其他 fixture 事实。不得新增查询来把该 fallback 提前成另一种幂等路径。
 
 ## 3. 前置 Cart 快照
 
@@ -45,9 +45,8 @@ afterCommit 仅使用原 userId 和原 DTO 对每个 SKU 调用一次 cleanup PO
 - 不改变 Order 公共 JSON、错误码、原始 Stock/Order 流程、金额、时间和事务语义；数量证明失败只影响 Cart 清理授权。
 - Cart Redis、Lua CAS、身份拦截器和 17CD 失败隔离规则保持不变。
 - Cart Redis IT 验证数量/原 JSON proof；Order MySQL/事务测试使用 Cart 替身验证采样顺序、回滚和提交；Feign/DTO/JSON 合同独立验证，不宣称真实跨 HTTP 集成。
-- 必须覆盖：Stock reserve 前后 Cart 变化仍使用旧 proof；购物车数量 5、购买数量 2 不删除；重复 SKU 聚合匹配时允许清理；缺项/坏数量/聚合溢出不授权；采样后新增项不产生晚期 GET；幂等命中零 GET；后续失败和 rollback 零 POST/DELETE；原订单精度与 checksum 回归。
+- 必须覆盖：Stock reserve 前后 Cart 变化仍使用旧 proof；购物车数量 5、购买数量 2 不删除；重复 SKU 聚合匹配时允许清理；缺项/坏数量/聚合溢出不授权；采样后新增项不产生晚期 GET；订单幂等投影命中零 GET/POST，投影缺失的 intent fallback 允许只读 GET但严格零 POST/DELETE/Stock且事实不变；后续失败和 rollback 零 POST/DELETE；原订单精度与 checksum 回归。
 
 ## 6. 明确不承诺
 
 本批不保护前置采样以前的购物车变化，不识别同字节 ABA，不提供 Cart 持久重试或客户端 exactly-once，也不把只读采样失败转换为订单失败。
-

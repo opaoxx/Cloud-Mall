@@ -141,7 +141,7 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项；并发变更保留最新项，比较失败仍返回原成功 null。脚本结果未知返回 INTERNAL/500，Redis 依赖故障保持既有 503，不自动重试或猜测删除结果。
 
-订单创建成功末尾先使用内部 snapshot GET 预采样，提交后的 afterCommit 仅使用原 DTO 调用 cleanup POST，不再 GET；GET 缺项返回 code=0/data=null，POST 仅在原 JSON bytes 精确匹配时返回 data=true，否则返回 data=false；请求 proof 失败为 400，结果未知为 500，Redis 依赖故障为 503。该内部契约不改变公开 Cart DELETE、订单 JSON 或错误码。
+订单创建入口在地址、商品、库存预扣、意图和订单本地写入前使用内部 snapshot GET 预采样；提交后的 afterCommit 仅使用原 DTO 调用 cleanup POST，不再 GET。已命中订单幂等投影的请求保持原顺序并不执行该 GET；投影缺失而进入既有 intent fallback 时允许只读 GET，但不得产生 POST/DELETE、Stock 调用或事实变更。GET 缺项返回 code=0/data=null，POST 仅在原 JSON bytes 精确匹配时返回 data=true，否则返回 data=false；请求 proof 失败为 400，结果未知为 500，Redis 依赖故障为 503。该内部契约不改变公开 Cart DELETE、订单 JSON 或错误码。
 
 订单创建的 Cart 清理快照在地址、商品、库存预扣、意图和订单本地写入之前只读预采样。请求基础校验后，所有 `skuId` 必须非空、`quantity` 必须为正 int；同 SKU 数量仅以 long 聚合用于证明，不改变原订单/Stock 请求，聚合超过 int 上限时不授权该 SKU 清理。快照 JSON 的 `skuId` 和正整数 `quantity` 必须分别精确匹配 SKU 与聚合购买数量；证明失败只保留购物车项。成功采样的 DTO 在提交后仅用于一次条件 cleanup POST，回调不再 GET；无事务、幂等命中或回滚不产生该清理调用。
 
