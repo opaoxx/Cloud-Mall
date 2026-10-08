@@ -89,6 +89,80 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void aFailureRecordSqlErrorMustNotPreventTheFollowingCandidate() {
+    OrderOutboxPO first = pendingOutbox();
+    first.lastError = "keep first fact";
+    OrderOutboxPO second = pendingOutbox();
+    second.id = 2L;
+    second.eventId = "after-failure-write";
+    second.orderNo = "202610-after-failure";
+    second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+    assertEquals(1, mapper.insert(first));
+    assertEquals(1, mapper.insert(second));
+    var firstBefore = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+    fixture.execute(
+        "CREATE TRIGGER cs_failure_record BEFORE UPDATE ON order_outbox FOR EACH ROW BEGIN "
+            + "IF OLD.id=1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='first failure write rejected'; END IF; END");
+    RabbitTemplate rabbit = failingRabbit("broker unavailable");
+    RuntimeException failure = null;
+    try {
+      dispatcher(rabbit).dispatchPending();
+    } catch (RuntimeException rejected) {
+      failure = rejected;
+    }
+    var firstAfter = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+    var secondAfter = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=2");
+    RuntimeException captured = failure;
+    assertAll(
+        () -> assertNull(captured),
+        () -> assertEquals(firstBefore, firstAfter),
+        () -> assertEquals(1, ((Number) secondAfter.get("attempts")).intValue()),
+        () -> assertEquals("broker unavailable", secondAfter.get("last_error")),
+        () -> assertEquals("PENDING", secondAfter.get("status")),
+        () ->
+            verify(rabbit, times(2))
+                .convertAndSend(
+                    anyString(), anyString(), any(), any(), any(CorrelationData.class)));
+  }
+
+  @Test
+  void aConfirmedPublishSqlErrorCannotBeRewrittenAsASendFailure() {
+    OrderOutboxPO first = pendingOutbox();
+    first.lastError = "keep confirmed event fact";
+    OrderOutboxPO second = pendingOutbox();
+    second.id = 2L;
+    second.eventId = "after-publish-write";
+    second.orderNo = "202610-after-publish";
+    second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+    assertEquals(1, mapper.insert(first));
+    assertEquals(1, mapper.insert(second));
+    var firstBefore = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+    fixture.execute(
+        "CREATE TRIGGER cs_published_record BEFORE UPDATE ON order_outbox FOR EACH ROW BEGIN "
+            + "IF OLD.id=1 AND NEW.status='PUBLISHED' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='first published write rejected'; END IF; END");
+    RabbitTemplate rabbit = mock(RabbitTemplate.class);
+    doAnswer(
+            invocation -> {
+              CorrelationData correlation = invocation.getArgument(4);
+              correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+              return null;
+            })
+        .when(rabbit)
+        .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    dispatcher(rabbit).dispatchPending();
+    var firstAfter = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+    var secondAfter = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=2");
+    assertAll(
+        () -> assertEquals(firstBefore, firstAfter),
+        () -> assertEquals("PUBLISHED", secondAfter.get("status")),
+        () -> assertEquals(0, ((Number) secondAfter.get("attempts")).intValue()),
+        () ->
+            verify(rabbit, times(2))
+                .convertAndSend(
+                    anyString(), anyString(), any(), any(), any(CorrelationData.class)));
+  }
+
+  @Test
   void invalidCounterSnapshotsCannotPublishButFollowingHealthyEventsStillCan() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (int invalidCount : List.of(-1, Integer.MIN_VALUE)) {
@@ -403,7 +477,7 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
-  void failureRecordSqlErrorStillPropagatesWithoutRepeatingThePublish() {
+  void failureRecordSqlErrorIsIsolatedWithoutRepeatingThePublish() {
     assertEquals(1, mapper.insert(pendingOutbox()));
     var before = fixture.queryForMap("SELECT * FROM order_outbox");
     fixture.execute(
@@ -411,7 +485,7 @@ class OrderOutboxErrorMySqlIT {
             + " FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='cm17au failure record rejected'");
     RabbitTemplate rabbit = failingRabbit("中".repeat(333) + "😀");
     var dispatcher = dispatcher(rabbit);
-    assertThrows(org.springframework.dao.DataAccessException.class, dispatcher::dispatchPending);
+    assertDoesNotThrow(dispatcher::dispatchPending);
     assertEquals(before, fixture.queryForMap("SELECT * FROM order_outbox"));
     verify(rabbit)
         .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));

@@ -21,6 +21,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.MessageConversionException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -68,12 +69,22 @@ public class OrderOutboxDispatcher {
     this.rabbitTemplate.setMandatory(true);
   }
 
-  /** Publishes pending timeout events after their local transaction has committed. */
+  /**
+   * 投递已提交的超时候选，单条数据库写异常告警并继续本批后项。
+   *
+   * @throws DataAccessException 扫描数据库失败，不能将扫描不可用伪装为单条跳过
+   */
   @Scheduled(fixedDelayString = "${cloudmall.order.outbox.dispatch-interval-ms:1000}")
   public void dispatchPending() {
+    // 1. 扫描失败继续传播，不生成虚假候选或吞掉数据库不可用。
     List<OrderOutboxPO> pendingRows = orderOutboxMapper.findPendingOutbox(batchSize);
     for (OrderOutboxPO pendingRow : pendingRows) {
-      dispatchOne(pendingRow);
+      // 2. 只隔离明确的单候选数据库异常，不重发或追加本候选写入。
+      try {
+        dispatchOne(pendingRow);
+      } catch (DataAccessException databaseFailure) {
+        log.warn("订单超时outbox数据库写入失败，保留当前事实并继续后项，eventId={}", pendingRow.eventId, databaseFailure);
+      }
     }
   }
 
@@ -117,11 +128,18 @@ public class OrderOutboxDispatcher {
         throw new IllegalStateException(reason);
       }
       orderOutboxMapper.markOutboxPublished(outbox.eventId, LocalDateTime.now(BUSINESS_ZONE));
+    } catch (DataAccessException databaseFailure) {
+      // 完成写的数据库失败不等于发送失败，交由候选边界处理而非再次写failure。
+      throw databaseFailure;
     } catch (Exception exception) {
       LocalDateTime nextRetryAt = LocalDateTime.now(BUSINESS_ZONE).plusSeconds(retryDelaySeconds);
       String error = compactError(exception);
       orderOutboxMapper.recordOutboxFailure(outbox.eventId, error, nextRetryAt);
-      log.warn("订单超时 outbox 发布失败，将重试，eventId={}, nextRetryAt={}", outbox.eventId, nextRetryAt, exception);
+      log.warn(
+          "订单超时 outbox 发布失败，将重试，eventId={}, nextRetryAt={}",
+          outbox.eventId,
+          nextRetryAt,
+          exception);
     }
   }
 
