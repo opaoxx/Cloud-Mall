@@ -54,28 +54,37 @@ public class CartServiceImpl implements CartService {
     return ApiResponse.ok(refreshItems().stream().map(CartItemVO::from).toList());
   }
 
+  /**
+   * 使用当前商品事实新增或安全合并购物车数量，拒绝时保持原Redis项及TTL。
+   *
+   * @param request 原SKU与正int数量请求，客户端商品摘要不作为事实
+   * @return 同一持久化项构造的购物车响应
+   * @throws BizException 非法请求/合并溢出为400，非正存量数据为500，Redis故障为503
+   */
   @PostMapping("/items")
-  /** 执行 add 相关操作。 */
   public ApiResponse<?> add(@RequestBody CartItemDTO request) {
-    // 1. 接收并整理 add 的业务请求。
-    // 2. 执行 add 的核心业务校验与状态处理。
-    // 3. 返回 add 的处理结果。
+    // 1. 保留请求正数校验并读取当前商品事实。
     if (request.skuId == null || request.quantity < 1)
       throw new BizException(ErrorCodes.INVALID, "购物车数量必须为正数", 400);
     ProductClient.SkuView current = currentSku(request.skuId);
+    // 2. 读取原项，新项保持原规则；存量先核数量并用long求和避免int回绕。
     Map<String, CartItemPO> items = readMap();
     CartItemPO item = items.get(String.valueOf(request.skuId));
     if (item == null) {
-      // 1. 从请求构造新项，但商品摘要只信任商品服务的当前 SKU 事实。
+      // 从请求构造新项，但商品摘要只信任商品服务的当前 SKU 事实。
       item = toPersistence(request);
       item.productId = current.productId();
       item.productName = current.productName();
       item.unitPrice = current.unitPrice();
-      // 2. 首次响应和 Redis 存储必须读取同一个完整 PO。
+      // 首次响应和 Redis 存储必须读取同一个完整 PO。
       item.checked = true;
       item.addedAt = OffsetDateTime.now(ZoneOffset.ofHours(8)).toString();
     } else {
-      item.quantity += request.quantity;
+      if (item.quantity < 1) throw new BizException(ErrorCodes.INTERNAL, "购物车数量数据损坏", 500);
+      long mergedQuantity = (long) item.quantity + request.quantity;
+      if (mergedQuantity > Integer.MAX_VALUE)
+        throw new BizException(ErrorCodes.INVALID, "购物车数量超过支持范围", 400);
+      item.quantity = (int) mergedQuantity;
       item.productId = current.productId();
       item.productName = current.productName();
       item.unitPrice = current.unitPrice();
