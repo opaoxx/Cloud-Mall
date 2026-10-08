@@ -46,12 +46,18 @@ public class OrderStockActionMapper {
     return statuses.isEmpty() ? null : statuses.get(0);
   }
 
-  /** 按到期时间取得有限数量的待恢复动作。 */
+  /**
+   * 按到期时间取得有限数量的待恢复动作，在LIMIT前排除负计数记录。
+   *
+   * @param now 原调用方提供的上海扫描时间
+   * @param limit 原候选数量上限，沿既有规则至少为1
+   * @return 按重试时间和主键排序的非负计数待恢复动作
+   */
   public List<OrderStockActionPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT id,order_no,action_type,operation_key,status,attempts,next_retry_at"
             + " FROM order_stock_action WHERE status IN ('PENDING','UNKNOWN')"
-            + " AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)"
+            + " AND attempts>=0 AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)"
             + " ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderStockActionPO action = new OrderStockActionPO();
@@ -63,16 +69,32 @@ public class OrderStockActionMapper {
           action.attempts = resultSet.getInt("attempts");
           action.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
           return action;
-        }, now, now, Math.max(1, limit));
+        },
+        now,
+        now,
+        Math.max(1, limit));
   }
 
-  /** 以数据库租约排除并发恢复。 */
+  /**
+   * 以数据库租约认领非负计数动作，次数在INT上限饱和递增。
+   *
+   * @param id 原动作主键
+   * @param owner 本次认领的独立标识
+   * @param now 原调用方提供的上海认领时间
+   * @return 原租约条件匹配的更新行数，负计数或不匹配为0
+   */
   public int claim(long id, String owner, LocalDateTime now) {
     return jdbcTemplate.update(
-        "UPDATE order_stock_action SET lease_owner=?,lease_until=?,attempts=attempts+1,"
+        "UPDATE order_stock_action SET lease_owner=?,lease_until=?,"
+            + "attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,"
             + "updated_at=? WHERE id=? AND status IN ('PENDING','UNKNOWN')"
-            + " AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)",
-        owner, now.plusSeconds(30), now, id, now, now);
+            + " AND attempts>=0 AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)",
+        owner,
+        now.plusSeconds(30),
+        now,
+        id,
+        now,
+        now);
   }
 
   /**
@@ -83,14 +105,15 @@ public class OrderStockActionMapper {
    * @param status 原调用方决定的目标状态
    * @param error 原错误文本，可为null
    * @param now 本次完成写的新鲜上海时间，同时用于更新和租约判断
-   * @return 有效租约匹配的更新行数，失效或空白标识为0
+   * @return 非负计数且有效租约匹配的更新行数，不匹配或空白标识为0
    */
   public int finish(long id, String owner, String status, String error, LocalDateTime now) {
     if (owner == null || owner.isBlank()) return 0;
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status=?,last_error=?,lease_owner=NULL,lease_until=NULL,"
             + "updated_at=? WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
-            + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')",
+            + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
+            + " AND attempts>=0",
         status,
         shorten(error),
         now,
@@ -107,7 +130,7 @@ public class OrderStockActionMapper {
    * @param error 原错误文本，可为null
    * @param retryAt 原调用方提供的下次重试时间
    * @param now 本次重试写的新鲜上海时间，同时用于更新和租约判断
-   * @return 有效租约匹配的更新行数，失效或空白标识为0
+   * @return 非负计数且有效租约匹配的更新行数，不匹配或空白标识为0
    */
   public int retry(long id, String owner, String error, LocalDateTime retryAt, LocalDateTime now) {
     if (owner == null || owner.isBlank()) return 0;
@@ -115,7 +138,8 @@ public class OrderStockActionMapper {
         "UPDATE order_stock_action SET status='UNKNOWN',last_error=?,next_retry_at=?,"
             + "lease_owner=NULL,lease_until=NULL,updated_at=?"
             + " WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
-            + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')",
+            + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
+            + " AND attempts>=0",
         shorten(error),
         retryAt,
         now,
