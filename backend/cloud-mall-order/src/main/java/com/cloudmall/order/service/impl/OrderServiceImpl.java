@@ -429,14 +429,18 @@ public class OrderServiceImpl implements OrderService {
   private String legacyStockActionStatus(OrderVO order) {
     // 1. 待支付订单尚未产生最终库存动作。
     if ("PENDING_PAYMENT".equals(order.status)) return "NONE";
-    // 2. 按订单终态确定允许结清的库存终态及相反状态。
+    // 2. 未知订单状态不能推断库存方向，不查询或修复历史坏行。
+    if (!"PAID".equals(order.status)
+        && !"COMPLETED".equals(order.status)
+        && !"CANCELLED".equals(order.status)) return "UNKNOWN";
+    // 3. 按明确订单终态确定允许结清的库存终态及相反状态。
     String expected = "CANCELLED".equals(order.status) ? "ROLLED_BACK" : "CONFIRMED";
     String opposite = "CANCELLED".equals(order.status) ? "CONFIRMED" : "ROLLED_BACK";
     try {
-      // 3. 只读取库存持久事实；旧记录缺失或服务不可用时保持未知。
+      // 4. 只读取库存持久事实；旧记录缺失或服务不可用时保持未知。
       ApiResponse<com.cloudmall.order.domain.vo.StockReservationStatusVO> response =
-          OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.STATUS,
-              () -> stock.reservation(order.orderNo));
+          OrderStockCircuitBreaker.call(
+              OrderStockCircuitBreaker.STATUS, () -> stock.reservation(order.orderNo));
       if (response == null || !"0".equals(response.code) || response.data == null)
         return "UNKNOWN";
       // 缺失或错单响应保持未知，不能借别单终态作为结清或退款依据。

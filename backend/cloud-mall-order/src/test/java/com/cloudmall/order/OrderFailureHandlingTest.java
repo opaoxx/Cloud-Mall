@@ -552,6 +552,57 @@ class OrderFailureHandlingTest {
     verifyNoInteractions(stockClient);
   }
 
+  @Test
+  void unrecognizedLegacyOrderStatesNeverQueryStockOrClaimSettlement() {
+    String orderNo = "202609legacybadstatus";
+    for (String orderStatus :
+        java.util.Arrays.asList(
+            null,
+            "",
+            " \t",
+            "paid",
+            "completed",
+            "cancelled",
+            "PAID ",
+            "COMPLETED ",
+            "CANCELLED ",
+            "PENDING_PAYMENT ",
+            "PÁID",
+            "OTHER",
+            "CLOSED",
+            "null")) {
+      for (String stockStatus : List.of("CONFIRMED", "ROLLED_BACK", "REJECTED", "RESERVED")) {
+        OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
+        Map<String, Object> row =
+            new java.util.HashMap<>(
+                Map.of(
+                    "order_no",
+                    orderNo,
+                    "user_id",
+                    8L,
+                    "total_amount",
+                    new BigDecimal("12.30"),
+                    "pay_amount",
+                    new BigDecimal("12.30"),
+                    "address_snapshot",
+                    "{}"));
+        row.put("status", orderStatus);
+        when(sqlMapper.findOrder(anyString(), eq(orderNo))).thenReturn(List.of(row));
+        StockClient stockClient = mock(StockClient.class);
+        when(stockClient.reservation(orderNo)).thenReturn(legacyStockFact(orderNo, stockStatus));
+        OrderServiceImpl target =
+            service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
+        Map<?, ?> state = (Map<?, ?>) target.paymentState(orderNo, 8L).data;
+        assertEquals("UNKNOWN", state.get("stockActionStatus"));
+        assertEquals(String.valueOf(orderStatus), state.get("status"));
+        assertEquals(orderNo, state.get("orderNo"));
+        verifyNoInteractions(stockClient);
+        verify(sqlMapper, never())
+            .updateStatus(anyString(), anyString(), anyString(), anyString(), any());
+      }
+    }
+  }
+
   /** 保留原Stock响应身份，不根据请求路径补全缺失或错单字段。 */
   private static ApiResponse<StockReservationStatusVO> legacyStockFact(
       String orderNo, String stockStatus) {

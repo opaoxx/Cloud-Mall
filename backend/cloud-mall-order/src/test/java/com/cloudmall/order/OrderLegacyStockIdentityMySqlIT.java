@@ -514,6 +514,57 @@ class OrderLegacyStockIdentityMySqlIT {
     verify(stock, never()).rollback(anyString(), any());
   }
 
+  @Test
+  void unknownLegacyOrderStatesRemainUnknownWithoutQueryingStockOrRepairingRows() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String orderStatus :
+        List.of(
+            "",
+            " \t",
+            "paid",
+            "completed",
+            "cancelled",
+            "PAID ",
+            "COMPLETED ",
+            "CANCELLED ",
+            "PENDING_PAYMENT ",
+            "PÁID",
+            "OTHER",
+            "CLOSED",
+            "null")) {
+      for (String responseStatus : List.of("CONFIRMED", "ROLLED_BACK", "REJECTED", "RESERVED")) {
+        seed(orderStatus);
+        assertNull(mapper.statusForOrder("202610legacy1"));
+        var before = fixtureSnapshot();
+        when(stock.reservation("202610legacy1")).thenReturn(fact("202610legacy1", responseStatus));
+        var response = paymentState(8L);
+        Object reportedStatus = response.get("stockActionStatus");
+        checks.add(() -> assertEquals("UNKNOWN", reportedStatus, orderStatus + responseStatus));
+        assertResponseFacts(response, orderStatus);
+        assertEquals(before, fixtureSnapshot());
+      }
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void unknownOrderStatesWithAnActionKeepTheExistingDirectionGuard() {
+    for (String orderStatus : List.of("paid", "cancelled", "PAID ", "OTHER", "CLOSED")) {
+      for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+        seed(orderStatus);
+        assertEquals(
+            1,
+            mapper.insert(1L, "202610legacy1", actionType, LocalDateTime.of(2026, 10, 8, 10, 0)));
+        fixture.update("UPDATE order_stock_action SET status='SUCCEEDED' WHERE id=1");
+        var before = fixtureSnapshot();
+        assertEquals("UNKNOWN", paymentState(8L).get("stockActionStatus"));
+        assertEquals(before, fixtureSnapshot());
+      }
+    }
+    verifyNoInteractions(stock);
+  }
+
   /** 保留源模板定义，只在本例随机数据库创建两张固定月表。 */
   private void cloneTemplate(String template, String target) {
     String ddl =
