@@ -292,6 +292,8 @@ Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行
 
 Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改变表事实，单候选写失败不追加未知状态或二次 failure 写，已 confirm 但终态更新失败保持原行供既有重试/人工核验；表结构和 SQL 条件不变。
 
+发布完成 proof 只读 `event_id,status` 当前事实；`markOutboxPublished` 影响行数 0 不直接代表成功，只有唯一精确 event_id 且 status=PUBLISHED 才可幂等收敛。该读取不新增列、索引或状态写入。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`
