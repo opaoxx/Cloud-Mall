@@ -8,6 +8,7 @@
 - 商品、订单和订单明细的金额列继续使用既有 `DECIMAL(18,2)` DDL；写入前由订单应用拒绝不能精确表示到分的非零 `BigDecimal`，不依赖数据库隐式舍入，也不因此修改表结构或历史数据。
 - `DECIMAL(18,2)` 的应用容量语义为最大可表示值 `9999999999999999.99`；订单写入前由应用比较并拒绝超容量单价、行金额或总额，DDL、索引和历史数据保持不变。
 - `mall_order_item` 的 `product_id BIGINT NOT NULL` 与 `product_name_snapshot VARCHAR(255) NOT NULL` 继续使用既有 DDL；订单应用按非空和 Unicode code point 不超过 255 预检，禁止依赖非严格 SQL 截断或默认值，不修改表结构和历史行。
+- `mall_order.address_snapshot JSON NOT NULL` 与 `mall_order_item.sku_snapshot JSON NULL` 的字段定义和 null 语义保持不变；普通订单应用在 intent/Stock/订单 SQL 前完成 JSON 序列化，避免依赖数据库阶段才暴露序列化失败，不修改 DDL 或历史数据。
 - 公共审计字段建议包含 `created_at`、`updated_at`；是否加入逻辑删除字段按表的状态语义决定。
 - 本项目使用一个 MySQL 8.0 实例，按服务划分逻辑库；文档是逻辑设计，不是 SQL 初始化脚本。字段长度、字符集和排序规则按实现环境采用与 MySQL 8.0 兼容的统一配置。
 

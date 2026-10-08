@@ -172,6 +172,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 普通订单创建在上述金额门之后，写入订单明细前必须确认 Product 的 `productId` 非 null、`productName` 非 null 且 Unicode code point 数不超过 255；不满足按既有 INTERNAL/500，不得继续 intent、库存或订单写入。空串、空白、尾空格和合法 255 code points 原样保留，不 trim、截断或新增父商品关系校验。
 
+普通订单在全部商品身份、价格、金额和必填 metadata 校验通过后，必须在创建预扣 intent、调用库存和订单 SQL 前，使用既有 ObjectMapper 一次性准备地址 JSON 与全部 SKU snapshot JSON；后续持久化只使用缓存结果。任一序列化失败沿既有 INTERNAL/500 返回（保持现有不携带 cause 的 BizException 语义），不留下 intent、库存或订单事实；直接幂等投影重放仍不执行该准备，晚期 intent fallback 保持原 Product/金额顺序，合法输入结果不变，不可序列化输入可在 fallback 前拒绝且不新增查询。
+
 订单本地事务实际提交后，才清理原用户的去重 SKU 购物车快照；事务回滚时不得删除购物车。清理使用提交前捕获的用户与 SKU 快照逐 SKU执行一次。Cart 返回 null、非 0 或 RuntimeException 时逐项告警并继续后续 SKU，不回滚已提交订单或库存；本批不提供持久重试或并发新增 SKU 的条件删除保障。该条款不改变本节既有 JSON、错误码、订单与库存步骤。
 
 订单列表的 `page`、`pageSize`、`startTime`、`endTime` 和可选 `status` 共同确定查询窗口；服务端先把带任意合法 ISO-8601 offset 的 `startTime/endTime` 按 same instant 规范到 `Asia/Shanghai`（`+08:00`），再计算月份范围，并使用左闭右开 `[start,end)` 时间条件，避免非 `+08:00` 请求在月初漏查前一月。`page` 与 `pageSize` 使用正数，服务端以 `long` 计算 `(page-1)*pageSize` 并在溢出或超出可接受深度时返回 `COMMON_INVALID_ARGUMENT`。响应必须保持 `items/page/pageSize/total` 结构，`total` 是所有命中月份的精确计数。由于不同物理月份的 `created_at` 区间按分片不变量严格不重叠，跨月查询按月份倒序遍历：先逐月 `COUNT`，根据计数跳过完整月份，仅对承载目标页的月份执行有界 `LIMIT/OFFSET` 批次，并在批次内使用 `created_at DESC, order_no DESC` 稳定排序；内存只保留目标页和当前批次，不得先把所有月份订单读入 JVM 后排序或 `subList`。若检测到订单落在错误月份，作为数据异常告警并使查询失败，不通过全量扫描默默兜底。任一命中月份不存在、不可访问或查询失败时，整个请求返回 `ORDER_QUERY_SHARD_UNAVAILABLE`（HTTP 503），不得返回部分 `items` 或部分 `total`。读路径不得为缺失历史月份偷偷建表；未来月份由定时任务预建，具体规则见数据库和架构规格。
