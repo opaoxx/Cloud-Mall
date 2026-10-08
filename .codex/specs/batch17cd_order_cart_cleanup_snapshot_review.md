@@ -72,6 +72,7 @@ POST /api/cart/items/{skuId}/cleanup
 - 不改 Cart Redis key、JSON 字段、TTL、Lua compare-write/delete、BU/BV/BW/BX/BZ/CA 行为。
 - 不引入客户端字段、数据库表、消息、迁移或持久清理重试；不承诺捕获前全生命周期或同字节 ABA 的检测。
 - 不宣称真实跨 HTTP 集成：Cart Redis IT、Order MySQL/事务 IT、Feign/DTO/JSON 反射合同分别验证，不建立模块间新测试依赖。
+- Order 的 Feign 身份拦截器必须尊重方法参数显式身份：对大小写不敏感地检测 `RequestTemplate` 已有 `X-User-Id` 时，保留该显式值，不再追加 `AuthContext` 的晚期 userId；已有 `X-User-Role` 时同样不追加晚期 role。没有显式身份时，继续注入当前线程上下文的 userId/role；上下文为空时不注入。该规则只约束 Order 配置，不改变 Cart 鉴权、Gateway 或公开 API。
 
 ## 5. API 契约补充
 
@@ -83,6 +84,7 @@ POST /api/cart/items/{skuId}/cleanup
 2. Order 真实 MySQL/实际事务 + Cart 替身：commit 前允许预采样 GET 但零 POST/DELETE；rollback 可完成只读 GET但零 POST/DELETE；commit 后不再 GET，只使用原 user/DTO 去重快照逐项 POST，前项失败不阻断后项，Error 保持传播。
 3. 验证坏 DTO/proof 不 fallback、不拼接、不二次请求；原订单/intent/status/afterCommit 语义保持。
 4. Feign 方法、路径、header、DTO JSON 字段通过反射/合同测试；独立 Cart Redis 与 Order MySQL fixture 可清理，原 checksum 保持。
+5. Feign 身份透传单测：显式 `X-User-Id=7` 与晚期上下文 `99` 时最终仅保留 `7`，显式身份存在时不追加晚期 role；无显式身份时保持原上下文注入，空上下文不注入。验证请求模板 header 不形成多值或合并值。
 
 ## 7. 明确不承诺
 

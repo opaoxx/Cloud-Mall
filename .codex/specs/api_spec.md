@@ -143,6 +143,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单创建成功末尾先使用内部 snapshot GET 预采样，提交后的 afterCommit 仅使用原 DTO 调用 cleanup POST，不再 GET；GET 缺项返回 code=0/data=null，POST 仅在原 JSON bytes 精确匹配时返回 data=true，否则返回 data=false；请求 proof 失败为 400，结果未知为 500，Redis 依赖故障为 503。该内部契约不改变公开 Cart DELETE、订单 JSON 或错误码。
 
+订单服务的 Feign 身份透传遵循显式参数优先：当 `RequestTemplate` 已有大小写不敏感匹配的 `X-User-Id`（或 `X-User-Role`）时，拦截器必须保留显式值，不追加线程上下文中的晚期值；无显式值时才注入当前 `AuthContext`，空上下文不注入。该规则用于避免订单 afterCommit 的原用户身份被晚期线程上下文覆盖，不改变其他服务鉴权、Gateway 或公开 API。
+
 购物车 all/preview 的商品摘要刷新采用有限 compare-write；确认冲突返回 COMMON_CONFLICT/409，脚本结果未知为 INTERNAL/500，Redis 依赖故障保持既有 503。Product 原 404/失效项语义和请求/响应字段保持不变。
 
 ## 7. 订单服务接口
