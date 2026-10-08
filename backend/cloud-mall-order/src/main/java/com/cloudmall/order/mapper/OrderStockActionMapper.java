@@ -92,8 +92,9 @@ public class OrderStockActionMapper {
         shorten(error), retryAt, now, id, owner);
   }
 
-  /** 将错误信息截断到数据库列宽。 */
+  /** 按VARCHAR512字符列宽保留完整code point，不拆有效代理对或归一化原错误文本。 */
   private static String shorten(String error) {
-    return error == null ? null : error.substring(0, Math.min(512, error.length()));
+    if (error == null || error.codePointCount(0, error.length()) <= 512) return error;
+    return error.substring(0, error.offsetByCodePoints(0, 512));
   }
 }
