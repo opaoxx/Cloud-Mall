@@ -4,9 +4,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -27,8 +27,13 @@ import org.mockito.ArgumentCaptor;
 
 /** 验证库存写响应丢失及相反终态不会触发错误补偿。 */
 class OrderStockActionRecoveryTest {
+  /** 库存动作持久层替身。 */
   private OrderStockActionMapper actionMapper;
+
+  /** 库存事实查询及原操作键动作客户端替身。 */
   private StockClient stockClient;
+
+  /** 实际被测订单库存动作恢复器。 */
   private OrderStockActionRecovery recovery;
 
   @BeforeEach
@@ -54,10 +59,10 @@ class OrderStockActionRecoveryTest {
   @Test
   void reservedStockIsConfirmedWithTheOriginalOperationKey() {
     due("CONFIRM");
-    when(stockClient.reservation("order-1"))
-        .thenReturn(status("RESERVED"), status("CONFIRMED"));
+    when(stockClient.reservation("order-1")).thenReturn(status("RESERVED"), status("CONFIRMED"));
     doReturn(ApiResponse.ok("confirmed"))
-        .when(stockClient).confirm(eq("order-1"), any(StockClient.Action.class));
+        .when(stockClient)
+        .confirm(eq("order-1"), any(StockClient.Action.class));
 
     recovery.recoverDue();
 
@@ -82,8 +87,11 @@ class OrderStockActionRecoveryTest {
   @Test
   void statusCircuitOpenRetainsUnknownActionWithoutAnyStockWrite() {
     due("CONFIRM");
-    doThrow(new StockCircuitOpenException(OrderStockCircuitBreaker.STATUS,
-        new IllegalStateException("open"))).when(stockClient).reservation("order-1");
+    doThrow(
+            new StockCircuitOpenException(
+                OrderStockCircuitBreaker.STATUS, new IllegalStateException("open")))
+        .when(stockClient)
+        .reservation("order-1");
 
     recovery.recoverDue();
 
@@ -91,6 +99,69 @@ class OrderStockActionRecoveryTest {
     verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
     verify(stockClient, never()).confirm(anyString(), any(StockClient.Action.class));
     verify(stockClient, never()).rollback(anyString(), any(StockClient.Action.class));
+  }
+
+  @Test
+  void wrongOrMissingStockIdentityCannotFinishOrAuthorizeEitherAction() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      for (String responseOrder :
+          java.util.Arrays.asList("order-2", "ORDER-1", "órder-1", "order-1 ", null, " ")) {
+        for (String responseStatus :
+            List.of("CONFIRMED", "ROLLED_BACK", "REJECTED", "RESERVED", "NOT_FOUND", "UNKNOWN")) {
+          setUp();
+          due(actionType);
+          when(stockClient.reservation("order-1"))
+              .thenReturn(stockFact(responseOrder, responseStatus));
+          recovery.recoverDue();
+          verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+          verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+          verify(stockClient, never()).confirm(anyString(), any(StockClient.Action.class));
+          verify(stockClient, never()).rollback(anyString(), any(StockClient.Action.class));
+        }
+      }
+    }
+  }
+
+  @Test
+  void wrongSecondQueryRetainsUnknownAfterOnlyTheOriginalAuthorizedAction() {
+    for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+      for (String responseStatus : List.of("CONFIRMED", "ROLLED_BACK", "REJECTED")) {
+        setUp();
+        due(actionType);
+        when(stockClient.reservation("order-1"))
+            .thenReturn(status("RESERVED"), stockFact("order-2", responseStatus));
+        if ("CONFIRM".equals(actionType)) {
+          doReturn(ApiResponse.ok("confirmed"))
+              .when(stockClient)
+              .confirm(eq("order-1"), any(StockClient.Action.class));
+        } else {
+          doReturn(ApiResponse.ok("rolledBack"))
+              .when(stockClient)
+              .rollback(eq("order-1"), any(StockClient.Action.class));
+        }
+        recovery.recoverDue();
+        var request = ArgumentCaptor.forClass(StockClient.Action.class);
+        if ("CONFIRM".equals(actionType)) {
+          verify(stockClient).confirm(eq("order-1"), request.capture());
+          verify(stockClient, never()).rollback(anyString(), any(StockClient.Action.class));
+        } else {
+          verify(stockClient).rollback(eq("order-1"), request.capture());
+          verify(stockClient, never()).confirm(anyString(), any(StockClient.Action.class));
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "order-1:" + actionType, request.getValue().operationKey());
+        verify(actionMapper).retry(eq(1L), anyString(), anyString(), any(), any());
+        verify(actionMapper, never()).finish(eq(1L), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
+  /** 构造具有指定身份的库存响应，不从请求路径补全字段。 */
+  private static ApiResponse<StockReservationStatusVO> stockFact(String orderNo, String state) {
+    StockReservationStatusVO fact = new StockReservationStatusVO();
+    fact.orderNo = orderNo;
+    fact.status = state;
+    return ApiResponse.ok(fact);
   }
 
   private void due(String actionType) {

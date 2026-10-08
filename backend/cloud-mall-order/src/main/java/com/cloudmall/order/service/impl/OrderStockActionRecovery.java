@@ -8,6 +8,7 @@ import com.cloudmall.order.mapper.OrderStockActionMapper;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -97,12 +98,15 @@ public class OrderStockActionRecovery {
     }
   }
 
-  /** 查询库存端唯一的预扣最终状态。 */
+  /** 核验响应原订单号再读取库存状态，错单或缺失身份沿原UNKNOWN退避处理。 */
   private String stockStatus(String orderNo) {
-    ApiResponse<StockReservationStatusVO> response = OrderStockCircuitBreaker.call(
-        OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
+    ApiResponse<StockReservationStatusVO> response =
+        OrderStockCircuitBreaker.call(
+            OrderStockCircuitBreaker.STATUS, () -> stockClient.reservation(orderNo));
     if (response == null || !"0".equals(response.code) || response.data == null)
       throw new IllegalStateException("库存状态查询结果未知");
+    if (!Objects.equals(orderNo, response.data.orderNo))
+      throw new IllegalStateException("库存状态查询订单号与原动作不一致");
     return response.data.status;
   }
 
