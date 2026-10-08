@@ -302,6 +302,8 @@ Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改�
 
 订单 outbox 完成/失败更新保留 `event_id` 索引候选，并使用 `CAST(event_id AS BINARY)=CAST(? AS BINARY)` 精确核验身份；`event_id VARCHAR(128) UNIQUE NOT NULL`、索引和历史数据不变，不新增列或迁移。
 
+订单 timeout dispatcher 对读取到的 PO 额外要求 eventId/orderNo 非空白；`event_id`/`order_no` 的既有 NOT NULL DDL、索引、扫描和历史行保持，不依赖该 guard 自动修复数据库坏值。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`
