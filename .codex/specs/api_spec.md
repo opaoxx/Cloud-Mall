@@ -133,6 +133,8 @@ Gateway 负责 Nacos 服务发现、基础 Redis 不透明 Token 鉴权、跨域
 
 购物车 settlement preview 会先校验 selected/checked 项数量；任一已选项为非正数时返回既有数据损坏 500，不调用商品服务、不写入或刷新 Redis。未选中的坏项不影响本次预览，合法项的既有失效项与金额响应结构保持。
 
+该商品事实的 unitPrice 必须是可由 BigDecimal 解析的原始金额字符串；null、空白或不可解析值按原 INTERNAL/500 处理，不写入或刷新当前项、不计入 preview 金额。合法字符串不做 scale/格式归一化，本条不定义金额范围上限。
+
 ## 7. 订单服务接口
 
 | 方法 | 路径 | 请求 | 响应/说明 |
