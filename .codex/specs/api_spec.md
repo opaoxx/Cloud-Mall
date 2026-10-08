@@ -255,6 +255,8 @@ CM-18 第 16C 只提供内部 `PayTccDeliveryService.deliver(String payNo)` 和 
 | POST | `/api/seckill/orders` | `{activityId,skuId,addressId}`；Header 必须有 `Idempotency-Key` | 受 Sentinel 保护的秒杀入口；受理 Lua 必须同时写 quota、用户累计计数、accepted marker、`seckill:quota:op:{orderNo}=RESERVED` 和活动全局 revision；返回 `{accepted,reservationStatus,orderNo,eventId}`，仅在 Redis 预扣和秒杀 outbox 已持久化后返回 `accepted=true`，不代表订单已落库 |
 | GET | `/api/internal/stock/seckill/reservations/{orderNo}` | Header `X-Internal-Service: cloud-mall-order` | 仅供 order DLQ recovery 通过内部 Feign 调用，Gateway 不路由、前端不可访问；返回 `{orderNo,eventId,reservationStatus,requestHash}`，只读验真，不改变库存 |
 
+秒杀消费首次创建订单时，Product 响应必须返回 code=`0`、非空 data，且 `data.skuId` 与消息 `skuId` 精确一致；null/错 SKU、null envelope/data 或非 0 code 在订单、明细、outbox、COMMITTED/Resolved 写入前按原未知失败流程重试或进入隔离，不得用消息 SKU猜测 Product 身份。已 COMMITTED 的重复事件仍在 Product 查询前按原幂等路径收敛；本条不改变普通下单、消息字段、价格范围或历史数据。
+
 ## 11. 错误码
 
 | 错误码 | 含义 | HTTP |
