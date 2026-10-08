@@ -960,6 +960,186 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void nonCentProductPricesCannotRoundOrderUnitsAndLinesIntoDifferentFacts() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String sample : List.of("12.345", "0.001", "1E-3", "later")) {
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(
+                      7L,
+                      9L,
+                      "product",
+                      "SKU-7",
+                      "later".equals(sample) ? BigDecimal.TEN : new BigDecimal(sample),
+                      Map.of())))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      request.items.get(0).quantity = 2;
+      if ("later".equals(sample)) {
+        OrderItemDTO second = new OrderItemDTO();
+        second.skuId = 8L;
+        second.quantity = 2;
+        request.items = List.of(request.items.get(0), second);
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        8L, 9L, "second", "SKU-8", new BigDecimal("12.345"), Map.of())))
+            .when(products)
+            .sku(8L);
+      }
+      clearInvocations(products, stock, cart);
+      var before = fixtureFacts();
+      RuntimeException failure = null;
+      String key = "non-cent-price-" + sequence++;
+      try {
+        transaction.execute(status -> service.create(key, request));
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+      RuntimeException captured = failure;
+      var after = fixtureFacts();
+      long stockCalls = mockingDetails(stock).getInvocations().size();
+      long cartWrites =
+          mockingDetails(cart).getInvocations().stream()
+              .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+              .count();
+      checks.add(() -> assertInstanceOf(BizException.class, captured, sample));
+      if (captured instanceof BizException controlled) {
+        checks.add(() -> assertEquals(500, controlled.getHttpStatus(), sample));
+        checks.add(() -> assertEquals(ErrorCodes.INTERNAL, controlled.getCode(), sample));
+      }
+      checks.add(() -> assertEquals(before, after, sample));
+      checks.add(() -> assertEquals(0, stockCalls, sample));
+      checks.add(() -> assertEquals(0, cartWrites, sample));
+      verify(products).sku(7L);
+      if ("later".equals(sample)) verify(products).sku(8L);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void nonCentSeckillPricesCannotRoundFactsOrCompleteHeldRecovery() throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String sample : List.of("12.345", "0.001", "1E-3")) {
+      Map<String, Object> event = timeEvent("202612-non-cent-" + sequence);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      saveRecovery(6200 + sequence++, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(
+                      7L, 9L, "product", "SKU-7", new BigDecimal(sample), Map.of())))
+          .when(products)
+          .sku(7L);
+      clearInvocations(products);
+      var before = fixtureFacts();
+      IllegalStateException failure = null;
+      try {
+        service.consumeSeckill(event);
+      } catch (IllegalStateException rejected) {
+        failure = rejected;
+      }
+      IllegalStateException captured = failure;
+      var after = fixtureFacts();
+      checks.add(() -> assertNotNull(captured, sample));
+      if (captured != null)
+        checks.add(
+            () -> assertInstanceOf(IllegalStateException.class, captured.getCause(), sample));
+      checks.add(() -> assertEquals(before, after, sample));
+      verify(products).sku(7L);
+      verifyNoMoreInteractions(products);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void correctedCentPrecisionRetriesAndLegalRepresentationsKeepExactSqlArithmetic()
+      throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    Map<String, Object> retry = timeEvent("202612-corrected-cent");
+    retry.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(6300, String.valueOf(retry.get("eventId")), retry, "QUARANTINED");
+    var before = fixtureFacts();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("12.345"), Map.of())))
+        .when(products)
+        .sku(7L);
+    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(retry));
+    assertEquals(before, fixtureFacts());
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, 9L, "product", "SKU-7", new BigDecimal("12.3400"), Map.of())))
+        .when(products)
+        .sku(7L);
+    service.consumeSeckill(retry);
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(retry.get("eventId"))).get("status"));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+            String.class,
+            retry.get("orderNo")));
+    assertPersistedCreation(
+        String.valueOf(retry.get("orderNo")), LocalDateTime.parse("2026-12-31T23:59:59.999"));
+    AuthContext.set(7L, "USER");
+    int sequence = 0;
+    for (String representation : List.of("12.3400", "0.0100", "1E+1", "0.0000")) {
+      BigDecimal price = new BigDecimal(representation);
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, 9L, "product", "SKU-7", price, Map.of())))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      request.items.get(0).quantity = 2;
+      ApiResponse<?> ordinary =
+          transaction.execute(status -> service.create("cent-exact-" + representation, request));
+      String orderNo = ((OrderVO) ordinary.data).orderNo;
+      Map<String, Object> detail =
+          fixture.queryForMap(
+              "SELECT unit_price, quantity, line_amount FROM mall_order_item_202612 WHERE order_no=?",
+              orderNo);
+      BigDecimal storedPrice = (BigDecimal) detail.get("unit_price");
+      BigDecimal storedLine = (BigDecimal) detail.get("line_amount");
+      assertEquals(0, price.compareTo(storedPrice));
+      assertEquals(0, storedPrice.multiply(BigDecimal.valueOf(2)).compareTo(storedLine));
+      assertEquals(
+          0,
+          storedLine.compareTo(
+              fixture.queryForObject(
+                  "SELECT total_amount FROM mall_order_202612 WHERE order_no=?",
+                  BigDecimal.class,
+                  orderNo)));
+      Map<String, Object> event = timeEvent("202612-cent-exact-" + sequence++);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      service.consumeSeckill(event);
+      assertEquals(
+          0,
+          price.compareTo(
+              fixture.queryForObject(
+                  "SELECT unit_price FROM mall_order_item_202612 WHERE order_no=?",
+                  BigDecimal.class,
+                  event.get("orderNo"))));
+      assertEquals(
+          "COMMITTED",
+          fixture.queryForObject(
+              "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+              String.class,
+              event.get("orderNo")));
+    }
+  }
+
+  @Test
   void matchingProductIdentityUsesTheCurrentPriceAndSameSkuForStockAndSqlDetails() {
     AuthContext.set(7L, "USER");
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");

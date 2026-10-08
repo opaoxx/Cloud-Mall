@@ -173,6 +173,62 @@ class OrderProductIdentityTest {
     }
   }
 
+  @Test
+  void nonCentPricesAreRejectedBeforeIntentStockAndOrderWrites() {
+    for (String representation : List.of("12.345", "0.001", "1E-3", "later")) {
+      Fixture fixture = new Fixture();
+      if ("later".equals(representation))
+        doReturn(ApiResponse.ok(product(8L, new BigDecimal("12.345"))))
+            .when(fixture.products)
+            .sku(8L);
+      else
+        doReturn(ApiResponse.ok(product(7L, new BigDecimal(representation))))
+            .when(fixture.products)
+            .sku(7L);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () ->
+                  fixture.service.create(
+                      "non-cent-" + representation, request("later".equals(representation))));
+      assertEquals(500, failure.getHttpStatus());
+      assertEquals(ErrorCodes.INTERNAL, failure.getCode());
+      assertTrue(failure.getMessage().contains("精度"));
+      fixture.verifyNoBusinessWrites();
+    }
+    Fixture tiny = new Fixture();
+    BigDecimal price = new BigDecimal(java.math.BigInteger.ONE, Integer.MAX_VALUE);
+    doReturn(ApiResponse.ok(product(7L, price))).when(tiny.products).sku(7L);
+    assertEquals(
+        500,
+        assertThrows(
+                BizException.class,
+                () -> tiny.service.create("extreme-positive-scale", request(false)))
+            .getHttpStatus());
+    tiny.verifyNoBusinessWrites();
+  }
+
+  @Test
+  void centExactTrailingZerosKeepTheOriginalUnitPriceAndCalculatedAmounts() {
+    for (String representation : List.of("12.3400", "0.0100", "99.99000", "1E+1", "0.0000")) {
+      Fixture fixture = new Fixture();
+      BigDecimal price = new BigDecimal(representation);
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      CreateOrderDTO request = request(false);
+      request.items.get(0).quantity = 2;
+      assertEquals("0", fixture.service.create("cent-exact-" + representation, request).code);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      verify(fixture.orders).insertOrder(anyString(), order.capture());
+      assertSame(price, detail.getValue().unitPrice);
+      BigDecimal expected = price.multiply(BigDecimal.valueOf(2));
+      assertEquals(expected, detail.getValue().lineAmount);
+      assertEquals(BigDecimal.ZERO.add(expected), order.getValue().totalAmount);
+      assertEquals(order.getValue().totalAmount, order.getValue().payAmount);
+    }
+  }
+
   /** 原商品事实对象，不转换身份或规范化金额。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());

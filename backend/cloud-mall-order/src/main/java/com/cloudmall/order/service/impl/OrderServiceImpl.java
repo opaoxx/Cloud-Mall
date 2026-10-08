@@ -188,6 +188,8 @@ public class OrderServiceImpl implements OrderService {
         throw new BizException(ErrorCodes.INTERNAL, "商品SKU响应身份不可信", 500);
       if (!hasNonnegativeProductPrice(skuView.unitPrice()))
         throw new BizException(ErrorCodes.INTERNAL, "商品价格不可信", 500);
+      if (!hasCentPrecision(skuView.unitPrice()))
+        throw new BizException(ErrorCodes.INTERNAL, "商品价格小数精度不可信", 500);
       BigDecimal line = skuView.unitPrice().multiply(BigDecimal.valueOf(item.quantity));
       total = total.add(line);
       lines.add(new StockClient.Line(item.skuId, item.quantity));
@@ -312,6 +314,11 @@ public class OrderServiceImpl implements OrderService {
   /** 只核原BigDecimal存在且数值非负；零价沿原兼容行为，不重建、舍入或改变scale。 */
   private static boolean hasNonnegativeProductPrice(BigDecimal unitPrice) {
     return unitPrice != null && unitPrice.signum() >= 0;
+  }
+
+  /** 仅在非空/非负价格门后核数学分精度，去尾零临时值不写回。先检查scale<=2， 避免极负scale整数去尾零下溢；不展开、舍入或修改原价格对象，不定义整数位容量。 */
+  private static boolean hasCentPrecision(BigDecimal amount) {
+    return amount.scale() <= 2 || amount.stripTrailingZeros().scale() <= 2;
   }
 
   /** 创建入口只读采样。只对购买聚合数量与原JSON正int数量一致的项提供不可变证明； long安全承载Java List中正int请求的总和，超int仅跳过清理，不改变订单流程。 */
@@ -832,6 +839,8 @@ public class OrderServiceImpl implements OrderService {
         throw new IllegalStateException("秒杀商品响应状态或SKU身份不可信: " + skuId);
       if (!hasNonnegativeProductPrice(productSku.unitPrice()))
         throw new IllegalStateException("秒杀商品价格不可信: " + skuId);
+      if (!hasCentPrecision(productSku.unitPrice()))
+        throw new IllegalStateException("秒杀商品价格小数精度不可信: " + skuId);
       OrderPO order = new OrderPO();
       order.id = id();
       order.orderNo = orderNo;

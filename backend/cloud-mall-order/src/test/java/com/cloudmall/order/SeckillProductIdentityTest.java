@@ -204,6 +204,48 @@ class SeckillProductIdentityTest {
     }
   }
 
+  @Test
+  void nonCentPricesCannotCreateOrCompleteSeckillFacts() {
+    List<BigDecimal> prices = new java.util.ArrayList<>();
+    for (String representation : List.of("12.345", "0.001", "1E-3"))
+      prices.add(new BigDecimal(representation));
+    prices.add(new BigDecimal(java.math.BigInteger.ONE, Integer.MAX_VALUE));
+    for (BigDecimal price : prices) {
+      Fixture fixture = new Fixture();
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertInstanceOf(IllegalStateException.class, failure.getCause());
+      assertTrue(failure.getCause().getMessage().contains("精度"));
+      fixture.verifyNoOrderOrCompletionWrites();
+    }
+  }
+
+  @Test
+  void exactCentPricesAndExtremeScaleValidationNeverReplaceTheOriginalPrice() {
+    List<BigDecimal> prices = new java.util.ArrayList<>();
+    for (String representation : List.of("12.3400", "0.0100", "1E+1", "0.0000"))
+      prices.add(new BigDecimal(representation));
+    // 极端表示只验证Service与mock赋值，不能将其当作真实SQL或可支付金额承诺。
+    prices.add(new BigDecimal(java.math.BigInteger.ZERO, Integer.MAX_VALUE));
+    prices.add(new BigDecimal(java.math.BigInteger.TEN, Integer.MIN_VALUE));
+    for (BigDecimal price : prices) {
+      Fixture fixture = new Fixture();
+      doReturn(ApiResponse.ok(product(7L, price))).when(fixture.products).sku(7L);
+      fixture.service.consumeSeckill(fixture.event);
+      var order = org.mockito.ArgumentCaptor.forClass(OrderPO.class);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      verify(fixture.orders).insertOrder(anyString(), order.capture());
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      assertSame(price, detail.getValue().unitPrice);
+      assertSame(price, detail.getValue().lineAmount);
+      assertSame(price, order.getValue().totalAmount);
+      assertSame(price, order.getValue().payAmount);
+      assertEquals(1, detail.getValue().quantity);
+    }
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
