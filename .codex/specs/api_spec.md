@@ -273,6 +273,8 @@ CM-18 第 16C 只提供内部 `PayTccDeliveryService.deliver(String payNo)` 和 
 
 秒杀首次消费在单价分精度门之后要求单价不超过 `9999999999999999.99`；超容量在订单、明细、outbox、COMMITTED/Resolved 写入前沿原 retry/DLQ 处理并回滚新增 claim，已 COMMITTED 重放不重新核价。
 
+秒杀消费者解析消息的 `userId`、`activityId`、`skuId` 必须无损转换为 long：Number 使用精确 `BigDecimal/BigInteger.longValueExact` 语义，String 保持 `Long.parseLong`（允许 `+` 和前导零），小数、溢出和非字符串非法。解析失败必须早于指纹、claim、Product 和订单写入；userId 沿既有冲突证据路径，核心维度沿既有 INVALID_PAYLOAD 路径，不得截断或猜测身份。
+
 秒杀首次消费在金额容量门之后，写入 Order/明细前同样要求 Product `productId` 非 null、`productName` 非 null 且不超过 255 Unicode code points；失败沿原 retry/DLQ 处理并回滚新增 claim。该条不改变 skuSnapshot、消息字段或数据库 DDL。
 
 ## 11. 错误码
