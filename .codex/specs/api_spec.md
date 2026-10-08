@@ -277,6 +277,8 @@ CM-18 第 16C 只提供内部 `PayTccDeliveryService.deliver(String payNo)` 和 
 
 秒杀冲突台账同时保留既有结构化 `payload` 和可空 `raw_payload` 原文证据；新记录两列绑定同一次 ObjectMapper JSON 字符串，历史 `raw_payload=NULL` 明确为 legacy JSON 视图。该内部证据列不改变冲突唯一键、ACK、状态、消息或公开 API；迁移/列缺失/双写失败不得降级确认消息。
 
+秒杀首次订单、明细和 outbox 写入后，dedup `markCommitted` 的当前条件 UPDATE 必须返回恰好 1 才允许继续 `markResolved` 和完成消费；非 1 整数进入本批受控失败，Mapper Runtime/SQL 异常沿现有外层异常包装和 retry/DLQ，Error 不包装，且本地事务回滚。不新增二次状态查询，不猜测或改写已提交 held/COMMITTED 事实；已 COMMITTED 重放仍按原幂等路径收敛。
+
 秒杀首次消费在金额容量门之后，写入 Order/明细前同样要求 Product `productId` 非 null、`productName` 非 null 且不超过 255 Unicode code points；失败沿原 retry/DLQ 处理并回滚新增 claim。该条不改变 skuSnapshot、消息字段或数据库 DDL。
 
 ## 11. 错误码

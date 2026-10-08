@@ -220,6 +220,8 @@
 
 约束：`uk_seckill_dedup_user_key(user_id,idempotency_key)`、`uk_seckill_dedup_order(order_no)`，并建立 `idx_seckill_dedup_event(event_id)`。消费者在同一订单本地事务内原子插入/锁定该记录并写订单；同键同哈希的并发重复消息读取 `COMMITTED` 后确认消费，不重建订单；同键不同哈希进入独立 `seckill_order_dedup_conflict` 并确认消息，不进入 RabbitMQ 重试/死信。迁移前必须审计存量 `(user_id,idempotency_key)` 重复行：保留最早的原 `order_no` 作为事实，冲突行不得静默合并，标记为人工待处理；新增唯一约束前不得接受新的同键请求。
 
+首次消费完成时，应用必须以当前源条件/SQL 语义下 `markCommitted` 单行 UPDATE 结果 1 作为 `PROCESSING→COMMITTED` 的完成门；非 1 或写入异常不得继续完成/Resolve，不新增二次状态读取，既有 DDL、条件和历史事实保持不变。
+
 ### 5.3.2 `seckill_order_dedup_conflict`
 
 主队列消费发现同一用户幂等键对应不同载荷、orderNo 不一致或事件哈希非法时，写入独立冲突表后确认消息；不得改写原 `seckill_order_dedup`，也不得把正常主队列冲突误记为死信恢复记录。
