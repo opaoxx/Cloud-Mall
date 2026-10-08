@@ -41,25 +41,53 @@ public class OrderStockActionMapper {
   }
 
   /**
-   * 读取原订单库存动作状态，别名候选保持UNKNOWN，不误当作无动作进入兜底。
+   * 核验原订单、合法类型及操作键后读取动作状态，保留旧签名不限制订单期望方向。
    *
    * @param orderNo 原查询订单号，不进行裁剪或归一化
-   * @return 精确匹配的原状态、别名命中的UNKNOWN，或真正无候选时的null
+   * @return 可信动作的原状态、不可信候选的UNKNOWN，或真正无候选时的null
    */
   public String statusForOrder(String orderNo) {
+    return readStatusForOrder(orderNo, null, false);
+  }
+
+  /**
+   * 核验动作完整性及订单终态期望方向；未知方向不能授权已有动作状态。
+   *
+   * @param orderNo 原查询订单号，不进行裁剪或归一化
+   * @param expectedActionType 订单期望的精确CONFIRM/ROLLBACK，其他值不授权已有动作
+   * @return 完整且方向匹配的原状态、不可信候选的UNKNOWN，或真正无候选时的null
+   */
+  public String statusForOrder(String orderNo, String expectedActionType) {
+    return readStatusForOrder(orderNo, expectedActionType, true);
+  }
+
+  /** 单次索引候选读取后逐项核原字段；UNKNOWN不混同缺行，不清洗或写回历史数据。 */
+  private String readStatusForOrder(
+      String orderNo, String expectedActionType, boolean requireExpectedType) {
+    // 1. 保留collation候选，避免把不可信动作伪装成缺行并触发legacy兜底。
     List<OrderStockActionPO> actions =
         jdbcTemplate.query(
-            "SELECT order_no,status FROM order_stock_action WHERE order_no=?",
+            "SELECT order_no,action_type,operation_key,status FROM order_stock_action WHERE order_no=?",
             (resultSet, rowNumber) -> {
               OrderStockActionPO action = new OrderStockActionPO();
               action.orderNo = resultSet.getString("order_no");
+              action.actionType = resultSet.getString("action_type");
+              action.operationKey = resultSet.getString("operation_key");
               action.status = resultSet.getString("status");
               return action;
             },
             orderNo);
     if (actions.isEmpty()) return null;
+    // 2. 顺序核验原订单、精确类型、操作键绑定及调用方提供的方向。
     OrderStockActionPO action = actions.get(0);
-    return Objects.equals(orderNo, action.orderNo) ? action.status : "UNKNOWN";
+    if (!Objects.equals(orderNo, action.orderNo)
+        || (!"CONFIRM".equals(action.actionType) && !"ROLLBACK".equals(action.actionType))
+        || !Objects.equals(action.operationKey, action.orderNo + ":" + action.actionType)
+        || (requireExpectedType && !Objects.equals(expectedActionType, action.actionType))) {
+      return "UNKNOWN";
+    }
+    // 3. 仅可信候选返回原状态，沿既有状态优先级，不执行任何写入或额外查询。
+    return action.status;
   }
 
   /**

@@ -421,6 +421,99 @@ class OrderLegacyStockIdentityMySqlIT {
     verifyNoInteractions(stock);
   }
 
+  @Test
+  void malformedActionTypesAndKeysRemainUnknownWithoutLegacyFallback() {
+    String orderNo = "202610legacy1";
+    List<String[]> invalidTuples = new ArrayList<>();
+    for (String actionType :
+        List.of("", " \t", "confirm", "rollback", "CONFIRM ", "ROLLBACK ", "OTHER"))
+      invalidTuples.add(new String[] {actionType, orderNo + ":" + actionType});
+    for (String operationKey :
+        List.of(
+            "",
+            " \t",
+            "202610other:CONFIRM",
+            orderNo + ":ROLLBACK",
+            orderNo + ":confirm",
+            "202610LEGACY1:CONFIRM",
+            "202610légacy1:CONFIRM",
+            orderNo + ":CONFIRM ")) invalidTuples.add(new String[] {"CONFIRM", operationKey});
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    when(stock.reservation(orderNo)).thenReturn(fact(orderNo, "CONFIRMED"));
+    for (String[] tuple : invalidTuples) {
+      for (String actionStatus : List.of("PENDING", "UNKNOWN", "SUCCEEDED", "CONFLICT")) {
+        seed("PAID");
+        assertEquals(1, mapper.insert(1L, orderNo, tuple[0], LocalDateTime.of(2026, 10, 8, 10, 0)));
+        fixture.update(
+            "UPDATE order_stock_action SET operation_key=?,status=? WHERE id=1",
+            tuple[1],
+            actionStatus);
+        var before = fixtureSnapshot();
+        String directStatus = mapper.statusForOrder(orderNo);
+        Object paymentStatus = paymentState(8L).get("stockActionStatus");
+        checks.add(() -> assertEquals("UNKNOWN", directStatus, tuple[0] + tuple[1] + actionStatus));
+        checks.add(
+            () -> assertEquals("UNKNOWN", paymentStatus, tuple[0] + tuple[1] + actionStatus));
+        assertEquals(before, fixtureSnapshot());
+      }
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void existingActionsMustMatchTheOrderTerminalDirection() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED", "PENDING_PAYMENT")) {
+      for (String actionType : List.of("CONFIRM", "ROLLBACK")) {
+        boolean matches =
+            (List.of("PAID", "COMPLETED").contains(orderStatus) && "CONFIRM".equals(actionType))
+                || ("CANCELLED".equals(orderStatus) && "ROLLBACK".equals(actionType));
+        for (String actionStatus : List.of("PENDING", "UNKNOWN", "SUCCEEDED", "CONFLICT")) {
+          seed(orderStatus);
+          assertEquals(
+              1,
+              mapper.insert(1L, "202610legacy1", actionType, LocalDateTime.of(2026, 10, 8, 10, 0)));
+          fixture.update("UPDATE order_stock_action SET status=? WHERE id=1", actionStatus);
+          var before = fixtureSnapshot();
+          assertEquals(actionStatus, mapper.statusForOrder("202610legacy1"));
+          Object reportedStatus = paymentState(8L).get("stockActionStatus");
+          checks.add(
+              () ->
+                  assertEquals(
+                      matches ? actionStatus : "UNKNOWN",
+                      reportedStatus,
+                      orderStatus + actionType + actionStatus));
+          assertEquals(before, fixtureSnapshot());
+        }
+      }
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void trulyMissingActionsStillUseLegacyInsteadOfBeingTreatedAsCorruption() {
+    for (String orderStatus : List.of("PAID", "COMPLETED", "CANCELLED", "PENDING_PAYMENT")) {
+      seed(orderStatus);
+      var before = fixtureSnapshot();
+      assertNull(mapper.statusForOrder("202610legacy1"));
+      if (!"PENDING_PAYMENT".equals(orderStatus))
+        when(stock.reservation("202610legacy1"))
+            .thenReturn(
+                fact(
+                    "202610legacy1",
+                    "CANCELLED".equals(orderStatus) ? "ROLLED_BACK" : "CONFIRMED"));
+      assertEquals(
+          "PENDING_PAYMENT".equals(orderStatus) ? "NONE" : "SUCCEEDED",
+          paymentState(8L).get("stockActionStatus"));
+      assertEquals(before, fixtureSnapshot());
+    }
+    verify(stock, times(3)).reservation("202610legacy1");
+    verify(stock, never()).confirm(anyString(), any());
+    verify(stock, never()).rollback(anyString(), any());
+  }
+
   /** 保留源模板定义，只在本例随机数据库创建两张固定月表。 */
   private void cloneTemplate(String template, String target) {
     String ddl =

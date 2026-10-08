@@ -408,8 +408,12 @@ public class OrderServiceImpl implements OrderService {
     // 2. 校验订单归属，禁止跨用户探测支付状态。
     if (!Objects.equals(order.userId, userId))
       throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
-    // 3. 只返回支付恢复所需的稳定字段。
-    String actionStatus = orderStockActionMapper.statusForOrder(orderNo);
+    // 3. 已有动作必须匹配订单终态方向；真正无动作才进入原legacy只读兜底。
+    String expectedActionType =
+        "CANCELLED".equals(order.status)
+            ? "ROLLBACK"
+            : ("PAID".equals(order.status) || "COMPLETED".equals(order.status)) ? "CONFIRM" : null;
+    String actionStatus = orderStockActionMapper.statusForOrder(orderNo, expectedActionType);
     if (actionStatus == null)
       actionStatus = legacyStockActionStatus(order);
     return ApiResponse.ok(
