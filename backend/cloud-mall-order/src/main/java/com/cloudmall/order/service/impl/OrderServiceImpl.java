@@ -135,7 +135,7 @@ public class OrderServiceImpl implements OrderService {
    * @param key 与原用户绑定的幂等请求键
    * @param req 购买商品数量及原收货地址请求
    * @return 创建成功或既有幂等重放的订单摘要
-   * @throws BizException 请求非法为400，商品缺失为404，幂等/库存冲突为409，预扣待确认为202
+   * @throws BizException 请求非法400，商品缺失404，响应SKU不可信500，幂等/库存冲突409，预扣待确认202
    */
   @Transactional
   @PostMapping("/orders")
@@ -183,6 +183,9 @@ public class OrderServiceImpl implements OrderService {
       if (resp == null || !"0".equals(resp.code) || resp.data == null)
         throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
       ProductClient.SkuView skuView = resp.data;
+      // 商品事实必须属于本次请求SKU，错/缺响应身份不得授权金额、意图或库存。
+      if (!Objects.equals(item.skuId, skuView.skuId()))
+        throw new BizException(ErrorCodes.INTERNAL, "商品SKU响应身份不可信", 500);
       BigDecimal line = skuView.unitPrice().multiply(BigDecimal.valueOf(item.quantity));
       total = total.add(line);
       lines.add(new StockClient.Line(item.skuId, item.quantity));

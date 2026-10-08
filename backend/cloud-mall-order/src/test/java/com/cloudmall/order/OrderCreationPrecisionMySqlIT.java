@@ -688,6 +688,139 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void wrongOrMissingProductSkuCannotCreateAnyOrderOrReservationFacts() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String variant : List.of("wrong", "missing")) {
+      Long responseSku = null;
+      if ("wrong".equals(variant)) responseSku = 8L;
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(
+                      responseSku,
+                      9L,
+                      "untrusted product",
+                      "SKU-OTHER",
+                      new BigDecimal("99.90"),
+                      Map.of())))
+          .when(products)
+          .sku(7L);
+      clearInvocations(products, stock, cart);
+      var before = fixtureFacts();
+      RuntimeException failure = null;
+      try {
+        transaction.execute(
+            status -> service.create("untrusted-product-" + variant, normalRequest()));
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+      RuntimeException captured = failure;
+      var after = fixtureFacts();
+      checks.add(() -> assertInstanceOf(BizException.class, captured, variant));
+      if (captured instanceof BizException controlled) {
+        checks.add(() -> assertEquals(500, controlled.getHttpStatus(), variant));
+        checks.add(() -> assertEquals(ErrorCodes.INTERNAL, controlled.getCode(), variant));
+      }
+      checks.add(() -> assertEquals(before, after, variant));
+      // Interaction assertions must capture the per-case invocations before the next reset.
+      long stockCalls = mockingDetails(stock).getInvocations().size();
+      long writes =
+          mockingDetails(cart).getInvocations().stream()
+              .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+              .count();
+      checks.add(() -> assertEquals(0, stockCalls, variant));
+      checks.add(() -> assertEquals(0, writes, variant));
+      verify(products).sku(7L);
+      verify(cart).cleanupSnapshot(7L, 7L);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void aWrongLaterProductSkuCannotPersistAnEarlierValidLineOrReachStock() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    9L, 9L, "wrong second product", "SKU-9", new BigDecimal("99.90"), Map.of())))
+        .when(products)
+        .sku(8L);
+    CreateOrderDTO request = normalRequest();
+    OrderItemDTO second = new OrderItemDTO();
+    second.skuId = 8L;
+    second.quantity = 2;
+    request.items = List.of(request.items.get(0), second);
+    var before = fixtureFacts();
+    RuntimeException failure = null;
+    try {
+      transaction.execute(status -> service.create("wrong-later-product", request));
+    } catch (RuntimeException rejected) {
+      failure = rejected;
+    }
+    RuntimeException captured = failure;
+    assertAll(
+        () -> assertInstanceOf(BizException.class, captured),
+        () -> assertEquals(before, fixtureFacts()),
+        () -> verifyNoInteractions(stock),
+        () -> verify(cart, never()).cleanupItem(anyLong(), anyLong(), any()),
+        () -> verify(cart, never()).deleteItem(anyLong(), anyLong()));
+    BizException controlled = (BizException) captured;
+    assertEquals(500, controlled.getHttpStatus());
+    assertEquals(ErrorCodes.INTERNAL, controlled.getCode());
+    verify(products).sku(7L);
+    verify(products).sku(8L);
+  }
+
+  @Test
+  void matchingProductIdentityUsesTheCurrentPriceAndSameSkuForStockAndSqlDetails() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L,
+                    9L,
+                    "current product",
+                    "SKU-7",
+                    new BigDecimal("12.30"),
+                    Map.of("color", "blue"))))
+        .when(products)
+        .sku(7L);
+    CreateOrderDTO request = normalRequest();
+    request.items.get(0).quantity = 3;
+    ApiResponse<?> response =
+        transaction.execute(status -> service.create("matching-product-sku", request));
+    assertEquals("0", response.code);
+    var reservation = org.mockito.ArgumentCaptor.forClass(StockClient.Reservation.class);
+    verify(stock).reserve(reservation.capture());
+    assertEquals(7L, reservation.getValue().items().get(0).skuId());
+    assertEquals(3, reservation.getValue().items().get(0).quantity());
+    Map<String, Object> detail =
+        fixture.queryForMap(
+            "SELECT sku_id, quantity, unit_price, line_amount, product_name_snapshot FROM mall_order_item_202612");
+    assertEquals(7L, ((Number) detail.get("sku_id")).longValue());
+    assertEquals(3, ((Number) detail.get("quantity")).intValue());
+    assertEquals(new BigDecimal("12.30"), detail.get("unit_price"));
+    assertEquals(new BigDecimal("36.90"), detail.get("line_amount"));
+    assertEquals("current product", detail.get("product_name_snapshot"));
+    assertEquals(
+        new BigDecimal("36.90"),
+        fixture.queryForObject("SELECT total_amount FROM mall_order_202612", BigDecimal.class));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE idempotency_key='matching-product-sku'",
+            String.class));
+  }
+
+  @Test
   void cartCleanupWaitsForCommitAndObservesCommittedOrderAndIntent() {
     AuthContext.set(7L, "USER");
     CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
