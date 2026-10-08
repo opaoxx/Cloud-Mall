@@ -679,7 +679,11 @@ class OrderCreationPrecisionMySqlIT {
     verify(stock, never()).reservation(anyString());
     verify(stock, never()).rollback(anyString());
     CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
-    int cartCalls = mockingDetails(cart).getInvocations().size();
+    int cartCalls =
+        (int)
+            mockingDetails(cart).getInvocations().stream()
+                .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+                .count();
     checks.add(() -> assertEquals(0, cartCalls, key));
   }
 
@@ -775,6 +779,71 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void cartChangesDuringReserveKeepTheirNewItemAfterTheOrderReallyCommits() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartCleanupSnapshotDTO original =
+        new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":1,\"addedAt\":\"original\"}");
+    CartCleanupSnapshotDTO readded =
+        new CartCleanupSnapshotDTO(
+            7L, "{\"skuId\":7,\"quantity\":1,\"addedAt\":\"readded-during-reserve\"}");
+    var current = new java.util.concurrent.atomic.AtomicReference<CartCleanupSnapshotDTO>(original);
+    doAnswer(invocation -> ApiResponse.ok(current.get())).when(cart).cleanupSnapshot(7L, 7L);
+    doAnswer(
+            invocation -> {
+              current.set(readded);
+              StockClient.Reservation reservation = invocation.getArgument(0);
+              return ApiResponse.ok(Map.of("orderNo", reservation.orderNo(), "status", "RESERVED"));
+            })
+        .when(stock)
+        .reserve(any());
+    doAnswer(
+            invocation -> {
+              CartCleanupSnapshotDTO expected = invocation.getArgument(2);
+              return ApiResponse.ok(current.compareAndSet(expected, null));
+            })
+        .when(cart)
+        .cleanupItem(anyLong(), anyLong(), any());
+    assertEquals("0", service.create("cart-changed-during-reserve", normalRequest()).code);
+    assertEquals(readded, current.get());
+    var ordered = inOrder(cart, stock);
+    ordered.verify(cart).cleanupSnapshot(7L, 7L);
+    ordered.verify(stock).reserve(any());
+    ordered.verify(cart).cleanupItem(7L, 7L, original);
+    verifyNoMoreInteractions(cart);
+    verify(stock, never()).rollback(anyString());
+    assertEquals(
+        1, fixture.queryForObject("SELECT COUNT(*) FROM mall_order_202612", Integer.class));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-changed-during-reserve'",
+            String.class));
+  }
+
+  @Test
+  void partiallyPurchasedCartQuantityDoesNotGetDeletedAndStillCommitsTheOrder() {
+    AuthContext.set(7L, "USER");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    doReturn(ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":5}")))
+        .when(cart)
+        .cleanupSnapshot(7L, 7L);
+    assertEquals("0", service.create("cart-partially-purchased", normalRequest()).code);
+    verify(cart).cleanupSnapshot(7L, 7L);
+    verify(cart, never()).cleanupItem(anyLong(), anyLong(), any());
+    verify(cart, never()).deleteItem(anyLong(), anyLong());
+    verifyNoMoreInteractions(cart);
+    assertEquals(
+        1, fixture.queryForObject("SELECT COUNT(*) FROM mall_order_202612", Integer.class));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE idempotency_key='cart-partially-purchased'",
+            String.class));
+  }
+
+  @Test
   void outerRollbackNeverDeletesCartOrPretendsTheOrderCommitted() {
     AuthContext.set(7L, "USER");
     CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
@@ -826,7 +895,10 @@ class OrderCreationPrecisionMySqlIT {
             String.class));
     verify(stock).rollback(anyString());
     verify(stock).reservation(anyString());
-    verifyNoInteractions(cart);
+    verify(cart).cleanupSnapshot(7L, 7L);
+    verify(cart, never()).cleanupItem(anyLong(), anyLong(), any());
+    verify(cart, never()).deleteItem(anyLong(), anyLong());
+    verifyNoMoreInteractions(cart);
   }
 
   @Test
@@ -1013,7 +1085,11 @@ class OrderCreationPrecisionMySqlIT {
       assertEquals(ErrorCodes.DUPLICATE, failure.getCode());
       verify(users).addresses();
       verify(products).sku(7L);
-      verifyNoInteractions(stock, cart);
+      verifyNoInteractions(stock);
+      verify(cart).cleanupSnapshot(7L, 7L);
+      verify(cart, never()).cleanupItem(anyLong(), anyLong(), any());
+      verify(cart, never()).deleteItem(anyLong(), anyLong());
+      verifyNoMoreInteractions(cart);
       assertEquals(before, fixtureFacts());
     }
     clearInvocations(stock, products, users, cart);
@@ -1021,7 +1097,11 @@ class OrderCreationPrecisionMySqlIT {
         transaction.execute(status -> service.create("Key-Case", normalRequest()));
     assertEquals("0", replay.code);
     assertEquals(((OrderVO) original.data).orderNo, ((OrderVO) replay.data).orderNo);
-    verifyNoInteractions(stock, cart);
+    verifyNoInteractions(stock);
+    verify(cart).cleanupSnapshot(7L, 7L);
+    verify(cart, never()).cleanupItem(anyLong(), anyLong(), any());
+    verify(cart, never()).deleteItem(anyLong(), anyLong());
+    verifyNoMoreInteractions(cart);
     assertEquals(before, fixtureFacts());
   }
 

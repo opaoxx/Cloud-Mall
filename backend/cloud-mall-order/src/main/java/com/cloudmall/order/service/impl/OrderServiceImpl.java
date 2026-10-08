@@ -129,14 +129,19 @@ public class OrderServiceImpl implements OrderService {
     this.mapper = mapper;
   }
 
+  /**
+   * 创建普通订单，入口采样数量匹配的原购物车证明，仅提交后条件清理。
+   *
+   * @param key 与原用户绑定的幂等请求键
+   * @param req 购买商品数量及原收货地址请求
+   * @return 创建成功或既有幂等重放的订单摘要
+   * @throws BizException 请求非法为400，商品缺失为404，幂等/库存冲突为409，预扣待确认为202
+   */
   @Transactional
   @PostMapping("/orders")
-  /** 执行 create 相关操作。 */
   public synchronized ApiResponse<?> create(
       @RequestHeader("Idempotency-Key") String key, @RequestBody CreateOrderDTO req) {
-    // 1. 接收并整理 create 的业务请求。
-    // 2. 执行 create 的核心业务校验与状态处理。
-    // 3. 返回 create 的处理结果。
+    // 1. 读取原用户与订单幂等投影，直接重放不再次采样或写入。
     long userId = AuthContext.requireUserId();
     if (key == null || key.isBlank()) bad("Idempotency-Key不能为空");
     if (key.codePointCount(0, key.length()) > 128) bad("Idempotency-Key不能超过128个字符");
@@ -148,6 +153,15 @@ public class OrderServiceImpl implements OrderService {
     }
     if (req == null || req.items == null || req.items.isEmpty() || req.addressId == null)
       bad("订单商品和地址不能为空");
+    // 2. 全集预检数量并只读捕获匹配购买聚合的原证明，后续不取最新Cart授权删除。
+    Map<Long, Long> purchaseQuantities = new LinkedHashMap<>();
+    for (OrderItemDTO item : req.items) {
+      if (item == null || item.skuId == null || item.quantity < 1) bad("商品数量必须为正数");
+      purchaseQuantities.merge(item.skuId, (long) item.quantity, Long::sum);
+    }
+    List<CartCleanupSnapshotDTO> cleanupSnapshots =
+        captureCartCleanupSnapshots(userId, purchaseQuantities);
+    // 3. 按原流程校验地址/商品、预扣并持久化，成功末尾只注册原证明回调。
     Map<String, Object> address = findAddress(req.addressId);
     OffsetDateTime created = OrderCreationTime.normalize(OffsetDateTime.now(creationClock));
     String orderNo = created.format(MONTH) + UUID.randomUUID().toString().replace("-", "");
@@ -273,7 +287,7 @@ public class OrderServiceImpl implements OrderService {
       OrderVO createdOrder = find(orderNo);
       if (reservationIntentMapper.markCommitted(orderNo, now().toLocalDateTime()) != 1)
         throw new BizException(ErrorCodes.CONFLICT, "库存预扣意图未能提交", 409);
-      registerCartCleanup(orderNo, userId, req.items);
+      registerCartCleanup(orderNo, userId, cleanupSnapshots);
       return ApiResponse.ok(createdOrder);
     } catch (RuntimeException creationFailure) {
       // 3. 只有成功响应才能同步回滚并结束意图；响应丢失须保留 INIT 等待恢复。
@@ -290,8 +304,42 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 提交前捕获原用户与不可变原JSON快照，提交后仅条件删除未变项，失败逐项保留并告警。 */
-  private void registerCartCleanup(String orderNo, long userId, List<OrderItemDTO> items) {
+  /** 创建入口只读采样。只对购买聚合数量与原JSON正int数量一致的项提供不可变证明； long安全承载Java List中正int请求的总和，超int仅跳过清理，不改变订单流程。 */
+  private List<CartCleanupSnapshotDTO> captureCartCleanupSnapshots(
+      long userId, Map<Long, Long> purchaseQuantities) {
+    // 1. 无真实事务或同步上下文时不调用Cart，也不猜测提交事实。
+    if (!TransactionSynchronizationManager.isActualTransactionActive()
+        || !TransactionSynchronizationManager.isSynchronizationActive()) {
+      log.warn("订单购物车快照缺少实际事务上下文，保留购物车，userId={}", userId);
+      return List.of();
+    }
+    // 2. 每个SKU只读一次，坏身份/数量或普通故障只保留该项，Error原传播。
+    List<CartCleanupSnapshotDTO> captured = new ArrayList<>();
+    for (Map.Entry<Long, Long> purchase : purchaseQuantities.entrySet()) {
+      Long skuId = purchase.getKey();
+      long purchasedQuantity = purchase.getValue();
+      if (purchasedQuantity > Integer.MAX_VALUE) {
+        log.warn("订单购买聚合数量超Cart范围，保留该项，userId={}，skuId={}", userId, skuId);
+        continue;
+      }
+      try {
+        ApiResponse<CartCleanupSnapshotDTO> response = cart.cleanupSnapshot(skuId, userId);
+        if (response == null
+            || !"0".equals(response.code)
+            || !validCartCleanupSnapshot(skuId, purchasedQuantity, response.data))
+          throw new IllegalStateException("购物车清理快照身份或购买数量未确认");
+        captured.add(response.data);
+      } catch (RuntimeException snapshotFailure) {
+        log.warn("订单购物车前置快照捕获失败，保留该项，userId={}，skuId={}", userId, skuId, snapshotFailure);
+      }
+    }
+    // 3. 保存原DTO，创建末尾与提交回调不GET重建或替换证明。
+    return List.copyOf(captured);
+  }
+
+  /** 创建成功末尾只注册原证明回调，提交后条件删除，不重读Cart或改变原用户。 */
+  private void registerCartCleanup(
+      String orderNo, long userId, List<CartCleanupSnapshotDTO> cleanupSnapshots) {
     try {
       // 1. 无实际事务或同步上下文时不能证明提交，禁止提前删除购物车。
       if (!TransactionSynchronizationManager.isActualTransactionActive()
@@ -299,22 +347,7 @@ public class OrderServiceImpl implements OrderService {
         log.warn("订单购物车清理缺少实际事务上下文，保留购物车，orderNo={}", orderNo);
         return;
       }
-      // 2. 捕获原值，回调不重读请求或晚期鉴权；每个SKU最多删除一次。
-      List<Long> purchasedSkuIds = items.stream().map(item -> item.skuId).distinct().toList();
-      List<CartCleanupSnapshotDTO> captured = new ArrayList<>();
-      for (Long skuId : purchasedSkuIds) {
-        try {
-          ApiResponse<CartCleanupSnapshotDTO> response = cart.cleanupSnapshot(skuId, userId);
-          if (response == null
-              || !"0".equals(response.code)
-              || !validCartCleanupSnapshot(skuId, response.data))
-            throw new IllegalStateException("购物车清理快照未确认");
-          captured.add(response.data);
-        } catch (RuntimeException snapshotFailure) {
-          log.warn("订单购物车快照捕获失败，保留该项，orderNo={}，skuId={}", orderNo, skuId, snapshotFailure);
-        }
-      }
-      List<CartCleanupSnapshotDTO> cleanupSnapshots = List.copyOf(captured);
+      // 2. 只注册入口捕获的不可变证明，业务失败或rollback不执行POST。
       TransactionSynchronizationManager.registerSynchronization(
           new TransactionSynchronization() {
             /** 订单已提交后逐SKU清理；普通失败隔离，Error保持传播。 */
@@ -338,8 +371,9 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 原DTO与原JSON数值SKU都须精确匹配请求，不从坏响应拼接或重建删除证明。 */
-  private boolean validCartCleanupSnapshot(Long skuId, CartCleanupSnapshotDTO snapshot) {
+  /** 原DTO/JSON数值SKU及原正int数量须匹配购买聚合，不从坏响应拼接或重建证明。 */
+  private boolean validCartCleanupSnapshot(
+      Long skuId, long purchasedQuantity, CartCleanupSnapshotDTO snapshot) {
     if (snapshot == null
         || !Objects.equals(skuId, snapshot.skuId())
         || snapshot.expectedJson() == null
@@ -351,11 +385,16 @@ public class OrderServiceImpl implements OrderService {
               .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
               .readTree(snapshot.expectedJson());
       JsonNode proofSku = proof == null ? null : proof.path("skuId");
+      JsonNode proofQuantity = proof == null ? null : proof.path("quantity");
       return proof != null
           && proof.isObject()
           && proofSku.isIntegralNumber()
           && proofSku.canConvertToLong()
-          && proofSku.longValue() == skuId.longValue();
+          && proofSku.longValue() == skuId.longValue()
+          && proofQuantity.isIntegralNumber()
+          && proofQuantity.canConvertToInt()
+          && proofQuantity.intValue() > 0
+          && proofQuantity.longValue() == purchasedQuantity;
     } catch (JsonProcessingException malformedProof) {
       return false;
     }

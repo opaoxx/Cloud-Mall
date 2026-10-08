@@ -6,9 +6,11 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.common.error.BizException;
 import com.cloudmall.order.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
+import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.feign.CartClient;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
@@ -197,10 +199,227 @@ class OrderCartCommitBoundaryTest {
     assertTrue(TransactionSynchronizationManager.getSynchronizations().isEmpty());
   }
 
+  @Test
+  void cartChangesDuringStockReservationAreNotCapturedAsNewCleanupPermission() {
+    Fixture fixture = new Fixture();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.initSynchronization();
+    var current =
+        new java.util.concurrent.atomic.AtomicReference<CartCleanupSnapshotDTO>(snapshot(7L));
+    CartCleanupSnapshotDTO readded =
+        new CartCleanupSnapshotDTO(
+            7L, "{\"skuId\":7,\"quantity\":2,\"addedAt\":\"readded-during-reserve\"}");
+    doAnswer(invocation -> ApiResponse.ok(current.get()))
+        .when(fixture.cart)
+        .cleanupSnapshot(7L, 8L);
+    doAnswer(
+            invocation -> {
+              StockClient.Reservation reservation = invocation.getArgument(0);
+              current.set(readded);
+              return ApiResponse.ok(Map.of("orderNo", reservation.orderNo(), "status", "RESERVED"));
+            })
+        .when(fixture.stock)
+        .reserve(any());
+    doAnswer(
+            invocation -> {
+              CartCleanupSnapshotDTO expected = invocation.getArgument(2);
+              return ApiResponse.ok(current.compareAndSet(expected, null));
+            })
+        .when(fixture.cart)
+        .cleanupItem(eq(7L), eq(8L), any());
+    assertEquals("0", fixture.service.create("changed-during-reserve", request()).code);
+    for (TransactionSynchronization callback :
+        TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+    assertEquals(readded, current.get());
+    verify(fixture.cart).cleanupSnapshot(7L, 8L);
+    verify(fixture.cart).cleanupItem(7L, 8L, snapshot(7L));
+    verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+  }
+
+  @Test
+  void partiallyPurchasedCartQuantityIsNeverAuthorizedForWholeItemDeletion() {
+    Fixture fixture = new Fixture();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.initSynchronization();
+    doReturn(ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":5}")))
+        .when(fixture.cart)
+        .cleanupSnapshot(7L, 8L);
+    assertEquals("0", fixture.service.create("only-two-of-five", request()).code);
+    for (TransactionSynchronization callback :
+        TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+    verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+    verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+  }
+
+  @Test
+  void samplingPrecedesAddressAndProductsAndNeverAuthorizesAPreviouslyMissingItem() {
+    for (String phase : List.of("address", "product", "initial-missing")) {
+      Fixture fixture = new Fixture();
+      TransactionSynchronizationManager.setActualTransactionActive(true);
+      TransactionSynchronizationManager.initSynchronization();
+      var current =
+          new java.util.concurrent.atomic.AtomicReference<CartCleanupSnapshotDTO>(
+              "initial-missing".equals(phase) ? null : snapshot(7L));
+      CartCleanupSnapshotDTO readded =
+          new CartCleanupSnapshotDTO(
+              7L, "{\"skuId\":7,\"quantity\":2,\"addedAt\":\"new-during-" + phase + "\"}");
+      doAnswer(invocation -> ApiResponse.ok(current.get()))
+          .when(fixture.cart)
+          .cleanupSnapshot(7L, 8L);
+      if ("address".equals(phase))
+        doAnswer(
+                invocation -> {
+                  current.set(readded);
+                  return ApiResponse.ok(List.of(Map.of("id", 9L)));
+                })
+            .when(fixture.users)
+            .addresses();
+      else if ("product".equals(phase))
+        doAnswer(
+                invocation -> {
+                  current.set(readded);
+                  return ApiResponse.ok(
+                      new ProductClient.SkuView(7L, 9L, "商品", "SKU", BigDecimal.TEN, Map.of()));
+                })
+            .when(fixture.products)
+            .sku(7L);
+      else
+        doAnswer(
+                invocation -> {
+                  current.set(readded);
+                  StockClient.Reservation reservation = invocation.getArgument(0);
+                  return ApiResponse.ok(
+                      Map.of("orderNo", reservation.orderNo(), "status", "RESERVED"));
+                })
+            .when(fixture.stock)
+            .reserve(any());
+      doAnswer(
+              invocation -> {
+                CartCleanupSnapshotDTO expected = invocation.getArgument(2);
+                return ApiResponse.ok(current.compareAndSet(expected, null));
+              })
+          .when(fixture.cart)
+          .cleanupItem(eq(7L), eq(8L), any());
+      assertEquals("0", fixture.service.create("early-" + phase, request()).code);
+      var ordered = inOrder(fixture.cart, fixture.users, fixture.products, fixture.stock);
+      ordered.verify(fixture.cart).cleanupSnapshot(7L, 8L);
+      ordered.verify(fixture.cart).cleanupSnapshot(8L, 8L);
+      ordered.verify(fixture.users).addresses();
+      ordered.verify(fixture.products, times(2)).sku(7L);
+      ordered.verify(fixture.products).sku(8L);
+      ordered.verify(fixture.stock).reserve(any());
+      for (TransactionSynchronization callback :
+          TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+      assertEquals(readded, current.get());
+      if ("initial-missing".equals(phase))
+        verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+      else verify(fixture.cart).cleanupItem(7L, 8L, snapshot(7L));
+      verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+      verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+      verifyNoMoreInteractions(fixture.cart);
+      clearContext();
+    }
+  }
+
+  @Test
+  void invalidQuantityProofsAndOutOfRangePurchaseSumsOnlySkipCleanup() {
+    for (String quantity :
+        List.of(
+            "missing",
+            "null",
+            "0",
+            "-1",
+            "-2147483648",
+            "1",
+            "5",
+            "2147483648",
+            "4294967298",
+            "2.0",
+            "\"2\"",
+            "true",
+            "[]")) {
+      Fixture fixture = new Fixture();
+      TransactionSynchronizationManager.setActualTransactionActive(true);
+      TransactionSynchronizationManager.initSynchronization();
+      String raw =
+          "missing".equals(quantity)
+              ? "{\"skuId\":7}"
+              : "{\"skuId\":7,\"quantity\":" + quantity + "}";
+      doReturn(ApiResponse.ok(new CartCleanupSnapshotDTO(7L, raw)))
+          .when(fixture.cart)
+          .cleanupSnapshot(7L, 8L);
+      assertEquals("0", fixture.service.create("bad-quantity-" + quantity, request()).code);
+      for (TransactionSynchronization callback :
+          TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+      verify(fixture.cart).cleanupSnapshot(7L, 8L);
+      verify(fixture.cart).cleanupSnapshot(8L, 8L);
+      verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+      verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+      verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+      verifyNoMoreInteractions(fixture.cart);
+      clearContext();
+    }
+    Fixture fixture = new Fixture();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.initSynchronization();
+    CreateOrderDTO request = request();
+    request.items.get(0).quantity = Integer.MAX_VALUE;
+    assertEquals("0", fixture.service.create("purchase-sum-over-int", request).code);
+    for (TransactionSynchronization callback :
+        TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+    verify(fixture.cart, never()).cleanupSnapshot(eq(7L), anyLong());
+    verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+    verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+    var reservation = org.mockito.ArgumentCaptor.forClass(StockClient.Reservation.class);
+    verify(fixture.stock).reserve(reservation.capture());
+    assertEquals(Integer.MAX_VALUE, reservation.getValue().items().get(0).quantity());
+    assertEquals(1, reservation.getValue().items().get(1).quantity());
+    assertEquals(7L, reservation.getValue().items().get(0).skuId());
+    assertEquals(7L, reservation.getValue().items().get(1).skuId());
+  }
+
+  @Test
+  void invalidLaterRequestItemsAndIdempotentReplaysDoNotSampleCart() {
+    for (String invalid : List.of("null-item", "null-sku", "quantity")) {
+      Fixture fixture = new Fixture();
+      TransactionSynchronizationManager.setActualTransactionActive(true);
+      TransactionSynchronizationManager.initSynchronization();
+      CreateOrderDTO request = request();
+      if ("null-item".equals(invalid)) request.items.set(2, null);
+      else if ("null-sku".equals(invalid)) request.items.get(2).skuId = null;
+      else request.items.get(2).quantity = 0;
+      assertEquals(
+          400,
+          assertThrows(
+                  BizException.class,
+                  () -> fixture.service.create("invalid-later-" + invalid, request))
+              .getHttpStatus());
+      verifyNoInteractions(fixture.cart, fixture.products, fixture.users, fixture.stock);
+      clearContext();
+    }
+    Fixture fixture = new Fixture();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.initSynchronization();
+    OrderIdempotencyPO existing = new OrderIdempotencyPO();
+    existing.idempotencyKey = "existing-order";
+    existing.orderNo = "202610" + "a".repeat(32);
+    OrderSqlMapper orders =
+        (OrderSqlMapper) ReflectionTestUtils.getField(fixture.service, "orderSqlMapper");
+    doReturn(List.of(existing)).when(orders).findIdempotentOrders(8L, "existing-order");
+    assertEquals("0", fixture.service.create("existing-order", request()).code);
+    verifyNoInteractions(fixture.cart, fixture.products, fixture.users, fixture.stock);
+    assertTrue(TransactionSynchronizationManager.getSynchronizations().isEmpty());
+  }
+
   /** 不可变原始JSON证明，不从回调时期的购物车重新读取。 */
   private static CartCleanupSnapshotDTO snapshot(Long skuId) {
     return new CartCleanupSnapshotDTO(
-        skuId, "{\"skuId\":" + skuId + ",\"quantity\":2,\"checked\":true}");
+        skuId,
+        "{\"skuId\":"
+            + skuId
+            + ",\"quantity\":"
+            + (skuId.equals(7L) ? 2 : 1)
+            + ",\"checked\":true}");
   }
 
   /** 实际创建编排，持久层和远端明确替身，不把人工同步上下文称作真实提交。 */
@@ -211,13 +430,17 @@ class OrderCartCommitBoundaryTest {
     /** 原库存客户端替身。 */
     final StockClient stock = mock(StockClient.class);
 
+    /** 商品事实调用的独立替身。 */
+    final ProductClient products = mock(ProductClient.class);
+
+    /** 地址事实调用的独立替身。 */
+    final UserClient users = mock(UserClient.class);
+
     /** 实际创建与提交清理编排。 */
     final OrderServiceImpl service;
 
     private Fixture() {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
-      ProductClient products = mock(ProductClient.class);
-      UserClient users = mock(UserClient.class);
       OrderReservationIntentService intents = mock(OrderReservationIntentService.class);
       OrderReservationIntentMapper intentMapper = mock(OrderReservationIntentMapper.class);
       when(products.sku(anyLong()))
