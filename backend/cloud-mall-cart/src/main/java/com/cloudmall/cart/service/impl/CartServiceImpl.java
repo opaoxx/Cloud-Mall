@@ -196,23 +196,27 @@ public class CartServiceImpl implements CartService {
     return "cart:" + AuthContext.requireUserId();
   }
 
-  /** 执行 readMap 相关操作。 */
+  /** 完整校验Hash原字段与PO的SKU绑定后返回，坏行沿原500拒绝，不清洗或写回。 */
   private Map<String, CartItemPO> readMap() {
-    // 1. 接收并整理 readMap 的业务请求。
-    // 2. 执行 readMap 的核心业务校验与状态处理。
-    // 3. 返回 readMap 的处理结果。
+    // 1. 原Hash读取保持Redis异常503，结果只在当前调用内构造。
     Map<String, CartItemPO> result = new LinkedHashMap<>();
     redisOperation(() -> redis.opsForHash().entries(key()))
         .forEach(
             (field, value) -> {
               try {
-                result.put(
-                    String.valueOf(field),
-                    mapper.readValue(String.valueOf(value), CartItemPO.class));
-              } catch (Exception e) {
+                // 2. 字段只能是原始规范SKU字符串，不把别名或空PO当作合法项。
+                CartItemPO item = mapper.readValue(String.valueOf(value), CartItemPO.class);
+                if (item == null
+                    || item.skuId == null
+                    || !(field instanceof String)
+                    || !Objects.equals(field, String.valueOf(item.skuId)))
+                  throw new IllegalArgumentException("购物车Hash字段与SKU身份不一致");
+                result.put((String) field, item);
+              } catch (Exception invalidItem) {
                 throw new BizException(ErrorCodes.INTERNAL, "购物车数据损坏", 500);
               }
             });
+    // 3. 整个读取通过才授权下游操作，任何坏行均无Redis写入/删除。
     return result;
   }
 
