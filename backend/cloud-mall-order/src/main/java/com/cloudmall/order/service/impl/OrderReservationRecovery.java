@@ -80,8 +80,12 @@ public class OrderReservationRecovery {
     for (OrderReservationIntentPO intent : recoverable) {
       if (Thread.currentThread().isInterrupted()) return;
       try {
+        // 每条认领独立采时，避免扫描或前序处理消耗后续候选的一分钟租约。
+        LocalDateTime claimedAt = LocalDateTime.now(BUSINESS_ZONE);
+        if (Thread.currentThread().isInterrupted()) return;
         int claimed =
-            reservationIntentMapper.claimRecovery(intent.orderNo, now, now.plusMinutes(1));
+            reservationIntentMapper.claimRecovery(
+                intent.orderNo, claimedAt, claimedAt.plusMinutes(1));
         if (Thread.currentThread().isInterrupted()) return;
         if (claimed != 1) continue;
         recoverOne(intent);
