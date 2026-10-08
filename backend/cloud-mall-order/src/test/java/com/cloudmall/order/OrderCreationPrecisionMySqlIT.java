@@ -1344,6 +1344,167 @@ class OrderCreationPrecisionMySqlIT {
   }
 
   @Test
+  void missingOrOverwideProductMetadataCannotReachStockOrLeaveOrderFacts() {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    StockClient stock = (StockClient) ReflectionTestUtils.getField(service, "stock");
+    CartClient cart = (CartClient) ReflectionTestUtils.getField(service, "cart");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String fault : List.of("null-parent", "null-name", "wide-name", "later-wide")) {
+      Long parentId = "null-parent".equals(fault) ? null : Long.valueOf(9L);
+      String name =
+          "null-name".equals(fault)
+              ? null
+              : "wide-name".equals(fault) ? "名".repeat(256) : "product";
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, parentId, name, "SKU-7", BigDecimal.TEN, Map.of())))
+          .when(products)
+          .sku(7L);
+      CreateOrderDTO request = normalRequest();
+      if ("later-wide".equals(fault)) {
+        OrderItemDTO second = new OrderItemDTO();
+        second.skuId = 8L;
+        second.quantity = 1;
+        request.items = List.of(request.items.get(0), second);
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        8L, 9L, "名".repeat(256), "SKU-8", BigDecimal.TEN, Map.of())))
+            .when(products)
+            .sku(8L);
+      }
+      clearInvocations(products, stock, cart);
+      var before = fixtureFacts();
+      RuntimeException failure = null;
+      try {
+        transaction.execute(status -> service.create("bad-product-metadata-" + fault, request));
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+      RuntimeException captured = failure;
+      var after = fixtureFacts();
+      long stockCalls = mockingDetails(stock).getInvocations().size();
+      long cartWrites =
+          mockingDetails(cart).getInvocations().stream()
+              .filter(invocation -> !invocation.getMethod().getName().equals("cleanupSnapshot"))
+              .count();
+      checks.add(() -> assertInstanceOf(BizException.class, captured, fault));
+      if (captured instanceof BizException controlled) {
+        checks.add(() -> assertEquals(500, controlled.getHttpStatus(), fault));
+        checks.add(() -> assertEquals(ErrorCodes.INTERNAL, controlled.getCode(), fault));
+      }
+      checks.add(() -> assertEquals(before, after, fault));
+      checks.add(() -> assertEquals(0, stockCalls, fault));
+      checks.add(() -> assertEquals(0, cartWrites, fault));
+      verify(products).sku(7L);
+      if ("later-wide".equals(fault)) verify(products).sku(8L);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void badSeckillMetadataRollsBackClaimsAndDoesNotCompleteHeldRecovery() throws Exception {
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    int sequence = 0;
+    for (String fault : List.of("null-parent", "null-name", "wide-name")) {
+      Map<String, Object> event = timeEvent("202612-bad-metadata-" + fault);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      saveRecovery(6600 + sequence++, String.valueOf(event.get("eventId")), event, "QUARANTINED");
+      Long parentId = "null-parent".equals(fault) ? null : Long.valueOf(9L);
+      String name =
+          "null-name".equals(fault)
+              ? null
+              : "wide-name".equals(fault) ? "名".repeat(256) : "product";
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, parentId, name, "SKU-7", BigDecimal.TEN, Map.of())))
+          .when(products)
+          .sku(7L);
+      clearInvocations(products);
+      var before = fixtureFacts();
+      IllegalStateException failure =
+          assertThrows(IllegalStateException.class, () -> service.consumeSeckill(event));
+      var after = fixtureFacts();
+      checks.add(() -> assertInstanceOf(IllegalStateException.class, failure.getCause(), fault));
+      checks.add(() -> assertEquals(before, after, fault));
+      verify(products).sku(7L);
+      verifyNoMoreInteractions(products);
+    }
+    assertAll(checks);
+  }
+
+  @Test
+  void legalMetadataSurvivesSqlAndTheOriginalRejectedMessageCanRetry() throws Exception {
+    AuthContext.set(7L, "USER");
+    ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");
+    int sequence = 0;
+    for (String name : List.of("", " ", "尾空格 ", "名".repeat(255), "😀".repeat(255))) {
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(
+                      7L, Long.MAX_VALUE, name, "SKU-7", BigDecimal.TEN, null)))
+          .when(products)
+          .sku(7L);
+      ApiResponse<?> ordinary =
+          transaction.execute(
+              status ->
+                  service.create(
+                      "legal-metadata-"
+                          + name.codePointCount(0, name.length())
+                          + "-"
+                          + name.length(),
+                      normalRequest()));
+      assertEquals("0", ordinary.code);
+      String ordinaryNo = ((OrderVO) ordinary.data).orderNo;
+      Map<String, Object> event = timeEvent("202612-legal-metadata-" + sequence++);
+      event.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+      service.consumeSeckill(event);
+      for (String orderNo : List.of(ordinaryNo, String.valueOf(event.get("orderNo")))) {
+        String itemTable = "mall_order_item_" + orderNo.substring(0, 6);
+        Map<String, Object> detail =
+            fixture.queryForMap(
+                "SELECT product_id, product_name_snapshot, sku_snapshot FROM "
+                    + itemTable
+                    + " WHERE order_no=?",
+                orderNo);
+        assertEquals(Long.MAX_VALUE, ((Number) detail.get("product_id")).longValue());
+        assertEquals(name, detail.get("product_name_snapshot"));
+        assertTrue(
+            new ObjectMapper().readTree(String.valueOf(detail.get("sku_snapshot"))).isNull());
+      }
+    }
+    Map<String, Object> retry = timeEvent("202612-metadata-retry");
+    retry.put("occurredAt", "2026-12-31T23:59:59.999+08:00");
+    saveRecovery(6700, String.valueOf(retry.get("eventId")), retry, "QUARANTINED");
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(7L, null, null, "SKU-7", BigDecimal.TEN, null)))
+        .when(products)
+        .sku(7L);
+    var before = fixtureFacts();
+    assertThrows(IllegalStateException.class, () -> service.consumeSeckill(retry));
+    assertEquals(before, fixtureFacts());
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(
+                    7L, Long.MAX_VALUE, "😀".repeat(255), "SKU-7", BigDecimal.TEN, null)))
+        .when(products)
+        .sku(7L);
+    service.consumeSeckill(retry);
+    assertEquals("RESOLVED", recoveryRow(String.valueOf(retry.get("eventId"))).get("status"));
+    assertEquals(
+        "COMMITTED",
+        fixture.queryForObject(
+            "SELECT status FROM seckill_order_dedup WHERE order_no=?",
+            String.class,
+            retry.get("orderNo")));
+    assertPersistedCreation(
+        String.valueOf(retry.get("orderNo")), LocalDateTime.parse("2026-12-31T23:59:59.999"));
+  }
+
+  @Test
   void matchingProductIdentityUsesTheCurrentPriceAndSameSkuForStockAndSqlDetails() {
     AuthContext.set(7L, "USER");
     ProductClient products = (ProductClient) ReflectionTestUtils.getField(service, "products");

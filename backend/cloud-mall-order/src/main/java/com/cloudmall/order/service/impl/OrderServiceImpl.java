@@ -138,7 +138,7 @@ public class OrderServiceImpl implements OrderService {
    * @param key 与原用户绑定的幂等请求键
    * @param req 购买商品数量及原收货地址请求
    * @return 创建成功或既有幂等重放的订单摘要
-   * @throws BizException 请求或组合金额非法400，商品缺失404，响应SKU或价格不可信500，幂等/库存冲突409，预扣待确认202
+   * @throws BizException 请求或组合金额非法400，商品缺失404，响应商品事实不可信500，幂等/库存冲突409，预扣待确认202
    */
   @Transactional
   @PostMapping("/orders")
@@ -195,6 +195,8 @@ public class OrderServiceImpl implements OrderService {
         throw new BizException(ErrorCodes.INTERNAL, "商品价格小数精度不可信", 500);
       if (!fitsOrderAmountCapacity(skuView.unitPrice()))
         throw new BizException(ErrorCodes.INTERNAL, "商品价格超出金额容量", 500);
+      if (!hasPersistableProductMetadata(skuView))
+        throw new BizException(ErrorCodes.INTERNAL, "商品必填信息不可信", 500);
       BigDecimal line = skuView.unitPrice().multiply(BigDecimal.valueOf(item.quantity));
       if (!fitsOrderAmountCapacity(line))
         throw new BizException(ErrorCodes.INVALID, "订单行金额超过支持范围", 400);
@@ -334,6 +336,13 @@ public class OrderServiceImpl implements OrderService {
   /** 在非空/非负及分精度通过后只比较既有列数值上界，不展开、舍入或改变原金额表示。 */
   private static boolean fitsOrderAmountCapacity(BigDecimal amount) {
     return amount.compareTo(MAX_ORDER_AMOUNT) <= 0;
+  }
+
+  /** 仅核已存在商品事实的持久化必填字段和Unicode字符宽度，不截断/规范化或查询父关系。 */
+  private static boolean hasPersistableProductMetadata(ProductClient.SkuView productSku) {
+    return productSku.productId() != null
+        && productSku.productName() != null
+        && productSku.productName().codePointCount(0, productSku.productName().length()) <= 255;
   }
 
   /** 创建入口只读采样。只对购买聚合数量与原JSON正int数量一致的项提供不可变证明； long安全承载Java List中正int请求的总和，超int仅跳过清理，不改变订单流程。 */
@@ -858,6 +867,8 @@ public class OrderServiceImpl implements OrderService {
         throw new IllegalStateException("秒杀商品价格小数精度不可信: " + skuId);
       if (!fitsOrderAmountCapacity(productSku.unitPrice()))
         throw new IllegalStateException("秒杀商品价格超出金额容量: " + skuId);
+      if (!hasPersistableProductMetadata(productSku))
+        throw new IllegalStateException("秒杀商品必填信息不可信: " + skuId);
       OrderPO order = new OrderPO();
       order.id = id();
       order.orderNo = orderNo;

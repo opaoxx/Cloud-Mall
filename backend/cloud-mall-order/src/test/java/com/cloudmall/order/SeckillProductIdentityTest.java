@@ -285,6 +285,73 @@ class SeckillProductIdentityTest {
     }
   }
 
+  @Test
+  void invalidRequiredMetadataCannotCompleteTheClaimOrWriteOrders() {
+    for (String fault : List.of("null-parent", "null-name", "wide", "wide-emoji")) {
+      Fixture fixture = new Fixture();
+      Long parentId = "null-parent".equals(fault) ? null : Long.valueOf(9L);
+      String name =
+          "null-name".equals(fault)
+              ? null
+              : "wide".equals(fault)
+                  ? "名".repeat(256)
+                  : "wide-emoji".equals(fault) ? "😀".repeat(256) : "商品";
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, parentId, name, "SKU", BigDecimal.TEN, Map.of())))
+          .when(fixture.products)
+          .sku(7L);
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> fixture.service.consumeSeckill(fixture.event));
+      assertInstanceOf(IllegalStateException.class, failure.getCause());
+      assertTrue(failure.getCause().getMessage().contains("必填信息"));
+      fixture.verifyNoOrderOrCompletionWrites();
+    }
+    Fixture earlier = new Fixture();
+    doReturn(
+            ApiResponse.ok(
+                new ProductClient.SkuView(7L, null, null, "SKU", new BigDecimal("-1"), null)))
+        .when(earlier.products)
+        .sku(7L);
+    IllegalStateException failure =
+        assertThrows(
+            IllegalStateException.class, () -> earlier.service.consumeSeckill(earlier.event));
+    assertTrue(failure.getCause().getMessage().contains("价格"));
+    earlier.verifyNoOrderOrCompletionWrites();
+  }
+
+  @Test
+  void legalMetadataPreservesOriginalNameParentAndNullableSnapshotOnCompletion() {
+    for (String name : List.of("", " ", "尾空格 ", "名".repeat(255), "😀".repeat(255))) {
+      Fixture fixture = new Fixture();
+      BigDecimal price = new BigDecimal("12.3000");
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, Long.MAX_VALUE, name, "SKU", price, null)))
+          .when(fixture.products)
+          .sku(7L);
+      fixture.service.consumeSeckill(fixture.event);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      assertEquals(Long.MAX_VALUE, detail.getValue().productId);
+      assertSame(name, detail.getValue().productNameSnapshot);
+      assertSame(price, detail.getValue().unitPrice);
+      assertEquals("null", detail.getValue().skuSnapshot);
+      assertEquals(1, detail.getValue().quantity);
+      verify(fixture.dedup).markCommitted(eq(8L), eq(fixture.key), any());
+      verify(fixture.recovery)
+          .markResolved(
+              eq(fixture.eventId),
+              eq(fixture.orderNo),
+              eq(8L),
+              eq(fixture.key),
+              eq(fixture.hash),
+              any());
+      verifyNoInteractions(fixture.stock, fixture.cart);
+    }
+  }
+
   /** 原始Product记录，不改变业务金额表示。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());

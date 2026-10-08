@@ -313,6 +313,81 @@ class OrderProductIdentityTest {
     }
   }
 
+  @Test
+  void requiredMetadataFailuresPrecedeAllBusinessWritesAndKeepEarlierErrorPriority() {
+    for (String fault : List.of("null-parent", "null-name", "wide", "wide-emoji", "later")) {
+      Fixture fixture = new Fixture();
+      Long parentId = "null-parent".equals(fault) ? null : Long.valueOf(9L);
+      String name =
+          "null-name".equals(fault)
+              ? null
+              : "wide".equals(fault)
+                  ? "名".repeat(256)
+                  : "wide-emoji".equals(fault) ? "😀".repeat(256) : "商品";
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, parentId, name, "SKU", BigDecimal.TEN, Map.of())))
+          .when(fixture.products)
+          .sku(7L);
+      if ("later".equals(fault))
+        doReturn(
+                ApiResponse.ok(
+                    new ProductClient.SkuView(
+                        8L, 9L, "名".repeat(256), "SKU", BigDecimal.TEN, Map.of())))
+            .when(fixture.products)
+            .sku(8L);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> fixture.service.create("metadata-" + fault, request("later".equals(fault))));
+      assertEquals(500, failure.getHttpStatus());
+      assertEquals(ErrorCodes.INTERNAL, failure.getCode());
+      assertTrue(failure.getMessage().contains("必填信息"));
+      fixture.verifyNoBusinessWrites();
+    }
+    for (String earlier : List.of("SKU", "价格")) {
+      Fixture fixture = new Fixture();
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(
+                      "SKU".equals(earlier) ? 8L : 7L,
+                      null,
+                      null,
+                      "SKU",
+                      new BigDecimal("-1"),
+                      null)))
+          .when(fixture.products)
+          .sku(7L);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> fixture.service.create("priority-" + earlier, request(false)));
+      assertTrue(failure.getMessage().contains(earlier));
+      fixture.verifyNoBusinessWrites();
+    }
+  }
+
+  @Test
+  void legalMetadataKeepsUnicodeWidthWhitespaceParentAndNullableSnapshot() {
+    for (String name : List.of("", " ", "尾空格 ", "名".repeat(255), "😀".repeat(255))) {
+      Fixture fixture = new Fixture();
+      BigDecimal price = new BigDecimal("12.3000");
+      doReturn(
+              ApiResponse.ok(
+                  new ProductClient.SkuView(7L, Long.MAX_VALUE, name, "SKU", price, null)))
+          .when(fixture.products)
+          .sku(7L);
+      assertEquals("0", fixture.service.create("legal-metadata", request(false)).code);
+      var detail = org.mockito.ArgumentCaptor.forClass(OrderItemPO.class);
+      verify(fixture.orders).insertOrderItem(anyString(), detail.capture());
+      assertEquals(Long.MAX_VALUE, detail.getValue().productId);
+      assertSame(name, detail.getValue().productNameSnapshot);
+      assertSame(price, detail.getValue().unitPrice);
+      assertEquals("null", detail.getValue().skuSnapshot);
+      verify(fixture.stock).reserve(any());
+    }
+  }
+
   /** 原商品事实对象，不转换身份或规范化金额。 */
   private static ProductClient.SkuView product(Long skuId, BigDecimal price) {
     return new ProductClient.SkuView(skuId, 9L, "商品", "SKU", price, Map.of());
