@@ -22,10 +22,10 @@ public class OrderStockActionRecovery {
   private static final Logger log = LoggerFactory.getLogger(OrderStockActionRecovery.class);
   /** 业务数据库时区。 */
   private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
-  /** 当前恢复器实例租约标识。 */
-  private final String owner = UUID.randomUUID().toString();
+
   /** 订单库存动作持久层。 */
   private final OrderStockActionMapper actionMapper;
+
   /** 库存状态查询与幂等动作客户端。 */
   private final StockClient stockClient;
 
@@ -43,13 +43,15 @@ public class OrderStockActionRecovery {
     // 2. 逐条认领，避免多实例重复执行相反动作。
     for (OrderStockActionPO action : due) {
       LocalDateTime claimedAt = now();
-      if (actionMapper.claim(action.id, owner, claimedAt) != 1) continue;
-      recoverOne(action);
+      // 每次认领使用独立代际标识，避免同实例重认领后接受迟到结果。
+      String claimOwner = UUID.randomUUID().toString();
+      if (actionMapper.claim(action.id, claimOwner, claimedAt) != 1) continue;
+      recoverOne(action, claimOwner);
     }
   }
 
-  /** 查询事实、按原操作键重试、确认最终状态。 */
-  private void recoverOne(OrderStockActionPO action) {
+  /** 查询事实并携带本次认领标识完成本地CAS；失效零更新不猜测结果或再次写入。 */
+  private void recoverOne(OrderStockActionPO action, String claimOwner) {
     try {
       // 未知类型不得默认成回滚；原事实保留并走既有UNKNOWN退避。
       if (!"CONFIRM".equals(action.actionType) && !"ROLLBACK".equals(action.actionType)) {
@@ -66,12 +68,11 @@ public class OrderStockActionRecovery {
       String opposite = "CONFIRM".equals(action.actionType) ? "ROLLED_BACK" : "CONFIRMED";
       String current = stockStatus(action.orderNo);
       if (target.equals(current)) {
-        actionMapper.finish(action.id, owner, "SUCCEEDED", null, now());
+        actionMapper.finish(action.id, claimOwner, "SUCCEEDED", null, now());
         return;
       }
       if (opposite.equals(current) || "REJECTED".equals(current)) {
-        actionMapper.finish(action.id, owner, "CONFLICT",
-            "库存已处于不可逆的相反终态: " + current, now());
+        actionMapper.finish(action.id, claimOwner, "CONFLICT", "库存已处于不可逆的相反终态: " + current, now());
         log.error("订单库存动作与库存事实冲突，需人工对账，orderNo={}，action={}，stock={}",
             action.orderNo, action.actionType, current);
         return;
@@ -90,10 +91,9 @@ public class OrderStockActionRecovery {
       // 3. 再读持久状态；仅目标终态允许把本地动作标记成功。
       String afterWrite = stockStatus(action.orderNo);
       if (target.equals(afterWrite)) {
-        actionMapper.finish(action.id, owner, "SUCCEEDED", null, now());
+        actionMapper.finish(action.id, claimOwner, "SUCCEEDED", null, now());
       } else if (opposite.equals(afterWrite)) {
-        actionMapper.finish(action.id, owner, "CONFLICT",
-            "库存写入后为相反终态: " + afterWrite, now());
+        actionMapper.finish(action.id, claimOwner, "CONFLICT", "库存写入后为相反终态: " + afterWrite, now());
         log.error("订单库存动作写入后发生终态冲突，orderNo={}，action={}",
             action.orderNo, action.actionType);
       } else {
@@ -102,7 +102,8 @@ public class OrderStockActionRecovery {
     } catch (RuntimeException unknownResult) {
       // 4. 查询或写入失败只记录未知，不猜测失败或执行相反操作。
       long delaySeconds = Math.min(60, 5L * Math.max(1, action.attempts == null ? 1 : action.attempts));
-      actionMapper.retry(action.id, owner, unknownResult.toString(), now().plusSeconds(delaySeconds), now());
+      actionMapper.retry(
+          action.id, claimOwner, unknownResult.toString(), now().plusSeconds(delaySeconds), now());
       log.warn("订单库存动作结果待恢复，orderNo={}，action={}",
           action.orderNo, action.actionType, unknownResult);
     }

@@ -75,21 +75,53 @@ public class OrderStockActionMapper {
         owner, now.plusSeconds(30), now, id, now, now);
   }
 
-  /** 仅由租约持有者完成动作。 */
+  /**
+   * 仅由本次认领的有效租约持有者完成动作；过期或被接管时零更新。
+   *
+   * @param id 原动作主键
+   * @param owner 本次认领标识，按原字符串精确比较
+   * @param status 原调用方决定的目标状态
+   * @param error 原错误文本，可为null
+   * @param now 本次完成写的新鲜上海时间，同时用于更新和租约判断
+   * @return 有效租约匹配的更新行数，失效或空白标识为0
+   */
   public int finish(long id, String owner, String status, String error, LocalDateTime now) {
+    if (owner == null || owner.isBlank()) return 0;
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status=?,last_error=?,lease_owner=NULL,lease_until=NULL,"
-            + "updated_at=? WHERE id=? AND lease_owner=? AND status IN ('PENDING','UNKNOWN')",
-        status, shorten(error), now, id, owner);
+            + "updated_at=? WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
+            + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')",
+        status,
+        shorten(error),
+        now,
+        id,
+        owner,
+        now);
   }
 
-  /** 远端结果未知时保留动作和原操作键，等待退避后重试。 */
+  /**
+   * 在本次有效租约内保留未知动作和原操作键，等待退避后重试。
+   *
+   * @param id 原动作主键
+   * @param owner 本次认领标识，按原字符串精确比较
+   * @param error 原错误文本，可为null
+   * @param retryAt 原调用方提供的下次重试时间
+   * @param now 本次重试写的新鲜上海时间，同时用于更新和租约判断
+   * @return 有效租约匹配的更新行数，失效或空白标识为0
+   */
   public int retry(long id, String owner, String error, LocalDateTime retryAt, LocalDateTime now) {
+    if (owner == null || owner.isBlank()) return 0;
     return jdbcTemplate.update(
         "UPDATE order_stock_action SET status='UNKNOWN',last_error=?,next_retry_at=?,"
             + "lease_owner=NULL,lease_until=NULL,updated_at=?"
-            + " WHERE id=? AND lease_owner=? AND status IN ('PENDING','UNKNOWN')",
-        shorten(error), retryAt, now, id, owner);
+            + " WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
+            + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')",
+        shorten(error),
+        retryAt,
+        now,
+        id,
+        owner,
+        now);
   }
 
   /** 按VARCHAR512字符列宽保留完整code point，不拆有效代理对或归一化原错误文本。 */

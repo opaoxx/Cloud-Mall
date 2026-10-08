@@ -219,6 +219,37 @@ class OrderStockActionRecoveryTest {
     }
   }
 
+  @Test
+  void eachClaimUsesANewTokenAndCompletionUsesOnlyItsOwnToken() {
+    due("CONFIRM");
+    when(stockClient.reservation("order-1"))
+        .thenReturn(status("CONFIRMED"))
+        .thenThrow(new IllegalStateException("query unknown"))
+        .thenReturn(status("CONFIRMED"));
+    recovery.recoverDue();
+    recovery.recoverDue();
+    recovery.recoverDue();
+    var claimTokens = ArgumentCaptor.forClass(String.class);
+    verify(actionMapper, org.mockito.Mockito.times(3)).claim(eq(1L), claimTokens.capture(), any());
+    var finishTokens = ArgumentCaptor.forClass(String.class);
+    verify(actionMapper, org.mockito.Mockito.times(2))
+        .finish(eq(1L), finishTokens.capture(), eq("SUCCEEDED"), eq(null), any());
+    var retryToken = ArgumentCaptor.forClass(String.class);
+    verify(actionMapper).retry(eq(1L), retryToken.capture(), anyString(), any(), any());
+    org.junit.jupiter.api.Assertions.assertEquals(
+        3, new java.util.HashSet<>(claimTokens.getAllValues()).size());
+    org.junit.jupiter.api.Assertions.assertEquals(
+        claimTokens.getAllValues().get(0), finishTokens.getAllValues().get(0));
+    org.junit.jupiter.api.Assertions.assertEquals(
+        claimTokens.getAllValues().get(1), retryToken.getValue());
+    org.junit.jupiter.api.Assertions.assertEquals(
+        claimTokens.getAllValues().get(2), finishTokens.getAllValues().get(1));
+    for (String token : claimTokens.getAllValues())
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> java.util.UUID.fromString(token));
+    verify(stockClient, never()).confirm(anyString(), any());
+    verify(stockClient, never()).rollback(anyString(), any());
+  }
+
   /** 构造具有指定身份的库存响应，不从请求路径补全字段。 */
   private static ApiResponse<StockReservationStatusVO> stockFact(String orderNo, String state) {
     StockReservationStatusVO fact = new StockReservationStatusVO();
