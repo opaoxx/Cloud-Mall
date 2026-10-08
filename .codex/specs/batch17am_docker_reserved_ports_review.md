@@ -47,3 +47,9 @@ README 必须记录 Nginx 新入口 `http://localhost:18088`、Seata host 端口
 ## 6. 实施门与范围声明
 
 实现限定在 Compose published mappings、Seata 本地连接配置、User/Stock/Pay/Order/common 测试配置契约、只读端口诊断脚本和 README。不得新增管理员操作、停止系统服务、修改业务 8080–8086、接入新的中间件或改变容器内部网络端口。
+
+## 7. 回归验收补充
+
+`StockDependencyTransactionTest` 的 Sentinel 统计窗口使用生产默认 `60000ms`，只修正测试稳定性门；保留两次真实提交失败、第三次调用被 gate 阻断、异常比例 `0.5` 和原断言，不修改生产 Sentinel 配置。测试 context 完成后再加载规则，避免初始化顺序造成假失败。
+
+Seata RM 故障 IT 必须停止并行 Maven/构建竞争后按序复跑；子进程类加载失败归为测试环境/构建并发证据，不归因于 TC 端口或业务逻辑。保留首次失败日志和重跑证据，只有独立复跑完成并通过后才纳入真实 TC 验收结论。
