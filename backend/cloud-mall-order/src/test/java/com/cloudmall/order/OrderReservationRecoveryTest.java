@@ -20,10 +20,17 @@ import com.cloudmall.order.service.impl.OrderReservationRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
 
 class OrderReservationRecoveryTest {
+  /** 只清理本测试工作线程的中断，避免污染后续用例。 */
+  @AfterEach
+  void clearTestInterrupt() {
+    Thread.interrupted();
+  }
+
   @Test
   void queriesTheOriginalReservationThenRollsItBackWhenNoOrderCommitted() {
     StockClient stockClient = mock(StockClient.class);
@@ -339,6 +346,285 @@ class OrderReservationRecoveryTest {
             AssertionError.class, recovery::recoverStaleReservations));
     verify(intentMapper, never()).claimRecovery(eq(second.orderNo), any(), any());
     verify(intentMapper, never()).recordFailure(anyString(), anyString(), any());
+  }
+
+  @Test
+  void preInterruptedRecoveryDoesNotScanOrClearItsInterruptFlag() {
+    var fixture = new RecoveryFixture();
+    Thread.currentThread().interrupt();
+    fixture.recovery.recoverStaleReservations();
+    org.junit.jupiter.api.Assertions.assertTrue(Thread.currentThread().isInterrupted());
+    org.mockito.Mockito.verifyNoInteractions(fixture.stock, fixture.intents, fixture.orders);
+  }
+
+  @Test
+  void observableInterruptCheckpointsStopLaterActionsAndCandidates() throws Exception {
+    for (String phase :
+        List.of(
+            "scan",
+            "claim",
+            "order",
+            "status",
+            "parse",
+            "reserve",
+            "rollback",
+            "complete",
+            "record")) {
+      var fixture = new RecoveryFixture();
+      switch (phase) {
+        case "scan" ->
+            when(fixture.intents.findRecoverable(any(), any(), anyInt()))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return List.of(fixture.first, fixture.second);
+                    });
+        case "claim" ->
+            when(fixture.intents.claimRecovery(eq(fixture.first.orderNo), any(), any()))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return 1;
+                    });
+        case "order" ->
+            when(fixture.orders.orderExists("mall_order_202609", fixture.first.orderNo))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return false;
+                    });
+        case "status" ->
+            when(fixture.stock.reservation(fixture.first.orderNo))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return ApiResponse.ok(stockStatus(fixture.first.orderNo, "ROLLED_BACK"));
+                    });
+        case "parse" -> {
+          fixture.useInitialStockFact();
+          org.mockito.Mockito.doAnswer(
+                  invocation -> {
+                    Thread.currentThread().interrupt();
+                    return List.of(new StockClient.Line(7L, 2));
+                  })
+              .when(fixture.snapshots)
+              .readValue(anyString(), any(com.fasterxml.jackson.core.type.TypeReference.class));
+        }
+        case "reserve" -> {
+          fixture.useInitialStockFact();
+          when(fixture.stock.reserve(any()))
+              .thenAnswer(
+                  invocation -> {
+                    Thread.currentThread().interrupt();
+                    return ApiResponse.ok(java.util.Map.of("reserved", true));
+                  });
+        }
+        case "rollback" -> {
+          doReturn(ApiResponse.ok(stockStatus(fixture.first.orderNo, "RESERVED")))
+              .when(fixture.stock)
+              .reservation(fixture.first.orderNo);
+          when(fixture.stock.rollback(fixture.first.orderNo))
+              .thenAnswer(
+                  invocation -> {
+                    Thread.currentThread().interrupt();
+                    return ApiResponse.ok(java.util.Map.of("rolledBack", true));
+                  });
+        }
+        case "complete" ->
+            when(fixture.intents.markReleased(eq(fixture.first.orderNo), any()))
+                .thenAnswer(
+                    invocation -> {
+                      Thread.currentThread().interrupt();
+                      return 1;
+                    });
+        case "record" -> {
+          doReturn(ApiResponse.ok(stockStatus("202609other", "ROLLED_BACK")))
+              .when(fixture.stock)
+              .reservation(fixture.first.orderNo);
+          when(fixture.intents.recordFailure(eq(fixture.first.orderNo), anyString(), any()))
+              .thenAnswer(
+                  invocation -> {
+                    Thread.currentThread().interrupt();
+                    return 1;
+                  });
+        }
+        default -> throw new AssertionError("Unexpected interruption phase");
+      }
+      try {
+        fixture.recovery.recoverStaleReservations();
+        org.junit.jupiter.api.Assertions.assertTrue(Thread.currentThread().isInterrupted(), phase);
+        verify(fixture.intents, never()).claimRecovery(eq(fixture.second.orderNo), any(), any());
+        verify(fixture.stock, never()).reservation(fixture.second.orderNo);
+        if (!"reserve".equals(phase)) verify(fixture.stock, never()).reserve(any());
+        if (!"rollback".equals(phase)) verify(fixture.stock, never()).rollback(anyString());
+        if (!"complete".equals(phase))
+          verify(fixture.intents, never()).markReleased(anyString(), any());
+        if (!"record".equals(phase))
+          verify(fixture.intents, never()).recordFailure(anyString(), anyString(), any());
+        if ("scan".equals(phase))
+          verify(fixture.intents, never()).claimRecovery(anyString(), any(), any());
+        if (List.of("scan", "claim", "order").contains(phase))
+          org.mockito.Mockito.verifyNoInteractions(fixture.stock);
+      } finally {
+        Thread.interrupted();
+      }
+    }
+  }
+
+  @Test
+  void wrappedInterruptedExceptionsRestoreFlagsWithoutRecordingOrContinuing() throws Exception {
+    for (String phase :
+        List.of(
+            "scan",
+            "claim",
+            "claim-runtime",
+            "order",
+            "status",
+            "parse",
+            "reserve",
+            "rollback",
+            "complete",
+            "record",
+            "rejection")) {
+      var fixture = new RecoveryFixture();
+      var interrupted = new InterruptedException("blocked operation interrupted");
+      var databaseFailure = new DataAccessResourceFailureException("interrupted SQL", interrupted);
+      var remoteFailure = new IllegalStateException("interrupted remote call", interrupted);
+      switch (phase) {
+        case "scan" ->
+            when(fixture.intents.findRecoverable(any(), any(), anyInt()))
+                .thenThrow(databaseFailure);
+        case "claim" ->
+            when(fixture.intents.claimRecovery(eq(fixture.first.orderNo), any(), any()))
+                .thenThrow(databaseFailure);
+        case "claim-runtime" ->
+            when(fixture.intents.claimRecovery(eq(fixture.first.orderNo), any(), any()))
+                .thenThrow(remoteFailure);
+        case "order" ->
+            when(fixture.orders.orderExists("mall_order_202609", fixture.first.orderNo))
+                .thenThrow(databaseFailure);
+        case "status" ->
+            org.mockito.Mockito.doThrow(remoteFailure)
+                .when(fixture.stock)
+                .reservation(fixture.first.orderNo);
+        case "parse" -> {
+          fixture.useInitialStockFact();
+          org.mockito.Mockito.doThrow(
+                  com.fasterxml.jackson.databind.JsonMappingException.from(
+                      (com.fasterxml.jackson.core.JsonParser) null,
+                      "interrupted parse",
+                      interrupted))
+              .when(fixture.snapshots)
+              .readValue(anyString(), any(com.fasterxml.jackson.core.type.TypeReference.class));
+        }
+        case "reserve" -> {
+          fixture.useInitialStockFact();
+          org.mockito.Mockito.doThrow(remoteFailure).when(fixture.stock).reserve(any());
+        }
+        case "rollback" -> {
+          doReturn(ApiResponse.ok(stockStatus(fixture.first.orderNo, "RESERVED")))
+              .when(fixture.stock)
+              .reservation(fixture.first.orderNo);
+          org.mockito.Mockito.doThrow(remoteFailure)
+              .when(fixture.stock)
+              .rollback(fixture.first.orderNo);
+        }
+        case "record" -> {
+          doReturn(ApiResponse.ok(stockStatus("202609other", "ROLLED_BACK")))
+              .when(fixture.stock)
+              .reservation(fixture.first.orderNo);
+          when(fixture.intents.recordFailure(eq(fixture.first.orderNo), anyString(), any()))
+              .thenThrow(databaseFailure);
+        }
+        case "complete" ->
+            when(fixture.intents.markReleased(eq(fixture.first.orderNo), any()))
+                .thenThrow(databaseFailure);
+        case "rejection" -> {
+          fixture.useInitialStockFact();
+          var rejection = mock(feign.FeignException.class);
+          when(rejection.status()).thenReturn(409);
+          when(rejection.getCause()).thenReturn(interrupted);
+          org.mockito.Mockito.doThrow(rejection).when(fixture.stock).reserve(any());
+        }
+        default -> throw new AssertionError("Unexpected wrapped interruption phase");
+      }
+      try {
+        fixture.recovery.recoverStaleReservations();
+        org.junit.jupiter.api.Assertions.assertTrue(Thread.currentThread().isInterrupted(), phase);
+        verify(fixture.intents, never()).claimRecovery(eq(fixture.second.orderNo), any(), any());
+        if (!"complete".equals(phase))
+          verify(fixture.intents, never()).markReleased(anyString(), any());
+        else verify(fixture.intents).markReleased(eq(fixture.first.orderNo), any());
+        if (!"record".equals(phase))
+          verify(fixture.intents, never()).recordFailure(anyString(), anyString(), any());
+        else verify(fixture.intents).recordFailure(eq(fixture.first.orderNo), anyString(), any());
+      } finally {
+        Thread.interrupted();
+      }
+    }
+  }
+
+  @Test
+  void socketTimeoutDoesNotBecomeThreadCancellation() {
+    for (java.io.IOException timeout :
+        List.of(
+            new java.net.SocketTimeoutException("read timeout"),
+            new java.io.InterruptedIOException("ordinary interrupted IO timeout"))) {
+      var fixture = new RecoveryFixture();
+      org.mockito.Mockito.doThrow(new IllegalStateException("ordinary timeout", timeout))
+          .when(fixture.stock)
+          .reservation(fixture.first.orderNo);
+      fixture.recovery.recoverStaleReservations();
+      org.junit.jupiter.api.Assertions.assertFalse(Thread.currentThread().isInterrupted());
+      verify(fixture.intents).recordFailure(eq(fixture.first.orderNo), anyString(), any());
+      verify(fixture.intents).markReleased(eq(fixture.second.orderNo), any());
+    }
+  }
+
+  /** 两条候选及原依赖替身，所有测试只改变中断发生点。 */
+  private static class RecoveryFixture {
+    /** 库存远程调用替身。 */
+    private final StockClient stock = mock(StockClient.class);
+
+    /** 意图持久层替身。 */
+    private final OrderReservationIntentMapper intents = mock(OrderReservationIntentMapper.class);
+
+    /** 本地订单事实查询替身。 */
+    private final OrderSqlMapper orders = mock(OrderSqlMapper.class);
+
+    /** 原快照解析器，可在解析返回时注入中断。 */
+    private final ObjectMapper snapshots = org.mockito.Mockito.spy(new ObjectMapper());
+
+    /** 当前处理中断的首条原意图。 */
+    private final OrderReservationIntentPO first = intent("202609firstinterrupt");
+
+    /** 中断后禁止再认领的后续原意图。 */
+    private final OrderReservationIntentPO second = intent("202609secondinterrupt");
+
+    /** 实际被测恢复任务。 */
+    private final OrderReservationRecovery recovery =
+        new OrderReservationRecovery(stock, intents, orders, snapshots);
+
+    /** 构造可正常完成的候选，注入故障时不改变原身份。 */
+    private RecoveryFixture() {
+      when(intents.findRecoverable(any(), any(), anyInt())).thenReturn(List.of(first, second));
+      when(intents.claimRecovery(anyString(), any(), any())).thenReturn(1);
+      doReturn(ApiResponse.ok(stockStatus(first.orderNo, "ROLLED_BACK")))
+          .when(stock)
+          .reservation(first.orderNo);
+      doReturn(ApiResponse.ok(stockStatus(second.orderNo, "ROLLED_BACK")))
+          .when(stock)
+          .reservation(second.orderNo);
+    }
+
+    /** 使首条进入原订单号/快照预扣重试路径。 */
+    private void useInitialStockFact() {
+      doReturn(
+              ApiResponse.ok(stockStatus(first.orderNo, "NOT_FOUND")),
+              ApiResponse.ok(stockStatus(first.orderNo, "ROLLED_BACK")))
+          .when(stock)
+          .reservation(first.orderNo);
+    }
   }
 
   private static StockReservationStatusVO stockStatus(String orderNo, String status) {

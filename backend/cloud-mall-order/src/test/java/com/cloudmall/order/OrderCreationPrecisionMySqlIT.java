@@ -141,6 +141,8 @@ class OrderCreationPrecisionMySqlIT {
 
   @AfterEach
   void cleanupFixture() {
+    // 清理本用例的中断后再访问数据库，避免测试线程信号影响夹具回收。
+    Thread.interrupted();
     AuthContext.clear();
     if (database != null && database.matches("cm17f_[0-9a-f]{32}")) {
       String dropped = database;
@@ -490,6 +492,145 @@ class OrderCreationPrecisionMySqlIT {
     assertThrows(
         org.springframework.dao.DataAccessException.class, recovery::recoverStaleReservations);
     verifyNoInteractions(stock);
+  }
+
+  @Test
+  void preInterruptedRecoveryLeavesRealIntentFactsUntouched() {
+    var first = insertStaleRecoveryIntent("interruptfirst", 1L);
+    insertStaleRecoveryIntent("interruptsecond", 2L);
+    var before = fixtureFacts();
+    StockClient stock = mock(StockClient.class);
+    doReturn(ApiResponse.ok(recoveryStatus(first.orderNo, "ROLLED_BACK")))
+        .when(stock)
+        .reservation(first.orderNo);
+    var observedMapper = spy(new OrderReservationIntentMapper(fixture));
+    var recovery =
+        new OrderReservationRecovery(
+            stock, observedMapper, new OrderSqlMapper(fixture), new ObjectMapper());
+
+    Thread.currentThread().interrupt();
+    recovery.recoverStaleReservations();
+    boolean interruptPreserved = Thread.currentThread().isInterrupted();
+    Thread.interrupted();
+
+    assertTrue(interruptPreserved);
+    verifyNoInteractions(stock, observedMapper);
+    assertEquals(before, fixtureFacts());
+  }
+
+  @Test
+  void interruptAfterRealClaimKeepsOnlyTheCommittedLeaseAndNoLaterWork() {
+    var first = insertStaleRecoveryIntent("interruptclaim", 1L);
+    var second = insertStaleRecoveryIntent("interruptsecond", 2L);
+    var before = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    var secondBefore = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=2");
+    StockClient stock = mock(StockClient.class);
+    var observedMapper = spy(new OrderReservationIntentMapper(fixture));
+    doAnswer(
+            invocation -> {
+              Object claimed = invocation.callRealMethod();
+              Thread.currentThread().interrupt();
+              return claimed;
+            })
+        .when(observedMapper)
+        .claimRecovery(eq(first.orderNo), any(), any());
+    var recovery =
+        new OrderReservationRecovery(
+            stock, observedMapper, new OrderSqlMapper(fixture), new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+    boolean interruptPreserved = Thread.currentThread().isInterrupted();
+    Thread.interrupted();
+
+    assertTrue(interruptPreserved);
+    assertHeldRecoveryFacts(
+        before, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1"));
+    assertEquals(
+        secondBefore, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=2"));
+    verifyNoInteractions(stock);
+    verify(observedMapper, never()).markReleased(anyString(), any());
+    verify(observedMapper, never()).recordFailure(anyString(), anyString(), any());
+    var held = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    doReturn(ApiResponse.ok(recoveryStatus(second.orderNo, "ROLLED_BACK")))
+        .when(stock)
+        .reservation(second.orderNo);
+    recovery.recoverStaleReservations();
+    assertEquals(held, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1"));
+    assertEquals(
+        "RELEASED",
+        fixture.queryForObject(
+            "SELECT status FROM order_reservation_intent WHERE id=2", String.class));
+    verify(stock, never()).reservation(first.orderNo);
+    verify(stock).reservation(second.orderNo);
+  }
+
+  @Test
+  void interruptAfterRollbackReplyDoesNotFinishOrRecordTheRealIntent() {
+    var first = insertStaleRecoveryIntent("interruptrollback", 1L);
+    insertStaleRecoveryIntent("interruptsecond", 2L);
+    var before = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    var secondBefore = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=2");
+    StockClient stock = mock(StockClient.class);
+    doReturn(ApiResponse.ok(recoveryStatus(first.orderNo, "RESERVED")))
+        .when(stock)
+        .reservation(first.orderNo);
+    when(stock.rollback(first.orderNo))
+        .thenAnswer(
+            invocation -> {
+              Thread.currentThread().interrupt();
+              return ApiResponse.ok(Map.of("rolledBack", true));
+            });
+    var observedMapper = spy(new OrderReservationIntentMapper(fixture));
+    var recovery =
+        new OrderReservationRecovery(
+            stock, observedMapper, new OrderSqlMapper(fixture), new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+    boolean interruptPreserved = Thread.currentThread().isInterrupted();
+    Thread.interrupted();
+
+    assertTrue(interruptPreserved);
+    assertHeldRecoveryFacts(
+        before, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1"));
+    assertEquals(
+        secondBefore, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=2"));
+    verify(stock).rollback(first.orderNo);
+    verify(observedMapper, never()).markReleased(anyString(), any());
+    verify(observedMapper, never()).recordFailure(anyString(), anyString(), any());
+  }
+
+  @Test
+  void wrappedInterruptedFailureAfterRealClaimRestoresSignalWithoutNewWrites() {
+    var first = insertStaleRecoveryIntent("interruptwrapped", 1L);
+    insertStaleRecoveryIntent("interruptsecond", 2L);
+    var before = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1");
+    var secondBefore = fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=2");
+    StockClient stock = mock(StockClient.class);
+    var observedMapper = spy(new OrderReservationIntentMapper(fixture));
+    doAnswer(
+            invocation -> {
+              invocation.callRealMethod();
+              throw new org.springframework.dao.DataAccessResourceFailureException(
+                  "claim interrupted after commit",
+                  new InterruptedException("claim acknowledgement interrupted"));
+            })
+        .when(observedMapper)
+        .claimRecovery(eq(first.orderNo), any(), any());
+    var recovery =
+        new OrderReservationRecovery(
+            stock, observedMapper, new OrderSqlMapper(fixture), new ObjectMapper());
+
+    recovery.recoverStaleReservations();
+    boolean interruptPreserved = Thread.currentThread().isInterrupted();
+    Thread.interrupted();
+
+    assertTrue(interruptPreserved);
+    assertHeldRecoveryFacts(
+        before, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=1"));
+    assertEquals(
+        secondBefore, fixture.queryForMap("SELECT * FROM order_reservation_intent WHERE id=2"));
+    verifyNoInteractions(stock);
+    verify(observedMapper, never()).recordFailure(anyString(), anyString(), any());
   }
 
   /** 数据库失败只能留下已提交的认领元数据，不得猜终态或追加失败写。 */
