@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.springframework.dao.DataAccessException;
@@ -27,11 +28,11 @@ public class CartServiceImpl implements CartService {
   /** 执行 ofDays 相关操作。 */
   private static final Duration TTL = Duration.ofDays(30);
 
-  /** add最多三轮确认未写后的重读，未知Redis执行结果不得重试。 */
-  private static final int ADD_COMPARE_ATTEMPTS = 3;
+  /** Cart条件更新最多三轮确认未写后的重读，未知Redis执行结果不得重试。 */
+  private static final int CART_COMPARE_ATTEMPTS = 3;
 
   /** 仅比较原JSON字节并写原序列化结果，不用cjson解析Long/金额/时间。 */
-  private static final DefaultRedisScript<Long> ADD_COMPARE_WRITE =
+  private static final DefaultRedisScript<Long> CART_COMPARE_WRITE =
       new DefaultRedisScript<>(
           "local current=redis.call('HGET',KEYS[1],ARGV[1]); "
               + "if ARGV[2]=='0' then if current then return 0 end "
@@ -84,7 +85,7 @@ public class CartServiceImpl implements CartService {
     // 2. 每轮取得同次原始JSON/合法PO，确认未写的竞争才重读并重算。
     String cartKey = key();
     String skuField = String.valueOf(request.skuId);
-    for (int attempt = 0; attempt < ADD_COMPARE_ATTEMPTS; attempt++) {
+    for (int attempt = 0; attempt < CART_COMPARE_ATTEMPTS; attempt++) {
       Map<String, String> originalValues = new HashMap<>();
       CartItemPO item = readMap(cartKey, originalValues).get(skuField);
       if (item == null) {
@@ -108,19 +109,30 @@ public class CartServiceImpl implements CartService {
     throw new BizException(ErrorCodes.CONFLICT, "购物车已发生变化，请重试", 409);
   }
 
+  /**
+   * 条件修改已有项的绝对数量，并仅在请求提供checked时修改勾选状态。
+   *
+   * @param skuId 原购物车项SKU身份
+   * @param request 正数绝对数量及可选勾选状态
+   * @return 条件写成功的购物车项
+   * @throws BizException 数量非法为400，缺项为404，竞争耗尽为409，未知结果为500，Redis故障为503
+   */
   @PutMapping("/items/{skuId}")
-  /** 执行 update 相关操作。 */
   public ApiResponse<?> update(@PathVariable Long skuId, @RequestBody CartItemDTO request) {
-    // 1. 接收并整理 update 的业务请求。
-    // 2. 执行 update 的核心业务校验与状态处理。
-    // 3. 返回 update 的处理结果。
-    if (request.quantity < 1) throw new BizException(ErrorCodes.INVALID, "数量必须为正数", 400);
-    CartItemPO item = readMap().get(String.valueOf(skuId));
-    if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
-    item.quantity = request.quantity;
-    if (request.checked != null) item.checked = request.checked;
-    write(item);
-    return ApiResponse.ok(CartItemVO.from(item));
+    // 1. 校验并固定本次请求意图，后续重读不会改变请求字段。
+    int requestedQuantity = request.quantity;
+    Boolean requestedChecked = request.checked;
+    if (requestedQuantity < 1) throw new BizException(ErrorCodes.INVALID, "数量必须为正数", 400);
+    // 2. 每次只应用本次声明字段，保留最新快照的其他状态。
+    CartItemVO updatedItem =
+        mutateExisting(
+            skuId,
+            item -> {
+              item.quantity = requestedQuantity;
+              if (requestedChecked != null) item.checked = requestedChecked;
+            });
+    // 3. 返回条件写入成功的同一项，不重新查询商品事实。
+    return ApiResponse.ok(updatedItem);
   }
 
   @DeleteMapping("/items/{skuId}")
@@ -133,17 +145,22 @@ public class CartServiceImpl implements CartService {
     return ApiResponse.ok(null);
   }
 
+  /**
+   * 条件修改已有项的勾选状态，保留并发更新后的数量和商品摘要。
+   *
+   * @param skuId 原购物车项SKU身份
+   * @param body 沿既有Boolean.TRUE语义读取checked
+   * @return 条件写成功的购物车项
+   * @throws BizException 缺项为404，竞争耗尽为409，未知结果为500，Redis故障为503
+   */
   @PutMapping("/items/{skuId}/checked")
-  /** 执行 checked 相关操作。 */
   public ApiResponse<?> checked(@PathVariable Long skuId, @RequestBody Map<String, Boolean> body) {
-    // 1. 接收并整理 checked 的业务请求。
-    // 2. 执行 checked 的核心业务校验与状态处理。
-    // 3. 返回 checked 的处理结果。
-    CartItemPO item = readMap().get(String.valueOf(skuId));
-    if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
-    item.checked = Boolean.TRUE.equals(body.get("checked"));
-    write(item);
-    return ApiResponse.ok(CartItemVO.from(item));
+    // 1. 固定本次勾选意图，缺失或null仍沿既有false语义。
+    boolean requestedChecked = Boolean.TRUE.equals(body.get("checked"));
+    // 2. 只修改勾选字段，确认竞争失败后才重读最新项。
+    CartItemVO updatedItem = mutateExisting(skuId, item -> item.checked = requestedChecked);
+    // 3. 返回成功写入的同一项，不覆盖最新数量。
+    return ApiResponse.ok(updatedItem);
   }
 
   @DeleteMapping("/checked-items")
@@ -309,6 +326,21 @@ public class CartServiceImpl implements CartService {
     }
   }
 
+  /** 从同次HGETALL的原JSON和合法PO修改已有项。仅0确认未写时重读，缺项直接404； 条件写成功才续TTL，未知执行结果与Redis异常传播且不重复修改。 */
+  private CartItemVO mutateExisting(Long skuId, Consumer<CartItemPO> mutation) {
+    String cartKey = key();
+    String skuField = String.valueOf(skuId);
+    for (int attempt = 0; attempt < CART_COMPARE_ATTEMPTS; attempt++) {
+      Map<String, String> originalValues = new HashMap<>();
+      CartItemPO item = readMap(cartKey, originalValues).get(skuField);
+      if (item == null) throw new BizException(ErrorCodes.NOT_FOUND, "购物车项不存在", 404);
+      mutation.accept(item);
+      if (compareWrite(cartKey, skuField, originalValues.get(skuField), item))
+        return CartItemVO.from(item);
+    }
+    throw new BizException(ErrorCodes.CONFLICT, "购物车已发生变化，请重试", 409);
+  }
+
   /** 只有脚本明确0才可重试，执行异常或未知结果不能猜未应用。 */
   private boolean compareWrite(
       String cartKey, String skuField, String expectedJson, CartItemPO item) {
@@ -317,7 +349,7 @@ public class CartServiceImpl implements CartService {
         redisOperation(
             () ->
                 redis.execute(
-                    ADD_COMPARE_WRITE,
+                    CART_COMPARE_WRITE,
                     List.of(cartKey),
                     skuField,
                     expectedJson == null ? "0" : "1",
