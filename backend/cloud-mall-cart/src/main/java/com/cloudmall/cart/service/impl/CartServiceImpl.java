@@ -292,7 +292,7 @@ public class CartServiceImpl implements CartService {
     }
   }
 
-  /** 读取成功且原SKU身份一致的商品事实，坏证明抛500阻止当前项回写/结算。 */
+  /** 核成功状态、原SKU及价格语法后返回原事实，坏证明抛500阻止当前项回写/结算。 */
   private ProductClient.SkuView currentSku(Long skuId) {
     // 1. 保持原查询和缺失响应/数据的404语义。
     ApiResponse<ProductClient.SkuView> response = products.getSku(skuId);
@@ -303,7 +303,16 @@ public class CartServiceImpl implements CartService {
         || skuId == null
         || !Objects.equals(skuId, response.data.skuId()))
       throw new BizException(ErrorCodes.INTERNAL, "商品SKU响应身份或状态不可信", 500);
-    // 3. 只有精确原身份的成功事实进入既有摘要/价格处理。
+    // 3. 价格先验语法，不规范化或回写解析结果，保留原字符串金额语义。
+    if (response.data.unitPrice() == null)
+      throw new BizException(ErrorCodes.INTERNAL, "商品价格数据不可信", 500);
+    try {
+      new BigDecimal(response.data.unitPrice());
+    } catch (NumberFormatException malformedPrice) {
+      BizException invalidPrice = new BizException(ErrorCodes.INTERNAL, "商品价格数据不可信", 500);
+      invalidPrice.addSuppressed(malformedPrice);
+      throw invalidPrice;
+    }
     return response.data;
   }
 
