@@ -203,11 +203,21 @@ public class OrderOutboxDispatcher {
       LocalDateTime nextRetryAt = LocalDateTime.now(BUSINESS_ZONE).plusSeconds(retryDelaySeconds);
       String error = compactError(exception);
       if (Thread.currentThread().isInterrupted()) return;
-      orderOutboxMapper.recordOutboxFailure(outbox.eventId, error, nextRetryAt);
+      int recordedFailureRows =
+          orderOutboxMapper.recordOutboxFailure(outbox.eventId, error, nextRetryAt);
+      if (Thread.currentThread().isInterrupted()) return;
+      if (recordedFailureRows != 0 && recordedFailureRows != 1)
+        throw new OptimisticLockingFailureException(
+            "订单超时outbox失败退避更新行数不可信: " + outbox.eventId, exception);
+      if (recordedFailureRows == 0) {
+        log.warn("订单超时outbox失败退避更新0行，本次未确认记录退避，保留当前事实，eventId={}", outbox.eventId, exception);
+        return;
+      }
       log.warn(
-          "订单超时 outbox 发布失败，将重试，eventId={}, nextRetryAt={}",
+          "订单超时outbox失败退避已记录，eventId={}, nextRetryAt={}, error={}",
           outbox.eventId,
           nextRetryAt,
+          error,
           exception);
     }
   }

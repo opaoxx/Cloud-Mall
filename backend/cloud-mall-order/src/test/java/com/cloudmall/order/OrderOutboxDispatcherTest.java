@@ -515,6 +515,141 @@ class OrderOutboxDispatcherTest {
   }
 
   @Test
+  void failureUpdateResultsDoNotInventRecordedRetriesOrAdditionalDatabaseActions() {
+    for (int affected : List.of(0, 1, -1, 2)) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO first = candidate("first-failure-result");
+      OrderOutboxPO second = candidate("after-failure-result");
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(first, second));
+      org.mockito.Mockito.when(
+              mapper.recordOutboxFailure(anyString(), anyString(), any(LocalDateTime.class)))
+          .thenReturn(affected);
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                if (first.eventId.equals(correlation.getId()))
+                  throw new IllegalStateException("send failure");
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+            .dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      List<ch.qos.logback.classic.spi.ILoggingEvent> events =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getLevel() == ch.qos.logback.classic.Level.WARN
+                          && event.getFormattedMessage().contains(first.eventId))
+              .toList();
+      org.junit.jupiter.api.Assertions.assertEquals(1, events.size());
+      org.junit.jupiter.api.Assertions.assertFalse(
+          events.get(0).getFormattedMessage().contains("将重试"));
+      if (affected == 0)
+        org.junit.jupiter.api.Assertions.assertTrue(
+            events.get(0).getFormattedMessage().contains("更新0行")
+                && events.get(0).getFormattedMessage().contains("未确认记录"));
+      else if (affected == 1)
+        org.junit.jupiter.api.Assertions.assertTrue(
+            events.get(0).getFormattedMessage().contains("失败退避已记录"));
+      else {
+        org.junit.jupiter.api.Assertions.assertTrue(
+            events
+                .get(0)
+                .getThrowableProxy()
+                .getClassName()
+                .endsWith("OptimisticLockingFailureException"));
+        org.junit.jupiter.api.Assertions.assertEquals(
+            IllegalStateException.class.getName(),
+            events.get(0).getThrowableProxy().getCause().getClassName());
+      }
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .recordOutboxFailure(
+              org.mockito.ArgumentMatchers.eq(first.eventId),
+              anyString(),
+              any(LocalDateTime.class));
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(second.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit, times(2))
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
+  void interruptionAfterFailureWriteStopsWithoutFurtherRetryClaimsOrSends() {
+    for (int affected : List.of(0, 1)) {
+      try {
+        OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+        RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+        OrderOutboxPO first = candidate("interrupted-failure-write");
+        org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+            .thenReturn(List.of(first, candidate("unprocessed-after-failure")));
+        doThrow(new IllegalStateException("send failure"))
+            .when(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+        doAnswer(
+                invocation -> {
+                  Thread.currentThread().interrupt();
+                  return affected;
+                })
+            .when(mapper)
+            .recordOutboxFailure(anyString(), anyString(), any(LocalDateTime.class));
+        ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+            new ch.qos.logback.core.read.ListAppender<>();
+        warnings.start();
+        logger.addAppender(warnings);
+        try {
+          new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+              .dispatchPending();
+        } finally {
+          logger.detachAppender(warnings);
+          warnings.stop();
+        }
+        org.junit.jupiter.api.Assertions.assertTrue(Thread.currentThread().isInterrupted());
+        org.junit.jupiter.api.Assertions.assertEquals(
+            0,
+            warnings.list.stream()
+                .filter(event -> event.getLevel() == ch.qos.logback.classic.Level.WARN)
+                .count());
+        verify(mapper).findPendingOutbox(50);
+        verify(mapper)
+            .recordOutboxFailure(
+                org.mockito.ArgumentMatchers.eq(first.eventId),
+                anyString(),
+                any(LocalDateTime.class));
+        org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+        verify(rabbit)
+            .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      } finally {
+        Thread.interrupted();
+      }
+    }
+  }
+
+  @Test
   void dueSnapshotsUseTheExistingDlxWithoutExpirationAndKeepTheOriginalEnvelope() {
     for (String expiration :
         List.of(

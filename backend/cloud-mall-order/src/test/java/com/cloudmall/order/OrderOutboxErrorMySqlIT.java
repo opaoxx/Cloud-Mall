@@ -89,6 +89,86 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void zeroFailureUpdateCannotClaimARetryWasRecordedAndKeepsCurrentFacts() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String state : List.of("PUBLISHED", "MISSING", "TYPE", "NEGATIVE")) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO first = pendingOutbox();
+      OrderOutboxPO second = pendingOutbox();
+      second.id = 2L;
+      second.eventId = "after-unrecorded-failure";
+      second.orderNo = "202610-after-unrecorded-failure";
+      second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+      assertEquals(1, mapper.insert(first));
+      assertEquals(1, mapper.insert(second));
+      java.util.concurrent.atomic.AtomicReference<List<Map<String, Object>>> established =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      List<String> sentIds = new ArrayList<>();
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                sentIds.add(correlation.getId());
+                if (first.eventId.equals(correlation.getId())) {
+                  if ("PUBLISHED".equals(state))
+                    assertEquals(
+                        1,
+                        mapper.markOutboxPublished(
+                            first.eventId, LocalDateTime.now(ZoneOffset.ofHours(8))));
+                  else if ("MISSING".equals(state))
+                    fixture.update("DELETE FROM order_outbox WHERE id=1");
+                  else if ("TYPE".equals(state))
+                    fixture.update("UPDATE order_outbox SET event_type='PAY_NOTIFY' WHERE id=1");
+                  else fixture.update("UPDATE order_outbox SET attempts=-1 WHERE id=1");
+                  established.set(fixture.queryForList("SELECT * FROM order_outbox WHERE id=1"));
+                  throw new IllegalStateException("controlled send failure");
+                }
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        dispatcher(rabbit).dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      List<String> messages =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getLevel() == ch.qos.logback.classic.Level.WARN
+                          && event.getFormattedMessage().contains(first.eventId))
+              .map(event -> event.getFormattedMessage())
+              .toList();
+      var after = fixture.queryForList("SELECT * FROM order_outbox WHERE id=1");
+      String secondStatus =
+          fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+      checks.add(() -> assertEquals(established.get(), after, state));
+      checks.add(() -> assertEquals(List.of(first.eventId, second.eventId), sentIds, state));
+      checks.add(() -> assertEquals("PUBLISHED", secondStatus, state));
+      checks.add(() -> assertEquals(1, messages.size(), state));
+      checks.add(
+          () -> assertTrue(messages.stream().noneMatch(message -> message.contains("将重试")), state));
+      checks.add(
+          () ->
+              assertTrue(
+                  messages.stream()
+                      .allMatch(message -> message.contains("更新0行") && message.contains("未确认记录")),
+                  state));
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void alreadyExpiredRecoveryCannotWaitBehindAnUnexpiredTtlHead() throws Exception {
     OrderOutboxPO future = pendingOutbox();
     future.eventId = "future-timeout-head";
