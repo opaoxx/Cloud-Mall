@@ -66,7 +66,7 @@ public class OrderOutboxMapper {
   }
 
   /**
-   * 在LIMIT前精确匹配状态/类型，排除下界前时间、负计数及Java空白身份，查询已提交并到期的超时候选。
+   * 在LIMIT前精确匹配状态/类型，排除下界前时间、零月日、负计数及Java空白身份，查询已提交并到期的超时候选。
    *
    * @param limit 本轮候选上限，非正值沿原规则归一为1
    * @return 按原重试时间及主键顺序的合资格候选，身份原样映射，不修改未入选事实
@@ -78,11 +78,14 @@ public class OrderOutboxMapper {
             + " FROM order_outbox WHERE CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND"
             + " next_retry_at<=? AND next_retry_at>='1000-01-01 00:00:00.000' AND"
             + " created_at>='1000-01-01 00:00:00.000' AND updated_at>='1000-01-01 00:00:00.000' AND"
-            + " (published_at IS NULL OR published_at>='1000-01-01 00:00:00.000') AND attempts>=0"
-            + " AND BINARY event_type=BINARY 'ORDER_TIMEOUT' AND REGEXP_LIKE(event_id,"
-            + " CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c') AND REGEXP_LIKE(order_no,"
-            + " CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c') ORDER BY next_retry_at,id"
-            + " LIMIT ?",
+            + " (published_at IS NULL OR published_at>='1000-01-01 00:00:00.000') AND"
+            + " MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0 AND MONTH(created_at)>0 AND"
+            + " DAYOFMONTH(created_at)>0 AND MONTH(updated_at)>0 AND DAYOFMONTH(updated_at)>0 AND"
+            + " (published_at IS NULL OR (MONTH(published_at)>0 AND DAYOFMONTH(published_at)>0))"
+            + " AND attempts>=0 AND BINARY event_type=BINARY 'ORDER_TIMEOUT' AND"
+            + " REGEXP_LIKE(event_id, CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c') AND"
+            + " REGEXP_LIKE(order_no, CONVERT(UNHEX(?) USING utf8mb4) COLLATE utf8mb4_bin, 'c')"
+            + " ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderOutboxPO outbox = new OrderOutboxPO();
           outbox.id = resultSet.getLong("id");

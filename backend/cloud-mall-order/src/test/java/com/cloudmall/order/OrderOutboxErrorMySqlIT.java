@@ -1477,7 +1477,18 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void partialZeroDatesCannotAbortTheScanOrOccupyItsLimit() throws Exception {
+    assertInvalidDateCandidatesAreExcluded(
+        List.of("2026-00-15 00:00:00.000", "2026-02-00 00:00:00.000", "2026-00-00 00:00:00.000"));
+  }
+
+  @Test
   void zeroDateCandidatesCannotAbortTheScanOrOccupyItsLimit() throws Exception {
+    assertInvalidDateCandidatesAreExcluded(List.of("0000-00-00 00:00:00.000"));
+  }
+
+  /** 仅隔离库构造指定零日期，逐字段/模式断言窗口、真实SQL投递和不可变坏事实；broker为确认替身。 */
+  private void assertInvalidDateCandidatesAreExcluded(List<String> invalidDates) throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     try (var connection = fixture.getDataSource().getConnection()) {
       var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
@@ -1485,82 +1496,84 @@ class OrderOutboxErrorMySqlIT {
       for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
         for (String zeroField :
             List.of("next_retry_at", "created_at", "updated_at", "published_at")) {
-          modeJdbc.execute("SET SESSION sql_mode=''");
-          modeJdbc.update("DELETE FROM order_outbox");
-          OrderOutboxPO invalid = pendingOutbox();
-          OrderOutboxPO healthy = pendingOutbox();
-          healthy.id = 2L;
-          healthy.eventId = "after-zero-date";
-          healthy.orderNo = "202610-after-zero-date";
-          healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
-          OrderOutboxPO later = pendingOutbox();
-          later.id = 3L;
-          later.eventId = "after-healthy-event";
-          later.orderNo = "202610-after-healthy-event";
-          later.nextRetryAt = invalid.nextRetryAt.plusSeconds(2);
-          assertEquals(1, modeMapper.insert(invalid));
-          assertEquals(1, modeMapper.insert(healthy));
-          assertEquals(1, modeMapper.insert(later));
-          // 字段名仅来自上述固定白名单；异常数据只在本例随机隔离库构造。
-          modeJdbc.update(
-              "UPDATE order_outbox SET " + zeroField + "='0000-00-00 00:00:00.000' WHERE id=1");
-          var originalInvalid = outboxTextFacts(modeJdbc, 1L);
-          modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
-          List<OrderOutboxPO> selected = List.of();
-          RuntimeException scanFailure = null;
-          try {
-            selected = modeMapper.findPendingOutbox(1);
-          } catch (RuntimeException rejected) {
-            scanFailure = rejected;
+          for (String invalidDate : invalidDates) {
+            modeJdbc.execute("SET SESSION sql_mode=''");
+            modeJdbc.update("DELETE FROM order_outbox");
+            OrderOutboxPO invalid = pendingOutbox();
+            OrderOutboxPO healthy = pendingOutbox();
+            healthy.id = 2L;
+            healthy.eventId = "after-zero-date";
+            healthy.orderNo = "202610-after-zero-date";
+            healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+            OrderOutboxPO later = pendingOutbox();
+            later.id = 3L;
+            later.eventId = "after-healthy-event";
+            later.orderNo = "202610-after-healthy-event";
+            later.nextRetryAt = invalid.nextRetryAt.plusSeconds(2);
+            assertEquals(1, modeMapper.insert(invalid));
+            assertEquals(1, modeMapper.insert(healthy));
+            assertEquals(1, modeMapper.insert(later));
+            // 字段名仅来自上述固定白名单；异常数据只在本例随机隔离库构造。
+            modeJdbc.update("UPDATE order_outbox SET " + zeroField + "=? WHERE id=1", invalidDate);
+            assertEquals(invalidDate, outboxTextFacts(modeJdbc, 1L).get(zeroField));
+            var originalInvalid = outboxTextFacts(modeJdbc, 1L);
+            modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+            List<OrderOutboxPO> selected = List.of();
+            RuntimeException scanFailure = null;
+            try {
+              selected = modeMapper.findPendingOutbox(1);
+            } catch (RuntimeException rejected) {
+              scanFailure = rejected;
+            }
+            List<OrderOutboxPO> candidates = selected;
+            RuntimeException capturedScan = scanFailure;
+            String label = mode + ":" + zeroField + ":" + invalidDate;
+            checks.add(() -> assertNull(capturedScan, label));
+            checks.add(
+                () ->
+                    assertEquals(
+                        List.of(healthy.eventId),
+                        candidates.stream().map(candidate -> candidate.eventId).toList(),
+                        label));
+            var invalidAfterScan = outboxTextFacts(modeJdbc, 1L);
+            checks.add(() -> assertEquals(originalInvalid, invalidAfterScan, label));
+            List<String> sentEvents = new ArrayList<>();
+            RabbitTemplate rabbit = mock(RabbitTemplate.class);
+            doAnswer(
+                    invocation -> {
+                      Map<?, ?> envelope = invocation.getArgument(2);
+                      sentEvents.add((String) envelope.get("eventId"));
+                      CorrelationData correlation = invocation.getArgument(4);
+                      correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                      return null;
+                    })
+                .when(rabbit)
+                .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+            RuntimeException dispatchFailure = null;
+            try {
+              new OrderOutboxDispatcher(
+                      modeMapper,
+                      rabbit,
+                      new ObjectMapper(),
+                      new MockEnvironment().withProperty("cloudmall.order.outbox.batch-size", "1"))
+                  .dispatchPending();
+            } catch (RuntimeException rejected) {
+              dispatchFailure = rejected;
+            }
+            RuntimeException capturedDispatch = dispatchFailure;
+            var invalidAfterDispatch = outboxTextFacts(modeJdbc, 1L);
+            String healthyStatus =
+                modeJdbc.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+            String laterStatus =
+                modeJdbc.queryForObject("SELECT status FROM order_outbox WHERE id=3", String.class);
+            checks.add(() -> assertNull(capturedDispatch, label));
+            checks.add(() -> assertEquals(List.of(healthy.eventId), sentEvents, label));
+            checks.add(() -> assertEquals(originalInvalid, invalidAfterDispatch, label));
+            checks.add(() -> assertEquals("PUBLISHED", healthyStatus, label));
+            checks.add(() -> assertEquals("PENDING", laterStatus, label));
+            verify(modeMapper, never()).markOutboxPublished(eq(invalid.eventId), any());
+            verify(modeMapper, never()).recordOutboxFailure(eq(invalid.eventId), any(), any());
           }
-          List<OrderOutboxPO> candidates = selected;
-          RuntimeException capturedScan = scanFailure;
-          String label = mode + ":" + zeroField;
-          checks.add(() -> assertNull(capturedScan, label));
-          checks.add(
-              () ->
-                  assertEquals(
-                      List.of(healthy.eventId),
-                      candidates.stream().map(candidate -> candidate.eventId).toList(),
-                      label));
-          var invalidAfterScan = outboxTextFacts(modeJdbc, 1L);
-          checks.add(() -> assertEquals(originalInvalid, invalidAfterScan, label));
-          List<String> sentEvents = new ArrayList<>();
-          RabbitTemplate rabbit = mock(RabbitTemplate.class);
-          doAnswer(
-                  invocation -> {
-                    Map<?, ?> envelope = invocation.getArgument(2);
-                    sentEvents.add((String) envelope.get("eventId"));
-                    CorrelationData correlation = invocation.getArgument(4);
-                    correlation.getFuture().set(new CorrelationData.Confirm(true, null));
-                    return null;
-                  })
-              .when(rabbit)
-              .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
-          RuntimeException dispatchFailure = null;
-          try {
-            new OrderOutboxDispatcher(
-                    modeMapper,
-                    rabbit,
-                    new ObjectMapper(),
-                    new MockEnvironment().withProperty("cloudmall.order.outbox.batch-size", "1"))
-                .dispatchPending();
-          } catch (RuntimeException rejected) {
-            dispatchFailure = rejected;
-          }
-          RuntimeException capturedDispatch = dispatchFailure;
-          var invalidAfterDispatch = outboxTextFacts(modeJdbc, 1L);
-          String healthyStatus =
-              modeJdbc.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
-          String laterStatus =
-              modeJdbc.queryForObject("SELECT status FROM order_outbox WHERE id=3", String.class);
-          checks.add(() -> assertNull(capturedDispatch, label));
-          checks.add(() -> assertEquals(List.of(healthy.eventId), sentEvents, label));
-          checks.add(() -> assertEquals(originalInvalid, invalidAfterDispatch, label));
-          checks.add(() -> assertEquals("PUBLISHED", healthyStatus, label));
-          checks.add(() -> assertEquals("PENDING", laterStatus, label));
-          verify(modeMapper, never()).markOutboxPublished(eq(invalid.eventId), any());
-          verify(modeMapper, never()).recordOutboxFailure(eq(invalid.eventId), any(), any());
         }
         // 合法最小/最大非空发布时间与NULL都仍可读，不以PENDING猜测发布时间必须为空。
         for (LocalDateTime publishedAt :
