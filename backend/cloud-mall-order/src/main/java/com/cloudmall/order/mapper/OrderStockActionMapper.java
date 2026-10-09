@@ -120,7 +120,7 @@ public class OrderStockActionMapper {
   }
 
   /**
-   * 按到期时间取得有限数量的待恢复动作，在LIMIT前排除负计数及重试时间下界前记录。
+   * 按到期时间取得有限数量的待恢复动作，在LIMIT前排除负计数及重试时间下界前、零月日记录。
    *
    * @param now 原调用方提供的上海扫描时间，向下毫秒规范化后共用谓词
    * @param limit 原候选数量上限，沿既有规则至少为1
@@ -133,7 +133,8 @@ public class OrderStockActionMapper {
         "SELECT id,order_no,action_type,operation_key,status,attempts,next_retry_at FROM"
             + " order_stock_action WHERE status IN ('PENDING','UNKNOWN') AND BINARY status IN"
             + " (BINARY 'PENDING', BINARY 'UNKNOWN') AND attempts>=0 AND next_retry_at<=? AND"
-            + " next_retry_at>='1000-01-01 00:00:00.000' AND (lease_until IS NULL OR lease_until<?)"
+            + " next_retry_at>='1000-01-01 00:00:00.000' AND MONTH(next_retry_at)>0"
+            + " AND DAYOFMONTH(next_retry_at)>0 AND (lease_until IS NULL OR lease_until<?)"
             + " ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderStockActionPO action = new OrderStockActionPO();
