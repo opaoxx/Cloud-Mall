@@ -14,7 +14,7 @@
 - `created_at`：typed `LocalDateTime` 读取；
 - `updated_at`：typed `LocalDateTime` 读取。
 
-移除不再使用的 `java.sql.Timestamp` import，并更新 RowMapper 注释。其他 PO 字段、写入、claimRecovery、status/recovery、Stock、时区、配置、zero/partial-invalid 策略、DDL、索引和历史事实不变；不增加过滤、全局 catch、Calendar/string fallback 或历史修复。
+移除不再使用的 `java.sql.Timestamp` import，并更新 RowMapper 注释。其他 PO 字段、写入、claimRecovery、status/recovery、Stock、时区、配置、DDL、索引和历史事实不变；不设置 SQL mode/driver zero-date 参数，不增加 filter 或历史 repair，仅保证本批合法日期读取，其余非法历史值行为待核验；不增加全局 catch、Calendar/string fallback。
 
 ## 3. 验收矩阵
 
