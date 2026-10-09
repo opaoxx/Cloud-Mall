@@ -310,6 +310,8 @@ failure writer `recordOutboxFailure` 仍执行一次既有 UPDATE 并返回影�
 
 订单 outbox 的 `next_retry_at DATETIME(3)` 仍由 dispatcher 以 Asia/Shanghai 当前时间加既有正 `retry-delay-seconds` 计算；failure UPDATE 前必须拒绝时间计算异常或结果年份超出 MySQL DATETIME 可表示的 `1000..9999`，并沿单候选 DataAccessException 隔离，不执行该次 failure UPDATE，不读取、不重发、不改写原事实。计算异常携带原发送/解析异常 cause，并保留计算异常 suppressed 证据；可表示的大正数仍按原退避时间写入。`next_retry_at` 列、精度、SQL、索引、Schema 和历史数据不变；本条不新增上限、不自动纠正、不扩展 DATETIME(3) 舍入/截断或全局配置语义。
 
+订单 outbox future 消息的 TTL 毫秒值由订单模块纯函数对正 Duration 向上取整：整毫秒保持，纳秒余量加一；zero/negative 仍为 0 并走既有 DLX 路由。该数学转换不写数据库、不改变 `order_outbox` Schema、SQL、next_retry_at/published_at/updated_at floor、索引、状态、消息或 topology；转换溢出沿 dispatcher 原 failure，不猜测到期或完成。本条不扩展数据库时间精度、其他 TTL、Service consumer 或 future queue/FIFO 语义。
+
 `recordOutboxFailure` 在原 failure UPDATE 前把调用方 `nextRetryAt` 和一次上海当前 `updatedAt` 都以 `LocalDateTime.truncatedTo(ChronoUnit.MILLIS)` 向下归一后绑定；两个时间不做 timezone 转换、四舍五入、替代或重采样。非 null 且年份 `1000..9999` 是 Mapper 内部参数契约，非法值在首次 JDBC 调用前抛 `InvalidDataAccessApiUsageException`，不因 WHERE 找不到行或状态/类型/attempts 不合资格而跳过校验。`next_retry_at`/`updated_at DATETIME(3)` DDL、SQL 参数位置、索引、SQL mode、历史数据、失败计数和返回行数不变；应用 floor 不依赖全局 `TIME_TRUNCATE_FRACTIONAL`，本条不扩展其他时间写路径或 DATETIME(3) 舍入边界。
 
 `markOutboxPublished` 在原完成 UPDATE 前对 `publishedAt` 使用同一 `normalizeOutboxWriteTime` 毫秒 floor helper；非 null 且年份 `1000..9999` 是 Mapper 参数契约，非法值即使行缺失或资格不符也在首次 JDBC 前抛 `InvalidDataAccessApiUsageException`。合法归一值不转换时区、不采新时间、不修改调用方对象，并按原 SQL 参数位置同时写入 `published_at`、`updated_at`；两列得到同一精确 floor 值。完成 SQL、WHERE、索引、返回行数、`DATETIME(3)` DDL、SQL mode、历史数据、17DD proof 和其他时间路径不变，不新增列/API/message 或历史修复。
