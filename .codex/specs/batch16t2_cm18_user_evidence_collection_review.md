@@ -61,11 +61,13 @@ wrapper 的共享 `validateForRead` 必须在进入任一 reader 事务前校验
 | 原 local 分类 + `LOCAL_ANCHOR_NOT_TRUSTED` | Legacy、BEGIN_UNKNOWN、LOCAL_CONFLICT 或锚点不完整 | 不发 User GET |
 | `LOCAL_EVIDENCE_CHANGED` | User GET 前后 local capture 不一致 | 丢弃本次组合结果，保留原事实 |
 | `USER_EVIDENCE_UNAVAILABLE` | User GET 超时、HTTP/Feign/DB 不可用或 404 | 固定 reason code，不写 Pay/User |
-| `USER_EVIDENCE_INCOMPLETE` | User 响应 UNKNOWN、缺 state/branch/ledger 可验证字段或 null body | 阻塞，不推断扣款/回滚 |
+| `USER_EVIDENCE_INCOMPLETE` | User 响应有 body 但 state/branch/ledger 等可验证字段缺失，`ledgerAppliedPresent=false`，或 Pay execution 已 `COMMITTED/ROLLEDBACK` 而 User 仍为合法 `TRYING` | 阻塞，不推断扣款/回滚 |
 | `USER_EVIDENCE_CONFLICT` | User 与 Pay anchor 的 payload、XID、branch、ledger 或相反终态矛盾 | 固定冲突码并阻塞 |
 | `BLOCKED_REMAINING_EVIDENCE` | Pay 与 User 只读证据一致 | 明确仍缺 Order/Stock/TC/MQ，不输出终态 |
 
 16T2 response 固定 `scope=PAY_USER_READ_ONLY`、`automaticActionsAllowed=false`、`collectedAt`、原 16T1 local report，以及 `userEvidence={queryAttempted,status/state whitelist,identityMatched,ledgerApplied(nullable),xidSha256,branchIdSha256}`。User GET 未发起时 `externalSystemsNotQueried` 仍包含 USER；GET 已发起后只移除 USER，ORDER/STOCK/TC/MQ 保持。`BLOCKED_REMAINING_EVIDENCE` 是最高成功层级，不能命名为 TCC committed/cancelled、debit/refund success 或任何自动动作许可。所有分类只输出固定 reason codes、白名单状态和字段级 SHA-256 指纹；不输出 raw XID、branch、operation/ledger key、User error 或凭证。
+
+Pay execution 已为 `COMMITTED` 或 `ROLLEDBACK`、Pay receipt/dispatch 已为对应终态，而 User 返回合法 `TRYING` 时，User 终态证据仍未完成，必须归 `USER_EVIDENCE_INCOMPLETE`（可使用固定 `USER_TERMINAL_EVIDENCE_PENDING` reason），不得归 `BLOCKED_REMAINING_EVIDENCE`。User 与 Pay 已证明相反终态时仍归 `USER_EVIDENCE_CONFLICT`。
 
 ## 6. 验收与取证
 
