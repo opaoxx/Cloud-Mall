@@ -14,7 +14,7 @@
 action.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
 ```
 
-不改其他列读取、`normalizedNow` 毫秒归一、claim/finish/retry、Recovery、Stock 调用、时区/配置、Calendar、字符串 fallback、DDL、索引、历史事实或零/部分非法日期策略。扫描数据库/driver 异常仍沿原传播，不增加全局 catch；未来租约、shadow、状态和 lease fencing 不纳入本批。
+不改其他列读取、`normalizedNow` 毫秒归一、claim/finish/retry、Recovery、Stock 调用、时区/配置、Calendar、字符串 fallback、DDL、索引或历史事实；不设置 zero-date/partial-date 配置、不新增过滤或历史修复。typed getter 只验证本批合法日期读取，其他零/部分非法历史值的行为仍待独立核验。扫描数据库/driver 异常仍沿原传播，不增加全局 catch；未来租约、shadow、状态和 lease fencing 不纳入本批。
 
 ## 3. 验收矩阵
 
