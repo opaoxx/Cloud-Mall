@@ -563,6 +563,12 @@ CM-18 16T1 的本地证据检查只读 `pay_record`、`pay_tcc_execution`、`pay
 
 payment 零候选返回既有 NOT_FOUND/404 且不查询其余五类；多候选或 payNo 身份别名冲突返回身份冲突/409，不暴露别行；缺表、连接失败或数据库不可用统一返回 `PAY_TCC_RECONCILIATION_UNAVAILABLE`/503，不返回 raw 错误、不创建表。其他来源缺失在 payment 身份确认后进入本地阻塞分类；采集时间、reason code 和状态字段仅使用冻结白名单，未知状态不回显原值。点查/诊断不因 ledgerKey 恰好等于 payNo 而要求隐藏 payNo，测试只禁止 raw key 字段，允许业务 payNo 与对应 fingerprint 同时出现。
 
+CM-18 16T2 不新增 User 资金表、字段、索引或 API 事实。Pay 新增 default-off 的 User evidence 只读采集配置和内部控制流：第一次 Pay RR 只读快照产生 trustedAnchor，事务结束后才通过既有 User state GET 查询 User 的 receive/attempt/debit/ledger/Fence RR 读链，随后重新建立 Pay RR 快照。User GET 不绑定 XID、不注册分支、不写任何 User 事实；不复用 Pay bridge/coordinator/Store，不发送 POST。User 的 UserTccStateVO 不包含账户 balance/frozen 汇总，16T2 不宣称全账户取证。
+
+trustedAnchor 只能来自 Pay 本地完整且无冲突的 TCC execution/dispatch/receipt/Fence：原 XID 非空，state 非 UNKNOWN/BEGIN_UNKNOWN，Pay branch 与 User branch 均为正且不同，pay/user/order/amount/operation/ledger tuple 一致。anchor 字段只在内存中使用，不能来自请求或进入响应/日志。User 响应必须逐字段核对原 payNo、userId、orderNo、金额、operation/ledger key、XID、User branch、state 和 `ledgerApplied`；金额不得使用 double，User `CONFIRMED` 必须 `ledgerApplied=true`，其他状态不得为 true。Pay 接收侧 UserTccStateVO 保留 primitive `ledgerApplied` 和既有 JSON/其他消费者语义，额外用 `@JsonIgnore ledgerAppliedPresent` 与 `@JsonSetter("ledgerApplied")` 的 `Boolean` setter 记录显式非 null 字段；缺字段/null 时不得把 primitive 默认 false 当作证据，collector 必须返回 `USER_EVIDENCE_INCOMPLETE`。失败/缺证/UNKNOWN/相反终态只分类阻塞或冲突，不改 Pay/User 行。
+
+User GET 前后 Pay 两次 capture 的本地 report、snapshot、identifiers、classification、reason 和 anchor 必须相同（仅忽略 collectedAt）；变化返回 `LOCAL_EVIDENCE_CHANGED`，不声称检测所有 lease/重试 metadata。User GET 的 null body、null/非成功外层响应、404、网络或数据库不可用均为 `USER_EVIDENCE_UNAVAILABLE`；只有现有 ErrorDecoder 明确产生 `PAY_TCC_DISPATCH_CONFLICT` 的 409 才能为 `USER_EVIDENCE_CONFLICT`，其他 HTTP 409 不得推导资金冲突。成功匹配最高只为 `BLOCKED_REMAINING_EVIDENCE`，ORDER/STOCK/TC/MQ 仍未验证；不输出 TCC 终态，不新增自动资金处置、历史 repair 或 User 业务依赖。
+
 该诊断读取不改变本表字段、状态、decision、XID、branch、lease 或重试时间。`BEGIN_UNKNOWN`、无 XID、缺 execution、局部 tuple 冲突和 SQL/连接缺失必须保留原事实并分类阻塞；不能通过新 begin/Try、补 branch、猜 TC 决议或写 Pay/User 资金收敛。由于不读取 User/Order/Stock/TC/MQ，完整本地快照也不能证明提交、回滚或退款。
 
 第 16C `pay_tcc_delivery` 的 READY 只表示本地 COMMITTED execution 派生的待核验意图，不代表 User/Order 远程证据已完成；ROLLEDBACK execution 不建 job。每次 RPC 前重查本地 proof 和 User live TCC tuple；PayRecord 状态与 delivery 状态在同一 Pay 本地事务同向更新。User DEBIT 已有任何 refundOperationKey 时不能 paid，退款只能使用唯一 `refund:<payNo>` 并在 POST 后 GET 核验。
