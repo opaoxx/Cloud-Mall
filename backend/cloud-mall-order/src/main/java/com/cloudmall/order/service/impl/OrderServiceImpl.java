@@ -1027,9 +1027,14 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
+  /**
+   * 消费新JSON envelope或旧String订单号；裸数字正文保持原文本，不转数值标识。
+   *
+   * @param message 原UTF8超时消息，沿原格式解析后委托String业务入口
+   * @throws IllegalArgumentException JSON根格式无效且未匹配既有legacy路径
+   */
   @RabbitListener(queues = OrderMessagingConfiguration.TIMEOUT_DLQ)
   @Transactional
-  /** 消费新 JSON envelope 或存量 String 订单号超时消息。 */
   public void consumeTimeout(Message message) {
     // 1. 将两种消息表示统一为订单号；新消息必须携带稳定事件号和类型。
     String rawPayload = new String(message.getBody(), StandardCharsets.UTF_8);
@@ -1038,6 +1043,9 @@ public class OrderServiceImpl implements OrderService {
       com.fasterxml.jackson.databind.JsonNode event = mapper.readTree(rawPayload);
       if (event.isTextual()) {
         orderNo = event.asText();
+      } else if (event.isIntegralNumber() && rawPayload.trim().matches("[0-9]+")) {
+        // 旧裸数字String会被JSON读成整数；只认整份正文，避免long/浮点转换改写身份。
+        orderNo = rawPayload.trim();
       } else if (event.isObject()
           && "ORDER_TIMEOUT".equals(event.path("eventType").asText())
           && !event.path("eventId").asText().isBlank()
