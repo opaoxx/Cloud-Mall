@@ -29,7 +29,7 @@
 
 - 真实 MySQL 隔离库在 `STRICT_TRANS_TABLES` 和空 SQL mode 下覆盖 `.999499`、`.999500`、`.999999`、跨秒/月/年以及合法 1000、9999 端点；数据库保存值均为应用向下毫秒结果，无 warning，其他字段保持。
 - unit 使用 JdbcTemplate seam 捕获两个时间参数：均为毫秒精度，`nextRetryAt` 的输入对象未被修改；`null`、年份 999、10000、`LocalDateTime.MIN/MAX` 均在 JDBC 前拒绝。
-- 既有 33 条 SQL IT、17DE 两条真实 Rabbit case 与 dispatcher 回归保持；本批不验证 insert/markPublished/scan 或全系统时间路径。
+- 既有 34 条 SQL IT、17DE 两条真实 Rabbit case 与 dispatcher 回归保持；本批不验证 insert/markPublished/scan 或全系统时间路径。
 
 ## 5. 交付边界
 
