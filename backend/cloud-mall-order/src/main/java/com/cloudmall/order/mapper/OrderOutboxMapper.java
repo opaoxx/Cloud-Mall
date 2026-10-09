@@ -4,8 +4,10 @@ import com.cloudmall.order.domain.po.OrderOutboxPO;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.List;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -146,10 +148,17 @@ public class OrderOutboxMapper {
    *
    * @param eventId 原超时事件唯一标识
    * @param error 原失败文本，可为null，内容不做归一化
-   * @param nextRetryAt 原调用方提供的上海重试时间
+   * @param nextRetryAt 原调用方提供的上海重试时间，年份1000..9999，写入前向下截到毫秒
    * @return 原身份/状态/超时类型精确且次数非负的匹配行数，资格不匹配或未命中为0
+   * @throws InvalidDataAccessApiUsageException 时间为空或年份超出DATETIME范围，首次JDBC前拒绝
    */
   public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
+    // 1. 校验调用方时间并向下截到毫秒，避免数据库舍入跨秒、跨月或年份上限。
+    LocalDateTime normalizedRetryAt = normalizeFailureTime(nextRetryAt, "nextRetryAt");
+    // 2. 只采样一次上海更新时间，应用同一DATETIME(3)边界，不替换原重试时间。
+    LocalDateTime updatedAt =
+        normalizeFailureTime(LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")), "updatedAt");
+    // 3. 按原资格和参数顺序写入，保持错误裁剪、计数饱和及返回行数语义。
     return jdbcTemplate.update(
         "UPDATE order_outbox SET attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE"
             + " attempts END,last_error=?,next_retry_at=?,updated_at=? WHERE event_id=?"
@@ -157,10 +166,19 @@ public class OrderOutboxMapper {
             + " AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY)"
             + " AND CAST(event_type AS BINARY)=CAST('ORDER_TIMEOUT' AS BINARY) AND attempts>=0",
         clipOutboxError(error),
-        nextRetryAt,
-        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
+        normalizedRetryAt,
+        updatedAt,
         eventId,
         eventId);
+  }
+
+  /** 仅失败写时间边界：先拒绝空值/非法年份，再向下截毫秒；不转换时区、裁剪年份或补造时间。 */
+  private static LocalDateTime normalizeFailureTime(LocalDateTime timestamp, String fieldName) {
+    if (timestamp == null || timestamp.getYear() < 1000 || timestamp.getYear() > 9999) {
+      throw new InvalidDataAccessApiUsageException(
+          fieldName + " must be non-null with year in 1000..9999");
+    }
+    return timestamp.truncatedTo(ChronoUnit.MILLIS);
   }
 
   /** 按VARCHAR512字符列宽取完整code point，不分裂有效代理对或修复原异常输入。 */

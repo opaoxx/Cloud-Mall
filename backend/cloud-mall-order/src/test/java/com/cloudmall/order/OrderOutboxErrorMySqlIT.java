@@ -1477,6 +1477,69 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void failureRetryTimesAreFlooredBeforeSqlInBothModes() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    List<LocalDateTime> retryTimes =
+        List.of(
+            LocalDateTime.parse("2026-10-31T23:59:59.999499"),
+            LocalDateTime.parse("2026-10-31T23:59:59.999500"),
+            LocalDateTime.parse("2026-10-31T23:59:59.999999"),
+            LocalDateTime.parse("2026-12-31T23:59:59.999999"),
+            LocalDateTime.parse("1000-01-01T00:00:00.000999"),
+            LocalDateTime.parse("9999-12-31T23:59:59.999999"),
+            LocalDateTime.parse("2026-10-09T12:00:00.456"));
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderOutboxMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (LocalDateTime retryAt : retryTimes) {
+          modeJdbc.update("DELETE FROM order_outbox");
+          OrderOutboxPO outbox = pendingOutbox();
+          assertEquals(1, modeMapper.insert(outbox));
+          var before = modeJdbc.queryForMap("SELECT * FROM order_outbox");
+          RuntimeException failure = null;
+          int affected = -2;
+          try {
+            affected = modeMapper.recordOutboxFailure(outbox.eventId, "time failure😀", retryAt);
+          } catch (RuntimeException rejected) {
+            failure = rejected;
+          }
+          var warnings = modeJdbc.queryForList("SHOW WARNINGS");
+          // 以文本读取retry，保留旧实现non-strict越界写零日期的证据而不触发JDBC读错误。
+          var after =
+              modeJdbc.queryForMap(
+                  "SELECT id,event_id,event_type,order_no,payload,status,attempts,"
+                      + "CAST(next_retry_at AS CHAR) AS next_retry_at,last_error,published_at,"
+                      + "created_at,updated_at FROM order_outbox");
+          String storedRetry = (String) after.get("next_retry_at");
+          RuntimeException captured = failure;
+          int result = affected;
+          String label = mode + ":" + retryAt;
+          checks.add(() -> assertNull(captured, label));
+          checks.add(() -> assertTrue(warnings.isEmpty(), label));
+          checks.add(() -> assertEquals(1, result, label));
+          checks.add(
+              () ->
+                  assertEquals(
+                      retryAt
+                          .truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+                          .format(
+                              java.time.format.DateTimeFormatter.ofPattern(
+                                  "uuuu-MM-dd HH:mm:ss.SSS")),
+                      storedRetry,
+                      label));
+          checks.add(() -> assertEquals("PENDING", after.get("status"), label));
+          checks.add(() -> assertEquals(1, ((Number) after.get("attempts")).intValue(), label));
+          checks.add(() -> assertEquals("time failure😀", after.get("last_error"), label));
+          checks.add(() -> assertUnchangedEvent(before, after));
+        }
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void failureCountersSaturateWithoutSqlWarningsAndDoNotRepairNegativeFacts() throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     LocalDateTime retryAt = LocalDateTime.of(2026, 10, 9, 12, 0, 0, 456_000_000);
