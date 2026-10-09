@@ -450,6 +450,20 @@ mvn -pl backend/cloud-mall-stock -am test '-Dtest=StockReservationTerminalProofM
 不自动修复或改写历史数量/状态。上述StockReservationTerminalProofMySqlIT已增加实际JSON
 规范化、原请求与流水完整对应、Order fallback及重放响应门回归，可沿同一命令运行。
 
+### CM-18 普通流水原订单来源与原行校验（16T6）
+
+普通库存GET的原数量汇总同时保留原订单号、不同字节订单身份数和非法原行计数。
+只有原订单号精确等于查询号、byte identity唯一且非法计数为零，才继续16T4/16T5的数量、
+完整SKU快照与hash判据。大小写/尾随空格/accent别名、同SKU或跨SKU混合订单标识，
+负数被正数抵消、零数量、未知或非规范flow_type、遗留NULL原行均返回UNKNOWN/空明细；
+异常来源也不能在重放中被ACK，继续使用固定503门。
+
+WHERE保留原候选，异常行不会被过滤后伪装NOT_FOUND；单次只读SQL额外投影来源事实，
+不改表/索引/写状态/其他Mapper数量语义。未知结果保留原流水供核查，未自动修历史。
+本规则仍不证明库存余额、原Order完整SKU、秒杀或跨服务事务/MQ完成；不新增跨查询RR。
+上述StockReservationTerminalProofMySqlIT已补实际SQL来源投影、异常旧数据、Order fallback
+和重放回归，可沿同一隔离验证命令执行。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

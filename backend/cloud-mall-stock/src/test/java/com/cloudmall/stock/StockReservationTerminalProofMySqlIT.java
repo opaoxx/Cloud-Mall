@@ -171,6 +171,143 @@ class StockReservationTerminalProofMySqlIT {
   }
 
   @Test
+  void flowIdentityAliasesAndMixedOriginalIdentifiersAreNotCurrentOrderProof() {
+    for (String variant : List.of("upper", "space", "accent", "same-sku-mixed", "cross-sku-mixed"))
+      for (boolean hasRequest : List.of(false, true)) {
+        reset();
+        reserve(7, 2);
+        reserve(8, 3);
+        flow(7, "CONFIRM", 2);
+        flow(8, "CONFIRM", 3);
+        if (hasRequest) request("CONFIRMED");
+        if ("upper".equals(variant))
+          fixture.update("UPDATE stock_flow SET order_no=UPPER(order_no)");
+        if ("space".equals(variant))
+          fixture.update("UPDATE stock_flow SET order_no=CONCAT(order_no,' ')");
+        if ("accent".equals(variant))
+          fixture.update("UPDATE stock_flow SET order_no='202610próof1'");
+        if ("same-sku-mixed".equals(variant))
+          fixture.update(
+              "UPDATE stock_flow SET order_no=UPPER(order_no) WHERE sku_id=7 AND"
+                  + " flow_type='CONFIRM'");
+        if ("cross-sku-mixed".equals(variant))
+          fixture.update("UPDATE stock_flow SET order_no=UPPER(order_no) WHERE sku_id=8");
+        var before = facts();
+        tracked.checking = true;
+        var result = read();
+        assertEquals("UNKNOWN", result.status, variant);
+        assertEquals(ORDER_NO, result.orderNo);
+        assertTrue(result.items.isEmpty());
+        assertEquals(before, facts());
+        assertOnlySelects();
+      }
+  }
+
+  @Test
+  void flowRawInvalidRowsCannotDisappearBehindApparentlyValidSums() {
+    for (String variant :
+        List.of(
+            "compensated-negative",
+            "zero",
+            "unknown",
+            "lowercase",
+            "padded",
+            "null-type",
+            "null-quantity")) {
+      reset();
+      reserve(7, 2);
+      reserve(8, 3);
+      flow(7, "CONFIRM", 2);
+      flow(8, "CONFIRM", 3);
+      request("CONFIRMED");
+      if ("compensated-negative".equals(variant)) {
+        flow(7, "CONFIRM", -1);
+        flow(7, "CONFIRM", 1);
+      }
+      if ("zero".equals(variant)) flow(7, "ROLLBACK", 0);
+      if ("unknown".equals(variant)) flow(7, "ADJUST", 1);
+      if ("lowercase".equals(variant))
+        fixture.update(
+            "UPDATE stock_flow SET flow_type='confirm' WHERE sku_id=7 AND flow_type='CONFIRM'");
+      if ("padded".equals(variant))
+        fixture.update(
+            "UPDATE stock_flow SET flow_type='CONFIRM ' WHERE sku_id=7 AND flow_type='CONFIRM'");
+      if ("null-type".equals(variant) || "null-quantity".equals(variant)) {
+        fixture.execute(
+            "ALTER TABLE stock_flow MODIFY flow_type VARCHAR(32) NULL, MODIFY quantity INT NULL");
+        flow(7, "ADJUST", 1);
+        if ("null-type".equals(variant))
+          fixture.update("UPDATE stock_flow SET flow_type=NULL WHERE flow_type='ADJUST'");
+        else fixture.update("UPDATE stock_flow SET quantity=NULL WHERE flow_type='ADJUST'");
+      }
+      var before = facts();
+      tracked.checking = true;
+      assertEquals("UNKNOWN", read().status, variant);
+      assertEquals(before, facts());
+      assertOnlySelects();
+    }
+  }
+
+  @Test
+  void flowInvalidOriginCannotLetActualOrderFallbackClaimSettlement() throws Exception {
+    reserve(7, 2);
+    reserve(8, 3);
+    flow(7, "CONFIRM", 2);
+    flow(8, "CONFIRM", 3);
+    fixture.update("UPDATE stock_flow SET order_no=UPPER(order_no)");
+    var before = facts();
+    tracked.checking = true;
+    assertEquals("UNKNOWN", orderFallback("PAID"));
+    assertEquals(before, facts());
+    assertOnlySelects();
+  }
+
+  @Test
+  void flowInvalidOriginCannotBeAcknowledgedAsReservedOnReplay() {
+    reserve(7, 2);
+    reserve(8, 3);
+    request("RESERVED");
+    fixture.update("UPDATE stock_flow SET order_no=UPPER(order_no)");
+    var before = facts();
+    tracked.checking = true;
+    var failure =
+        assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> ReflectionTestUtils.invokeMethod(service, "alreadyReserved", ORDER_NO));
+    assertEquals(503, failure.getHttpStatus());
+    assertEquals("STOCK_RESERVATION_PROOF_UNAVAILABLE", failure.getCode());
+    assertEquals(before, facts());
+    assertOnlySelects();
+  }
+
+  @Test
+  void flowSameIdentityPositiveRowsKeepHealthyThreeStates() {
+    for (String state : List.of("RESERVED", "CONFIRMED", "ROLLED_BACK")) {
+      reset();
+      reserve(7, 2);
+      reserve(8, 3);
+      if (!"RESERVED".equals(state)) {
+        String type = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
+        flow(7, type, 2);
+        flow(8, type, 3);
+      }
+      request(state);
+      var before = facts();
+      tracked.checking = true;
+      var projections = mapper.findReservationFlows(ORDER_NO);
+      assertEquals(2, projections.size());
+      for (var projection : projections) {
+        assertEquals(ORDER_NO, projection.get("original_order_no"));
+        assertEquals(1L, ((Number) projection.get("order_identity_count")).longValue());
+        assertEquals(0L, ((Number) projection.get("invalid_flow_count")).longValue());
+      }
+      assertEquals(state, read().status);
+      assertEquals(before, facts());
+      assertOnlySelects();
+    }
+  }
+
+  @Test
   void snapshotReplayCannotReplaceIncompleteProofWithAcknowledgement() {
     reserve(7, 2);
     request("RESERVED");

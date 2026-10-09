@@ -123,6 +123,9 @@ class StockReservationTerminalProofTest {
   private static Map<String, Object> flow(long skuId, int reserved, int confirmed, int rolledBack) {
     Map<String, Object> row = new HashMap<>();
     row.put("sku_id", skuId);
+    row.put("original_order_no", "order-proof");
+    row.put("order_identity_count", 1L);
+    row.put("invalid_flow_count", BigDecimal.ZERO);
     row.put("reserved_quantity", BigDecimal.valueOf(reserved));
     row.put("confirmed_quantity", BigDecimal.valueOf(confirmed));
     row.put("rolled_back_quantity", BigDecimal.valueOf(rolledBack));

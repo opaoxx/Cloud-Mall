@@ -311,9 +311,19 @@ public class StockSqlMapper {
     return update("update stock_cache_repair set status=?,last_error=?,next_retry_at=?,lease_owner=null,lease_until=null,updated_at=? where id=? and status='PENDING' and lease_owner=?", status, error, nextRetry, now, id, owner);
   }
 
-  /** 查询指定订单的库存流水汇总。 */
+  /** 查询库存候选汇总并保留原订单字节身份及非法原行计数，不过滤隐藏异常。 */
   public List<Map<String, Object>> findReservationFlows(String orderNo) {
-    return queryForList("select sku_id, sum(case when flow_type='RESERVE' then quantity else 0 end) reserved_quantity, sum(case when flow_type='CONFIRM' then quantity else 0 end) confirmed_quantity, sum(case when flow_type='ROLLBACK' then quantity else 0 end) rolled_back_quantity from stock_flow where order_no=? group by sku_id", orderNo);
+    return queryForList(
+        "select sku_id, MIN(order_no) AS original_order_no,"
+            + " COUNT(DISTINCT BINARY order_no) AS order_identity_count,"
+            + " SUM(CASE WHEN flow_type IS NULL OR BINARY flow_type NOT IN"
+            + " ('RESERVE','CONFIRM','ROLLBACK') OR quantity IS NULL OR quantity<=0"
+            + " THEN 1 ELSE 0 END) AS invalid_flow_count,"
+            + " sum(case when flow_type='RESERVE' then quantity else 0 end) reserved_quantity,"
+            + " sum(case when flow_type='CONFIRM' then quantity else 0 end) confirmed_quantity,"
+            + " sum(case when flow_type='ROLLBACK' then quantity else 0 end) rolled_back_quantity"
+            + " from stock_flow where order_no=? group by sku_id",
+        orderNo);
   }
 
   /** 读取普通库存的当前版本快照。 */

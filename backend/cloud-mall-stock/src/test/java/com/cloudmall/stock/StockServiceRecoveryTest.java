@@ -41,10 +41,20 @@ class StockServiceRecoveryTest {
         .thenReturn(
             List.of(
                 Map.of(
-                    "sku_id", 7L,
-                    "reserved_quantity", 2L,
-                    "confirmed_quantity", 0L,
-                    "rolled_back_quantity", 0L)));
+                    "sku_id",
+                    7L,
+                    "original_order_no",
+                    "old-order-1",
+                    "order_identity_count",
+                    1L,
+                    "invalid_flow_count",
+                    0L,
+                    "reserved_quantity",
+                    2L,
+                    "confirmed_quantity",
+                    0L,
+                    "rolled_back_quantity",
+                    0L)));
     StockServiceImpl stockService = service(redis, stockSqlMapper);
 
     ApiResponse<?> response = stockService.reserve(request("old-order-1", 7L, 2));

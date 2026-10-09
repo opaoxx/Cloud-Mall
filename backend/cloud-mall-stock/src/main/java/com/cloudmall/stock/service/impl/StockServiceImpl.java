@@ -363,6 +363,11 @@ public class StockServiceImpl implements StockService {
     for (Map<String, Object> row : rows) {
       if (row == null) return unknownReservationProof(orderNo);
       try {
+        // 原SUM不能证明来源：字节身份须唯一且精确，非法原行不能被抵消或忽略。
+        if (!Objects.equals(orderNo, row.get("original_order_no"))
+            || exactReservationNumber(row.get("order_identity_count")).longValueExact() != 1
+            || exactReservationNumber(row.get("invalid_flow_count")).longValueExact() != 0)
+          return unknownReservationProof(orderNo);
         long skuId = exactReservationNumber(row.get("sku_id")).longValueExact();
         int reserved = exactReservationNumber(row.get("reserved_quantity")).intValueExact();
         int confirmed = exactReservationNumber(row.get("confirmed_quantity")).intValueExact();
