@@ -91,6 +91,145 @@ class OrderReservationRollbackProofMySqlIT {
   }
 
   @Test
+  void unsupportedIntentDatesCannotAbortOrOccupyTheRecoveryLimit() throws Exception {
+    System.out.println("CM17EB test JVM timezone: " + ZoneId.systemDefault());
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderReservationIntentMapper(modeJdbc);
+      List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+      for (String readMode : List.of("STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE", "")) {
+        for (String column : List.of("next_retry_at", "created_at", "updated_at")) {
+          for (String invalid :
+              List.of(
+                  "0000-00-00 00:00:00.000",
+                  "0000-01-01 12:34:56.789",
+                  "0999-12-31 23:59:59.999")) {
+            checks.add(
+                () -> {
+                  modeJdbc.execute("SET SESSION sql_mode=''");
+                  OrderReservationIntentPO original = seed(1L);
+                  OrderReservationIntentPO healthy = insert(2L);
+                  modeJdbc.update(
+                      "UPDATE order_reservation_intent SET created_at=CASE WHEN id=1 THEN"
+                          + " '2026-10-08 10:00:00.123' ELSE '2026-10-08 11:00:00.123'"
+                          + " END,updated_at='2026-10-08 10:00:00.123',next_retry_at=NULL");
+                  modeJdbc.update(
+                      "UPDATE order_reservation_intent SET " + column + "=? WHERE id=1", invalid);
+                  var before = intentDateEvidence(modeJdbc);
+                  assertEquals(invalid, before.get(0).get(column));
+                  modeJdbc.execute("SET SESSION sql_mode='" + readMode + "'");
+                  var candidates =
+                      modeMapper.findRecoverable(
+                          LocalDateTime.of(2026, 10, 10, 0, 0),
+                          LocalDateTime.of(2026, 10, 10, 0, 0),
+                          1);
+                  assertEquals(1, candidates.size());
+                  assertEquals(healthy.orderNo, candidates.get(0).orderNo);
+                  assertEquals(healthy.idempotencyKey, candidates.get(0).idempotencyKey);
+                  assertNull(candidates.get(0).nextRetryAt);
+                  if (invalid.startsWith("0000-00-00")) {
+                    assertThrows(
+                        org.springframework.dao.DataAccessException.class,
+                        () ->
+                            modeMapper.findByUserAndKey(original.userId, original.idempotencyKey));
+                  } else {
+                    var originalCandidates =
+                        modeMapper.findByUserAndKey(original.userId, original.idempotencyKey);
+                    assertEquals(1, originalCandidates.size());
+                    assertEquals(original.orderNo, originalCandidates.get(0).orderNo);
+                  }
+                  assertEquals(before, intentDateEvidence(modeJdbc));
+                });
+          }
+        }
+      }
+      assertAll(checks);
+    }
+  }
+
+  @Test
+  void sixtyInvalidIntentDatesCannotStarveTheFollowingHealthyRecovery() throws Exception {
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderReservationIntentMapper(modeJdbc);
+      modeJdbc.execute("SET SESSION sql_mode=''");
+      seed(1L);
+      OrderReservationIntentPO healthy = null;
+      for (int identity = 2; identity <= 61; identity++) healthy = insert(identity);
+      assertNotNull(healthy);
+      modeJdbc.update(
+          "UPDATE order_reservation_intent SET created_at=CASE WHEN MOD(id,3)=0 THEN '0000-00-00"
+              + " 00:00:00.000' ELSE created_at END,updated_at=CASE WHEN MOD(id,3)=1 THEN"
+              + " '0000-00-00 00:00:00.000' ELSE updated_at END,next_retry_at=CASE WHEN MOD(id,3)=2"
+              + " THEN '0000-00-00 00:00:00.000' ELSE next_retry_at END WHERE id<=60");
+      var before = intentDateEvidence(modeJdbc);
+      modeJdbc.execute("SET SESSION sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE'");
+      StockClient stock = mock(StockClient.class);
+      when(stock.reservation(healthy.orderNo)).thenReturn(fact(healthy.orderNo, "ROLLED_BACK"));
+      OrderReservationRecovery recovery =
+          new OrderReservationRecovery(
+              stock, modeMapper, mock(OrderSqlMapper.class), new ObjectMapper());
+      String healthyOrderNo = healthy.orderNo;
+      assertAll(
+          () -> assertDoesNotThrow(recovery::recoverStaleReservations),
+          () ->
+              assertEquals(
+                  "RELEASED",
+                  modeJdbc.queryForObject(
+                      "SELECT status FROM order_reservation_intent WHERE id=61", String.class)),
+          () -> verify(stock).reservation(healthyOrderNo));
+      var after = intentDateEvidence(modeJdbc);
+      assertEquals(before.subList(0, 60), after.subList(0, 60));
+      assertNull(after.get(60).get("next_retry_at"));
+      assertNull(after.get(60).get("last_error"));
+      for (String column :
+          List.of("id", "order_no", "user_id", "idempotency_key", "items_snapshot", "created_at")) {
+        assertEquals(before.get(60).get(column), after.get(60).get(column), column);
+      }
+      verifyNoMoreInteractions(stock);
+    }
+  }
+
+  @Test
+  void minimumIntentDatesAndNullRetryKeepTheirExistingReadSemantics() throws Exception {
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderReservationIntentMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (String status : List.of("INIT", "RESERVE_UNKNOWN", "RESERVED")) {
+          for (boolean nullRetry : List.of(true, false)) {
+            OrderReservationIntentPO original = seed(1L);
+            LocalDateTime minimum = LocalDateTime.of(1000, 1, 1, 0, 0);
+            modeJdbc.update(
+                "UPDATE order_reservation_intent SET"
+                    + " created_at=?,updated_at=?,next_retry_at=?,status=? WHERE id=1",
+                minimum,
+                minimum,
+                nullRetry ? null : minimum,
+                status);
+            var before = intentDateEvidence(modeJdbc);
+            var selected =
+                modeMapper.findRecoverable(
+                    LocalDateTime.of(2026, 10, 10, 0, 0), LocalDateTime.of(2026, 10, 10, 0, 0), 1);
+            var direct = modeMapper.findByUserAndKey(original.userId, original.idempotencyKey);
+            assertEquals(1, selected.size());
+            assertEquals(1, direct.size());
+            for (OrderReservationIntentPO candidate : List.of(selected.get(0), direct.get(0))) {
+              assertEquals(original.orderNo, candidate.orderNo);
+              assertEquals(status, candidate.status);
+              assertEquals(minimum, candidate.createdAt);
+              assertEquals(minimum, candidate.updatedAt);
+              assertEquals(nullRetry ? null : minimum, candidate.nextRetryAt);
+            }
+            assertEquals(before, intentDateEvidence(modeJdbc));
+          }
+        }
+      }
+    }
+  }
+
+  @Test
   void intentDatesRetainNativeComponentsInBothReadPaths() throws Exception {
     System.out.println("CM17DX test JVM timezone: " + ZoneId.systemDefault());
     try (var connection = fixture.getDataSource().getConnection()) {
