@@ -370,6 +370,8 @@ timeout Message 的 JSON tree 读取为单次 per-call `ObjectReader` 配置 `FA
 
 `OrderStockActionMapper.findDue` 对 `next_retry_at DATETIME(3)` 使用 JDBC `ResultSet.getObject("next_retry_at", LocalDateTime.class)` 直接读取；其他列、SQL、参数、状态/attempts/lease 条件、排序、limit、DDL、索引、历史日期和 Recovery 语义保持。该边界只避免 Connector/J GregorianCalendar cutover 读取异常，不设置系统时区、不使用字符串 fallback、不扩展 zero/partial-invalid 日期或全服务时间策略。
 
+`order_stock_action` 恢复扫描在原 `next_retry_at<=?` 后、LIMIT 前增加单一字面量下界 `next_retry_at >= '1000-01-01 00:00:00.000'`；不增加 prepared 参数，不改变表、字段、索引、其他 SQL、normalizedNow、状态/attempts/lease、排序、limit、claim/finish/retry 或历史事实。下界前行不进入恢复候选、不修复/删除/写状态；不设置 SQL mode/driver 参数，不新增 zero/partial-invalid 或其他列过滤。
+
 ### 5.7 `seckill_message_recovery`
 
 秒杀订单死信由订单服务持久化接管，避免 DLQ 消息只停留在 RabbitMQ。
