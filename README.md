@@ -411,6 +411,28 @@ mvn -pl backend/cloud-mall-order -am package -DskipTests
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccOrderEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 普通库存预扣查询的终态判据（16T4）
+
+现有 `GET /api/stock/reservations/{orderNo}` 的普通非空流水分支，只有全部已观察 SKU
+完整同向确认、完整同向回滚或全部未结算，才分别报告 `CONFIRMED/ROLLED_BACK/RESERVED`。
+部分结算、确认与回滚混合、非法/缺失/超量数量、容量溢出或请求状态与流水矛盾，均返回
+`UNKNOWN` 和空明细；请求行不能覆盖不完整流水。合法数量使用精确整数验证，不截断或补零。
+旧无库存动作订单据此保持待核验，不把部分 SKU 结清当成整单库存动作成功。
+
+这是对已观察流水数量/方向与 request.status 的检查，不证明原订单完整 SKU 集合、请求
+快照/哈希、库存余额或秒杀身份；仍需 CM-18 后续完整取证。GET 没有新增 RR/跨查询原子性，
+并发读取不一致可保守返回 UNKNOWN，按原订单号重查。无流水的原 NOT_FOUND/request 分支、
+秒杀、库存写状态机、Redis 和消息行为保持。查询不会自动修复历史流水或改库存数量。
+
+隔离验证先构建标准 Order classes/Boot jar，然后用真实 Stock SQL 和实际 Order fallback
+消费结果；Order 行/动作 Mapper 为替身，非 HTTP/TC/真实资金全链。只为加载 Order 已有的
+Feign 类型，从其 Boot jar 提取依赖至临时文件，结束后删除，不新增生产依赖：
+
+```powershell
+mvn -pl backend/cloud-mall-order -am package -DskipTests
+mvn -pl backend/cloud-mall-stock -am test '-Dtest=StockReservationTerminalProofMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_stock?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

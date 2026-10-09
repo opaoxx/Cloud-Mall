@@ -18,6 +18,7 @@ import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockService;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.*;
@@ -346,20 +347,60 @@ public class StockServiceImpl implements StockService {
               requestStatus,
               itemsFromSnapshot(String.valueOf(requestRow.get("items_snapshot")), requestStatus)));
     }
-    String status = "RESERVED";
+    return ApiResponse.ok(normalReservationProof(orderNo, requestRow, rows));
+  }
+
+  /** 仅证明已观察普通流水；所有SKU必须完整同向，矛盾请求状态不能覆盖流水。 */
+  private static StockReservationVO normalReservationProof(
+      String orderNo, Map<String, Object> requestRow, List<Map<String, Object>> rows) {
+    // 1. 精确读取原SKU/数量，拒绝缺值、截断、负数、超容量与超原RESERVE量。
     List<StockReservationItemVO> items = new ArrayList<>();
+    String aggregateStatus = null;
     for (Map<String, Object> row : rows) {
-      int reserved = number(row.get("reserved_quantity"));
-      int confirmed = number(row.get("confirmed_quantity"));
-      int rolledBack = number(row.get("rolled_back_quantity"));
-      int settled = confirmed + rolledBack;
-      String itemStatus = confirmed > 0 ? "CONFIRMED" : (rolledBack > 0 ? "ROLLED_BACK" : "RESERVED");
-      if (settled >= reserved && confirmed > 0) status = "CONFIRMED";
-      else if (settled >= reserved && rolledBack > 0 && !"CONFIRMED".equals(status)) status = "ROLLED_BACK";
-      items.add(new StockReservationItemVO(((Number) row.get("sku_id")).longValue(), reserved, itemStatus));
+      if (row == null) return unknownReservationProof(orderNo);
+      try {
+        long skuId = exactReservationNumber(row.get("sku_id")).longValueExact();
+        int reserved = exactReservationNumber(row.get("reserved_quantity")).intValueExact();
+        int confirmed = exactReservationNumber(row.get("confirmed_quantity")).intValueExact();
+        int rolledBack = exactReservationNumber(row.get("rolled_back_quantity")).intValueExact();
+        if (skuId <= 0
+            || reserved <= 0
+            || confirmed < 0
+            || rolledBack < 0
+            || (long) confirmed + rolledBack > reserved) return unknownReservationProof(orderNo);
+        // 2. 单SKU只有全量同向或未结算才有已知状态，跨SKU混合与部分结清均阻塞。
+        String itemStatus =
+            confirmed == reserved && rolledBack == 0
+                ? "CONFIRMED"
+                : rolledBack == reserved && confirmed == 0
+                    ? "ROLLED_BACK"
+                    : confirmed == 0 && rolledBack == 0 ? "RESERVED" : "UNKNOWN";
+        if ("UNKNOWN".equals(itemStatus)
+            || aggregateStatus != null && !aggregateStatus.equals(itemStatus))
+          return unknownReservationProof(orderNo);
+        aggregateStatus = itemStatus;
+        items.add(new StockReservationItemVO(skuId, reserved, itemStatus));
+      } catch (IllegalArgumentException | ArithmeticException invalidNumber) {
+        return unknownReservationProof(orderNo);
+      }
     }
-    if (requestRow != null) status = String.valueOf(requestRow.get("status"));
-    return ApiResponse.ok(new StockReservationVO(orderNo, status, items));
+    // 3. request只能交叉验证；读中竞争或历史矛盾保留原事实，允许按原订单号重查。
+    if (aggregateStatus == null
+        || requestRow != null && !Objects.equals(aggregateStatus, requestRow.get("status")))
+      return unknownReservationProof(orderNo);
+    return new StockReservationVO(orderNo, aggregateStatus, items);
+  }
+
+  /** JDBC整数/DECIMAL以精确值处理，不接收浮点、文本或null来补造库存事实。 */
+  private static BigDecimal exactReservationNumber(Object value) {
+    if (!(value instanceof Number) || value instanceof Float || value instanceof Double)
+      throw new IllegalArgumentException("普通库存流水数值不可信");
+    return value instanceof BigDecimal decimal ? decimal : new BigDecimal(value.toString());
+  }
+
+  /** 缺证不得回显看似终态的部分明细；不删除或修改任何原流水。 */
+  private static StockReservationVO unknownReservationProof(String orderNo) {
+    return new StockReservationVO(orderNo, "UNKNOWN", List.of());
   }
 
   /** 在尚未写入库存流水时从不可变请求快照展示预扣明细。 */
