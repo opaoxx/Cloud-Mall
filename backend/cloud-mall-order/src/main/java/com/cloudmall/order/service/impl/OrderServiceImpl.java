@@ -38,6 +38,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.exc.MismatchedInputException;
 import feign.FeignException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -1040,7 +1041,8 @@ public class OrderServiceImpl implements OrderService {
     String rawPayload = new String(message.getBody(), StandardCharsets.UTF_8);
     String orderNo;
     try {
-      com.fasterxml.jackson.databind.JsonNode event = mapper.readTree(rawPayload);
+      JsonNode event =
+          mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(rawPayload);
       if (event.isTextual()) {
         orderNo = event.asText();
       } else if (event.isIntegralNumber() && rawPayload.trim().matches("[0-9]+")) {
@@ -1056,6 +1058,9 @@ public class OrderServiceImpl implements OrderService {
       } else {
         throw new IllegalArgumentException("订单超时事件格式无效");
       }
+    } catch (MismatchedInputException invalidJsonRoot) {
+      // 多根JSON不是旧订单号文本；保留解析证据，拒绝进入legacy或业务。
+      throw new IllegalArgumentException("订单超时事件格式无效", invalidJsonRoot);
     } catch (com.fasterxml.jackson.core.JsonProcessingException malformedLegacyMessage) {
       orderNo = rawPayload.trim();
     }
