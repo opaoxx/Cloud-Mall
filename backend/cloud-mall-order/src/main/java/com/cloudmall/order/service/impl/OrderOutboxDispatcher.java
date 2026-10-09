@@ -3,6 +3,7 @@ package com.cloudmall.order.service.impl;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
+import com.cloudmall.order.util.OrderTimeoutTtl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.DateTimeException;
@@ -312,12 +313,11 @@ public class OrderOutboxDispatcher {
     return message;
   }
 
-  /** 以同一采样时刻判定到期；过去先返回0避免负时长溢出，未来保原至少1ms及溢出失败语义。 */
+  /** 以同一采样时刻判定到期；过去为0，未来向上取整完整毫秒，溢出继续原失败路径。 */
   private static long remainingTtlMillis(String value) {
     OffsetDateTime expiration = parseExpiration(value);
     Duration remaining = Duration.between(OffsetDateTime.now(ZoneOffset.ofHours(8)), expiration);
-    if (remaining.isNegative() || remaining.isZero()) return 0;
-    return Math.max(1L, remaining.toMillis());
+    return OrderTimeoutTtl.remainingMillis(remaining);
   }
 
   private static OffsetDateTime parseExpiration(String value) {
