@@ -1099,7 +1099,9 @@ public class OrderServiceImpl implements OrderService {
     if (orderNo == null || orderNo.isBlank()) return;
     OrderVO order = find(orderNo);
     if (!"PENDING_PAYMENT".equals(order.status)) return;
-    if (order.expireAt != null && now().isBefore(OffsetDateTime.parse(order.expireAt))) {
+    // 缺失DB期限无法证明已到期，不从消息或创建时间推导自动关单授权。
+    if (order.expireAt == null) throw new BizException(ErrorCodes.STATUS, "订单超时期限缺失，暂不关单", 409);
+    if (now().isBefore(OffsetDateTime.parse(order.expireAt))) {
       throw new BizException(ErrorCodes.STATUS, "订单尚未到超时关单时间", 409);
     }
     if (setStatus(order, "CANCELLED"))

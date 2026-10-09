@@ -7,6 +7,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.order.domain.po.OrderPO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.CartClient;
@@ -18,6 +19,7 @@ import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,11 +30,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
-/** 存量订单支付状态响应身份的真实只读SQL验证，Stock响应为替身。 */
+/** 存量订单身份、状态及超时期限的真实SQL验证；Stock响应为替身，仅修改随机隔离库。 */
 class OrderLegacyStockIdentityMySqlIT {
   /** 原订单库只读核验和隔离库管理入口。 */
   private static JdbcTemplate source;
@@ -115,6 +119,82 @@ class OrderLegacyStockIdentityMySqlIT {
   static void verifyOriginalDatabase() {
     if (source != null) assertEquals(sourceFingerprint, fingerprint());
     System.out.println("CM17BD original Order tables and checksums unchanged");
+  }
+
+  @Test
+  void missingTimeoutDeadlineCannotAuthorizeCancellationOrRollback() {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (String entry : List.of("STRING", "ENVELOPE", "QUOTED")) {
+      seed("PENDING_PAYMENT");
+      fixture.update("UPDATE mall_order_202610 SET expire_at=NULL WHERE id=1");
+      var before = fixtureSnapshot();
+      RuntimeException failure = null;
+      try {
+        invokeTimeoutEntry(entry);
+      } catch (RuntimeException rejected) {
+        failure = rejected;
+      }
+      RuntimeException captured = failure;
+      var after = fixtureSnapshot();
+      checks.add(() -> assertInstanceOf(BizException.class, captured, entry));
+      if (captured instanceof BizException rejected) {
+        checks.add(() -> assertEquals(ErrorCodes.STATUS, rejected.getCode(), entry));
+        checks.add(() -> assertEquals(409, rejected.getHttpStatus(), entry));
+      }
+      checks.add(() -> assertEquals(before, after, entry));
+      int actionCount =
+          fixture.queryForObject("SELECT COUNT(*) FROM order_stock_action", Integer.class);
+      checks.add(() -> assertEquals(0, actionCount, entry));
+    }
+    assertAll(checks);
+    verifyNoInteractions(stock);
+  }
+
+  @Test
+  void knownDeadlinesAndNonpendingOrdersRetainTheExistingTimeoutRules() {
+    seed("PENDING_PAYMENT");
+    fixture.update("UPDATE mall_order_202610 SET expire_at='2099-01-01 00:00:00.000' WHERE id=1");
+    var futureBefore = fixtureSnapshot();
+    BizException notDue =
+        assertThrows(BizException.class, () -> service.consumeTimeout("202610legacy1"));
+    assertEquals(ErrorCodes.STATUS, notDue.getCode());
+    assertEquals(409, notDue.getHttpStatus());
+    assertEquals(futureBefore, fixtureSnapshot());
+
+    seed("PENDING_PAYMENT");
+    fixture.update("UPDATE mall_order_202610 SET expire_at='2000-01-01 00:00:00.000' WHERE id=1");
+    invokeTimeoutEntry("ENVELOPE");
+    assertEquals(
+        "CANCELLED",
+        fixture.queryForObject("SELECT status FROM mall_order_202610 WHERE id=1", String.class));
+    assertEquals(
+        1, fixture.queryForObject("SELECT COUNT(*) FROM order_stock_action", Integer.class));
+    assertEquals(
+        "202610legacy1:ROLLBACK",
+        fixture.queryForObject("SELECT operation_key FROM order_stock_action", String.class));
+
+    for (String status : List.of("PAID", "CANCELLED", "COMPLETED", "OTHER")) {
+      seed(status);
+      fixture.update("UPDATE mall_order_202610 SET expire_at=NULL WHERE id=1");
+      var before = fixtureSnapshot();
+      service.consumeTimeout("202610legacy1");
+      assertEquals(before, fixtureSnapshot(), status);
+    }
+    verifyNoInteractions(stock);
+  }
+
+  /** 三种实际入口共享业务deadline；envelope提供past文本不能填补DB的NULL期限。 */
+  private void invokeTimeoutEntry(String entry) {
+    if ("STRING".equals(entry)) {
+      service.consumeTimeout("202610legacy1");
+      return;
+    }
+    String body =
+        "ENVELOPE".equals(entry)
+            ? "{\"eventType\":\"ORDER_TIMEOUT\",\"eventId\":\"timeout-1\",\"orderNo\":\"202610legacy1\",\"expireAt\":\"2000-01-01T00:00:00+08:00\"}"
+            : "\"202610legacy1\"";
+    service.consumeTimeout(
+        new Message(body.getBytes(StandardCharsets.UTF_8), new MessageProperties()));
   }
 
   @Test

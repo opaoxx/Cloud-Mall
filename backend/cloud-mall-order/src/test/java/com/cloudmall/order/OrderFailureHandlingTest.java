@@ -824,7 +824,26 @@ class OrderFailureHandlingTest {
   }
 
   private static void pendingOrder(OrderSqlMapper orderSqlMapper, String orderNo) {
-    orderWithStatus(orderSqlMapper, orderNo, "PENDING_PAYMENT");
+    // 合法待支付超时fixture必须有可证明已过期的DB期限；缺失期限由专门真实SQLIT保护。
+    when(orderSqlMapper.findOrder(anyString(), eq(orderNo)))
+        .thenReturn(
+            List.of(
+                Map.of(
+                    "order_no",
+                    orderNo,
+                    "user_id",
+                    8L,
+                    "status",
+                    "PENDING_PAYMENT",
+                    "total_amount",
+                    new BigDecimal("12.30"),
+                    "pay_amount",
+                    new BigDecimal("12.30"),
+                    "address_snapshot",
+                    "{}",
+                    "expire_at",
+                    java.time.LocalDateTime.of(2000, 1, 1, 0, 0))));
+    when(orderSqlMapper.findOrderItems(anyString(), eq(orderNo))).thenReturn(List.of());
   }
 
   private static void orderWithStatus(
