@@ -296,6 +296,8 @@ Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行
 
 在 17DL 零月/零日谓词之后、LIMIT 前继续增加日历上限资格：`DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at))`、`DAYOFMONTH(created_at)<=DAYOFMONTH(LAST_DAY(created_at))`、`DAYOFMONTH(updated_at)<=DAYOFMONTH(LAST_DAY(updated_at))`，以及 `published_at IS NULL OR DAYOFMONTH(published_at)<=DAYOFMONTH(LAST_DAY(published_at))`。`LAST_DAY` 返回非法/NULL 参数的 NULL 时不放行该非空行；本条只排除超出当月末日的部分非法日期，不改变表、索引、driver、SQL mode、投影、参数、排序、limit 或历史事实，也不提供完整日期/ALLOW_INVALID_DATES 修复。
 
+`findPendingOutbox` 读取 `DATETIME(3)` 全 row 时，对 `next_retry_at`、`published_at`、`created_at`、`updated_at` 使用 JDBC `ResultSet.getObject(column, LocalDateTime.class)` 直接组件读取；`published_at` nullable 语义保持。该读取替换 Timestamp/GregorianCalendar 映射，不改变 `order_outbox` DDL、字段精度、索引、DK/DL/DM eligibility、SQL 参数、投影、排序、limit、driver zero-date/partial-date 策略或历史数据；不设置系统时区、不解析字符串、不修复合法切换日期，也不承诺其他服务时间路径兼容。
+
 订单 outbox 的状态条件在扫描、PUBLISHED CAS 和 failure 更新中使用 `CAST(status AS BINARY)=CAST('PENDING' AS BINARY)` 精确匹配；`status VARCHAR(32)` DDL、索引和既有状态值不变，历史别名状态不由本批修复。该语法避免 MySQL 8.0 的 BINARY 表达式弃用警告；event_type 的既有 BINARY 条件边界保持。
 
 订单 timeout dispatcher 的扫描在 LIMIT 前以 BINARY 精确匹配 `event_type='ORDER_TIMEOUT'`；`event_type VARCHAR(64) NOT NULL` DDL 与索引不变，其他类型记录保留原事实并等待专属处理器。
