@@ -266,6 +266,8 @@
 
 约束：`uk_intent_user_key(user_id,idempotency_key)`、`uk_intent_order_no(order_no)`；索引：`idx_intent_status_retry(status,next_retry_at)`、`idx_intent_user(user_id,created_at)`。流程约束：地址/商品校验通过后先在一个已提交的本地事务中写 `INIT`；库存预扣成功后在另一个本地事务中更新 `RESERVED`；订单与 timeout outbox 同事务成功后更新 `COMMITTED`；确认回滚后更新 `RELEASED`。扫描任务只处理超过恢复宽限期的 `INIT`/`RESERVED`，并按 `order_no` 重试同一预扣请求后回滚。`RESERVED` 意图必须保存完整 SKU/数量快照，不能依赖 Redis reservation key 存活。
 
+`OrderReservationIntentMapper` 的共享 RowMapper 在 `findByUserAndKey` 与 `findRecoverable` 中将 `next_retry_at`、`created_at`、`updated_at` 以 typed `LocalDateTime` 组件读取；`next_retry_at` NULL 保持 NULL。该读取不改变本表字段、DDL、索引、SQL、参数、排序、limit、claimRecovery、markReleased、status、`order_no`/幂等键/快照事实或异常日期策略；不设置 SQL mode/时区、不增加 filter/repair，也不宣称其他非法历史日期已闭环。
+
 ### 5.5 `order_outbox`
 
 订单本地事务与 RabbitMQ 超时消息之间的可靠交付表。该表不按订单月分片，dispatcher 按状态和下次重试时间扫描；不改变订单事实表的月度分片策略。
