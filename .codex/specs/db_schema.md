@@ -268,6 +268,8 @@
 
 `OrderReservationIntentMapper` 的共享 RowMapper 在 `findByUserAndKey` 与 `findRecoverable` 中将 `next_retry_at`、`created_at`、`updated_at` 以 typed `LocalDateTime` 组件读取；`next_retry_at` NULL 保持 NULL。该读取不改变本表字段、DDL、索引、SQL、参数、排序、limit、claimRecovery、markReleased、status、`order_no`/幂等键/快照事实或异常日期策略；不设置 SQL mode/时区、不增加 filter/repair，也不宣称其他非法历史日期已闭环。
 
+为避免恢复扫描被年份下界前的历史日期阻断或占据 LIMIT，`findRecoverable` 在原资格条件之后、LIMIT 前增加三项无参数字面量谓词：`created_at >= '1000-01-01 00:00:00.000'`、`updated_at >= '1000-01-01 00:00:00.000'`，以及 `(next_retry_at IS NULL OR next_retry_at >= '1000-01-01 00:00:00.000')`。原扫描仍绑定 `staleBefore`、`now`、`limit` 三个参数，保留全行投影、状态/排序/limit、typed RowMapper、NULL next 语义和恢复写入链；`findByUserAndKey` 保持原按用户与幂等键读取候选，不应用该过滤。下界前行不被恢复扫描读取、修复、删除或改状态；点查询仍沿原行为处理。本条只保证本批合法年份下界资格，不设置 SQL mode/driver zero-date 参数，不新增零月日/超月末或其他非法日期过滤，不进行历史 repair。
+
 ### 5.5 `order_outbox`
 
 订单本地事务与 RabbitMQ 超时消息之间的可靠交付表。该表不按订单月分片，dispatcher 按状态和下次重试时间扫描；不改变订单事实表的月度分片策略。

@@ -250,6 +250,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单预扣意图的 `findByUserAndKey` 与 `findRecoverable` 共享 RowMapper；该 RowMapper 对 `next_retry_at`、`created_at`、`updated_at` 必须使用 JDBC typed `getObject(column, LocalDateTime.class)`，`next_retry_at` NULL 保持 Java null。SQL、全行投影、WHERE、参数、排序/limit、claim/recovery/status、Stock、时区/配置和公开 API 不变；不新增过滤、历史修复、字符串 fallback 或全局时区策略。
 
+在上述共享 typed RowMapper 约束下，`findRecoverable` 的扫描 WHERE 在 LIMIT 前必须增加三项无参数年份下界：`created_at >= '1000-01-01 00:00:00.000'`、`updated_at >= '1000-01-01 00:00:00.000'`，以及 `next_retry_at IS NULL OR next_retry_at >= '1000-01-01 00:00:00.000'`。原 `staleBefore`、`now`、`limit` 三个绑定、全行投影、状态/恢复时间资格、排序、limit、nullable next、claimRecovery、markReleased、Recovery/Stock 和异常传播保持；`findByUserAndKey` 不得应用这些过滤。下界前行只被扫描资格排除，不被读取、修复、删除或改状态。本条只覆盖合法年份下界，不扩展零月日、超月末、其他历史日期、SQL mode、driver 或真实 Stock HTTP。
+
 订单 timeout `consumeTimeout(String)` 在读取订单并确认 `PENDING_PAYMENT` 后、任何 CAS 或 `order_stock_action` 写入前，必须要求订单事实 `expire_at` 非 null；缺失时返回既有状态错误/409“订单超时期限缺失，暂不关单”，不从 created_at、Message envelope 或当前时间推导 deadline。非待支付状态即使 expire_at NULL 仍沿原 no-op；非空 future 继续原 409，已过期继续原 CAS/rollback action。该门不改变 expire_at nullable DDL、API、消息、SQL、Stock、ACK/retry、TTL 或其他日期异常语义。
 
 ## 8. 库存服务接口
