@@ -12,7 +12,7 @@ object 分支必须同时满足：
 
 - `eventType` 使用 `textValue()` 精确等于 `ORDER_TIMEOUT`；非文本节点自然不匹配；
 - `eventId`、`orderNo`、`expireAt` 使用私有 `hasNonblankText(JsonNode event, String fieldName)` 校验：节点存在、`isTextual()` 为 true 且 `textValue().isBlank()` 为 false；
-- `orderNo` 始终使用原 `textValue()`，不 trim、不转换数值、不拼接、不校验额外格式/宽度；`expireAt` 只保留原文本，仍由原业务到期解析决定。
+- `orderNo` 始终使用原 `textValue()`，不 trim、不转换数值、不拼接、不校验额外格式/宽度；envelope 的 `expireAt` 仅执行文本资格校验，不解析、不转换、不与数据库日期匹配；到期判定仍使用订单数据库事实中的 `expireAt`。
 
 缺失、JSON null、空字符串、ASCII/Unicode 空白、数字、布尔、数组、对象或 eventType 别名均抛原 `IllegalArgumentException` 格式错误，不委托 `consumeTimeout(String)`，不访问订单 Mapper、Stock/RPC 或业务状态。`catch` 仍只捕获 `JsonProcessingException`，不得把坏 object 转进 DP legacy fallback。
 
