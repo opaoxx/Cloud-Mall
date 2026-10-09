@@ -220,6 +220,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单 timeout dispatcher 在解析 payload 后、发送前仅核验 payload 已存在的 eventId、eventType、orderNo 是否为 String 并分别精确等于 outbox row 身份；缺失字段保持旧兼容，失配按原 failure/退避且不发送。不得补写、trim、转换或新增消息字段。
 
+订单 timeout consumer 对历史 DLQ Message 的 body 继续先按原 JSON string/envelope 规则解析；若整份 UTF-8 文本 `trim()` 后严格匹配 ASCII `[0-9]+` 且 root node 为 integral number，则仅将原 `rawPayload.trim()` 作为订单号委托既有 `consumeTimeout(String)`，不 long/double/asText、不重序列化、不猜 content type。负数、小数、指数、数字前缀或附加 JSON/非空字符不进入该分支，原格式拒绝/fallback、quoted JSON、object envelope、月份/精确身份/到期/CAS/action/事务/ACK-retry 语义不变；不改 outbox TTL、SQL、DDL、proof、公开 API 或对象内数字字段规则，不自动重放历史消息。
+
 订单 outbox 发布完成 UPDATE 还必须在执行时精确确认 `event_type=ORDER_TIMEOUT` 且 `attempts>=0`；失败记录 UPDATE 精确确认 event_type，保留既有 attempts 非负条件。扫描后类型或计数变化时返回原 0 行语义，不改写异常行；不新增 proof 投影或公开 API。
 
 订单 outbox dispatcher 在入口、扫描/候选检查、发布确认等待和完成/失败写入前检查线程中断；明确中断恢复标志并停止当前及后续候选，不新增 failure/complete、不撤回已发送消息。普通网络超时仍沿既有退避，不把所有 InterruptedIOException 当作取消。

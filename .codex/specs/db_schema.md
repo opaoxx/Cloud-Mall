@@ -330,6 +330,8 @@ failure writer `recordOutboxFailure` 仍执行一次既有 UPDATE 并返回影�
 
 订单 timeout payload 身份校验只读 JSON 中已存在的 eventId/eventType/orderNo，缺失保持兼容；`payload JSON NOT NULL` DDL、字段、索引和历史 JSON 不变，不新增身份列或回填缺失键。
 
+订单 timeout 消费入口可兼容历史裸数字订单号：仅当整份 Message body 去首尾空白后为 ASCII `[0-9]+` 且 JSON root 为 integral number 时，直接把原 trimmed 文本交给既有订单号读取/月份路由/精确 CAS 流程。该兼容不改变 `order_outbox`、订单表、`order_stock_action` 或任何 SQL/DDL/索引；负数、小数、指数、数字前缀和附加 JSON 不放宽，quoted string/object envelope、ACK/retry、TTL/DLX、历史消息事实均保持原语义，不自动修复或重放。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`
