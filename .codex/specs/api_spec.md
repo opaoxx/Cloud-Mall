@@ -246,6 +246,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 在上述 17DY 下界之后，订单库存动作恢复 `findDue` 还必须在 LIMIT 前增加 `MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0`；两谓词不增加参数，仅排除 zero month/day 的 retry 时间。其他 SQL、3 参数、投影、排序、limit、status/attempts/lease、claim/finish/retry、Recovery/Stock、global/JDBC 策略和 API 保持；不校验合法月份上限/超月末，不修复其他历史日期。
 
+在 17DZ 零月/零日门之后，订单库存动作恢复 `findDue` 还必须在 LIMIT 前增加 `DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at))`；不增加参数，仅排除 retry 时间超出当月最后一天的非法日期。其他 SQL、3 参数、投影、排序、limit、status/attempts/lease、claim/finish/retry、Recovery/Stock、global/JDBC 策略和 API 保持；不扩展其他时间列、完整日历、历史修复或真实 Stock HTTP。
+
 订单预扣意图的 `findByUserAndKey` 与 `findRecoverable` 共享 RowMapper；该 RowMapper 对 `next_retry_at`、`created_at`、`updated_at` 必须使用 JDBC typed `getObject(column, LocalDateTime.class)`，`next_retry_at` NULL 保持 Java null。SQL、全行投影、WHERE、参数、排序/limit、claim/recovery/status、Stock、时区/配置和公开 API 不变；不新增过滤、历史修复、字符串 fallback 或全局时区策略。
 
 订单 timeout `consumeTimeout(String)` 在读取订单并确认 `PENDING_PAYMENT` 后、任何 CAS 或 `order_stock_action` 写入前，必须要求订单事实 `expire_at` 非 null；缺失时返回既有状态错误/409“订单超时期限缺失，暂不关单”，不从 created_at、Message envelope 或当前时间推导 deadline。非待支付状态即使 expire_at NULL 仍沿原 no-op；非空 future 继续原 409，已过期继续原 CAS/rollback action。该门不改变 expire_at nullable DDL、API、消息、SQL、Stock、ACK/retry、TTL 或其他日期异常语义。

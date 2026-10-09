@@ -374,6 +374,8 @@ timeout Message 的 JSON tree 读取为单次 per-call `ObjectReader` 配置 `FA
 
 在 17DY 下界之后，`order_stock_action` 恢复扫描仅对 `next_retry_at` 增加 `MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0` 两个无参数资格谓词；不改变表、字段、索引、其他 SQL、3 参数、投影、排序、limit、状态/attempts/lease、claim/finish/retry 或历史事实。该门只过滤零月/零日，不校验合法月份上限/超月末，不设置 global/JDBC 策略，不修复其他非法日期。
 
+在 17DZ 零月/零日谓词之后，`order_stock_action` 恢复扫描仅对 `next_retry_at` 增加 `DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at))` 单一无参数资格谓词；不改变表、字段、索引、其他 SQL、3 参数、投影、排序、limit、状态/attempts/lease、claim/finish/retry 或历史事实。该门只排除超出当月最后一天的 retry 日期，不扩展其他时间列、完整日历、历史修复、global/driver 策略。
+
 ### 5.7 `seckill_message_recovery`
 
 秒杀订单死信由订单服务持久化接管，避免 DLQ 消息只停留在 RabbitMQ。
