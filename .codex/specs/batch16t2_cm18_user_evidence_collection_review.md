@@ -43,6 +43,7 @@ wrapper 的共享 `validateForRead` 必须在进入任一 reader 事务前校验
 ## 4. User GET 只读边界
 
 - 只复用现有 `UserTccClient.state` GET 和 User `UserTccHttpService.state` → `UserTccStateQuery.read` 只读链；该链必须保持 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)`，不绑定 RootContext、不注册分支、不认领 receive、不写 attempt/debit/ledger/Fence。沿现有 Feign 3 秒连接/5 秒读取超时，最多额外一次 GET retry；永不 POST。
+- User GET 窗口必须隔离 Pay 线程的 `AuthContext`：保存原 userId/role，临时清理后发出明确 anchor userId 的 GET，使 Feign `authHeaders` 不能把请求上下文中的其他 `X-User-Id`（例如 99）追加到 User 请求；GET 成功、失败和异常均在 finally 恢复原上下文。该局部清理不得掩盖或解除 Spring 事务/Seata XID 门，不修改全局 Feign 拦截器或其他业务链，也不传 caller role。
 - 不复用 `UserTccClient.prepare`、Pay bridge、任何 Store/coordinator/recover，也不调用 Confirm/Cancel/refund；任何 Feign transport、HTTP 4xx/5xx、响应解析失败或 User 数据库不可用均只产生阻塞分类。
 - User 响应必须完整核对 `userId`、`payNo`、`orderNo`、金额、operation key、ledger key、XID、User branch、state 和 `ledgerApplied`。金额按 `BigDecimal` 数值比较，不能字符串截断或重算；User branch 必须等于 Pay dispatch 的 `userBranchId`，且不同于 Pay receipt branch。
 - User 返回 `CONFIRMED`/`CANCELLED` 或 `ledgerApplied=true` 也只是外部证据的一部分；本批不输出资金终态，不设置 `automaticActionsAllowed=true`，不改变 Pay 或 User 任何记录。
