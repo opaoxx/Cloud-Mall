@@ -366,6 +366,8 @@ timeout Message 的 JSON tree 读取为单次 per-call `ObjectReader` 配置 `FA
 
 索引：`uk_order_stock_action_order(order_no)`、`uk_order_stock_action_key(operation_key)`、`idx_order_stock_action_retry(status,next_retry_at,lease_until)`。订单状态 CAS 成功后，必须在同一订单本地事务中插入对应动作；远程调用只能发生在事务提交之后。动作完成以 stock 的最终状态查询为准：目标状态已达到视为成功；结果未知保留 `UNKNOWN` 并重试同一操作键；发现相反终态标记 `CONFLICT` 并告警，禁止继续执行相反动作或伪造订单状态。
 
+`OrderStockActionMapper.findDue` 对 `next_retry_at DATETIME(3)` 使用 JDBC `ResultSet.getObject("next_retry_at", LocalDateTime.class)` 直接读取；其他列、SQL、参数、状态/attempts/lease 条件、排序、limit、DDL、索引、历史日期和 Recovery 语义保持。该边界只避免 Connector/J GregorianCalendar cutover 读取异常，不设置系统时区、不使用字符串 fallback、不扩展 zero/partial-invalid 日期或全服务时间策略。
+
 ### 5.7 `seckill_message_recovery`
 
 秒杀订单死信由订单服务持久化接管，避免 DLQ 消息只停留在 RabbitMQ。
