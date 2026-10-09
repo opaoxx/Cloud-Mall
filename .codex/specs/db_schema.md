@@ -332,6 +332,8 @@ failure writer `recordOutboxFailure` 仍执行一次既有 UPDATE 并返回影�
 
 订单 timeout 消费入口可兼容历史裸数字订单号：仅当整份 Message body 去首尾空白后为 ASCII `[0-9]+` 且 JSON root 为 integral number 时，直接把原 trimmed 文本交给既有订单号读取/月份路由/精确 CAS 流程。该兼容不改变 `order_outbox`、订单表、`order_stock_action` 或任何 SQL/DDL/索引；负数、小数、指数、数字前缀和附加 JSON 不放宽，quoted string/object envelope、ACK/retry、TTL/DLX、历史消息事实均保持原语义，不自动修复或重放。
 
+timeout object envelope 的 eventType、eventId、orderNo、expireAt 仅接受原生文本：eventType 精确 `ORDER_TIMEOUT`，其余三字段为非空白 textual 值；字段缺失/null/空白或非文本不进入业务订单查询。该入口校验不改变 outbox/订单/stock action 表、SQL、索引、ACK、TTL/DLX 或历史消息，不新增身份前缀/宽度/日期 grammar，也不把坏 object 归入裸数字 legacy 或自动重放。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`
