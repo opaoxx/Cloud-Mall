@@ -334,6 +334,8 @@ failure writer `recordOutboxFailure` 仍执行一次既有 UPDATE 并返回影�
 
 timeout object envelope 的 eventType、eventId、orderNo、expireAt 仅接受原生文本：eventType 精确 `ORDER_TIMEOUT`，其余三字段为非空白 textual 值；字段缺失/null/空白或非文本不进入业务订单查询。该入口校验不改变 outbox/订单/stock action 表、SQL、索引、ACK、TTL/DLX 或历史消息，不新增身份前缀/宽度/日期 grammar，也不把坏 object 归入裸数字 legacy 或自动重放。
 
+timeout Message 的 JSON tree 读取为单次 per-call `ObjectReader` 配置 `FAIL_ON_TRAILING_TOKENS`；尾随有效 root 不进入订单业务查询。`MismatchedInputException` 走原格式错误并保留 cause，其他 JsonProcessingException 保持原 raw legacy fallback；该解析边界不改变 outbox、订单、stock action 表、SQL、索引、ACK、TTL/DLX、历史事实或消息重放规则，也不改变共享 ObjectMapper 全局配置。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`

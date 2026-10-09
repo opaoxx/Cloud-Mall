@@ -224,6 +224,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单 timeout object envelope 必须要求 `eventType` 为 textual 且精确等于 `ORDER_TIMEOUT`，并要求 `eventId`、`orderNo`、`expireAt` 均为非空白 textual 节点；缺失、JSON null、空白、数字、布尔、数组、对象或 type 别名均沿原格式错误返回，不委托 String legacy、不查询订单/Stock/RPC。`orderNo`、`expireAt` 使用原 textValue，不 trim/转换；catch 仍只处理 `JsonProcessingException`，不把坏 object 送入 DP fallback。订单格式/月路由、精确身份、到期/CAS/action/事务、ACK/retry、TTL、outbox SQL/DDL/proof/API/message 保持。
 
+订单 timeout Message 入口必须使用 per-call `mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(rawPayload)` 拒绝尾随有效 JSON；不得全局修改共享 ObjectMapper。`MismatchedInputException` 转原格式 `IllegalArgumentException` 并携带 cause，不进入 raw legacy 或业务查询；其他 `JsonProcessingException` 仍沿原 `rawPayload.trim()` fallback。合法尾随空白、DP 整数 raw String、quoted/object 原生字段门和 String 业务路径保持，ACK/retry、事务、TTL、outbox SQL/DDL/proof、API/message 不变。
+
 订单 outbox 发布完成 UPDATE 还必须在执行时精确确认 `event_type=ORDER_TIMEOUT` 且 `attempts>=0`；失败记录 UPDATE 精确确认 event_type，保留既有 attempts 非负条件。扫描后类型或计数变化时返回原 0 行语义，不改写异常行；不新增 proof 投影或公开 API。
 
 订单 outbox dispatcher 在入口、扫描/候选检查、发布确认等待和完成/失败写入前检查线程中断；明确中断恢复标志并停止当前及后续候选，不新增 failure/complete、不撤回已发送消息。普通网络超时仍沿既有退避，不把所有 InterruptedIOException 当作取消。
