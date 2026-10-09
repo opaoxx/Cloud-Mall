@@ -1477,6 +1477,121 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void zeroDateCandidatesCannotAbortTheScanOrOccupyItsLimit() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = spy(new OrderOutboxMapper(modeJdbc));
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        for (String zeroField :
+            List.of("next_retry_at", "created_at", "updated_at", "published_at")) {
+          modeJdbc.execute("SET SESSION sql_mode=''");
+          modeJdbc.update("DELETE FROM order_outbox");
+          OrderOutboxPO invalid = pendingOutbox();
+          OrderOutboxPO healthy = pendingOutbox();
+          healthy.id = 2L;
+          healthy.eventId = "after-zero-date";
+          healthy.orderNo = "202610-after-zero-date";
+          healthy.nextRetryAt = invalid.nextRetryAt.plusSeconds(1);
+          OrderOutboxPO later = pendingOutbox();
+          later.id = 3L;
+          later.eventId = "after-healthy-event";
+          later.orderNo = "202610-after-healthy-event";
+          later.nextRetryAt = invalid.nextRetryAt.plusSeconds(2);
+          assertEquals(1, modeMapper.insert(invalid));
+          assertEquals(1, modeMapper.insert(healthy));
+          assertEquals(1, modeMapper.insert(later));
+          // 字段名仅来自上述固定白名单；异常数据只在本例随机隔离库构造。
+          modeJdbc.update(
+              "UPDATE order_outbox SET " + zeroField + "='0000-00-00 00:00:00.000' WHERE id=1");
+          var originalInvalid = outboxTextFacts(modeJdbc, 1L);
+          modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+          List<OrderOutboxPO> selected = List.of();
+          RuntimeException scanFailure = null;
+          try {
+            selected = modeMapper.findPendingOutbox(1);
+          } catch (RuntimeException rejected) {
+            scanFailure = rejected;
+          }
+          List<OrderOutboxPO> candidates = selected;
+          RuntimeException capturedScan = scanFailure;
+          String label = mode + ":" + zeroField;
+          checks.add(() -> assertNull(capturedScan, label));
+          checks.add(
+              () ->
+                  assertEquals(
+                      List.of(healthy.eventId),
+                      candidates.stream().map(candidate -> candidate.eventId).toList(),
+                      label));
+          var invalidAfterScan = outboxTextFacts(modeJdbc, 1L);
+          checks.add(() -> assertEquals(originalInvalid, invalidAfterScan, label));
+          List<String> sentEvents = new ArrayList<>();
+          RabbitTemplate rabbit = mock(RabbitTemplate.class);
+          doAnswer(
+                  invocation -> {
+                    Map<?, ?> envelope = invocation.getArgument(2);
+                    sentEvents.add((String) envelope.get("eventId"));
+                    CorrelationData correlation = invocation.getArgument(4);
+                    correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                    return null;
+                  })
+              .when(rabbit)
+              .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+          RuntimeException dispatchFailure = null;
+          try {
+            new OrderOutboxDispatcher(
+                    modeMapper,
+                    rabbit,
+                    new ObjectMapper(),
+                    new MockEnvironment().withProperty("cloudmall.order.outbox.batch-size", "1"))
+                .dispatchPending();
+          } catch (RuntimeException rejected) {
+            dispatchFailure = rejected;
+          }
+          RuntimeException capturedDispatch = dispatchFailure;
+          var invalidAfterDispatch = outboxTextFacts(modeJdbc, 1L);
+          String healthyStatus =
+              modeJdbc.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+          String laterStatus =
+              modeJdbc.queryForObject("SELECT status FROM order_outbox WHERE id=3", String.class);
+          checks.add(() -> assertNull(capturedDispatch, label));
+          checks.add(() -> assertEquals(List.of(healthy.eventId), sentEvents, label));
+          checks.add(() -> assertEquals(originalInvalid, invalidAfterDispatch, label));
+          checks.add(() -> assertEquals("PUBLISHED", healthyStatus, label));
+          checks.add(() -> assertEquals("PENDING", laterStatus, label));
+          verify(modeMapper, never()).markOutboxPublished(eq(invalid.eventId), any());
+          verify(modeMapper, never()).recordOutboxFailure(eq(invalid.eventId), any(), any());
+        }
+        // 合法最小/最大非空发布时间与NULL都仍可读，不以PENDING猜测发布时间必须为空。
+        for (LocalDateTime publishedAt :
+            Arrays.asList(
+                null, LocalDateTime.of(1000, 1, 1, 0, 0), LocalDateTime.of(9999, 12, 31, 23, 59))) {
+          modeJdbc.update("DELETE FROM order_outbox");
+          OrderOutboxPO valid = pendingOutbox();
+          valid.publishedAt = publishedAt;
+          assertEquals(1, modeMapper.insert(valid));
+          List<OrderOutboxPO> selected = modeMapper.findPendingOutbox(1);
+          assertEquals(1, selected.size());
+          assertEquals(valid.eventId, selected.get(0).eventId);
+          assertEquals(publishedAt, selected.get(0).publishedAt);
+        }
+      }
+      assertAll(checks);
+    }
+  }
+
+  /** 文本读取四个时间，避免取证被零日期的JDBC时间转换中断；保留完整事件事实。 */
+  private static Map<String, Object> outboxTextFacts(JdbcTemplate jdbcTemplate, long outboxId) {
+    return jdbcTemplate.queryForMap(
+        "SELECT"
+            + " id,event_id,event_type,order_no,payload,status,attempts,last_error,CAST(next_retry_at"
+            + " AS CHAR) AS next_retry_at,CAST(published_at AS CHAR) AS"
+            + " published_at,CAST(created_at AS CHAR) AS created_at,CAST(updated_at AS CHAR) AS"
+            + " updated_at FROM order_outbox WHERE id=?",
+        outboxId);
+  }
+
+  @Test
   void publicationTimesAreFlooredBeforeSqlInBothModes() throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     List<LocalDateTime> publicationTimes =
