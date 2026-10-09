@@ -59,7 +59,15 @@ public class OrderOutboxDispatcher {
   /** 投递失败后的再次尝试间隔。 */
   private final long retryDelaySeconds;
 
-  /** Creates the committed outbox dispatcher. */
+  /**
+   * 创建已提交事件投递者，在修改Rabbit模板前验证调度配置为正数。
+   *
+   * @param orderOutboxMapper 订单事件扫描和条件写入入口
+   * @param rabbitTemplate 原事件的Rabbit投递模板
+   * @param objectMapper 读取原JSON载荷的映射器
+   * @param environment 提供原配置名、类型和默认值的环境
+   * @throws IllegalArgumentException 批量、确认超时或失败退避配置非正
+   */
   public OrderOutboxDispatcher(
       OrderOutboxMapper orderOutboxMapper,
       RabbitTemplate rabbitTemplate,
@@ -74,7 +82,15 @@ public class OrderOutboxDispatcher {
         environment.getProperty("cloudmall.order.outbox.confirm-timeout-ms", Long.class, 5000L);
     this.retryDelaySeconds =
         environment.getProperty("cloudmall.order.outbox.retry-delay-seconds", Long.class, 10L);
+    requirePositiveConfiguration("cloudmall.order.outbox.batch-size", batchSize);
+    requirePositiveConfiguration("cloudmall.order.outbox.confirm-timeout-ms", confirmTimeoutMillis);
+    requirePositiveConfiguration("cloudmall.order.outbox.retry-delay-seconds", retryDelaySeconds);
     this.rabbitTemplate.setMandatory(true);
+  }
+
+  /** 只拒绝非正配置，不归一化或增加正值上限，保留原环境类型转换语义。 */
+  private static void requirePositiveConfiguration(String propertyName, long value) {
+    if (value <= 0) throw new IllegalArgumentException(propertyName + " 必须大于0，实际值=" + value);
   }
 
   /**
