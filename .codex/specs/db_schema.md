@@ -290,6 +290,8 @@ Dispatcher 只对读取到的 outbox PO 快照执行非负 attempts guard；数�
 
 Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行占据候选窗口；该过滤不改变列、索引或历史行，dispatcher 仍需保留读取快照 guard。
 
+为避免历史 MySQL 零日期在 `findPendingOutbox` 全 row 时间映射阶段阻断健康候选，扫描 WHERE 在 LIMIT 前增加四个不带参数的下界谓词：`next_retry_at`、`created_at`、`updated_at` 均 `>= '1000-01-01 00:00:00.000'`，`published_at IS NULL OR published_at >= '1000-01-01 00:00:00.000'`。这只是候选资格过滤，不改变 `order_outbox` DDL、索引、driver zero-date 行为、SQL mode、SELECT 投影、排序、limit 或历史事实；下界前行不读取、不修复、不删除、不写状态，NULL/年份 1000/9999 保持原语义。本条不提供完整日历校验或 `ALLOW_INVALID_DATES` 修复。
+
 订单 outbox 的状态条件在扫描、PUBLISHED CAS 和 failure 更新中使用 `CAST(status AS BINARY)=CAST('PENDING' AS BINARY)` 精确匹配；`status VARCHAR(32)` DDL、索引和既有状态值不变，历史别名状态不由本批修复。该语法避免 MySQL 8.0 的 BINARY 表达式弃用警告；event_type 的既有 BINARY 条件边界保持。
 
 订单 timeout dispatcher 的扫描在 LIMIT 前以 BINARY 精确匹配 `event_type='ORDER_TIMEOUT'`；`event_type VARCHAR(64) NOT NULL` DDL 与索引不变，其他类型记录保留原事实并等待专属处理器。
