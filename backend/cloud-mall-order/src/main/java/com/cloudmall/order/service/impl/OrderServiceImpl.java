@@ -1087,10 +1087,21 @@ public class OrderServiceImpl implements OrderService {
     consumeTimeout(orderNo);
   }
 
-  /** 对象消息仅接受原生非空白文本，拒绝缺失/null/非文本，不强转、trim或补造字段。 */
+  /** 必填原生文本须非空白且代理对完整；JSON转义不保证Unicode完整性，不替换或归一化。 */
   private static boolean hasNonblankText(JsonNode event, String fieldName) {
     JsonNode fieldValue = event.path(fieldName);
-    return fieldValue.isTextual() && !fieldValue.textValue().isBlank();
+    if (!fieldValue.isTextual() || fieldValue.textValue().isBlank()) return false;
+    String text = fieldValue.textValue();
+    // 逐UTF16单元线性检查，高代理与紧邻低代理同时消费，孤立低代理不得放行。
+    for (int position = 0; position < text.length(); position++) {
+      char codeUnit = text.charAt(position);
+      if (Character.isHighSurrogate(codeUnit)) {
+        if (position + 1 >= text.length() || !Character.isLowSurrogate(text.charAt(position + 1)))
+          return false;
+        position++;
+      } else if (Character.isLowSurrogate(codeUnit)) return false;
+    }
+    return true;
   }
 
   /** 按订单号处理旧版超时消息并供恢复测试复用。 */
