@@ -97,7 +97,7 @@ public class OrderReservationIntentMapper {
         idempotencyKey);
   }
 
-  /** 在LIMIT前排除三个时间列下界前事实，保留NULL重试时间并查询陈旧预扣意图。 */
+  /** 在LIMIT前排除三个时间列下界前、零月日事实，保留NULL重试时间并查询陈旧预扣意图。 */
   public List<OrderReservationIntentPO> findRecoverable(
       LocalDateTime staleBefore, LocalDateTime now, int limit) {
     return jdbcTemplate.query(
@@ -105,7 +105,10 @@ public class OrderReservationIntentMapper {
             + " ('INIT','RESERVE_UNKNOWN','RESERVED') AND created_at<? AND (next_retry_at IS NULL"
             + " OR next_retry_at<=?) AND created_at>='1000-01-01 00:00:00.000' AND"
             + " updated_at>='1000-01-01 00:00:00.000' AND (next_retry_at IS NULL OR"
-            + " next_retry_at>='1000-01-01 00:00:00.000') ORDER BY created_at,id LIMIT ?",
+            + " next_retry_at>='1000-01-01 00:00:00.000') AND MONTH(created_at)>0 AND"
+            + " DAYOFMONTH(created_at)>0 AND MONTH(updated_at)>0 AND DAYOFMONTH(updated_at)>0 AND"
+            + " (next_retry_at IS NULL OR (MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0))"
+            + " ORDER BY created_at,id LIMIT ?",
         ROW_MAPPER,
         staleBefore,
         now,
