@@ -9,7 +9,7 @@
 ## 2. request 载荷与 hash 契约
 
 - request 必须是 `order_no` 精确等于查询 orderNo、`scene` 精确为 `NORMAL`；不匹配返回 `UNKNOWN/items=[]`。
-- `items_snapshot` 必须是非空 String；使用该 StockService 实例的独立 ObjectMapper 副本，启用 `FAIL_ON_TRAILING_TOKENS` 与 `FAIL_ON_READING_DUP_TREE_KEY`，不修改 global mapper。
+- `items_snapshot` 必须是非空 String；使用该 StockService 实例的独立 ObjectMapper 副本，启用 `FAIL_ON_TRAILING_TOKENS` 与 `FAIL_ON_READING_DUP_TREE_KEY`，不修改 global mapper。native integral 判据针对从 MySQL JSON 读取后的持久树；若 MySQL 已将原始 `2.0` 规范为整数 `2`，只能按当前持久 semantic JSON 继续 canonical hash/载荷核对，不能重构或声称核验原输入 token 类型、重复键或其他已被数据库抹去的历史语法。
 - JSON 根必须是非空数组；每个元素只能包含 `skuId`、`quantity` 两个字段，字段必须是 native integral number；`skuId` 为正 Long，`quantity` 为正 int 范围。缺失/null/小数/负数/溢出/额外字段/重复键/尾随 JSON 均返回 `UNKNOWN/items=[]`。
 - 规范化数组必须按 `skuId` 严格升序且无重复；重建 `List<StockLineDTO>` 后复用原 `toJson` 与 SHA-256 算法计算 hash，再与 request `items_hash` 比较。不能对 raw JSON 直接 hash，不能因空白、JSON key 顺序或 MySQL JSON 存储规范化改变而误判合法载荷。
 - 重建数组的 SKU 集合和 quantity 必须与已观察 flows 一一对应：缺 SKU、额外 SKU、重复 SKU、数量差异任一存在均返回 `UNKNOWN/items=[]`。本批不验证超出当前 flows 的历史库存余额或完整 Stock 业务身份。
@@ -27,7 +27,7 @@
 
 ## 4. 验收矩阵
 
-- Unit：snapshot 非数组/空数组、缺字段/null、非整数、负数/溢出、额外字段、重复键、尾随 JSON、错误 order_no/scene、hash 错误、缺/多/重复 SKU、quantity 不同均 `UNKNOWN/items=[]`；合法 MySQL JSON 空白/key 顺序规范化控制样本通过；确认 ObjectMapper 全局配置不变。
+- Unit：snapshot 非数组/空数组、缺字段/null、读取后非整数、负数/溢出、额外字段、重复键、尾随 JSON、错误 order_no/scene、hash 错误、缺/多/重复 SKU、quantity 不同均 `UNKNOWN/items=[]`；合法 MySQL JSON 空白/key 顺序规范化控制样本通过；确认 ObjectMapper 全局配置不变。真实 MySQL 若已把原 token `2.0` 持久化为 native `2`，按 semantic canonical hash 兼容返回，不宣称前置原始 JSON 语法已验证；非法小数须以读取后仍为非整数的持久值（如 `2.5`）验证。
 - 真实 MySQL：复用 16T4 普通旧/有 request flows，覆盖完整原载荷、缺 SKU、额外 SKU、重复 SKU、错误 quantity/hash、request identity/scene 冲突；原 Stock 表 checksum、request/flows facts 前后不变。
 - Order fallback：Stock GET 返回实际 proof 结果时，只有 snapshot+flows+request.status 全部一致才可让旧无 action Order 映射 `SUCCEEDED`；proof 失败保持 UNKNOWN，不调用 Stock 写接口、不推进 Pay/退款。Order Mapper 为替身，StockClient 只桥接实际 GET 结果，不宣称 HTTP/TC/真实资金全链。
 - 保留 16T4 六类旧 writes、秒杀与 API 回归；修正旧 request mock 使其携带真实 canonical snapshot/hash，不降低新 proof 门。
