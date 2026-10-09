@@ -124,7 +124,7 @@ public class OrderStockActionMapper {
    *
    * @param now 原调用方提供的上海扫描时间，向下毫秒规范化后共用谓词
    * @param limit 原候选数量上限，沿既有规则至少为1
-   * @return 按重试时间和主键排序的非负计数待恢复动作
+   * @return 按重试时间和主键排序的非负计数待恢复动作，DATETIME列组件原样映射
    * @throws IllegalArgumentException 有效调用的时间为空、年份越界或派生时间越界
    */
   public List<OrderStockActionPO> findDue(LocalDateTime now, int limit) {
@@ -143,7 +143,7 @@ public class OrderStockActionMapper {
           action.operationKey = resultSet.getString("operation_key");
           action.status = resultSet.getString("status");
           action.attempts = resultSet.getInt("attempts");
-          action.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
+          action.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
           return action;
         },
         normalizedNow,

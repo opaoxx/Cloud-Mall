@@ -4,8 +4,14 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.common.api.ApiResponse;
+import com.cloudmall.order.domain.vo.StockReservationStatusVO;
+import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
+import com.cloudmall.order.service.impl.OrderStockActionRecovery;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -19,7 +25,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
-/** 库存动作恢复时间边界的真实隔离MySQL验证，不依赖Stock或业务启动。 */
+/** 库存动作恢复时间读取/写入边界的真实隔离MySQL验证；Stock为替身，不启动业务应用。 */
 class OrderStockActionRecoveryTimeMySqlIT {
   /** 原订单库只读核验和隔离库管理入口。 */
   private static JdbcTemplate source;
@@ -79,6 +85,95 @@ class OrderStockActionRecoveryTimeMySqlIT {
   static void verifyOriginalDatabase() {
     if (source != null) assertEquals(sourceFingerprint, fingerprint());
     System.out.println("CM17BK original Order tables and checksums unchanged");
+  }
+
+  @Test
+  void validCalendarRetryDatesAreReadWithoutChangingDatabaseComponents() throws Exception {
+    System.out.println("CM17DW test JVM timezone: " + ZoneId.systemDefault());
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderStockActionMapper(modeJdbc);
+      List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        for (String date :
+            List.of(
+                "1000-01-01",
+                "1582-10-04",
+                "1582-10-05",
+                "1582-10-10",
+                "1582-10-14",
+                "1582-10-15",
+                "2026-10-08")) {
+          checks.add(
+              () -> {
+                modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+                seed(modeJdbc, modeMapper, LocalDateTime.of(2026, 10, 8, 10, 0));
+                LocalDateTime expected = LocalDateTime.parse(date + "T12:34:56.789");
+                modeJdbc.update(
+                    "UPDATE order_stock_action SET next_retry_at=? WHERE id=1",
+                    date + " 12:34:56.789");
+                var before = retryDateEvidence(modeJdbc);
+                var actions = modeMapper.findDue(LocalDateTime.of(2026, 10, 9, 12, 0), 1);
+                assertEquals(1, actions.size());
+                assertEquals(expected, actions.get(0).nextRetryAt);
+                assertEquals("order-time", actions.get(0).orderNo);
+                assertEquals("order-time:CONFIRM", actions.get(0).operationKey);
+                assertEquals(before, retryDateEvidence(modeJdbc));
+              });
+        }
+      }
+      assertAll(checks);
+    }
+  }
+
+  @Test
+  void calendarCutoverCandidateCannotBlockHealthyStockActionRecovery() {
+    LocalDateTime createdAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1);
+    seed(fixture, mapper, createdAt);
+    assertEquals(1, mapper.insert(2L, "order-healthy", "CONFIRM", createdAt));
+    fixture.update(
+        "UPDATE order_stock_action SET next_retry_at='1582-10-10 12:34:56.789' WHERE id=1");
+    var before = retryDateEvidence(fixture);
+    StockClient stock = mock(StockClient.class);
+    when(stock.reservation(anyString()))
+        .thenAnswer(
+            invocation -> {
+              StockReservationStatusVO response = new StockReservationStatusVO();
+              response.orderNo = invocation.getArgument(0);
+              response.status = "CONFIRMED";
+              return ApiResponse.ok(response);
+            });
+    OrderStockActionRecovery recovery = new OrderStockActionRecovery(mapper, stock);
+    assertAll(
+        () -> assertDoesNotThrow(recovery::recoverDue),
+        () ->
+            assertEquals(
+                List.of("SUCCEEDED", "SUCCEEDED"),
+                fixture.queryForList(
+                    "SELECT status FROM order_stock_action ORDER BY id", String.class)),
+        () -> verify(stock).reservation("order-time"),
+        () -> verify(stock).reservation("order-healthy"));
+    var after = retryDateEvidence(fixture);
+    for (int actionIndex = 0; actionIndex < before.size(); actionIndex++) {
+      for (String column :
+          List.of(
+              "id", "order_no", "action_type", "operation_key", "next_retry_at", "created_at")) {
+        assertEquals(
+            before.get(actionIndex).get(column), after.get(actionIndex).get(column), column);
+      }
+      assertNull(after.get(actionIndex).get("lease_owner"));
+      assertNull(after.get(actionIndex).get("lease_until"));
+      assertEquals(1, ((Number) after.get(actionIndex).get("attempts")).intValue());
+    }
+    verifyNoMoreInteractions(stock);
+  }
+
+  /** 对整行取证，仅next_retry_at按数据库CHAR组件读，避免Timestamp再次误拒合法日期。 */
+  private static List<Map<String, Object>> retryDateEvidence(JdbcTemplate jdbc) {
+    return jdbc.queryForList(
+        "SELECT id,order_no,action_type,operation_key,status,attempts,CAST(next_retry_at AS CHAR)"
+            + " next_retry_at,lease_owner,lease_until,last_error,created_at,updated_at FROM"
+            + " order_stock_action ORDER BY id");
   }
 
   @Test
