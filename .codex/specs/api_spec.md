@@ -228,6 +228,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 该 per-call reader 还必须启用 `DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY`；同一 JSON object 任意深度的重复键（包括相同值、必填字段、optional/nested/array object）均转原格式错误并保留 cause，不进入 DP/raw legacy/业务 Mapper/RPC；不同 object 各自使用同名字段继续合法。不得全局 enable、启用其他 duplicate-key/POJO 解析策略或改变 JSON 宽度；单 root、DQ、quoted/raw、String 业务、ACK/retry、TTL、SQL、DDL、proof、API/message 保持。
 
+订单 timeout Message 在上述 JSON reader、legacy 和业务解析前必须使用每次新建的严格 UTF-8 decoder，并以 REPORT 处理 malformed/unmappable input；`CharacterCodingException` 转带 cause 的原格式 `IllegalArgumentException`，不访问订单/Stock/RPC，不改变原 body bytes。合法中文、emoji、真实 U+FFFD（EF BF BD）保持可用；不猜 content type/encoding、不改全局 charset、不改变 DP/DQ/DR/DS、String 业务、SQL、事务、ACK、TTL、outbox、proof 或 API/message。
+
 订单 outbox 发布完成 UPDATE 还必须在执行时精确确认 `event_type=ORDER_TIMEOUT` 且 `attempts>=0`；失败记录 UPDATE 精确确认 event_type，保留既有 attempts 非负条件。扫描后类型或计数变化时返回原 0 行语义，不改写异常行；不新增 proof 投影或公开 API。
 
 订单 outbox dispatcher 在入口、扫描/候选检查、发布确认等待和完成/失败写入前检查线程中断；明确中断恢复标志并停止当前及后续候选，不新增 failure/complete、不撤回已发送消息。普通网络超时仍沿既有退避，不把所有 InterruptedIOException 当作取消。

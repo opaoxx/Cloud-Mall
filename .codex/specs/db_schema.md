@@ -338,6 +338,8 @@ timeout Message 的 JSON tree 读取为单次 per-call `ObjectReader` 配置 `FA
 
 该 per-call `ObjectReader` 同时配置 `FAIL_ON_READING_DUP_TREE_KEY`，同一 JSON object 任意树深度的重复键拒绝解析；重复同值也拒绝，不同 object 的同名键不受影响。重复键失败不访问订单/库存事实、不改 outbox/订单/stock action 表、SQL、索引、ACK、TTL/DLX 或历史消息；不启用全局 duplicate detection，不改变其他服务 Map/POJO 解析。
 
+订单 timeout Message 在 JSON tree 读取前必须严格按 UTF-8 解码；malformed/unmappable bytes 在首次 JSON/legacy/订单事实读取前抛带 `CharacterCodingException` cause 的格式错误，不写 outbox/订单/stock action，不改变原消息 bytes。合法 UTF-8 中文、emoji、U+FFFD 保持；该入口不猜 content type/encoding、不改变 SQL/DDL/ACK/TTL/DLX、历史事实或其他服务解码策略。
+
 线程中断只改变 dispatcher 是否继续执行后续动作，不修改 outbox 表结构或自动清理事实；已发送/已确认但未完成写入的消息仍依赖原 eventId 幂等和重试，不能由中断检查推断最终状态。
 
 ### 5.6 `order_stock_action`
