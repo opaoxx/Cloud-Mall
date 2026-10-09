@@ -141,8 +141,40 @@ class StockReservationTerminalProofTest {
   private static StockReservationVO read(List<Map<String, Object>> rows, String requestState) {
     StockSqlMapper mapper = mock(StockSqlMapper.class);
     when(mapper.findSeckillByOrderNo("order-proof")).thenReturn(null);
-    when(mapper.findReservationRequest("order-proof"))
-        .thenReturn(requestState == null ? null : Map.of("status", requestState));
+    Map<String, Object> request = null;
+    if (requestState != null) {
+      request = new HashMap<>();
+      request.put("order_no", "order-proof");
+      request.put("scene", "NORMAL");
+      request.put("status", requestState);
+      String snapshot;
+      try {
+        var lines =
+            rows.stream()
+                .map(
+                    row ->
+                        new com.cloudmall.stock.domain.dto.StockLineDTO(
+                            ((Number) row.get("sku_id")).longValue(),
+                            ((Number) row.get("reserved_quantity")).intValue()))
+                .sorted(java.util.Comparator.comparing(line -> line.skuId))
+                .toList();
+        snapshot = new ObjectMapper().writeValueAsString(lines);
+      } catch (Exception invalidFixture) {
+        snapshot = "[]";
+      }
+      request.put("items_snapshot", snapshot);
+      try {
+        request.put(
+            "items_hash",
+            java.util.HexFormat.of()
+                .formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(snapshot.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
+      } catch (java.security.NoSuchAlgorithmException impossible) {
+        throw new AssertionError(impossible);
+      }
+    }
+    when(mapper.findReservationRequest("order-proof")).thenReturn(request);
     when(mapper.findReservationFlows("order-proof")).thenReturn(rows);
     StockServiceImpl service = new StockServiceImpl(null, mapper, null, new ObjectMapper());
     var report = (StockReservationVO) service.reservation("order-proof").data;

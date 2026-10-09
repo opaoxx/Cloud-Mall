@@ -17,8 +17,8 @@ import com.cloudmall.stock.domain.dto.StockReservationDTO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.StockCacheReconciler;
-import com.cloudmall.stock.service.impl.StockReservationRequestService;
 import com.cloudmall.stock.service.impl.StockReservationRejectedException;
+import com.cloudmall.stock.service.impl.StockReservationRequestService;
 import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
@@ -40,21 +40,40 @@ class StockBatch3ProjectionTest {
     StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
     StockReservationRequestService requestService = mock(StockReservationRequestService.class);
     AtomicReference<String> claimedHash = new AtomicReference<>();
+    AtomicReference<String> claimedSnapshot = new AtomicReference<>();
+    AtomicInteger requestReads = new AtomicInteger();
     AtomicInteger lockCount = new AtomicInteger();
     when(requestService.claim(eq("order-1"), eq("NORMAL"), anyString(), anyString()))
         .thenAnswer(
             invocation -> {
               claimedHash.set(invocation.getArgument(3));
+              claimedSnapshot.set(invocation.getArgument(2));
               return "INIT";
             });
     when(stockSqlMapper.findReservationRequest("order-1"))
-        .thenReturn(null, Map.of("status", "RESERVED"));
+        .thenAnswer(
+            invocation ->
+                requestReads.getAndIncrement() == 0
+                    ? null
+                    : Map.of(
+                        "order_no",
+                        "order-1",
+                        "scene",
+                        "NORMAL",
+                        "status",
+                        "RESERVED",
+                        "items_snapshot",
+                        claimedSnapshot.get(),
+                        "items_hash",
+                        claimedHash.get()));
     when(stockSqlMapper.findReservationRequestForUpdate("order-1"))
         .thenAnswer(
             invocation ->
                 Map.of(
-                    "items_hash", claimedHash.get(),
-                    "status", lockCount.getAndIncrement() == 0 ? "INIT" : "RESERVED"));
+                    "items_hash",
+                    claimedHash.get(),
+                    "status",
+                    lockCount.getAndIncrement() == 0 ? "INIT" : "RESERVED"));
     when(stockSqlMapper.findStockForUpdate(7L))
         .thenReturn(Map.of("available_quantity", 10, "reserved_quantity", 0, "version", 4));
     when(stockSqlMapper.updateAvailableWithVersion(eq(7L), eq(2), eq(4), any()))

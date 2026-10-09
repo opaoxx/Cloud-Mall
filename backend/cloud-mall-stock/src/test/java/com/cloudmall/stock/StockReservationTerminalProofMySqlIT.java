@@ -171,6 +171,133 @@ class StockReservationTerminalProofMySqlIT {
   }
 
   @Test
+  void snapshotReplayCannotReplaceIncompleteProofWithAcknowledgement() {
+    reserve(7, 2);
+    request("RESERVED");
+    var before = facts();
+    tracked.checking = true;
+    var failure =
+        assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> ReflectionTestUtils.invokeMethod(service, "alreadyReserved", ORDER_NO));
+    assertEquals(503, failure.getHttpStatus());
+    assertEquals("STOCK_RESERVATION_PROOF_UNAVAILABLE", failure.getCode());
+    assertEquals(before, facts());
+    assertOnlySelects();
+  }
+
+  @Test
+  void snapshotMissingExtraAndWrongQuantityCannotClaimCompleteRequest() {
+    for (String variant : List.of("missing", "extra", "quantity")) {
+      reset();
+      reserve(7, 2);
+      flow(7, "CONFIRM", 2);
+      if (!"missing".equals(variant)) {
+        int quantity = "quantity".equals(variant) ? 4 : 3;
+        reserve(8, quantity);
+        flow(8, "CONFIRM", quantity);
+      }
+      if ("extra".equals(variant)) {
+        reserve(9, 1);
+        flow(9, "CONFIRM", 1);
+      }
+      request("CONFIRMED");
+      var before = facts();
+      tracked.checking = true;
+      assertEquals("UNKNOWN", read().status, variant);
+      assertEquals(before, facts());
+      assertOnlySelects();
+    }
+  }
+
+  @Test
+  void snapshotWrongHashRequestIdentityAndSceneCannotAuthorizeTerminal() {
+    for (String variant : List.of("hash", "identity", "scene")) {
+      reset();
+      reserve(7, 2);
+      reserve(8, 3);
+      flow(7, "CONFIRM", 2);
+      flow(8, "CONFIRM", 3);
+      request("CONFIRMED");
+      if ("hash".equals(variant))
+        fixture.update("UPDATE stock_reservation_request SET items_hash=?", "0".repeat(64));
+      if ("identity".equals(variant))
+        fixture.update("UPDATE stock_reservation_request SET order_no='202610PROOF1'");
+      if ("scene".equals(variant))
+        fixture.update("UPDATE stock_reservation_request SET scene='SECKILL'");
+      var before = facts();
+      tracked.checking = true;
+      assertEquals("UNKNOWN", read().status, variant);
+      assertEquals(before, facts());
+      assertOnlySelects();
+    }
+  }
+
+  @Test
+  void snapshotInvalidJsonShapesAndNumbersRemainUnknownWithoutRepair() {
+    for (String snapshot :
+        List.of(
+            "null",
+            "{}",
+            "[]",
+            "[null]",
+            "[{\"skuId\":7,\"quantity\":\"2\"},{\"skuId\":8,\"quantity\":3}]",
+            "[{\"skuId\":7,\"quantity\":2.5},{\"skuId\":8,\"quantity\":3}]",
+            "[{\"skuId\":8,\"quantity\":3},{\"skuId\":7,\"quantity\":2}]",
+            "[{\"skuId\":7,\"quantity\":2},{\"skuId\":7,\"quantity\":2}]",
+            "[{\"skuId\":7,\"quantity\":2,\"extra\":1},{\"skuId\":8,\"quantity\":3}]")) {
+      reset();
+      reserve(7, 2);
+      reserve(8, 3);
+      flow(7, "CONFIRM", 2);
+      flow(8, "CONFIRM", 3);
+      request("CONFIRMED");
+      fixture.update("UPDATE stock_reservation_request SET items_snapshot=?", snapshot);
+      var before = facts();
+      tracked.checking = true;
+      assertEquals("UNKNOWN", read().status, snapshot);
+      assertEquals(before, facts());
+      assertOnlySelects();
+    }
+  }
+
+  @Test
+  void snapshotMysqlJsonNormalizationKeepsOriginalWriterHashAndHealthyStates() {
+    for (String state : List.of("RESERVED", "CONFIRMED", "ROLLED_BACK")) {
+      reset();
+      reserve(7, 2);
+      reserve(8, 3);
+      if (!"RESERVED".equals(state)) {
+        String type = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
+        flow(7, type, 2);
+        flow(8, type, 3);
+      }
+      request(state);
+      String stored =
+          fixture.queryForObject(
+              "SELECT items_snapshot FROM stock_reservation_request", String.class);
+      assertNotEquals("[{\"skuId\":7,\"quantity\":2},{\"skuId\":8,\"quantity\":3}]", stored);
+      var before = facts();
+      tracked.checking = true;
+      assertEquals(state, read().status);
+      assertEquals(before, facts());
+      assertOnlySelects();
+    }
+  }
+
+  @Test
+  void snapshotMissingSkuCannotLetActualOrderFallbackReportSucceeded() throws Exception {
+    reserve(7, 2);
+    flow(7, "CONFIRM", 2);
+    request("CONFIRMED");
+    var before = facts();
+    tracked.checking = true;
+    assertEquals("UNKNOWN", orderFallback("PAID"));
+    assertEquals(before, facts());
+    assertOnlySelects();
+  }
+
+  @Test
   void partialAndMixedLegacyFlowsCannotClaimAWholeOrderTerminal() {
     for (String variant : List.of("confirm-pending", "rollback-pending", "mixed", "partial-one")) {
       reset();

@@ -433,6 +433,23 @@ mvn -pl backend/cloud-mall-order -am package -DskipTests
 mvn -pl backend/cloud-mall-stock -am test '-Dtest=StockReservationTerminalProofMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_stock?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 普通库存请求原载荷与重放校验（16T5）
+
+普通非空流水存在请求行时，GET还核对原订单号、NORMAL场景、完整SKU/数量快照与hash。
+原快照须为升序唯一的正SKU/正整数数量数组；缺/多/重复SKU、错量、坏hash或载荷不符，
+均为UNKNOWN/空明细。独立JSON解析拒绝缺字段、额外字段、非原生整数、重复键与尾随JSON；
+不改变全局ObjectMapper。无请求历史、无流水外层分支、秒杀和库存写状态机保持。
+
+哈希由原StockLineDTO写入规则重建规范JSON再计算，兼容MySQL JSON空白/key顺序规范化，
+不直接hash读取字符串。原始2.0若已被数据库规范成2，只能核验当前持久整数与规范hash；
+已丢失的原token类型/重复键/前置语法不能重构。本校验也不证明原Order完整SKU、库存余额、
+秒杀身份或跨SELECT原子性，仍需后续CM-18完整取证。
+
+预扣重放只在读取结果确实为RESERVED时返回ALREADY_RESERVED。UNKNOWN、缺data、读取失败
+或其他状态返回固定503/STOCK_RESERVATION_PROOF_UNAVAILABLE，避免把证据不足强制ACK；
+不自动修复或改写历史数量/状态。上述StockReservationTerminalProofMySqlIT已增加实际JSON
+规范化、原请求与流水完整对应、Order fallback及重放响应门回归，可沿同一命令运行。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

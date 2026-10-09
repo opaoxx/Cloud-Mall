@@ -17,6 +17,10 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockService;
 import com.cloudmall.stock.util.StockDependencyGuard;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -350,8 +354,8 @@ public class StockServiceImpl implements StockService {
     return ApiResponse.ok(normalReservationProof(orderNo, requestRow, rows));
   }
 
-  /** 仅证明已观察普通流水；所有SKU必须完整同向，矛盾请求状态不能覆盖流水。 */
-  private static StockReservationVO normalReservationProof(
+  /** 核验普通流水和存在的原请求快照；全部SKU同向且原载荷一致才有已知状态。 */
+  private StockReservationVO normalReservationProof(
       String orderNo, Map<String, Object> requestRow, List<Map<String, Object>> rows) {
     // 1. 精确读取原SKU/数量，拒绝缺值、截断、负数、超容量与超原RESERVE量。
     List<StockReservationItemVO> items = new ArrayList<>();
@@ -384,11 +388,68 @@ public class StockServiceImpl implements StockService {
         return unknownReservationProof(orderNo);
       }
     }
-    // 3. request只能交叉验证；读中竞争或历史矛盾保留原事实，允许按原订单号重查。
+    // 3. 验证原请求状态和完整SKU快照；读中竞争或历史矛盾保留原事实。
     if (aggregateStatus == null
-        || requestRow != null && !Objects.equals(aggregateStatus, requestRow.get("status")))
+        || requestRow != null
+            && (!Objects.equals(aggregateStatus, requestRow.get("status"))
+                || !requestSnapshotMatches(orderNo, requestRow, items)))
       return unknownReservationProof(orderNo);
     return new StockReservationVO(orderNo, aggregateStatus, items);
+  }
+
+  /** 验证原规范快照和完整SKU/数量集合；MySQL JSON规范化后仍沿原writer重建hash。 */
+  private boolean requestSnapshotMatches(
+      String orderNo, Map<String, Object> requestRow, List<StockReservationItemVO> observedItems) {
+    // 1. 不借排序规则别名或其他场景的请求为当前普通库存提供证据。
+    if (orderNo == null
+        || orderNo.isBlank()
+        || !Objects.equals(orderNo, requestRow.get("order_no"))
+        || !"NORMAL".equals(requestRow.get("scene"))
+        || !(requestRow.get("items_snapshot") instanceof String snapshot)
+        || snapshot.isBlank()
+        || !(requestRow.get("items_hash") instanceof String persistedHash)) return false;
+    try {
+      // 2. 仅在独立副本启用严格解析；不得改变整个服务的JSON请求/序列化策略。
+      JsonNode root =
+          mapper
+              .copy()
+              .enable(
+                  DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
+                  DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+              .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+              .readTree(snapshot);
+      if (root == null || !root.isArray() || root.isEmpty()) return false;
+      List<StockLineDTO> lines = new ArrayList<>();
+      Map<Long, Integer> expectedQuantities = new HashMap<>();
+      long previousSkuId = 0;
+      for (JsonNode entry : root) {
+        if (!entry.isObject() || entry.size() != 2) return false;
+        JsonNode skuNode = entry.get("skuId");
+        JsonNode quantityNode = entry.get("quantity");
+        if (skuNode == null
+            || !skuNode.isIntegralNumber()
+            || !skuNode.canConvertToLong()
+            || quantityNode == null
+            || !quantityNode.isIntegralNumber()
+            || !quantityNode.canConvertToInt()) return false;
+        long skuId = skuNode.longValue();
+        int quantity = quantityNode.intValue();
+        if (skuId <= previousSkuId || quantity <= 0) return false;
+        previousSkuId = skuId;
+        lines.add(new StockLineDTO(skuId, quantity));
+        expectedQuantities.put(skuId, quantity);
+      }
+      // 3. 重用原DTO序列化规则，不能对读取时带空白/重排key的JSON直接hash。
+      if (!sha256(toJson(lines)).equals(persistedHash)) return false;
+      // 4. 消费完整原集合，缺/多/重复SKU或数量不一致都不能成为终态证据。
+      if (expectedQuantities.size() != observedItems.size()) return false;
+      for (StockReservationItemVO item : observedItems) {
+        if (!Objects.equals(expectedQuantities.remove(item.skuId), item.quantity)) return false;
+      }
+      return expectedQuantities.isEmpty();
+    } catch (JsonProcessingException | BizException malformedSnapshot) {
+      return false;
+    }
   }
 
   /** JDBC整数/DECIMAL以精确值处理，不接收浮点、文本或null来补造库存事实。 */
@@ -420,9 +481,21 @@ public class StockServiceImpl implements StockService {
 
   /** 返回同一订单号、同一 SKU 快照的幂等预扣结果。 */
   private ApiResponse<StockReservationVO> alreadyReserved(String orderNo) {
-    ApiResponse<StockReservationVO> response = reservationResult(orderNo);
+    ApiResponse<StockReservationVO> response;
+    try {
+      response = reservationResult(orderNo);
+    } catch (RuntimeException unavailableProof) {
+      throw reservationProofUnavailable();
+    }
+    if (response == null || response.data == null || !"RESERVED".equals(response.data.status))
+      throw reservationProofUnavailable();
     response.data.status = "ALREADY_RESERVED";
     return response;
+  }
+
+  /** 重放证据缺失保持原事实，不返回底层错误或强制ACK成功。 */
+  private static BizException reservationProofUnavailable() {
+    return new BizException("STOCK_RESERVATION_PROOF_UNAVAILABLE", "库存预扣持久事实待核验", 503);
   }
 
   /** 将排序后的 SKU/数量快照写成稳定 JSON。 */
