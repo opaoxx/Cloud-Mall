@@ -21,7 +21,7 @@ GET /api/internal/payments/{payNo}/tcc-reconciliation
 - 现有 callback token 与明确 caller 标识 `cm18-reconciliation` 必须同时通过校验；任一失败在执行任何数据库查询前返回既有鉴权错误。
 - Gateway 不开放该内部路径；不增加公网路由，不允许前端 Bearer Token 访问。该检查不要求开启业务 TCC 开关。
 
-Controller 只做绑定和委托；`@Service` wrapper 必须按 enabled、callback token、caller、payNo 顺序完成所有入口校验，再调用独立的 `ReadService`。只有 ReadService 在校验通过后进入 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)`，防止事务或连接在鉴权前建立。
+Controller 只做绑定和委托；`@Service` wrapper 必须按 enabled、callback token、caller、payNo 顺序完成所有入口校验，再检查当前线程不存在 Spring `TransactionSynchronizationManager` active transaction 且 Seata `RootContext` 无 XID；任一已有 write/READ_COMMITTED/其他事务或 XID 上下文均返回固定 `PAY_TCC_RECONCILIATION_CONTEXT_INVALID`/409，不调用 reader。只有这些校验通过后，独立 `ReadService` 才进入 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)`，防止取证加入调用者未提交资金事务或复用其 XID。该门是纯 thread-local 检查，不发 RPC。
 
 ### 2.2 响应 VO
 
@@ -69,7 +69,7 @@ Pay 记录查询结果分三类处理：零条候选返回既有 `NOT_FOUND`/404
 - SELECT 按 `payNo` 精确匹配，禁止 `FOR UPDATE`、claim、lease、Store.read、`bridge.recover`、coordinator RPC、TC 查询或任何远程调用。候选 payment 只允许有限 `LIMIT 2` 以发现唯一性/冲突，不做无界扫描。
 - 不调用会 observe、镜像写入、注册 branch、推进决议或触发恢复的既有 Store/bridge/coordinator 方法；本切片不能通过复用高层 recovery API 产生隐式副作用。
 - 不新增表、视图、列、索引、资金写、重试、Rabbit 操作、TC 操作或 schema migration。诊断结果只在响应中生成，日志仅记录安全的 payNo 和分类。
-- 任何已确认 payment 后的本地事实缺失、模式冲突、载荷不一致或 XID/branch 绑定缺失必须给出固定 reason code，不能用 null/空集合伪造合法状态；payment 零行/多行和数据库不可用按 2.2 的 HTTP 错误处理，不伪造分类快照。
+- 任何已确认 payment 后的本地事实缺失、模式冲突、载荷不一致或 XID/branch 绑定缺失必须给出固定 reason code，不能用 null/空集合伪造合法状态；execution 的 `COMMIT_REQUESTED` 必须配 `decision=COMMIT`，`ROLLBACK_REQUESTED` 必须配 `decision=ROLLBACK`，`CLAIMED`/`BEGIN_UNKNOWN` 必须配 `decision=NONE`，否则分类 `LOCAL_CONFLICT`。payment 零行/多行和数据库不可用按 2.2 的 HTTP 错误处理，不伪造分类快照。
 
 ## 4. 分类契约
 
@@ -88,7 +88,7 @@ Pay 记录查询结果分三类处理：零条候选返回既有 `NOT_FOUND`/404
 
 ## 5. 验收矩阵
 
-- Unit：disabled、鉴权失败、caller/token 任一缺失、payNo 非法均在任何 Mapper 调用前拒绝；验证 `automaticActionsAllowed=false`、外部系统列表固定、原始 XID/branch/operation/ledger 字段不出现在响应或普通日志，响应只含对应 fingerprint 字段。payNo 本身允许按业务标识显示，不能以“响应全文不得出现与 ledgerKey 相同字符串”作为断言。
+- Unit：disabled、鉴权失败、caller/token 任一缺失、payNo 非法、已有 Spring active transaction 或 Seata RootContext XID 均在任何 Mapper/reader 调用前拒绝；context 409 使用固定 `PAY_TCC_RECONCILIATION_CONTEXT_INVALID`，测试 finally 清理 thread-local。另覆盖 execution state/decision 四组矛盾组合均为 `LOCAL_CONFLICT`。验证 `automaticActionsAllowed=false`、外部系统列表固定、原始 XID/branch/operation/ledger 字段不出现在响应或普通日志，响应只含对应 fingerprint 字段。payNo 本身允许按业务标识显示，不能以“响应全文不得出现与 ledgerKey 相同字符串”作为断言。
 - Unit：六个本地来源分别缺失、BEGIN_UNKNOWN/无 XID、tuple/state 冲突、LEGACY 完整行、TCC 本地完整行均返回固定分类和 reason code；不调用 Store、bridge、coordinator、TC 或远程 client。
 - 真实 MySQL 最小隔离库：六表 owned 数据库在检查前后 checksum、行数、租约、attempts、决议、资金字段完全一致；已提交和已回滚本地快照都只能得到本地分类或 external blocked，不能输出 TCC 终态。
 - SQL 缺表/连接错误沿 503 原渠道；检查结束清理 owned 库和诊断日志，不启动业务应用、不新占端口、不接 Gateway/TC/MQ。
