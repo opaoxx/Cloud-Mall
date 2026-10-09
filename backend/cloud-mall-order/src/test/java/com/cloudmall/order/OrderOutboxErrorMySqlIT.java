@@ -1477,6 +1477,70 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void calendarCutoverDatesAreReadAsUnmodifiedLocalDateTimes() throws Exception {
+    System.out.println("CM17DN scan JVM zone: " + java.time.ZoneId.systemDefault());
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderOutboxMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (String field : List.of("next_retry_at", "created_at", "updated_at", "published_at")) {
+          for (String date :
+              List.of("1582-10-04", "1582-10-05", "1582-10-10", "1582-10-14", "1582-10-15")) {
+            modeJdbc.update("DELETE FROM order_outbox");
+            OrderOutboxPO original = pendingOutbox();
+            assertEquals(1, modeMapper.insert(original));
+            String storedValue = date + " 12:34:56.789";
+            // 白名单字段和明确文本保存合法ISO日期，取证全程不用Timestamp中转。
+            modeJdbc.update("UPDATE order_outbox SET " + field + "=? WHERE id=1", storedValue);
+            var before = outboxTextFacts(modeJdbc, 1L);
+            assertEquals(storedValue, before.get(field));
+            LocalDateTime expectedTime = LocalDateTime.parse(date + "T12:34:56.789");
+            LocalDateTime expectedRetry =
+                field.equals("next_retry_at") ? expectedTime : original.nextRetryAt;
+            LocalDateTime expectedCreated =
+                field.equals("created_at") ? expectedTime : original.createdAt;
+            LocalDateTime expectedUpdated =
+                field.equals("updated_at") ? expectedTime : original.updatedAt;
+            LocalDateTime expectedPublished = field.equals("published_at") ? expectedTime : null;
+            List<OrderOutboxPO> selected = List.of();
+            RuntimeException scanFailure = null;
+            try {
+              selected = modeMapper.findPendingOutbox(1);
+            } catch (RuntimeException rejected) {
+              scanFailure = rejected;
+            }
+            var warnings = modeJdbc.queryForList("SHOW WARNINGS");
+            var after = outboxTextFacts(modeJdbc, 1L);
+            RuntimeException captured = scanFailure;
+            List<OrderOutboxPO> candidates = selected;
+            String label = mode + ":" + field + ":" + date;
+            checks.add(() -> assertNull(captured, label));
+            checks.add(() -> assertEquals(1, candidates.size(), label));
+            checks.add(() -> assertEquals(before, after, label));
+            checks.add(
+                () ->
+                    assertTrue(
+                        warnings.stream()
+                            .allMatch(warning -> ((Number) warning.get("Code")).intValue() == 1287),
+                        label + ":" + warnings));
+            if (candidates.size() == 1) {
+              OrderOutboxPO candidate = candidates.get(0);
+              checks.add(() -> assertEquals(original.eventId, candidate.eventId, label));
+              checks.add(() -> assertEquals(expectedRetry, candidate.nextRetryAt, label));
+              checks.add(() -> assertEquals(expectedCreated, candidate.createdAt, label));
+              checks.add(() -> assertEquals(expectedUpdated, candidate.updatedAt, label));
+              checks.add(() -> assertEquals(expectedPublished, candidate.publishedAt, label));
+            }
+          }
+        }
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void impossibleCalendarDatesCannotAbortTheScanOrOccupyItsLimit() throws Exception {
     assertInvalidDateCandidatesAreExcluded(
         List.of(

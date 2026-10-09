@@ -2,7 +2,6 @@ package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderOutboxPO;
 import java.nio.charset.StandardCharsets;
-import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
@@ -69,7 +68,7 @@ public class OrderOutboxMapper {
    * 在LIMIT前精确匹配状态/类型，排除下界前时间、零月日、超出月长的日期、负计数及Java空白身份，查询已提交并到期的超时候选。
    *
    * @param limit 本轮候选上限，非正值沿原规则归一为1
-   * @return 按原重试时间及主键顺序的合资格候选，身份原样映射，不修改未入选事实
+   * @return 按原重试时间及主键顺序的合资格候选，身份及DATETIME列组件原样映射，不修改未入选事实
    */
   public List<OrderOutboxPO> findPendingOutbox(int limit) {
     return jdbcTemplate.query(
@@ -99,12 +98,12 @@ public class OrderOutboxMapper {
           outbox.payload = resultSet.getString("payload");
           outbox.status = resultSet.getString("status");
           outbox.attempts = resultSet.getInt("attempts");
-          outbox.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
+          // DATETIME直接读取列组件，避免Timestamp混合历及JVM默认时区中转。
+          outbox.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
           outbox.lastError = resultSet.getString("last_error");
-          Timestamp publishedAt = resultSet.getTimestamp("published_at");
-          outbox.publishedAt = publishedAt == null ? null : publishedAt.toLocalDateTime();
-          outbox.createdAt = resultSet.getTimestamp("created_at").toLocalDateTime();
-          outbox.updatedAt = resultSet.getTimestamp("updated_at").toLocalDateTime();
+          outbox.publishedAt = resultSet.getObject("published_at", LocalDateTime.class);
+          outbox.createdAt = resultSet.getObject("created_at", LocalDateTime.class);
+          outbox.updatedAt = resultSet.getObject("updated_at", LocalDateTime.class);
           return outbox;
         },
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
