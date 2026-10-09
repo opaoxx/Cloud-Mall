@@ -16,6 +16,38 @@ import reactor.core.publisher.Mono;
 /** 发现路由的服务名前缀不能把内部 TCC 路径重新暴露给用户。 */
 class TccInternalRouteIsolationTest {
   @Test
+  void reconciliationPathsCannotBeExposedThroughDiscoveryOrEncoding() {
+    for (String path :
+        List.of(
+            "/api/internal/payments/pay1/tcc-reconciliation",
+            "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation",
+            "/cloud-mall-pay/api/internal/payments/pay1/%74cc-reconciliation",
+            "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation;mode=inspect")) {
+      ReactiveStringRedisTemplate redis = mock(ReactiveStringRedisTemplate.class);
+      AuthenticationFilter filter = new AuthenticationFilter(redis);
+      AtomicBoolean forwarded = new AtomicBoolean();
+      MockServerWebExchange exchange =
+          MockServerWebExchange.from(
+              MockServerHttpRequest.get(path)
+                  .header("Authorization", "Bearer user-token")
+                  .header("X-Internal-Service", "cm18-reconciliation")
+                  .header("X-Internal-Callback-Token", "cloudmall-local-callback"));
+      filter
+          .filter(
+              exchange,
+              ignored -> {
+                forwarded.set(true);
+                return Mono.empty();
+              })
+          .block();
+      assertEquals(HttpStatus.FORBIDDEN, exchange.getResponse().getStatusCode());
+      assertEquals("no-store", exchange.getResponse().getHeaders().getCacheControl());
+      assertFalse(forwarded.get());
+      verifyNoInteractions(redis);
+    }
+  }
+
+  @Test
   void directDiscoveryAndEncodedPathsAreRejectedBeforeTokenLookup() {
     for (String path :
         List.of(

@@ -315,6 +315,40 @@ Get-Content -Raw -Encoding UTF8 backend/database/migrate_pay_tcc_execution.sql |
   docker exec -i cloud-mall-mysql mysql -uroot -proot --default-character-set=utf8mb4
 ```
 
+### CM-18 本地只读取证（16T1）
+
+取证入口默认关闭：`cloudmall.pay.tcc-reconciliation.enabled=false`。确认已有 Pay
+TCC 表和迁移结构后，可在需要检查的 Pay 实例显式开启此诊断开关；不需要开启资金
+TCC entry、coordinator 或 recovery，也不会替你建表、重试交易或改写历史记录。
+
+直接访问 Pay 的内部接口（固定本地端口 8086），不要通过 Gateway：
+
+```text
+GET /api/internal/payments/{payNo}/tcc-reconciliation
+X-Internal-Service: cm18-reconciliation
+X-Internal-Callback-Token: <该实例配置的内部 callback token>
+```
+
+仅接受 1–64 位 ASCII 字母、数字、下划线或连字符的支付号。关闭为 503，凭证/调用者
+错误为 403，非法支付号为 400；已有本地事务或 XID 上下文为 409。支付不存在为 404，
+排序规则别名/非唯一候选为 409；缺表或数据库不可用为固定 503，不泄露底层错误。
+授权与参数校验先于连接/事务。网关会在查 Redis Token 前拒绝该路径及发现前缀/编码变体。
+
+响应固定标记 `PAY_LOCAL_ONLY` 和 `automaticActionsAllowed=false`，包含上海采集时间、
+白名单状态、错误存在性和 XID/branch/操作键/账本键的 SHA-256 指纹。它只读取 Pay 六类
+本地来源，不查询 User、Order、Stock、TC 或 MQ；即使本地记录已 COMMITTED/ROLLEDBACK，
+也只能报告外部证据尚未查询，不能据此再次扣款、退款、改决议或结束未知交易。
+
+`BEGIN_UNKNOWN`/缺 XID 保留原事实；缺本地来源列出固定 reason code；载荷/模式/分支/Fence
+矛盾按 LOCAL_CONFLICT 阻塞。指纹不能用于重放或推导原 XID。关闭诊断开关不改变任何
+LEGACY/TCC 交易模式或恢复能力。后续仍需外部完整取证、人工处置和四服务发布/回退验收。
+
+独立 MySQL 验证不启动 Pay 应用或 TC，使用自有随机数据库和最小 MyBatis/只读 RR 代理：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccReconciliationMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

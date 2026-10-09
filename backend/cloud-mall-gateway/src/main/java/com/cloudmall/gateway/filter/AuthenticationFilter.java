@@ -78,7 +78,7 @@ public class AuthenticationFilter implements GlobalFilter, Ordered {
   private boolean isTccInternalPath(String path) {
     String decodedPath = path;
     for (int depth = 0; depth <= 2; depth++) {
-      if (decodedPath.contains("tcc-debits")) return true;
+      if (decodedPath.contains("tcc-debits") || decodedPath.contains("tcc-reconciliation")) return true;
       if (!decodedPath.contains("%")) return false;
       try {
         decodedPath = UriUtils.decode(decodedPath, StandardCharsets.UTF_8);

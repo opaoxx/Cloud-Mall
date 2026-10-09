@@ -11,6 +11,12 @@ import org.apache.ibatis.annotations.Update;
 /** 支付记录表数据访问接口。 */
 @Mapper
 public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
+  /** 只读取证的有界身份候选，不加锁或修改记录。 */
+  @Select(
+      "SELECT pay_no,order_no,user_id,amount,status,debit_mode FROM pay_record WHERE"
+          + " pay_no=#{payNo} LIMIT 2")
+  List<PayRecordPO> findReconciliationCandidates(@Param("payNo") String payNo);
+
   /** 查询用户订单的支付记录。 */
   @Select(
       "select pay_no,order_no,user_id,amount,status,debit_mode,paid_at from pay_record where"
