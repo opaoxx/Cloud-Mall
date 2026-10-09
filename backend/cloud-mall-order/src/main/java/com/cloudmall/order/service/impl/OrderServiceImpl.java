@@ -41,6 +41,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.exc.MismatchedInputException;
 import feign.FeignException;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -1038,7 +1041,19 @@ public class OrderServiceImpl implements OrderService {
   @Transactional
   public void consumeTimeout(Message message) {
     // 1. 将两种消息表示统一为订单号；新消息必须携带稳定事件号和类型。
-    String rawPayload = new String(message.getBody(), StandardCharsets.UTF_8);
+    String rawPayload;
+    try {
+      // 解码先保原字节含义，损坏UTF8不得用替代字符猜测身份或降级旧格式。
+      rawPayload =
+          StandardCharsets.UTF_8
+              .newDecoder()
+              .onMalformedInput(CodingErrorAction.REPORT)
+              .onUnmappableCharacter(CodingErrorAction.REPORT)
+              .decode(ByteBuffer.wrap(message.getBody()))
+              .toString();
+    } catch (CharacterCodingException invalidUtf8) {
+      throw new IllegalArgumentException("订单超时事件不是合法UTF-8", invalidUtf8);
+    }
     String orderNo;
     try {
       JsonNode event =
