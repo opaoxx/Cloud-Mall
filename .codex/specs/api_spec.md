@@ -238,6 +238,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单状态写操作必须返回并检查条件更新影响行数。支付成功、手工取消和超时关单先在本地事务中完成订单 CAS 与 `order_stock_action` 意图落库，提交后才调用库存确认/回滚；远程响应未知时动作进入 `UNKNOWN`，恢复任务查询库存最终状态并用同一 `operationKey` 重试。CAS 失败必须读取当前状态，已达到目标状态时作为幂等成功返回，处于其他终态时返回 `ORDER_STATUS_INVALID`，不得创建相反库存动作。支付成功的 `PAID` 状态一旦本地提交，不得因为后续 stock.confirm 超时回滚为 `PENDING_PAYMENT`；取消/超时只有在订单仍为 `PENDING_PAYMENT` 时才能提交 `CANCELLED` 与回滚意图。
 
+订单 timeout `consumeTimeout(String)` 在读取订单并确认 `PENDING_PAYMENT` 后、任何 CAS 或 `order_stock_action` 写入前，必须要求订单事实 `expire_at` 非 null；缺失时返回既有状态错误/409“订单超时期限缺失，暂不关单”，不从 created_at、Message envelope 或当前时间推导 deadline。非待支付状态即使 expire_at NULL 仍沿原 no-op；非空 future 继续原 409，已过期继续原 CAS/rollback action。该门不改变 expire_at nullable DDL、API、消息、SQL、Stock、ACK/retry、TTL 或其他日期异常语义。
+
 ## 8. 库存服务接口
 
 库存写接口原则上仅供内部服务调用，不作为普通前端公开 API。

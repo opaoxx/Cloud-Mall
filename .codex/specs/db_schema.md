@@ -195,6 +195,8 @@
 
 约束：金额非负；状态只能按状态机迁移；订单号 `yyyyMM + UUID` 全局唯一且可定位月份。索引：`idx_user_created(user_id, created_at)`、`idx_status_expire(status, expire_at)`、`idx_created_at(created_at)`。现有 `idx_user_created` 能支持用户和时间范围的主要过滤，但没有覆盖稳定排序的 `order_no`，也未证明能覆盖带 `status` 条件的全部查询；实现必须显式使用 `created_at DESC, order_no DESC`，先以 `EXPLAIN` 和实际分页耗时验证，当前不凭推测新增索引或改表。若后续证据表明深分页计划退化，再单独评审复合索引及迁移窗口。订单、明细和状态日志均按 `created_at` 月度分表；跨月用户订单列表按时间范围路由并聚合分页结果。
 
+超时关单只能基于订单主表事实的非空 `expire_at` 判断期限：待支付订单若 `expire_at` NULL，消费入口在状态 CAS/stock action 前拒绝并保留原行；不得用 outbox payload、created_at 加固定时长或当前时间回填 deadline。非待支付状态继续原 no-op，非空期限沿原 future/past 与 CAS 语义。`expire_at DATETIME(3)` nullable DDL、索引、历史 NULL 和所有其他订单/动作表不变。
+
 ### 5.2 `mall_order_item_${yyyyMM}`
 
 与订单同月分片，字段：`id BIGINT PK`、`order_id BIGINT NOT NULL`、`order_no VARCHAR(64) NOT NULL`、`product_id BIGINT NOT NULL`、`sku_id BIGINT NOT NULL`、`product_name_snapshot VARCHAR(255) NOT NULL`、`sku_snapshot JSON`、`unit_price DECIMAL(18,2) NOT NULL`、`quantity INT NOT NULL`、`line_amount DECIMAL(18,2) NOT NULL`、`created_at DATETIME(3) NOT NULL`。索引：`idx_order_id(order_id)`、`idx_order_no(order_no)`；数量大于 0，行金额须与单价和数量一致。
