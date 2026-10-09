@@ -515,6 +515,125 @@ class OrderOutboxDispatcherTest {
   }
 
   @Test
+  void dueSnapshotsUseTheExistingDlxWithoutExpirationAndKeepTheOriginalEnvelope() {
+    for (String expiration :
+        List.of(
+            "2020-01-01T00:00:00Z",
+            "2020-01-01T00:00:00+08:00",
+            "2020-01-01T00:00:00",
+            java.time.OffsetDateTime.now().toString(),
+            java.time.OffsetDateTime.MIN.toString())) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO outbox = candidate("due-event");
+      outbox.payload = "{\"expireAt\":\"" + expiration + "\",\"traceId\":\"original-trace\"}";
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(outbox));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertEquals(
+                    com.cloudmall.order.config.OrderMessagingConfiguration.DLX,
+                    invocation.getArgument(0));
+                Map<String, Object> envelope = invocation.getArgument(2);
+                org.junit.jupiter.api.Assertions.assertEquals(
+                    outbox.eventId, envelope.get("eventId"));
+                org.junit.jupiter.api.Assertions.assertEquals(expiration, envelope.get("expireAt"));
+                org.junit.jupiter.api.Assertions.assertEquals(
+                    "original-trace", envelope.get("traceId"));
+                org.springframework.amqp.core.Message message =
+                    new org.springframework.amqp.core.Message(
+                        new byte[0], new org.springframework.amqp.core.MessageProperties());
+                message.getMessageProperties().setExpiration("999");
+                org.springframework.amqp.core.MessagePostProcessor processor =
+                    invocation.getArgument(3);
+                org.junit.jupiter.api.Assertions.assertNull(
+                    processor.postProcessMessage(message).getMessageProperties().getExpiration());
+                CorrelationData correlation = invocation.getArgument(4);
+                org.junit.jupiter.api.Assertions.assertEquals(outbox.eventId, correlation.getId());
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+          .dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(outbox.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
+  void futureSnapshotsRetainTheOriginalTtlRouteAndTimeText() {
+    for (String expiration :
+        List.of("2099-01-01T00:00:00Z", "2099-01-01T00:00:00+08:00", "2099-01-01T00:00:00")) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO outbox = candidate("future-event");
+      outbox.payload = "{\"expireAt\":\"" + expiration + "\"}";
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(outbox));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertEquals(
+                    com.cloudmall.order.config.OrderMessagingConfiguration.TIMEOUT_EXCHANGE,
+                    invocation.getArgument(0));
+                Map<String, Object> envelope = invocation.getArgument(2);
+                org.junit.jupiter.api.Assertions.assertEquals(expiration, envelope.get("expireAt"));
+                org.springframework.amqp.core.MessagePostProcessor processor =
+                    invocation.getArgument(3);
+                org.springframework.amqp.core.Message message =
+                    new org.springframework.amqp.core.Message(
+                        new byte[0], new org.springframework.amqp.core.MessageProperties());
+                org.junit.jupiter.api.Assertions.assertTrue(
+                    Long.parseLong(
+                            processor
+                                .postProcessMessage(message)
+                                .getMessageProperties()
+                                .getExpiration())
+                        >= 1);
+                CorrelationData correlation = invocation.getArgument(4);
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment())
+          .dispatchPending();
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(outbox.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+    }
+  }
+
+  @Test
+  void futureDurationOverflowIsNotGuessedToBeAnExpiredMessage() {
+    OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+    RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+    OrderOutboxPO outbox = candidate("overflow-future");
+    outbox.payload = "{\"expireAt\":\"" + java.time.OffsetDateTime.MAX + "\"}";
+    org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt())).thenReturn(List.of(outbox));
+    OrderOutboxDispatcher dispatcher =
+        new OrderOutboxDispatcher(mapper, rabbit, new ObjectMapper(), new MockEnvironment());
+    org.mockito.Mockito.clearInvocations(rabbit);
+    dispatcher.dispatchPending();
+    verify(mapper).findPendingOutbox(50);
+    verify(mapper)
+        .recordOutboxFailure(
+            org.mockito.ArgumentMatchers.eq(outbox.eventId), anyString(), any(LocalDateTime.class));
+    org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+    org.mockito.Mockito.verifyNoInteractions(rabbit);
+  }
+
+  @Test
   void zeroProofRequiresOriginalOrderTypeAndAnInterpretableCounter() {
     for (String proof :
         List.of(

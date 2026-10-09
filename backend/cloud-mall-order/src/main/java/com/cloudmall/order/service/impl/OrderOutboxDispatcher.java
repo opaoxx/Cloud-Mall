@@ -29,7 +29,10 @@ import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-/** Dispatches committed order timeout outbox rows through the TTL and DLX chain. */
+/**
+ * Dispatches future timeout rows through TTL and already due rows directly through the existing
+ * DLX.
+ */
 @Component
 public class OrderOutboxDispatcher {
   /** 记录 outbox 投递和重试失败。 */
@@ -137,6 +140,10 @@ public class OrderOutboxDispatcher {
         throw new IllegalArgumentException("ORDER_TIMEOUT outbox 缺少 expireAt: " + outbox.eventId);
       }
       long ttlMillis = remainingTtlMillis(expireAt);
+      String exchange =
+          ttlMillis == 0
+              ? OrderMessagingConfiguration.DLX
+              : OrderMessagingConfiguration.TIMEOUT_EXCHANGE;
       Map<String, Object> envelope = new LinkedHashMap<>();
       envelope.put("eventId", outbox.eventId);
       envelope.put("eventType", outbox.eventType);
@@ -149,10 +156,10 @@ public class OrderOutboxDispatcher {
       CorrelationData correlationData = new CorrelationData(outbox.eventId);
       if (Thread.currentThread().isInterrupted()) return;
       rabbitTemplate.convertAndSend(
-          OrderMessagingConfiguration.TIMEOUT_EXCHANGE,
+          exchange,
           "",
           envelope,
-          message -> withTtl(message, ttlMillis),
+          message -> withTimeoutExpiration(message, ttlMillis),
           correlationData);
       if (Thread.currentThread().isInterrupted()) return;
       CorrelationData.Confirm confirm =
@@ -245,15 +252,20 @@ public class OrderOutboxDispatcher {
       throw new IllegalArgumentException("订单超时outbox载荷身份不一致: " + fieldName);
   }
 
-  private static Message withTtl(Message message, long ttlMillis) {
-    message.getMessageProperties().setExpiration(String.valueOf(Math.max(1L, ttlMillis)));
+  /** 已到期事件直达关单队列，清除过期属性避免再被丢弃；未来事件保持原正TTL。 */
+  private static Message withTimeoutExpiration(Message message, long ttlMillis) {
+    message
+        .getMessageProperties()
+        .setExpiration(ttlMillis == 0 ? null : String.valueOf(Math.max(1L, ttlMillis)));
     return message;
   }
 
+  /** 以同一采样时刻判定到期；过去先返回0避免负时长溢出，未来保原至少1ms及溢出失败语义。 */
   private static long remainingTtlMillis(String value) {
     OffsetDateTime expiration = parseExpiration(value);
-    return Math.max(
-        1L, Duration.between(OffsetDateTime.now(ZoneOffset.ofHours(8)), expiration).toMillis());
+    Duration remaining = Duration.between(OffsetDateTime.now(ZoneOffset.ofHours(8)), expiration);
+    if (remaining.isNegative() || remaining.isZero()) return 0;
+    return Math.max(1L, remaining.toMillis());
   }
 
   private static OffsetDateTime parseExpiration(String value) {

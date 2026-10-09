@@ -27,7 +27,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.mock.env.MockEnvironment;
 
-/** 超时outbox真实SQL错误记录，broker异常为替身，每例只写随机数据库。 */
+/** 超时outbox真实SQL回归；多数broker为替身，已到期路由另用隔离真实vhost，每例独立随机数据库。 */
 class OrderOutboxErrorMySqlIT {
   /** 原订单库只读核验和隔离库管理入口。 */
   private static JdbcTemplate source;
@@ -86,6 +86,59 @@ class OrderOutboxErrorMySqlIT {
   static void verifyOriginalDatabase() {
     if (source != null) assertEquals(originalFingerprint, fingerprint());
     System.out.println("CM17AU original Order tables and checksums unchanged");
+  }
+
+  @Test
+  void alreadyExpiredRecoveryCannotWaitBehindAnUnexpiredTtlHead() throws Exception {
+    OrderOutboxPO future = pendingOutbox();
+    future.eventId = "future-timeout-head";
+    OrderOutboxPO expired = pendingOutbox();
+    expired.id = 2L;
+    expired.eventId = "already-due-timeout-tail";
+    expired.orderNo = "202610-recovered-timeout";
+    expired.nextRetryAt = future.nextRetryAt.plusSeconds(1);
+    expired.payload =
+        "{\"expireAt\":\""
+            + LocalDateTime.now(ZoneOffset.ofHours(8))
+                .minusMinutes(1)
+                .atOffset(ZoneOffset.ofHours(8))
+            + "\"}";
+    assertEquals(1, mapper.insert(future));
+    assertEquals(1, mapper.insert(expired));
+    try (OrderTimeoutRabbitFixture broker = new OrderTimeoutRabbitFixture()) {
+      dispatcher(broker.rabbit()).dispatchPending();
+      org.springframework.amqp.core.Message message = broker.awaitDueMessage();
+      assertNotNull(message, "已到期事件不应等待未到期的30分钟TTL队头");
+      assertEquals(
+          expired.eventId, new ObjectMapper().readTree(message.getBody()).path("eventId").asText());
+      assertNull(message.getMessageProperties().getExpiration(), "关单队列消息不能继续携带1ms TTL");
+      assertEquals(1, broker.pendingTimeoutMessages(), "未到期消息仍保留原TTL链路");
+      assertEquals(
+          2,
+          fixture.queryForObject(
+              "SELECT COUNT(*) FROM order_outbox WHERE status='PUBLISHED'", Integer.class));
+    }
+  }
+
+  @Test
+  void missingDueRouteBindingCannotBeMistakenForSuccessfulPublication() throws Exception {
+    OrderOutboxPO expired = pendingOutbox();
+    expired.payload =
+        "{\"expireAt\":\""
+            + LocalDateTime.now(ZoneOffset.ofHours(8))
+                .minusMinutes(1)
+                .atOffset(ZoneOffset.ofHours(8))
+            + "\"}";
+    assertEquals(1, mapper.insert(expired));
+    try (OrderTimeoutRabbitFixture broker = new OrderTimeoutRabbitFixture()) {
+      broker.removeDeadLetterBinding();
+      dispatcher(broker.rabbit()).dispatchPending();
+      var after = fixture.queryForMap("SELECT * FROM order_outbox");
+      assertEquals("PENDING", after.get("status"));
+      assertEquals(1, ((Number) after.get("attempts")).intValue());
+      assertTrue(String.valueOf(after.get("last_error")).contains("returned"));
+      assertNull(after.get("published_at"));
+    }
   }
 
   @Test
