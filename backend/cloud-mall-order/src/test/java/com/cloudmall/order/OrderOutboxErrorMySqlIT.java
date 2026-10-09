@@ -1477,6 +1477,53 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void impossibleCalendarDatesCannotAbortTheScanOrOccupyItsLimit() throws Exception {
+    assertInvalidDateCandidatesAreExcluded(
+        List.of(
+            "2026-02-29 00:00:00.000",
+            "2026-02-30 00:00:00.000",
+            "2026-04-31 00:00:00.000",
+            "2026-09-31 00:00:00.000",
+            "1900-02-29 00:00:00.000",
+            "1000-02-29 00:00:00.000"),
+        "ALLOW_INVALID_DATES");
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderOutboxMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (String validDate :
+            List.of(
+                "2000-02-29",
+                "2024-02-29",
+                "1900-02-28",
+                "1000-02-28",
+                "2026-04-30",
+                "2026-01-31")) {
+          modeJdbc.update("DELETE FROM order_outbox");
+          OrderOutboxPO valid = pendingOutbox();
+          LocalDateTime timestamp = LocalDateTime.parse(validDate + "T12:00:00.123");
+          valid.nextRetryAt = timestamp;
+          valid.createdAt = timestamp;
+          valid.updatedAt = timestamp;
+          valid.publishedAt = timestamp;
+          assertEquals(1, modeMapper.insert(valid));
+          var original = outboxTextFacts(modeJdbc, 1L);
+          List<OrderOutboxPO> selected = modeMapper.findPendingOutbox(1);
+          assertEquals(1, selected.size(), mode + ":" + validDate);
+          OrderOutboxPO candidate = selected.get(0);
+          assertEquals(valid.eventId, candidate.eventId);
+          assertEquals(timestamp, candidate.nextRetryAt);
+          assertEquals(timestamp, candidate.createdAt);
+          assertEquals(timestamp, candidate.updatedAt);
+          assertEquals(timestamp, candidate.publishedAt);
+          assertEquals(original, outboxTextFacts(modeJdbc, 1L));
+        }
+      }
+    }
+  }
+
+  @Test
   void partialZeroDatesCannotAbortTheScanOrOccupyItsLimit() throws Exception {
     assertInvalidDateCandidatesAreExcluded(
         List.of("2026-00-15 00:00:00.000", "2026-02-00 00:00:00.000", "2026-00-00 00:00:00.000"));
@@ -1489,6 +1536,12 @@ class OrderOutboxErrorMySqlIT {
 
   /** 仅隔离库构造指定零日期，逐字段/模式断言窗口、真实SQL投递和不可变坏事实；broker为确认替身。 */
   private void assertInvalidDateCandidatesAreExcluded(List<String> invalidDates) throws Exception {
+    assertInvalidDateCandidatesAreExcluded(invalidDates, "");
+  }
+
+  /** 指定造数模式仅限隔离连接；读取仍覆盖strict/empty，非法时间以文本核验，不修改原库。 */
+  private void assertInvalidDateCandidatesAreExcluded(
+      List<String> invalidDates, String fixtureWriteMode) throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     try (var connection = fixture.getDataSource().getConnection()) {
       var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
@@ -1497,7 +1550,7 @@ class OrderOutboxErrorMySqlIT {
         for (String zeroField :
             List.of("next_retry_at", "created_at", "updated_at", "published_at")) {
           for (String invalidDate : invalidDates) {
-            modeJdbc.execute("SET SESSION sql_mode=''");
+            modeJdbc.execute("SET SESSION sql_mode='" + fixtureWriteMode + "'");
             modeJdbc.update("DELETE FROM order_outbox");
             OrderOutboxPO invalid = pendingOutbox();
             OrderOutboxPO healthy = pendingOutbox();
@@ -1525,10 +1578,18 @@ class OrderOutboxErrorMySqlIT {
             } catch (RuntimeException rejected) {
               scanFailure = rejected;
             }
+            var warnings = modeJdbc.queryForList("SHOW WARNINGS");
             List<OrderOutboxPO> candidates = selected;
             RuntimeException capturedScan = scanFailure;
             String label = mode + ":" + zeroField + ":" + invalidDate;
             checks.add(() -> assertNull(capturedScan, label));
+            // 仅保留原event_type BINARY弃用warning，新增日期门不得引入转换告警。
+            checks.add(
+                () ->
+                    assertTrue(
+                        warnings.stream()
+                            .allMatch(warning -> ((Number) warning.get("Code")).intValue() == 1287),
+                        label + ":" + warnings));
             checks.add(
                 () ->
                     assertEquals(
