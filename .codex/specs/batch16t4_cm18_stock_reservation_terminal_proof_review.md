@@ -10,11 +10,13 @@
 
 ## 2. 普通 flows 聚合契约
 
-### 2.1 每行数值验证
+### 2.1 每行数值验证（仅普通非空 flows 分支）
+
+本批 proof 只适用于已经进入普通非空 `flows` 读取分支的记录：原有 `flows` 为空且无 request 的 `NOT_FOUND` 语义保持，`flows` 为空但存在 request 的既有 request/snapshot 展示分支保持，不被本批 `UNKNOWN/items=[]` 规则覆盖。
 
 - `sku_id` 必须是正 `Long`；`reserved_quantity` 必须是正整数；`confirmed_quantity`、`rolled_back_quantity` 必须是非负整数。
 - JDBC `Number` 统一以 `BigDecimal` 精确读取并验证整数性、非负/正边界；不得用 `intValue()`、浮点、静默 null→0、截断、回绕或默认化。
-- 每行必须满足 `confirmed + rolled_back <= reserved`，加法使用不会溢出的精确方式；任一非法数值、空 flows、reserved 非正或超量均返回 `UNKNOWN` 且 `items=[]`。
+- 每行必须满足 `confirmed + rolled_back <= reserved`，加法使用不会溢出的精确方式；进入本 proof 分支后任一非法数值、reserved 非正或超量均返回 `UNKNOWN` 且 `items=[]`。
 
 ### 2.2 每 SKU 与整单状态
 
@@ -27,7 +29,7 @@
 
 所有 SKU 必须得到同一个合法状态，整单才返回该状态；多 SKU 混合 `CONFIRMED`/`ROLLED_BACK`/`RESERVED` 或任一 `UNKNOWN` 均返回 `UNKNOWN`。返回的 `items` 只在所有行数值和状态合法时构造，并保留每个 SKU 的原整数事实。
 
-若存在普通 reservation request 行，其状态只能作为交叉证据：只有 request status 与上述整单聚合得到的同一合法状态一致时才可沿用；request 缺失不覆盖合法 flows，request 与 flows 矛盾返回 `UNKNOWN`。request 行不能把不完整或非法 flows 覆盖成终态。
+若存在普通 reservation request 行，其状态只能作为交叉证据：只有 request status 与上述整单聚合得到的同一合法状态一致时才可沿用；request 缺失不覆盖合法 flows，request 与 flows 矛盾返回 `UNKNOWN`。request 行不能把不完整或非法 flows 覆盖成终态。本批只证明已观察 SKU 的数量/状态聚合与 request.status 一致，不验证原订单完整 SKU 集合、`items_snapshot`/`items_hash` 完整性、Stock 余额或秒杀身份。
 
 ### 2.3 保持的行为
 
@@ -39,9 +41,9 @@
 
 - Unit 红/绿覆盖：单 SKU 完整确认/回滚/保留、多 SKU 同向完整、部分结清、混合方向、request 缺失/一致/矛盾、null/非整数/负数/超量、`Integer.MAX_VALUE` 与加法溢出；非法与混合均 `UNKNOWN/items=[]`，不发 Stock 写调用。
 - 真实 MySQL：普通旧 flows 表写入多 SKU及混合 `stock_flow`，分别验证无 request 与有 request；只读 GET 的 SQL/行事实前后不变，request 矛盾不会覆盖 flows，`CONFIRMED`/`ROLLED_BACK` 仅在所有 SKU 完整同向时出现。
-- Order fallback 链：StockClient mock 返回实际 Stock GET 结果，旧无 `order_stock_action` 订单的 `payment-state` 只能在合法整单终态下映射 `SUCCEEDED`；partial/mixed/非法/UNKNOWN 保持未知，不调用 Stock 写接口、不推进 Pay/退款。
+- Order fallback 链：StockClient mock 返回实际 Stock GET 结果，旧无 `order_stock_action` 订单的 `payment-state` 只能在合法整单终态下映射 `SUCCEEDED`；partial/mixed/非法/UNKNOWN 保持未知，不调用 Stock 写接口、不推进 Pay/退款。测试可使用实际 Stock SQL/Order 代码与 StockClient 桥接结果，但 Order 行/动作 Mapper 仍为替身，不宣称 HTTP/TC/真实资金全链。
 - 保持秒杀 GET、普通写接口、Redis、消息和既有 API/字段回归；本批不覆盖读中多次 SELECT 的完整快照，只验证保守 UNKNOWN 可接受。
 
 ## 4. 交付边界
 
-本文件只冻结普通 reservation GET 终态证明，backend 按本文及 API/DB 相邻条款实现；本轮不修改业务测试、Maven、Order/Pay 生产代码或 CM18 其他 M1 切片。
+本文件只冻结普通非空 flows reservation GET 终态证明，backend 按本文及 API/DB 相邻条款实现；无 flows 的既有外层分支、完整预扣原载荷/库存余额/秒杀身份仍是 M1 缺口。本轮不修改业务测试、Maven、Order/Pay 生产代码或 CM18 其他 M1 切片。
