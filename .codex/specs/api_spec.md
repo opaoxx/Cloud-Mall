@@ -252,6 +252,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 在上述共享 typed RowMapper 约束下，`findRecoverable` 的扫描 WHERE 在 LIMIT 前必须增加三项无参数年份下界：`created_at >= '1000-01-01 00:00:00.000'`、`updated_at >= '1000-01-01 00:00:00.000'`，以及 `next_retry_at IS NULL OR next_retry_at >= '1000-01-01 00:00:00.000'`。原 `staleBefore`、`now`、`limit` 三个绑定、全行投影、状态/恢复时间资格、排序、limit、nullable next、claimRecovery、markReleased、Recovery/Stock 和异常传播保持；`findByUserAndKey` 不得应用这些过滤。下界前行只被扫描资格排除，不被读取、修复、删除或改状态。本条只覆盖合法年份下界，不扩展零月日、超月末、其他历史日期、SQL mode、driver 或真实 Stock HTTP。
 
+在上述 EB 年份下界之后，`findRecoverable` 的扫描 WHERE 在 LIMIT 前还必须增加三组无参数零组件资格：`MONTH(created_at)>0 AND DAYOFMONTH(created_at)>0`、`MONTH(updated_at)>0 AND DAYOFMONTH(updated_at)>0`，以及 `next_retry_at IS NULL OR (MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0)`。原三绑定参数、全行投影、状态/排序/limit、typed RowMapper、nullable next、claimRecovery、markReleased、RELEASED 写入、Recovery/Stock 和错误传播保持；`findByUserAndKey` 不应用这些过滤，继续按原用户与幂等键读取候选。该资格只排除恢复扫描中的零月/零日，不设置 global SQL mode、driver 或时区，不扩展完整日历、月末、其他字段或历史 repair。
+
 订单 timeout `consumeTimeout(String)` 在读取订单并确认 `PENDING_PAYMENT` 后、任何 CAS 或 `order_stock_action` 写入前，必须要求订单事实 `expire_at` 非 null；缺失时返回既有状态错误/409“订单超时期限缺失，暂不关单”，不从 created_at、Message envelope 或当前时间推导 deadline。非待支付状态即使 expire_at NULL 仍沿原 no-op；非空 future 继续原 409，已过期继续原 CAS/rollback action。该门不改变 expire_at nullable DDL、API、消息、SQL、Stock、ACK/retry、TTL 或其他日期异常语义。
 
 ## 8. 库存服务接口

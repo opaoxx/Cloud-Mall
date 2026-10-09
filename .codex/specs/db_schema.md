@@ -270,6 +270,8 @@
 
 为避免恢复扫描被年份下界前的历史日期阻断或占据 LIMIT，`findRecoverable` 在原资格条件之后、LIMIT 前增加三项无参数字面量谓词：`created_at >= '1000-01-01 00:00:00.000'`、`updated_at >= '1000-01-01 00:00:00.000'`，以及 `(next_retry_at IS NULL OR next_retry_at >= '1000-01-01 00:00:00.000')`。原扫描仍绑定 `staleBefore`、`now`、`limit` 三个参数，保留全行投影、状态/排序/limit、typed RowMapper、NULL next 语义和恢复写入链；`findByUserAndKey` 保持原按用户与幂等键读取候选，不应用该过滤。下界前行不被恢复扫描读取、修复、删除或改状态；点查询仍沿原行为处理。本条只保证本批合法年份下界资格，不设置 SQL mode/driver zero-date 参数，不新增零月日/超月末或其他非法日期过滤，不进行历史 repair。
 
+在上述 EB 年份下界之后，`findRecoverable` 在 LIMIT 前增加三组无参数零组件资格：`MONTH(created_at)>0 AND DAYOFMONTH(created_at)>0`、`MONTH(updated_at)>0 AND DAYOFMONTH(updated_at)>0`，以及 `(next_retry_at IS NULL OR (MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0))`。本条只筛除恢复扫描中的零月/零日；原 `staleBefore`、`now`、`limit` 三参数、全行投影、状态/排序/limit、typed RowMapper、NULL `next_retry_at`、`claimRecovery`、`markReleased`、`RELEASED` 写入和 Recovery/Stock 链保持。`findByUserAndKey` 仍按用户与幂等键读取候选，不应用该过滤；坏行点查沿原读取或异常传播。不得设置 SQL mode/driver/时区，不新增月末或完整日历过滤，不修复历史行。本表无 operationKey、finish、lease 或 attempts 字段，本条不引入这些概念。
+
 ### 5.5 `order_outbox`
 
 订单本地事务与 RabbitMQ 超时消息之间的可靠交付表。该表不按订单月分片，dispatcher 按状态和下次重试时间扫描；不改变订单事实表的月度分片策略。
