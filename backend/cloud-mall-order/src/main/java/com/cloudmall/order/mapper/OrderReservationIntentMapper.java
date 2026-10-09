@@ -1,7 +1,6 @@
 package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
-import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.springframework.dao.DuplicateKeyException;
@@ -201,7 +200,7 @@ public class OrderReservationIntentMapper {
         orderNo);
   }
 
-  /** 将 JDBC 行转换为预扣意图 PO。 */
+  /** 将 JDBC 行转换为预扣意图 PO，DATETIME直接读取组件并保留可空重试时间。 */
   private static final RowMapper<OrderReservationIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {
         OrderReservationIntentPO intent = new OrderReservationIntentPO();
@@ -212,10 +211,9 @@ public class OrderReservationIntentMapper {
         intent.itemsSnapshot = resultSet.getString("items_snapshot");
         intent.status = resultSet.getString("status");
         intent.lastError = resultSet.getString("last_error");
-        Timestamp nextRetryAt = resultSet.getTimestamp("next_retry_at");
-        intent.nextRetryAt = nextRetryAt == null ? null : nextRetryAt.toLocalDateTime();
-        intent.createdAt = resultSet.getTimestamp("created_at").toLocalDateTime();
-        intent.updatedAt = resultSet.getTimestamp("updated_at").toLocalDateTime();
+        intent.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
+        intent.createdAt = resultSet.getObject("created_at", LocalDateTime.class);
+        intent.updatedAt = resultSet.getObject("updated_at", LocalDateTime.class);
         return intent;
       };
 }

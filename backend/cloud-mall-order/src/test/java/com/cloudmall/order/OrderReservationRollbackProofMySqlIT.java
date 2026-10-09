@@ -26,8 +26,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
-/** 普通预扣回滚后必须核原单持久终态；SQL真实，Stock与订单查询为替身。 */
+/** 普通预扣意图时间读取和回滚持久终态验证；意图SQL真实，Stock与订单查询为替身。 */
 class OrderReservationRollbackProofMySqlIT {
   /** 原订单库只读核验和隔离库管理入口。 */
   private static JdbcTemplate source;
@@ -87,6 +88,138 @@ class OrderReservationRollbackProofMySqlIT {
   static void verifyOriginalDatabase() {
     if (source != null) assertEquals(sourceFingerprint, fingerprint());
     System.out.println("CM17BN original Order tables and checksums unchanged");
+  }
+
+  @Test
+  void intentDatesRetainNativeComponentsInBothReadPaths() throws Exception {
+    System.out.println("CM17DX test JVM timezone: " + ZoneId.systemDefault());
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderReservationIntentMapper(modeJdbc);
+      List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        for (String column : List.of("next_retry_at", "created_at", "updated_at")) {
+          for (String date :
+              List.of(
+                  "1000-01-01",
+                  "1582-10-04",
+                  "1582-10-05",
+                  "1582-10-10",
+                  "1582-10-14",
+                  "1582-10-15",
+                  "2026-10-08")) {
+            checks.add(
+                () -> {
+                  modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+                  OrderReservationIntentPO original = seed(1L);
+                  modeJdbc.update(
+                      "UPDATE order_reservation_intent SET created_at='2026-10-08"
+                          + " 10:00:00.123',updated_at='2026-10-08"
+                          + " 10:00:00.123',next_retry_at='2026-10-08 10:00:00.123' WHERE id=1");
+                  LocalDateTime expected = LocalDateTime.parse(date + "T12:34:56.789");
+                  modeJdbc.update(
+                      "UPDATE order_reservation_intent SET " + column + "=? WHERE id=1",
+                      date + " 12:34:56.789");
+                  var before = intentDateEvidence(modeJdbc);
+                  assertAll(
+                      () ->
+                          assertReadDate(
+                              modeMapper.findByUserAndKey(original.userId, original.idempotencyKey),
+                              original,
+                              column,
+                              expected),
+                      () ->
+                          assertReadDate(
+                              modeMapper.findRecoverable(
+                                  LocalDateTime.of(2026, 10, 10, 0, 0),
+                                  LocalDateTime.of(2026, 10, 10, 0, 0),
+                                  1),
+                              original,
+                              column,
+                              expected),
+                      () -> assertEquals(before, intentDateEvidence(modeJdbc)));
+                });
+          }
+        }
+        checks.add(
+            () -> {
+              OrderReservationIntentPO original = seed(1L);
+              var before = intentDateEvidence(modeJdbc);
+              var direct = modeMapper.findByUserAndKey(original.userId, original.idempotencyKey);
+              LocalDateTime staleBefore = original.createdAt.plusMinutes(1);
+              var scanned = modeMapper.findRecoverable(staleBefore, staleBefore, 1);
+              assertEquals(1, direct.size());
+              assertEquals(1, scanned.size());
+              assertNull(direct.get(0).nextRetryAt);
+              assertNull(scanned.get(0).nextRetryAt);
+              assertEquals(before, intentDateEvidence(modeJdbc));
+            });
+      }
+      assertAll(checks);
+    }
+  }
+
+  @Test
+  void calendarCutoverIntentCannotPreventFollowingHealthyRecovery() {
+    OrderReservationIntentPO ancient = seed(1L);
+    OrderReservationIntentPO healthy = insert(2L);
+    fixture.update(
+        "UPDATE order_reservation_intent SET next_retry_at='1582-10-10 12:34:56.789' WHERE id=1");
+    var before = intentDateEvidence(fixture);
+    StockClient stock = mock(StockClient.class);
+    when(stock.reservation(ancient.orderNo)).thenReturn(fact(ancient.orderNo, "ROLLED_BACK"));
+    when(stock.reservation(healthy.orderNo)).thenReturn(fact(healthy.orderNo, "ROLLED_BACK"));
+    assertAll(
+        () -> assertDoesNotThrow(() -> recovery(stock).recoverStaleReservations()),
+        () ->
+            assertEquals(
+                List.of("RELEASED", "RELEASED"),
+                fixture.queryForList(
+                    "SELECT status FROM order_reservation_intent ORDER BY id", String.class)),
+        () -> verify(stock).reservation(ancient.orderNo),
+        () -> verify(stock).reservation(healthy.orderNo));
+    var after = intentDateEvidence(fixture);
+    for (int intentIndex = 0; intentIndex < before.size(); intentIndex++) {
+      for (String column :
+          List.of("id", "order_no", "user_id", "idempotency_key", "items_snapshot", "created_at")) {
+        assertEquals(
+            before.get(intentIndex).get(column), after.get(intentIndex).get(column), column);
+      }
+      assertNull(after.get(intentIndex).get("next_retry_at"));
+      assertNull(after.get(intentIndex).get("last_error"));
+    }
+    verifyNoMoreInteractions(stock);
+  }
+
+  /** 两入口应返回同一原身份和本地时间组件，不通过字符串或Timestamp转回预期值。 */
+  private static void assertReadDate(
+      List<OrderReservationIntentPO> intents,
+      OrderReservationIntentPO original,
+      String column,
+      LocalDateTime expected) {
+    assertEquals(1, intents.size());
+    OrderReservationIntentPO actual = intents.get(0);
+    LocalDateTime actualDate =
+        switch (column) {
+          case "next_retry_at" -> actual.nextRetryAt;
+          case "created_at" -> actual.createdAt;
+          case "updated_at" -> actual.updatedAt;
+          default -> throw new AssertionError("Unknown intent date column");
+        };
+    assertEquals(expected, actualDate);
+    assertEquals(original.orderNo, actual.orderNo);
+    assertEquals(original.userId, actual.userId);
+    assertEquals(original.idempotencyKey, actual.idempotencyKey);
+    assertEquals(original.status, actual.status);
+  }
+
+  /** 数据库原生CHAR取三个时间列整行证据，避免取证本身经过Calendar。 */
+  private static List<Map<String, Object>> intentDateEvidence(JdbcTemplate jdbc) {
+    return jdbc.queryForList(
+        "SELECT"
+            + " id,order_no,user_id,idempotency_key,items_snapshot,status,last_error,CAST(next_retry_at"
+            + " AS CHAR) next_retry_at,CAST(created_at AS CHAR) created_at,CAST(updated_at AS CHAR)"
+            + " updated_at FROM order_reservation_intent ORDER BY id");
   }
 
   @Test
