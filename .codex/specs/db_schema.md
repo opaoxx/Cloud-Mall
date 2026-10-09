@@ -300,6 +300,8 @@ Outbox 数据库异常隔离仅属于 dispatcher 控制流：扫描失败不改�
 
 发布完成 proof 只读当前事实的 partial PO；`findPublicationFacts(eventId)` 方法签名不变，投影固定为 `event_id,status,event_type,order_no,attempts`，不读取 payload、时间、错误或其他 full-row 字段，不用于重投。`markOutboxPublished` 影响行数 0 不直接代表成功，只有唯一行同时满足原 event_id 精确相等、status=PUBLISHED、原 order_no 精确相等、event_type=ORDER_TIMEOUT 且 attempts 非 NULL/非负时才可幂等收敛。attempts 不要求等于发送快照，可合法增长 1 或饱和为 INT_MAX；Mapper 以 nullable 精确方式读取它，NULL 仅是 unit proof 输入，`attempts INT NOT NULL` DDL 不变。任一事实不满足时由 dispatcher 抛 Optimistic(DataAccess) 并沿单候选隔离，不写 failure、不重发、不修事实；读前后中断、扫描/查询数据库异常、完成写 1 行及非 0/1 原规则保持。该读取不新增列、索引或状态写入，也不提供 MQ 与 DB 原子证明。
 
+订单 outbox 的 `order_outbox` Schema、索引、状态和 SQL 不因到期路由改变。dispatcher 仅在已读取 payload 的 `expireAt` 解析为上海当前时刻以前或恰好当前时，将消息发送到既有 `OrderMessagingConfiguration.DLX` 和空 routing key，并清除 per-message `expiration`；未来时间继续发送 `TIMEOUT_EXCHANGE` 并设置至少 `1ms` expiration。两条路径都必须先通过原 publisher confirm/mandatory returned，再执行既有 `PUBLISHED` CAS 与 17DD proof；direct DLX binding 缺失时 returned 保持 PENDING，不把 exchange confirm 当作 timeout consumer 已处理。现有 DLX、DLQ、binding 和 consumer 拓扑不变，不新增表、列、索引、队列或消息字段。本条只解决已到期快照绕过 TTL FIFO 阻挡，不覆盖未来消息队头、消费者时间判定或所有 TTL 延迟场景。
+
 订单 outbox 完成/失败更新保留 `event_id` 索引候选，并使用 `CAST(event_id AS BINARY)=CAST(? AS BINARY)` 精确核验身份；`event_id VARCHAR(128) UNIQUE NOT NULL`、索引和历史数据不变，不新增列或迁移。
 
 订单 outbox 扫描可在 LIMIT 前使用 Java17 whitespace 对齐的 `REGEXP_LIKE` eligibility 排除空白 eventId/orderNo；pattern 以 UTF-8 HEX 参数经 `UNHEX` 恢复并显式 `COLLATE utf8mb4_bin`，避免 session 反斜杠与隐式 collation 差异。pattern 仍为 UTF-8 文本，不 CAST BINARY、不改列排序规则；NOT NULL/字段宽度/索引/历史行不变，扫描不自动修复坏身份。
