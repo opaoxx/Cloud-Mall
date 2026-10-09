@@ -435,6 +435,8 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 
 16T5 在上述普通非空 flows+request 分支内，必须核对 request `order_no`、`scene=NORMAL`、非空 `items_snapshot` 和 `items_hash`。独立 ObjectMapper 仅用于该 proof，启用 trailing token/duplicate tree key 拒绝；native integral 只针对 MySQL 读取后的持久 JSON 树，数据库若已将 `2.0` 规范为 `2`，按当前 semantic canonical JSON/hash 兼容核验，不能重构或声称验证已丢失的原 token 类型、重复键或前置语法。重建严格升序、无重复、正 Long SKU/正 int quantity 的 `StockLineDTO` 列表，复用 writer 的 canonical JSON 与 SHA-256 算法，不能对 MySQL JSON raw 文本 hash。重建集合必须与已观察 flows 的 SKU/quantity 一一对应，缺、多、重复、读取后数量/hash/identity 不符均返回 UNKNOWN，不改 facts。空 flows 外层分支、秒杀、写状态机、SQL/DDL、Redis、消息和非 RR 语义保持；本条不提供完整订单 SKU、Stock 余额或秒杀身份证明。
 
+16T6 `findReservationFlows` 仍是单次普通 flows 汇总 SELECT，保留 `WHERE order_no=?`、GROUP BY `sku_id`、原参数和数量汇总，并额外投影 `MIN(order_no)`、`COUNT(DISTINCT BINARY order_no)` 与 invalid flow metadata。binary distinct count 只作为 provenance 证明，不在 WHERE 过滤或伪装缺行；Service 先要求查询 orderNo 与 MIN 精确相等、count=1、invalid count=0，再执行 16T4/16T5 数量及 request proof。原 order alias、混合 order、unknown/NULL flow_type、非正 quantity、负值抵消、metadata 缺失/异常均保留 facts 并返回 UNKNOWN；不新增 DDL/索引/写入，不改变空 flows、秒杀和非 RR 语义。
+
 进入既有 `alreadyReserved()` 重放路径时，只有 `reservationResult()` 返回非空 data 且 proof status 精确为 `RESERVED` 才能返回 `ALREADY_RESERVED`。UNKNOWN、其他终态、缺 data 或读取异常固定为 `STOCK_RESERVATION_PROOF_UNAVAILABLE`/503，不修改 request/flows/数量/状态/Redis/消息，不修复或覆盖历史事实；合法 RESERVED 的既有重放 API 语义保持。本门只保护 16T5 snapshot proof 失败不被响应层强制 coerce。
 
 ### 6.3 `stock_cache_repair`
