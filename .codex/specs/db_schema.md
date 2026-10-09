@@ -336,6 +336,8 @@ failure writer `recordOutboxFailure` 仍执行一次既有 UPDATE 并返回影�
 
 timeout object envelope 的 eventType、eventId、orderNo、expireAt 仅接受原生文本：eventType 精确 `ORDER_TIMEOUT`，其余三字段为非空白 textual 值；字段缺失/null/空白或非文本不进入业务订单查询。该入口校验不改变 outbox/订单/stock action 表、SQL、索引、ACK、TTL/DLX 或历史消息，不新增身份前缀/宽度/日期 grammar，也不把坏 object 归入裸数字 legacy 或自动重放。
 
+timeout object 的 eventId/orderNo/expireAt textual 值还必须通过 Java UTF-16 代理配对检查：高代理后必须紧邻低代理，低代理不得孤立；不满足时不读取订单/库存事实、不写 outbox/订单/action、不改变 ACK/TTL/DLX 或历史消息。该入口约束不修改 Schema、SQL、索引、数据库 `expire_at` 权威、UTF-8 decoder、JSON grammar 或其他字符串字段规则；合法代理对/中文/emoji/U+FFFD 保持原语义。
+
 timeout Message 的 JSON tree 读取为单次 per-call `ObjectReader` 配置 `FAIL_ON_TRAILING_TOKENS`；尾随有效 root 不进入订单业务查询。`MismatchedInputException` 走原格式错误并保留 cause，其他 JsonProcessingException 保持原 raw legacy fallback；该解析边界不改变 outbox、订单、stock action 表、SQL、索引、ACK、TTL/DLX、历史事实或消息重放规则，也不改变共享 ObjectMapper 全局配置。
 
 该 per-call `ObjectReader` 同时配置 `FAIL_ON_READING_DUP_TREE_KEY`，同一 JSON object 任意树深度的重复键拒绝解析；重复同值也拒绝，不同 object 的同名键不受影响。重复键失败不访问订单/库存事实、不改 outbox/订单/stock action 表、SQL、索引、ACK、TTL/DLX 或历史消息；不启用全局 duplicate detection，不改变其他服务 Map/POJO 解析。

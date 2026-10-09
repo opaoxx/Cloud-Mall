@@ -224,6 +224,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 订单 timeout object envelope 必须要求 `eventType` 为 textual 且精确等于 `ORDER_TIMEOUT`，并要求 `eventId`、`orderNo`、`expireAt` 均为非空白 textual 节点；缺失、JSON null、空白、数字、布尔、数组、对象或 type 别名均沿原格式错误返回，不委托 String legacy、不查询订单/Stock/RPC。`orderNo`、`expireAt` 使用原 textValue，不 trim/转换；catch 仍只处理 `JsonProcessingException`，不把坏 object 送入 DP fallback。订单格式/月路由、精确身份、到期/CAS/action/事务、ACK/retry、TTL、outbox SQL/DDL/proof/API/message 保持。
 
+订单 timeout object 的 `eventId`、`orderNo`、`expireAt` 在 textual/nonblank 门之后还必须是 well-formed UTF-16：高代理必须紧邻低代理成对出现，低代理不得孤立；失败沿现有格式 `IllegalArgumentException`，不 trim、替换、归一化、委托 legacy 或访问业务。合法代理对、中文、emoji、U+FFFD 保持；eventType 精确 ASCII、可选字段、expireAt ISO、DB deadline、SQL/DDL/CAS/action/事务/ACK/retry/TTL/proof/API/message 不变。本条是项目文本约束，不把 RFC8259 ABNF 可接受的孤立代理称作 UTF-8 或 JSON grammar 错误。
+
 订单 timeout Message 入口必须使用 per-call `mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(rawPayload)` 拒绝尾随有效 JSON；不得全局修改共享 ObjectMapper。`MismatchedInputException` 转原格式 `IllegalArgumentException` 并携带 cause，不进入 raw legacy 或业务查询；其他 `JsonProcessingException` 仍沿原 `rawPayload.trim()` fallback。合法尾随空白、DP 整数 raw String、quoted/object 原生字段门和 String 业务路径保持，ACK/retry、事务、TTL、outbox SQL/DDL/proof、API/message 不变。
 
 该 per-call reader 还必须启用 `DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY`；同一 JSON object 任意深度的重复键（包括相同值、必填字段、optional/nested/array object）均转原格式错误并保留 cause，不进入 DP/raw legacy/业务 Mapper/RPC；不同 object 各自使用同名字段继续合法。不得全局 enable、启用其他 duplicate-key/POJO 解析策略或改变 JSON 宽度；单 root、DQ、quoted/raw、String 业务、ACK/retry、TTL、SQL、DDL、proof、API/message 保持。
