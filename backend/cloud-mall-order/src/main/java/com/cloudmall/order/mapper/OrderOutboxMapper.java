@@ -128,17 +128,21 @@ public class OrderOutboxMapper {
    * 仅在publisher confirm成功后将原身份、待发布状态、超时类型精确且计数非负的事件标记为已发布。
    *
    * @param eventId 原消息事件标识，不做大小写、重音或空格归一化
-   * @param publishedAt 调用方提供的上海发布时间
+   * @param publishedAt 调用方提供的上海发布时间，年份1000..9999，写入前向下截到毫秒
    * @return 精确原身份且仍符合超时投递资格的匹配行数，资格不匹配或缺失为0
+   * @throws InvalidDataAccessApiUsageException 时间为空或年份超出DATETIME范围，首次JDBC前拒绝
    */
   public int markOutboxPublished(String eventId, LocalDateTime publishedAt) {
+    // 1. 校验原发布时间并向下截到毫秒，不采样替代时间或转换时区。
+    LocalDateTime normalizedPublishedAt = normalizeOutboxWriteTime(publishedAt, "publishedAt");
+    // 2. 同一时间双绑定完成及更新时间，保留原身份资格和返回行数语义。
     return jdbcTemplate.update(
         "UPDATE order_outbox SET status='PUBLISHED',published_at=?,updated_at=?,last_error=NULL"
             + " WHERE event_id=? AND CAST(event_id AS BINARY)=CAST(? AS BINARY)"
             + " AND CAST(status AS BINARY)=CAST('PENDING' AS BINARY)"
             + " AND CAST(event_type AS BINARY)=CAST('ORDER_TIMEOUT' AS BINARY) AND attempts>=0",
-        publishedAt,
-        publishedAt,
+        normalizedPublishedAt,
+        normalizedPublishedAt,
         eventId,
         eventId);
   }
@@ -154,10 +158,11 @@ public class OrderOutboxMapper {
    */
   public int recordOutboxFailure(String eventId, String error, LocalDateTime nextRetryAt) {
     // 1. 校验调用方时间并向下截到毫秒，避免数据库舍入跨秒、跨月或年份上限。
-    LocalDateTime normalizedRetryAt = normalizeFailureTime(nextRetryAt, "nextRetryAt");
+    LocalDateTime normalizedRetryAt = normalizeOutboxWriteTime(nextRetryAt, "nextRetryAt");
     // 2. 只采样一次上海更新时间，应用同一DATETIME(3)边界，不替换原重试时间。
     LocalDateTime updatedAt =
-        normalizeFailureTime(LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")), "updatedAt");
+        normalizeOutboxWriteTime(
+            LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")), "updatedAt");
     // 3. 按原资格和参数顺序写入，保持错误裁剪、计数饱和及返回行数语义。
     return jdbcTemplate.update(
         "UPDATE order_outbox SET attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE"
@@ -172,8 +177,8 @@ public class OrderOutboxMapper {
         eventId);
   }
 
-  /** 仅失败写时间边界：先拒绝空值/非法年份，再向下截毫秒；不转换时区、裁剪年份或补造时间。 */
-  private static LocalDateTime normalizeFailureTime(LocalDateTime timestamp, String fieldName) {
+  /** 仅完成/失败写时间边界：先拒绝空值/非法年份，再向下截毫秒；不转换时区、裁剪年份或补造时间。 */
+  private static LocalDateTime normalizeOutboxWriteTime(LocalDateTime timestamp, String fieldName) {
     if (timestamp == null || timestamp.getYear() < 1000 || timestamp.getYear() > 9999) {
       throw new InvalidDataAccessApiUsageException(
           fieldName + " must be non-null with year in 1000..9999");

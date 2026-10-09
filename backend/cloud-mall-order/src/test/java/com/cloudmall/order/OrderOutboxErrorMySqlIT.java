@@ -1477,6 +1477,77 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void publicationTimesAreFlooredBeforeSqlInBothModes() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    List<LocalDateTime> publicationTimes =
+        List.of(
+            LocalDateTime.parse("2026-10-31T23:59:59.999499"),
+            LocalDateTime.parse("2026-10-31T23:59:59.999500"),
+            LocalDateTime.parse("2026-10-31T23:59:59.999999"),
+            LocalDateTime.parse("2026-12-31T23:59:59.999999"),
+            LocalDateTime.parse("1000-01-01T00:00:00.000999"),
+            LocalDateTime.parse("9999-12-31T23:59:59.999999"),
+            LocalDateTime.parse("2026-10-09T12:00:00.456"));
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderOutboxMapper(modeJdbc);
+      for (String mode : List.of("STRICT_TRANS_TABLES", "")) {
+        modeJdbc.execute("SET SESSION sql_mode='" + mode + "'");
+        for (LocalDateTime publishedAt : publicationTimes) {
+          modeJdbc.update("DELETE FROM order_outbox");
+          OrderOutboxPO outbox = pendingOutbox();
+          outbox.attempts = 19;
+          outbox.lastError = "previous failure😀";
+          assertEquals(1, modeMapper.insert(outbox));
+          var before = modeJdbc.queryForMap("SELECT * FROM order_outbox");
+          RuntimeException failure = null;
+          int affected = -2;
+          try {
+            affected = modeMapper.markOutboxPublished(outbox.eventId, publishedAt);
+          } catch (RuntimeException rejected) {
+            failure = rejected;
+          }
+          var warnings = modeJdbc.queryForList("SHOW WARNINGS");
+          // 两个完成时间以文本读取，保留旧non-strict实现的零日期事实。
+          var after =
+              modeJdbc.queryForMap(
+                  "SELECT id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,"
+                      + "last_error,CAST(published_at AS CHAR) AS published_at,created_at,"
+                      + "CAST(updated_at AS CHAR) AS updated_at FROM order_outbox");
+          RuntimeException captured = failure;
+          int result = affected;
+          String label = mode + ":" + publishedAt;
+          String expectedTime =
+              publishedAt
+                  .truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+                  .format(java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSS"));
+          checks.add(() -> assertNull(captured, label));
+          checks.add(() -> assertTrue(warnings.isEmpty(), label));
+          checks.add(() -> assertEquals(1, result, label));
+          checks.add(() -> assertEquals("PUBLISHED", after.get("status"), label));
+          checks.add(() -> assertNull(after.get("last_error"), label));
+          checks.add(() -> assertEquals(expectedTime, after.get("published_at"), label));
+          checks.add(() -> assertEquals(expectedTime, after.get("updated_at"), label));
+          for (String field :
+              List.of(
+                  "id",
+                  "event_id",
+                  "event_type",
+                  "order_no",
+                  "payload",
+                  "attempts",
+                  "next_retry_at",
+                  "created_at")) {
+            checks.add(
+                () -> assertEquals(before.get(field), after.get(field), label + ":" + field));
+          }
+        }
+      }
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void failureRetryTimesAreFlooredBeforeSqlInBothModes() throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     List<LocalDateTime> retryTimes =
