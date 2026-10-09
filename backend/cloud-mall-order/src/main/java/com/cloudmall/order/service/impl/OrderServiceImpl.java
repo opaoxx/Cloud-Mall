@@ -1042,7 +1042,11 @@ public class OrderServiceImpl implements OrderService {
     String orderNo;
     try {
       JsonNode event =
-          mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(rawPayload);
+          mapper
+              .reader()
+              .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+              .with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+              .readTree(rawPayload);
       if (event.isTextual()) {
         orderNo = event.asText();
       } else if (event.isIntegralNumber() && rawPayload.trim().matches("[0-9]+")) {
@@ -1059,7 +1063,7 @@ public class OrderServiceImpl implements OrderService {
         throw new IllegalArgumentException("订单超时事件格式无效");
       }
     } catch (MismatchedInputException invalidJsonRoot) {
-      // 多根JSON不是旧订单号文本；保留解析证据，拒绝进入legacy或业务。
+      // 多根或重复键JSON不是旧订单号文本；保留解析证据，拒绝进入legacy或业务。
       throw new IllegalArgumentException("订单超时事件格式无效", invalidJsonRoot);
     } catch (com.fasterxml.jackson.core.JsonProcessingException malformedLegacyMessage) {
       orderNo = rawPayload.trim();
