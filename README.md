@@ -385,6 +385,32 @@ Pay 已终态但 User 仍 TRYING 时也按缺证阻塞；GET 窗口隔离并恢�
 mvn -pl backend/cloud-mall-user,backend/cloud-mall-pay -am test '-Dtest=PayTccUserEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 Pay/Order 基本事实只读取证（16T3）
+
+同时开启 `cloudmall.pay.tcc-reconciliation.enabled` 和默认关闭的
+`cloudmall.pay.tcc-order-evidence.enabled` 后，以16T1相同内部请求头直连 Pay：
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/order-evidence`。
+该入口独立于 User 诊断开关：原 Pay RR anchor → 事务外既有 Order 详情 GET → 再次 Pay RR；
+无可信原锚点不发请求，本地变化优先 `LOCAL_EVIDENCE_CHANGED`。Feign 用户头来自原 anchor，
+调用方 AuthContext 在 GET 窗口隔离并在 finally 恢复；沿用 Order 3s/5s 超时和默认不重试。
+
+只核对订单主行的订单号、用户、应付金额（BigDecimal）和四种合法状态。Order 现有 GET
+不是 RR 完整快照，明细、地址、库存动作、当前 payNo 付款归属和退款均不构成本报告的证据。
+不调用会间接查 Stock 的 paymentState，不发送 paid/cancel。包括 Order 已取消而 Pay 已提交，
+只要基本身份与金额匹配，最高仍是 `BLOCKED_REMAINING_EVIDENCE`，不能据此判断库存或退款。
+响应固定 `PAY_ORDER_BASIC_ONLY`、`automaticActionsAllowed=false`；User、Stock、TC、MQ 未查询。
+404/403/5xx/null/error/数据库不可用按不可用阻塞，缺字段/未知状态按缺证，错身份/金额按冲突；
+报告不回显错误订单身份、原资金标识、地址、明细或底层错误。
+
+隔离验收先构建标准 Order classes/Boot jar，然后运行 Pay IT。仅为加载真实 Order 实现而从
+其已有 Boot jar 读取固定栈的 Sentinel core 到 owned 临时文件，结束后关闭加载器并删除文件；
+不新增生产依赖，不启动业务应用、TC、固定端口或调度器：
+
+```powershell
+mvn -pl backend/cloud-mall-order -am package -DskipTests
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccOrderEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
