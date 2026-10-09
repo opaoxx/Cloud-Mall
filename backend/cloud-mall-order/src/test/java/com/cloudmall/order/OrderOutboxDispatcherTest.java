@@ -515,6 +515,86 @@ class OrderOutboxDispatcherTest {
   }
 
   @Test
+  void invalidRetryTimeKeepsTheOriginalFailureAndContinuesWithoutAWrite() {
+    long outsideDatabaseYear =
+        java.time.Duration.between(
+                    LocalDateTime.now(java.time.ZoneOffset.ofHours(8)),
+                    LocalDateTime.of(10000, 1, 1, 0, 0))
+                .getSeconds()
+            + 86400;
+    for (long retrySeconds : List.of(Long.MAX_VALUE, outsideDatabaseYear)) {
+      OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);
+      RabbitTemplate rabbit = org.mockito.Mockito.mock(RabbitTemplate.class);
+      OrderOutboxPO first = candidate("invalid-retry-time");
+      OrderOutboxPO second = candidate("after-invalid-retry-time");
+      org.mockito.Mockito.when(mapper.findPendingOutbox(anyInt()))
+          .thenReturn(List.of(first, second));
+      org.mockito.Mockito.when(mapper.markOutboxPublished(anyString(), any(LocalDateTime.class)))
+          .thenReturn(1);
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                if (first.eventId.equals(correlation.getId()))
+                  throw new IllegalStateException("original broker failure");
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      try {
+        new OrderOutboxDispatcher(
+                mapper,
+                rabbit,
+                new ObjectMapper(),
+                new MockEnvironment()
+                    .withProperty(
+                        "cloudmall.order.outbox.retry-delay-seconds", String.valueOf(retrySeconds)))
+            .dispatchPending();
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      List<ch.qos.logback.classic.spi.ILoggingEvent> events =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getLevel() == ch.qos.logback.classic.Level.WARN
+                          && event.getFormattedMessage().contains(first.eventId))
+              .toList();
+      org.junit.jupiter.api.Assertions.assertEquals(1, events.size());
+      var failure = events.get(0).getThrowableProxy();
+      org.junit.jupiter.api.Assertions.assertTrue(
+          failure.getClassName().endsWith("InvalidDataAccessApiUsageException"));
+      org.junit.jupiter.api.Assertions.assertEquals(
+          IllegalStateException.class.getName(), failure.getCause().getClassName());
+      org.junit.jupiter.api.Assertions.assertEquals(1, failure.getSuppressed().length);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          failure
+                  .getSuppressed()[0]
+                  .getClassName()
+                  .equals(java.time.DateTimeException.class.getName())
+              || failure
+                  .getSuppressed()[0]
+                  .getClassName()
+                  .equals(ArithmeticException.class.getName()));
+      verify(mapper).findPendingOutbox(50);
+      verify(mapper)
+          .markOutboxPublished(
+              org.mockito.ArgumentMatchers.eq(second.eventId), any(LocalDateTime.class));
+      org.mockito.Mockito.verifyNoMoreInteractions(mapper);
+      verify(rabbit, times(2))
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+    }
+  }
+
+  @Test
   void failureUpdateResultsDoNotInventRecordedRetriesOrAdditionalDatabaseActions() {
     for (int affected : List.of(0, 1, -1, 2)) {
       OrderOutboxMapper mapper = org.mockito.Mockito.mock(OrderOutboxMapper.class);

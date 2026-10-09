@@ -62,6 +62,16 @@ class OrderOutboxConfigurationTest {
   }
 
   @Test
+  void representableLongRetryIntervalIsNotArbitrarilyCapped() throws Exception {
+    verifyDispatchSettings(
+        new MockEnvironment()
+            .withProperty("cloudmall.order.outbox.retry-delay-seconds", "3000000000"),
+        50,
+        5000L,
+        3000000000L);
+  }
+
+  @Test
   void positiveCustomAndMinimumSettingsAreHonoredByTheDispatchFlow() throws Exception {
     verifyDispatchSettings(
         new MockEnvironment()

@@ -5,6 +5,7 @@ import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -25,6 +26,7 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -216,7 +218,7 @@ public class OrderOutboxDispatcher {
       throw databaseFailure;
     } catch (Exception exception) {
       if (interrupted(exception)) return;
-      LocalDateTime nextRetryAt = LocalDateTime.now(BUSINESS_ZONE).plusSeconds(retryDelaySeconds);
+      LocalDateTime nextRetryAt = calculateNextRetryAt(outbox.eventId, exception);
       String error = compactError(exception);
       if (Thread.currentThread().isInterrupted()) return;
       int recordedFailureRows =
@@ -235,6 +237,30 @@ public class OrderOutboxDispatcher {
           nextRetryAt,
           error,
           exception);
+    }
+  }
+
+  /**
+   * 只采样一次上海时间并保原纳秒；不可表示的时间拒绝进入SQL，原故障cause与计算suppressed同时保留。
+   *
+   * @param eventId 原失败候选标识，不重建身份
+   * @param originalFailure 原发送或解析故障
+   * @return 使用原正数间隔计算的可表示年份时间，不截断或替代
+   * @throws InvalidDataAccessApiUsageException 时间计算溢出或派生年份不在1000..9999，沿候选边界隔离
+   */
+  private LocalDateTime calculateNextRetryAt(String eventId, Exception originalFailure) {
+    try {
+      LocalDateTime nextRetryAt = LocalDateTime.now(BUSINESS_ZONE).plusSeconds(retryDelaySeconds);
+      if (nextRetryAt.getYear() < 1000 || nextRetryAt.getYear() > 9999)
+        throw new DateTimeException("nextRetryAt超出MySQL DATETIME年份范围1000..9999");
+      return nextRetryAt;
+    } catch (DateTimeException | ArithmeticException timeFailure) {
+      InvalidDataAccessApiUsageException rejected =
+          new InvalidDataAccessApiUsageException(
+              "订单超时outbox重试时间不可表示，eventId=" + eventId + ", retryDelaySeconds=" + retryDelaySeconds,
+              originalFailure);
+      rejected.addSuppressed(timeFailure);
+      throw rejected;
     }
   }
 

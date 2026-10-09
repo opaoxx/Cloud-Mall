@@ -89,6 +89,95 @@ class OrderOutboxErrorMySqlIT {
   }
 
   @Test
+  void retryTimeOverflowCannotAbortFollowingEventsOrReachTheFailureWriter() {
+    long outsideDatabaseYear =
+        java.time.Duration.between(
+                    LocalDateTime.now(ZoneOffset.ofHours(8)), LocalDateTime.of(10000, 1, 1, 0, 0))
+                .getSeconds()
+            + 86400;
+    List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+    for (long retrySeconds : List.of(Long.MAX_VALUE, outsideDatabaseYear)) {
+      fixture.update("DELETE FROM order_outbox");
+      OrderOutboxPO first = pendingOutbox();
+      OrderOutboxPO second = pendingOutbox();
+      second.id = 2L;
+      second.eventId = "after-invalid-retry-time";
+      second.orderNo = "202610-after-invalid-retry-time";
+      second.nextRetryAt = first.nextRetryAt.plusSeconds(1);
+      assertEquals(1, mapper.insert(first));
+      assertEquals(1, mapper.insert(second));
+      var before = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+      OrderOutboxMapper observedMapper = spy(mapper);
+      RabbitTemplate rabbit = mock(RabbitTemplate.class);
+      List<String> sentIds = new ArrayList<>();
+      doAnswer(
+              invocation -> {
+                CorrelationData correlation = invocation.getArgument(4);
+                sentIds.add(correlation.getId());
+                if (first.eventId.equals(correlation.getId()))
+                  throw new IllegalStateException("controlled send failure");
+                correlation.getFuture().set(new CorrelationData.Confirm(true, null));
+                return null;
+              })
+          .when(rabbit)
+          .convertAndSend(anyString(), anyString(), any(), any(), any(CorrelationData.class));
+      ch.qos.logback.classic.Logger logger =
+          (ch.qos.logback.classic.Logger)
+              org.slf4j.LoggerFactory.getLogger(OrderOutboxDispatcher.class);
+      ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> warnings =
+          new ch.qos.logback.core.read.ListAppender<>();
+      warnings.start();
+      logger.addAppender(warnings);
+      RuntimeException rejected = null;
+      try {
+        new OrderOutboxDispatcher(
+                observedMapper,
+                rabbit,
+                new ObjectMapper(),
+                new MockEnvironment()
+                    .withProperty(
+                        "cloudmall.order.outbox.retry-delay-seconds", String.valueOf(retrySeconds)))
+            .dispatchPending();
+      } catch (RuntimeException failure) {
+        rejected = failure;
+      } finally {
+        logger.detachAppender(warnings);
+        warnings.stop();
+      }
+      RuntimeException captured = rejected;
+      var after = fixture.queryForMap("SELECT * FROM order_outbox WHERE id=1");
+      String secondStatus =
+          fixture.queryForObject("SELECT status FROM order_outbox WHERE id=2", String.class);
+      List<ch.qos.logback.classic.spi.ILoggingEvent> events =
+          warnings.list.stream()
+              .filter(
+                  event ->
+                      event.getLevel() == ch.qos.logback.classic.Level.WARN
+                          && event.getFormattedMessage().contains(first.eventId))
+              .toList();
+      checks.add(() -> assertNull(captured));
+      checks.add(() -> assertEquals(before, after));
+      checks.add(() -> assertEquals(List.of(first.eventId, second.eventId), sentIds));
+      checks.add(() -> assertEquals("PUBLISHED", secondStatus));
+      checks.add(
+          () ->
+              verify(observedMapper, never())
+                  .recordOutboxFailure(anyString(), anyString(), any(LocalDateTime.class)));
+      checks.add(() -> assertEquals(1, events.size()));
+      if (!events.isEmpty())
+        checks.add(
+            () ->
+                assertTrue(
+                    events
+                        .get(0)
+                        .getThrowableProxy()
+                        .getClassName()
+                        .endsWith("InvalidDataAccessApiUsageException")));
+    }
+    assertAll(checks);
+  }
+
+  @Test
   void zeroFailureUpdateCannotClaimARetryWasRecordedAndKeepsCurrentFacts() {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (String state : List.of("PUBLISHED", "MISSING", "TYPE", "NEGATIVE")) {
