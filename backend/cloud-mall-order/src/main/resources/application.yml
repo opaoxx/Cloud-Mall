@@ -24,7 +24,7 @@ spring:
 management.endpoints.web.exposure.include: health,info,prometheus
 feign.client.config.default: {connectTimeout: 3000, readTimeout: 5000}
 spring.cloud.sentinel.eager: true
-spring.cloud.sentinel.transport.dashboard: localhost:8858
+spring.cloud.sentinel.transport.dashboard: ${CLOUDMALL_SENTINEL_DASHBOARD:localhost:18858}
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root

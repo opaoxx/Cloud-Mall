@@ -21,7 +21,7 @@ spring.cloud.nacos.discovery.username: root
 spring.cloud.nacos.discovery.password: root
 spring.cloud.nacos.config.server-addr: localhost:18848
 spring.cloud.sentinel.eager: true
-spring.cloud.sentinel.transport.dashboard: localhost:8858
+spring.cloud.sentinel.transport.dashboard: ${CLOUDMALL_SENTINEL_DASHBOARD:localhost:18858}
 spring.cloud.sentinel.scg.order: -2147483647
 cloudmall.sentinel.nacos.gateway-flow-data-id: cloudmall-gateway-flow-rules
 cloudmall.sentinel.nacos.group: CLOUDMALL_DEV

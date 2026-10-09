@@ -66,6 +66,18 @@ Java/javaw 进程，因此本次映射改为上述高位端口。业务固定 80
 排除范围内；中间件启动成功不代表这些 IDEA 端口已经可绑定，启动业务前须另行
 解决 Windows 的端口保留问题，并保持项目业务端口契约。
 
+Sentinel Dashboard 的宿主入口为 `http://localhost:18858`，登录使用 `root/root`；
+容器内仍监听 `8858`，Docker 网络内的业务服务使用 `sentinel-dashboard:8858`。
+Gateway、Order、Stock 本地默认 Dashboard 地址为 `localhost:18858`，可用环境变量
+`CLOUDMALL_SENTINEL_DASHBOARD` 覆盖完整 `host:port`。2026-10-10 重启 Docker Desktop 后，
+8858 无进程监听却落入 Windows 排除范围 8773–8872，实际 start 报 forbidden，因此只调整
+宿主映射和本地客户端默认地址。高位端口仍需启动前诊断，不保证系统重启后永久可用；
+容器内端口、认证、健康检查和限流规则不变。已创建的容器必须重新创建才能更新映射：
+
+```powershell
+docker compose up -d --no-deps sentinel-dashboard
+```
+
 Nacos 使用固定 hostname 作为 standalone Raft 节点身份。新数据卷默认使用
 `cloud-mall-nacos`；已有数据卷必须把持久 Raft 日志中唯一 peer 的 hostname 写入本机
 `.env` 的 `NACOS_NODE_HOSTNAME`，以后保持该值。当前本机恢复值为 `57c05639b175`。

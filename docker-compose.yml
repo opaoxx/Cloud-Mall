@@ -245,7 +245,7 @@ services:
       TZ: Asia/Shanghai
       JAVA_TOOL_OPTIONS: -Dauth.username=root -Dauth.password=root
     ports:
-      - "8858:8858"
+      - "18858:8858"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8858/"]
       interval: 15s
