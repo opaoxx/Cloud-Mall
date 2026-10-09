@@ -41,6 +41,21 @@ public class PayTccReconciliationService {
   /** 先验证开关、凭证、调用者和有界支付号；不让失败请求启动事务。 */
   public PayTccReconciliationVO inspect(String payNo, String caller, String token) {
     // 1. 所有入口校验先于ReadService代理，disabled或未授权请求零DB访问。
+    validateForRead(payNo, caller, token);
+    // 2. 只读SQL不可用不伪装成缺行，不向调用方泄露连接或异常文本。
+    try {
+      PayTccReconciliationVO report = reader.inspect(payNo);
+      // 3. 审计不打印报告、XID、branch、操作键或底层异常。
+      log.info("CM18本地取证 payNo={} classification={}", payNo, report.classification);
+      return report;
+    } catch (DataAccessException unavailable) {
+      log.warn("CM18本地取证不可用 payNo={}", payNo);
+      throw new BizException("PAY_TCC_RECONCILIATION_UNAVAILABLE", "本地资金证据暂不可用", 503);
+    }
+  }
+
+  /** 共享入口门，必须在任何事务、连接或远端请求之前调用。 */
+  public void validateForRead(String payNo, String caller, String token) {
     if (!enabled) throw new BizException("PAY_TCC_RECONCILIATION_DISABLED", "本地取证入口未启用", 503);
     if (expectedToken == null
         || expectedToken.isBlank()
@@ -52,15 +67,5 @@ public class PayTccReconciliationService {
     if (TransactionSynchronizationManager.isActualTransactionActive()
         || RootContext.getXID() != null)
       throw new BizException("PAY_TCC_RECONCILIATION_CONTEXT_INVALID", "取证不允许继承资金或本地事务上下文", 409);
-    // 2. 只读SQL不可用不伪装成缺行，不向调用方泄露连接或异常文本。
-    try {
-      PayTccReconciliationVO report = reader.inspect(payNo);
-      // 3. 审计不打印报告、XID、branch、操作键或底层异常。
-      log.info("CM18本地取证 payNo={} classification={}", payNo, report.classification);
-      return report;
-    } catch (DataAccessException unavailable) {
-      log.warn("CM18本地取证不可用 payNo={}", payNo);
-      throw new BizException("PAY_TCC_RECONCILIATION_UNAVAILABLE", "本地资金证据暂不可用", 503);
-    }
   }
 }

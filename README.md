@@ -349,6 +349,30 @@ LEGACY/TCC 交易模式或恢复能力。后续仍需外部完整取证、人工
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccReconciliationMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 Pay/User 只读取证（16T2）
+
+另有默认关闭的 `cloudmall.pay.tcc-user-evidence.enabled=false`。同时开启 16T1 诊断开关后，
+使用相同内部请求头直接调用 Pay 的 `GET /api/internal/payments/{payNo}/tcc-reconciliation/user-evidence`。
+它先在 Pay 只读 RR 快照内取得可信原 XID 和两端分支，事务结束后复用 User 的现有 state GET，
+最后重新读取 Pay；前后摘要或锚点变化返回 `LOCAL_EVIDENCE_CHANGED`。没有可信锚点时不查询 User。
+
+User 必须已有其 TCC HTTP 查询入口；本工具不替你开启资金开关。其查询超时沿用 Feign 3s/5s，
+只读 GET 最多额外重试一次，永不 POST。User 不可用、404、null body 为阻塞，未知状态、缺分支
+或缺显式账本字段为缺证；原身份、金额、分支或明确相反终态为冲突，不修改任何资金记录。
+Pay 已终态但 User 仍 TRYING 时也按缺证阻塞；GET 窗口隔离并恢复调用方用户上下文，
+避免全局 Feign 拦截器追加其他用户身份或角色。
+
+响应固定 `PAY_USER_READ_ONLY` 和 `automaticActionsAllowed=false`。Pay/User 一致的最高分类为
+`BLOCKED_REMAINING_EVIDENCE`：Order、Stock、TC、MQ 仍未验证，User GET 也不包含账户余额/冻结
+汇总，不能据此判定全链结束或授权扣款/退款。原 XID、分支、操作键、凭证和底层错误不会进入响应。
+
+隔离验收先通过标准 Maven 构建 User classes，再用真实 User 只读链、Feign 和两个随机测试库验证；
+只监听临时 loopback 端口，结束后关闭，原 Pay/User 库仅核对表清单/校验和：
+
+```powershell
+mvn -pl backend/cloud-mall-user,backend/cloud-mall-pay -am test '-Dtest=PayTccUserEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

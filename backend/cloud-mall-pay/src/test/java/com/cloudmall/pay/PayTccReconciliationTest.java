@@ -106,6 +106,45 @@ class PayTccReconciliationTest {
   }
 
   @Test
+  void captureCreatesAnInternalAnchorOnlyFromCompleteKnownOriginalFacts() {
+    Fixture fixture = new Fixture();
+    var trusted = fixture.reader.capture("pay1");
+    assertNotNull(trusted.trustedAnchor());
+    assertEquals(fixture.execution.xid, trusted.trustedAnchor().xid());
+    assertEquals(101L, trusted.trustedAnchor().payBranchId());
+    assertEquals(202L, trusted.trustedAnchor().userBranchId());
+    for (String variant :
+        List.of(
+            "unknown",
+            "begin",
+            "xid",
+            "execution",
+            "dispatch",
+            "receipt",
+            "fence",
+            "branch",
+            "alias",
+            "legacy")) {
+      Fixture incomplete = new Fixture();
+      switch (variant) {
+        case "unknown" -> incomplete.execution.state = "UNKNOWN";
+        case "begin" -> incomplete.execution.state = "BEGIN_UNKNOWN";
+        case "xid" -> incomplete.execution.xid = null;
+        case "execution" -> when(incomplete.executions.selectByPayNo("pay1")).thenReturn(null);
+        case "dispatch" -> when(incomplete.dispatches.selectByPayNo("pay1")).thenReturn(null);
+        case "receipt" -> when(incomplete.receipts.selectByPayNo("pay1")).thenReturn(null);
+        case "fence" ->
+            when(incomplete.fences.findByBranch(anyString(), anyLong())).thenReturn(null);
+        case "branch" -> incomplete.dispatch.userBranchId = null;
+        case "alias" -> incomplete.dispatch.userBranchId = incomplete.receipt.branchId;
+        case "legacy" -> incomplete.payment.debitMode = "LEGACY";
+        default -> throw new AssertionError(variant);
+      }
+      assertNull(incomplete.reader.capture("pay1").trustedAnchor(), variant);
+    }
+  }
+
+  @Test
   void absentAliasedOrMultiplePaymentsCannotReadTheOtherFiveSources() {
     for (String variant : List.of("absent", "alias", "multiple")) {
       Fixture fixture = new Fixture();

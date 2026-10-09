@@ -2,6 +2,8 @@ package com.cloudmall.pay.service.impl;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.cloudmall.pay.domain.dto.PayTccEvidenceAnchorDTO;
+import com.cloudmall.pay.domain.dto.PayTccEvidenceCaptureDTO;
 import com.cloudmall.pay.domain.po.PayDebitIntentPO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.po.PayTccDispatchPO;
@@ -116,6 +118,17 @@ public class PayTccReconciliationReadService {
   /** 在入口门之后读取同一快照；无行或身份不可信时拒绝，绝不读取另一个支付号。 */
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public PayTccReconciliationVO inspect(String payNo) {
+    return readSnapshot(payNo).localReport();
+  }
+
+  /** 在同一独立RR事务返回内部锚点；事务结束后才允许查询User。 */
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public PayTccEvidenceCaptureDTO capture(String payNo) {
+    return readSnapshot(payNo);
+  }
+
+  /** 六来源查询只执行一次；无可信原始事实时不生成查询锚点。 */
+  private PayTccEvidenceCaptureDTO readSnapshot(String payNo) {
     // 1. 用有界候选核验原始支付号，不能因collation别名泄露另一笔支付。
     List<PayRecordPO> candidates = payments.findReconciliationCandidates(payNo);
     if (candidates.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
@@ -296,7 +309,33 @@ public class PayTccReconciliationReadService {
                 dispatch != null && nonblank(dispatch.lastError),
                 "receipt",
                 false));
-    return new PayTccReconciliationVO(classification, reasons, snapshot, identifiers);
+    PayTccEvidenceAnchorDTO anchor = null;
+    if ("BLOCKED_EXTERNAL_EVIDENCE".equals(classification)
+        && execution != null
+        && dispatch != null
+        && receipt != null
+        && fence != null
+        && nonblank(execution.xid)
+        && !Set.of("UNKNOWN", "BEGIN_UNKNOWN").contains(execution.state)
+        && positive(receipt.branchId)
+        && positive(dispatch.userBranchId)
+        && !Objects.equals(receipt.branchId, dispatch.userBranchId)) {
+      anchor =
+          new PayTccEvidenceAnchorDTO(
+              payNo,
+              payment.userId,
+              payment.orderNo,
+              payment.amount.toPlainString(),
+              execution.xid,
+              execution.operationKey,
+              execution.ledgerKey,
+              receipt.branchId,
+              dispatch.userBranchId,
+              execution.state,
+              execution.decision);
+    }
+    return new PayTccEvidenceCaptureDTO(
+        new PayTccReconciliationVO(classification, reasons, snapshot, identifiers), anchor);
   }
 
   /** 严格比较本地不可变载荷，不trim、不改变金额精度或补造操作键。 */

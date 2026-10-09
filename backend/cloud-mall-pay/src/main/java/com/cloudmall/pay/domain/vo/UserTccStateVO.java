@@ -1,5 +1,7 @@
 package com.cloudmall.pay.domain.vo;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonSetter;
 import java.math.BigDecimal;
 
 /** User TCC 只读状态响应。 */
@@ -33,6 +35,16 @@ public class UserTccStateVO {
 
   /** 是否存在 APPLIED 账本。 */
   public boolean ledgerApplied;
+
+  /** 接收侧是否观察到显式非null布尔值；只供证据核验，不进入JSON。 */
+  @JsonIgnore public boolean ledgerAppliedPresent;
+
+  /** 保留既有boolean语义，同时区分缺字段/null与明确false。 */
+  @JsonSetter("ledgerApplied")
+  public void setLedgerApplied(Boolean applied) {
+    ledgerAppliedPresent = applied != null;
+    ledgerApplied = Boolean.TRUE.equals(applied);
+  }
 
   /** 返回用于载荷校验的金额。 */
   public BigDecimal amountValue() {
