@@ -433,6 +433,8 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 
 普通库存 reservation GET 的非空 flows 终态只读聚合必须逐 SKU 精确验证：`reserved_quantity` 为正整数，`confirmed_quantity`/`rolled_back_quantity` 为非负整数，且 confirmed+rollback 不超过 reserved；Number 以 BigDecimal 验证整数性，不使用 int 截断、溢出或 null 默认。单 SKU 仅完整确认、完整回滚或两者均零分别产生 `CONFIRMED`、`ROLLED_BACK`、`RESERVED`；多 SKU 必须全部已观察行同向同状态，否则返回 `UNKNOWN` 且不生成终态 items。flows 为空且无 request 的既有 NOT_FOUND、flows 为空但有 request 的既有 request 分支不受本门覆盖。普通 reservation request 行若存在只能与 flows 聚合状态一致才可作为交叉证据，不能覆盖矛盾/缺失/非法 flows；request 缺失不否定合法 flows。本批只证明已观察 SKU 数量/状态与 request.status 一致，不验证完整 SKU 集合、items_snapshot/items_hash、Stock 余额或秒杀身份。该 GET 不新增 RR/事务一致性、DDL、索引或写入语义，不改变秒杀路径和普通写状态机；Order fallback 只能据合法完整同向结果判断库存已结清。
 
+16T5 在上述普通非空 flows+request 分支内，必须核对 request `order_no`、`scene=NORMAL`、非空 `items_snapshot` 和 `items_hash`。独立 ObjectMapper 仅用于该 proof，启用 trailing token/duplicate tree key 拒绝；重建严格升序、无重复、正 Long SKU/正 int quantity 的 `StockLineDTO` 列表，复用 writer 的 canonical JSON 与 SHA-256 算法，不能对 MySQL JSON raw 文本 hash。重建集合必须与已观察 flows 的 SKU/quantity 一一对应，缺、多、重复、数量/hash/identity 不符均返回 UNKNOWN，不改 facts。空 flows 外层分支、秒杀、写状态机、SQL/DDL、Redis、消息和非 RR 语义保持；本条不提供完整订单 SKU、Stock 余额或秒杀身份证明。
+
 ### 6.3 `stock_cache_repair`
 
 正常库存的 MySQL 状态是事实源，Redis 只保存可售数量投影。每次成功改变 `stock_sku` 的本地事务必须同时写入一条待执行的缓存修复记录，覆盖数据库提交后进程退出、Redis 连接失败和回补结果未知等窗口。
