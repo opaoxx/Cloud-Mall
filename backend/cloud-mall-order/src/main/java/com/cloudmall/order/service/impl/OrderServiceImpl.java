@@ -1047,10 +1047,12 @@ public class OrderServiceImpl implements OrderService {
         // 旧裸数字String会被JSON读成整数；只认整份正文，避免long/浮点转换改写身份。
         orderNo = rawPayload.trim();
       } else if (event.isObject()
-          && "ORDER_TIMEOUT".equals(event.path("eventType").asText())
-          && !event.path("eventId").asText().isBlank()
-          && !event.path("expireAt").asText().isBlank()) {
-        orderNo = event.path("orderNo").asText();
+          && hasNonblankText(event, "eventType")
+          && "ORDER_TIMEOUT".equals(event.path("eventType").textValue())
+          && hasNonblankText(event, "eventId")
+          && hasNonblankText(event, "orderNo")
+          && hasNonblankText(event, "expireAt")) {
+        orderNo = event.path("orderNo").textValue();
       } else {
         throw new IllegalArgumentException("订单超时事件格式无效");
       }
@@ -1059,6 +1061,12 @@ public class OrderServiceImpl implements OrderService {
     }
     // 2. 统一读取订单事实并通过 CAS 决定是否执行库存回滚。
     consumeTimeout(orderNo);
+  }
+
+  /** 对象消息仅接受原生非空白文本，拒绝缺失/null/非文本，不强转、trim或补造字段。 */
+  private static boolean hasNonblankText(JsonNode event, String fieldName) {
+    JsonNode fieldValue = event.path(fieldName);
+    return fieldValue.isTextual() && !fieldValue.textValue().isBlank();
   }
 
   /** 按订单号处理旧版超时消息并供恢复测试复用。 */
