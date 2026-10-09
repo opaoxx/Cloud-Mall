@@ -559,6 +559,12 @@ Redis 受理 Lua 必须原子初始化/递增 `seckill:quota:revision:{activityI
 
 第 16B2 `pay_tcc_execution` 的唯一键为 `pay_no、xid、operation_key、ledger_key`，不设置 lease/attempts；INSERT winner 的执行权不可转移。`xid` 可空只表示 begin 未确认，必须保留 BEGIN_UNKNOWN，不能新建 XID。decision 只能 NONE/COMMIT/ROLLBACK 单向推进，recover 不能新增 decision。
 
+CM-18 16T1 的本地证据检查只读 `pay_record`、`pay_tcc_execution`、`pay_tcc_dispatch`、`pay_tcc_receipt`、Pay Fence 和 `pay_debit_intent` 六类既有事实。配置 `cloudmall.pay.tcc-reconciliation.enabled=false` 默认关闭；Controller 只委托先做 enabled、callback token、caller=`cm18-reconciliation`、payNo 校验的 Service wrapper，校验通过后才进入独立 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)` ReadService。它按 `pay_no` 精确查询，使用最多两条 payment 候选核验，不加 `FOR UPDATE`，不执行 claim/lease、Store/bridge/coordinator recovery、TC/RPC、Rabbit 或任何业务写入；不新增表、视图、列、索引或资金事实。payment 使用新增只读 LIMIT 2 Mapper 方法；`PayDebitIntentMapper` 继续是 JdbcTemplate Mapper 并复用无锁 `findByPayNo`，其余五类沿既有 MyBatis 无锁 SELECT。Service 不持有 SQL/JdbcTemplate/QueryWrapper。XID、branch、operation key、ledger key 只生成字段对应的 SHA-256 指纹，普通日志不得记录原值、凭证或错误文本。
+
+payment 零候选返回既有 NOT_FOUND/404 且不查询其余五类；多候选或 payNo 身份别名冲突返回身份冲突/409，不暴露别行；缺表、连接失败或数据库不可用统一返回 `PAY_TCC_RECONCILIATION_UNAVAILABLE`/503，不返回 raw 错误、不创建表。其他来源缺失在 payment 身份确认后进入本地阻塞分类；采集时间、reason code 和状态字段仅使用冻结白名单，未知状态不回显原值。点查/诊断不因 ledgerKey 恰好等于 payNo 而要求隐藏 payNo，测试只禁止 raw key 字段，允许业务 payNo 与对应 fingerprint 同时出现。
+
+该诊断读取不改变本表字段、状态、decision、XID、branch、lease 或重试时间。`BEGIN_UNKNOWN`、无 XID、缺 execution、局部 tuple 冲突和 SQL/连接缺失必须保留原事实并分类阻塞；不能通过新 begin/Try、补 branch、猜 TC 决议或写 Pay/User 资金收敛。由于不读取 User/Order/Stock/TC/MQ，完整本地快照也不能证明提交、回滚或退款。
+
 第 16C `pay_tcc_delivery` 的 READY 只表示本地 COMMITTED execution 派生的待核验意图，不代表 User/Order 远程证据已完成；ROLLEDBACK execution 不建 job。每次 RPC 前重查本地 proof 和 User live TCC tuple；PayRecord 状态与 delivery 状态在同一 Pay 本地事务同向更新。User DEBIT 已有任何 refundOperationKey 时不能 paid，退款只能使用唯一 `refund:<payNo>` 并在 POST 后 GET 核验。
 
 第 16E 新增 `pay_tcc_cancel`：唯一 `pay_no`，冻结 user/order/amount，状态为 `REQUESTED/ORDER_CANCELLED/CANCEL_UNKNOWN/COMPLETED/CONFLICT`，并带 attempts、next_retry_at、随机 lease_owner/lease_until、last_error。取消表无条件初始化；`tcc-cancel.enabled` 只控制新取消入口和调度，不控制 execution/bridge/receipt 的 gate。`COMPLETED` 只允许在无 execution/dispatch/receipt、Order CANCELLED + stock SUCCEEDED 的短事务内与 Pay `PENDING→FAILED` 同步 CAS；台账不拥有 XID/decision。首次取消、TCC execution claim、bridge.prepare、receipt.claim 均先锁 `pay_record` 再检查该台账；已有台账永久阻止未来 begin。迁移与新 schema 必须保持上述唯一键和 due 索引，默认调度关闭。

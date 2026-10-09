@@ -313,6 +313,14 @@ CM-18 第 16C 只提供内部 `PayTccDeliveryService.deliver(String payNo)` 和 
 
 支付服务与用户服务之间的内部接口契约：
 
+CM-18 16T1 增加一个仅供内部取证的 `GET /api/internal/payments/{payNo}/tcc-reconciliation`，配置 `cloudmall.pay.tcc-reconciliation.enabled=false` 默认关闭。Controller 只委托 `@Service` wrapper；wrapper 必须先校验 enabled、现有 callback token、caller=`cm18-reconciliation` 和 ASCII 字母/数字/`_`/`-` 的 1..64 位 `payNo`，再调用 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)` 的独立 ReadService，保证任何 DB/事务访问均发生在入口校验之后。Gateway 不开放该路径，且该接口不要求开启业务 TCC 开关。
+
+响应固定声明 `scope=PAY_LOCAL_ONLY`、`automaticActionsAllowed=false` 和 `externalSystemsNotQueried=[USER,ORDER,STOCK,TC,MQ]`，并包含 `collectedAt`、分类和固定 reason codes；只返回 Pay 本地 `pay_record`、`pay_tcc_execution`、`pay_tcc_dispatch`、`pay_tcc_receipt`、Pay Fence、`pay_debit_intent` 的同一只读快照。金额为 JSON 字符串；XID、branch、operation key、ledger key 只返回对应 SHA-256 指纹，不返回原值、凭证或 `last_error` 文本，未知状态不回显原始值。即使本地快照完整也只能返回 `BLOCKED_EXTERNAL_EVIDENCE`，不得输出 `TCC_COMMITTED`/`TCC_CANCELLED` 或任何资金决议。
+
+payment 零候选返回既有 404/NOT_FOUND，且不查询其他五类来源；多候选或 payNo 身份别名冲突返回 409，不暴露别单；缺表、连接失败或数据库不可用统一返回 `PAY_TCC_RECONCILIATION_UNAVAILABLE`/503，不返回 raw SQL 错误且不建表。其他本地来源缺失只在 payment 身份确认后进入阻塞分类。
+
+实现必须使用六个专用无锁 SELECT，按 payNo 精确匹配并以最多两条候选核验唯一性；`PayDebitIntentMapper` 复用其 JdbcTemplate `findByPayNo`，其余五类复用 MyBatis 只读入口，payment 增加一个只读 LIMIT 2 Mapper 方法，Service 不持有 SQL/JdbcTemplate/QueryWrapper。不得 `FOR UPDATE`、claim、lease、Store.read、bridge.recover、coordinator/TC/RPC、Rabbit 操作或任何资金/状态写入。该诊断接口不是公网业务 API，不新增表、视图、列、索引或 TCC/Legacy 行为。
+
 | 方法 | 路径 | 请求/响应 | 说明 |
 | --- | --- | --- | --- |
 | POST | `/api/internal/users/{userId}/balance/debits` | `{operationKey,payNo,orderNo,amount}` → `{operationKey,state,balance}` | `operationKey=payNo`；同键只允许一次扣款，重复请求返回同一结果 |
