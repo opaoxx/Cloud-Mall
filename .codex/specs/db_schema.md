@@ -571,6 +571,10 @@ User GET 前后 Pay 两次 capture 的本地 report、snapshot、identifiers、c
 
 该诊断读取不改变本表字段、状态、decision、XID、branch、lease 或重试时间。`BEGIN_UNKNOWN`、无 XID、缺 execution、局部 tuple 冲突和 SQL/连接缺失必须保留原事实并分类阻塞；不能通过新 begin/Try、补 branch、猜 TC 决议或写 Pay/User 资金收敛。由于不读取 User/Order/Stock/TC/MQ，完整本地快照也不能证明提交、回滚或退款。
 
+CM-18 16T3 不新增 Order 表、列、索引或写接口。Pay 只在 16T2 `ReadService.capture` 返回可信 anchor、local classification 为 `BLOCKED_EXTERNAL_EVIDENCE` 且两次 Pay capture 稳定时，事务外复用既有 `OrderClient.get(orderNo,userId)` 读取订单基本事实；不要求 16T2 User flag、不调用 User，不调用 `paymentState`，避免把 Stock action/库存镜像混入本地证据，不调用 Order paid/cancel 或其他写路径。Order 现有 GET/owned/OrderSqlMapper 主行查询必须保持只读；本次只验证一次主行 SELECT，明细第二 SELECT 不进入报告，16T3 只采集 `orderNo`、`userId`、`payAmount`、白名单 `status`，不声称 Order RR、items/address/time/stockActionStatus/退款事实已核验。
+
+Order GET 前后两次 Pay capture 的 local report、snapshot、identifiers、classification、reason、anchor 必须相同（忽略 collectedAt），变化返回 `LOCAL_EVIDENCE_CHANGED`。Order null/error/404/403/5xx、传输或数据库不可用分类 `ORDER_EVIDENCE_UNAVAILABLE`；基本字段缺失/未知状态分类 `ORDER_EVIDENCE_INCOMPLETE`；order/user/amount 不匹配分类 `ORDER_EVIDENCE_CONFLICT`。`PENDING_PAYMENT`、`PAID`、`COMPLETED`、`CANCELLED` 任一白名单状态在基本字段匹配时只到 `BLOCKED_REMAINING_EVIDENCE`；合法 `CANCELLED + Pay COMMITTED` 不作相反终态冲突。本批不查询 User/Stock/TC/MQ，不改变 Order/Pay 事实。
+
 第 16C `pay_tcc_delivery` 的 READY 只表示本地 COMMITTED execution 派生的待核验意图，不代表 User/Order 远程证据已完成；ROLLEDBACK execution 不建 job。每次 RPC 前重查本地 proof 和 User live TCC tuple；PayRecord 状态与 delivery 状态在同一 Pay 本地事务同向更新。User DEBIT 已有任何 refundOperationKey 时不能 paid，退款只能使用唯一 `refund:<payNo>` 并在 POST 后 GET 核验。
 
 第 16E 新增 `pay_tcc_cancel`：唯一 `pay_no`，冻结 user/order/amount，状态为 `REQUESTED/ORDER_CANCELLED/CANCEL_UNKNOWN/COMPLETED/CONFLICT`，并带 attempts、next_retry_at、随机 lease_owner/lease_until、last_error。取消表无条件初始化；`tcc-cancel.enabled` 只控制新取消入口和调度，不控制 execution/bridge/receipt 的 gate。`COMPLETED` 只允许在无 execution/dispatch/receipt、Order CANCELLED + stock SUCCEEDED 的短事务内与 Pay `PENDING→FAILED` 同步 CAS；台账不拥有 XID/decision。首次取消、TCC execution claim、bridge.prepare、receipt.claim 均先锁 `pay_record` 再检查该台账；已有台账永久阻止未来 begin。迁移与新 schema 必须保持上述唯一键和 due 索引，默认调度关闭。

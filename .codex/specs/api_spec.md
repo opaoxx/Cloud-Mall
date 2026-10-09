@@ -333,6 +333,12 @@ Pay 只读事务结束后，使用既有 `UserTccClient.state` GET，固定 serv
 | GET | `/api/internal/users/{userId}/balance/operations/{operationKey}` | → `{operationKey,type,state,amount,refundOperationKey}` | 查询扣款/退款持久化结果，供支付恢复任务判断最终结果 |
 | POST | `/api/internal/users/{userId}/balance/refunds` | `{refundOperationKey,originalOperationKey,payNo,orderNo,amount}` → `{refundOperationKey,state,balance}` | 仅对已应用的原扣款退款；退款键幂等且不得超过原扣款金额 |
 
+CM-18 16T3 增加独立 default-off 的 `cloudmall.pay.tcc-order-evidence.enabled=false` 和 `GET /api/internal/payments/{payNo}/tcc-reconciliation/order-evidence`。它复用 16T1 local flag、callback token、caller、payNo、Gateway 和 context 409 门，并检查本批 Order flag；不要求 16T2 User flag、不调用 User。第一次 Pay `ReadService.capture` 必须返回可信原 anchor，且事务关闭后才允许调用既有 `OrderClient.get(orderNo,userId)` GET。Order 参数只来自 anchor，不接受 HTTP 输入；窗口内保存并临时清理 Pay `AuthContext` userId/role，使用显式 anchor userId，finally 恢复，避免 Feign `authHeaders` 污染身份；不传 caller role，不改全局拦截器。
+
+16T3 只核对 Order GET 返回的 `orderNo`、`userId`、`payAmount`（BigDecimal）和白名单 `status`，不调用 `paymentState`，不读取 `stockActionStatus`、items、address、时间或退款事实，不调用任何 Order/Stock 写接口。沿现有 Feign 3s/5s、默认 NEVER retry；前后仅比较两次 Pay capture 的摘要/anchor（忽略 collectedAt），否则 `LOCAL_EVIDENCE_CHANGED`。null/error、404/403/5xx、Feign transport 或 Order DB 不可用为 `ORDER_EVIDENCE_UNAVAILABLE`；字段缺失/未知状态为 `ORDER_EVIDENCE_INCOMPLETE`；身份或金额冲突为 `ORDER_EVIDENCE_CONFLICT`。`PENDING_PAYMENT/PAID/COMPLETED/CANCELLED` 与 Pay 组合只要基本字段匹配均为 `BLOCKED_REMAINING_EVIDENCE`；合法 `CANCELLED + Pay COMMITTED` 不自动冲突。
+
+响应固定 `scope=PAY_ORDER_BASIC_ONLY`、`automaticActionsAllowed=false`、Pay local evidence 和 Order 基本摘要；发起 Order GET 后 `externalSystemsNotQueried` 只移除 ORDER，USER/STOCK/TC/MQ 保持，未发起时保留 ORDER。16T3 不新增 User/Order API、DDL、Feign 依赖或业务状态写入，不宣称完整订单/库存/退款证据。
+
 订单服务提供支付恢复查询接口：
 
 | 方法 | 路径 | 响应 | 说明 |
