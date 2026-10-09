@@ -294,6 +294,8 @@ Outbox 扫描可在 LIMIT 前使用 `attempts>=0` 过滤，避免负值异常行
 
 在 17DK 下界谓词之后、LIMIT 前继续增加部分零日期资格过滤：`MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0`、`MONTH(created_at)>0 AND DAYOFMONTH(created_at)>0`、`MONTH(updated_at)>0 AND DAYOFMONTH(updated_at)>0`，以及 `published_at IS NULL OR (MONTH(published_at)>0 AND DAYOFMONTH(published_at)>0)`。MySQL 官方函数允许从日期表达式提取月份和月内日期，返回值包含 0；本条只用其识别零月/零日，不进行完整日历转换。表结构、索引、SQL mode、driver、全 row 投影、参数、排序、limit、历史事实和其他状态保持；零月/零日行不读取、不修复、不删除、不写状态。
 
+在 17DL 零月/零日谓词之后、LIMIT 前继续增加日历上限资格：`DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at))`、`DAYOFMONTH(created_at)<=DAYOFMONTH(LAST_DAY(created_at))`、`DAYOFMONTH(updated_at)<=DAYOFMONTH(LAST_DAY(updated_at))`，以及 `published_at IS NULL OR DAYOFMONTH(published_at)<=DAYOFMONTH(LAST_DAY(published_at))`。`LAST_DAY` 返回非法/NULL 参数的 NULL 时不放行该非空行；本条只排除超出当月末日的部分非法日期，不改变表、索引、driver、SQL mode、投影、参数、排序、limit 或历史事实，也不提供完整日期/ALLOW_INVALID_DATES 修复。
+
 订单 outbox 的状态条件在扫描、PUBLISHED CAS 和 failure 更新中使用 `CAST(status AS BINARY)=CAST('PENDING' AS BINARY)` 精确匹配；`status VARCHAR(32)` DDL、索引和既有状态值不变，历史别名状态不由本批修复。该语法避免 MySQL 8.0 的 BINARY 表达式弃用警告；event_type 的既有 BINARY 条件边界保持。
 
 订单 timeout dispatcher 的扫描在 LIMIT 前以 BINARY 精确匹配 `event_type='ORDER_TIMEOUT'`；`event_type VARCHAR(64) NOT NULL` DDL 与索引不变，其他类型记录保留原事实并等待专属处理器。

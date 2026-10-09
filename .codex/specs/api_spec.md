@@ -188,6 +188,8 @@ clearChecked 仅删除读取时 checked=true 且原 JSON bytes 未变化的项�
 
 在上述 17DK 下界之后，订单 timeout outbox 扫描还必须在 LIMIT 前以 `MONTH(col)>0 AND DAYOFMONTH(col)>0` 排除 `next_retry_at`、`created_at`、`updated_at` 的零月/零日值，并对非空 `published_at` 使用同一两个函数谓词；`published_at IS NULL` 继续合法。四个原 prepared 参数、全 row 投影、排序、limit、原资格和错误传播不变，不修复/删除历史行，不声明完整日历或 `ALLOW_INVALID_DATES` 校验；只保护 JDBC 映射免受部分零日期阻断，DF/DG/DH/DI/DJ、SQL、Schema、API 和 message 语义保持。
 
+在 17DL 零月/零日门之后，订单 timeout outbox 扫描还必须在 LIMIT 前按 `DAYOFMONTH(col)<=DAYOFMONTH(LAST_DAY(col))` 分别校验 `next_retry_at`、`created_at`、`updated_at`，并对非空 `published_at` 使用同一比较；`published_at IS NULL` 继续合法。保留四个原 prepared 参数、全 row 投影、排序、limit、原资格和错误传播；不修复/删除历史非法日期，不宣称完整 Gregorian、1582、timezone、编码或 `ALLOW_INVALID_DATES` 闭环。若函数产生新 warning 或语义不符，验收保持失败，不放宽测试。
+
 订单超时 outbox 扫描还必须在 LIMIT 前以 BINARY 精确筛选 `event_type='ORDER_TIMEOUT'`；dispatcher 对当前 PO 再做精确类型 guard，别名/其他类型只告警跳过，不解析、发送或写完成/失败。其他事件类型需独立 handler，不由 timeout exchange 处理器猜测。
 
 订单 outbox 扫描 SQL 故障继续向外传播；单候选 DataAccessException 只隔离当前候选并继续后续候选。`markOutboxPublished` 或 failure 写入的数据库异常不得被普通发送 catch 转换为第二次 failure 写入，不猜测已确认消息状态；非数据库发送/解析异常保持原一次退避记录，Error 不捕获。
