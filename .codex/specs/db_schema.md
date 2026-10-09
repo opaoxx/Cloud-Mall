@@ -435,6 +435,8 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 
 16T5 在上述普通非空 flows+request 分支内，必须核对 request `order_no`、`scene=NORMAL`、非空 `items_snapshot` 和 `items_hash`。独立 ObjectMapper 仅用于该 proof，启用 trailing token/duplicate tree key 拒绝；重建严格升序、无重复、正 Long SKU/正 int quantity 的 `StockLineDTO` 列表，复用 writer 的 canonical JSON 与 SHA-256 算法，不能对 MySQL JSON raw 文本 hash。重建集合必须与已观察 flows 的 SKU/quantity 一一对应，缺、多、重复、数量/hash/identity 不符均返回 UNKNOWN，不改 facts。空 flows 外层分支、秒杀、写状态机、SQL/DDL、Redis、消息和非 RR 语义保持；本条不提供完整订单 SKU、Stock 余额或秒杀身份证明。
 
+进入既有 `alreadyReserved()` 重放路径时，只有 `reservationResult()` 返回非空 data 且 proof status 精确为 `RESERVED` 才能返回 `ALREADY_RESERVED`。UNKNOWN、其他终态、缺 data 或读取异常固定为 `STOCK_RESERVATION_PROOF_UNAVAILABLE`/503，不修改 request/flows/数量/状态/Redis/消息，不修复或覆盖历史事实；合法 RESERVED 的既有重放 API 语义保持。本门只保护 16T5 snapshot proof 失败不被响应层强制 coerce。
+
 ### 6.3 `stock_cache_repair`
 
 正常库存的 MySQL 状态是事实源，Redis 只保存可售数量投影。每次成功改变 `stock_sku` 的本地事务必须同时写入一条待执行的缓存修复记录，覆盖数据库提交后进程退出、Redis 连接失败和回补结果未知等窗口。

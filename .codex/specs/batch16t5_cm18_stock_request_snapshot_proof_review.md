@@ -21,12 +21,17 @@
 - request proof 通过后仍必须满足 16T4：每 SKU 数值合法、完整同向终态、所有 SKU 同一状态、request.status 与聚合状态一致；任一 proof 失败返回 `UNKNOWN/items=[]`，不改原行。
 - GET 仍非 RR；读取竞争可保守 UNKNOWN。Order fallback 只消费实际 Stock GET 结果，不由本批直接改变 Order/Pay。
 
+### 3.1 已有重放响应门
+
+进入已有相同 request/hash 的 `alreadyReserved()` 重放路径时，必须先检查 `reservationResult()` 返回非 null、data 非 null 且 proof status 精确为 `RESERVED`；只有该条件满足才可返回原 `ALREADY_RESERVED` 语义。proof 为 `UNKNOWN`、`CONFIRMED`、`ROLLED_BACK`、缺 data 或读取异常时，固定抛 `STOCK_RESERVATION_PROOF_UNAVAILABLE`/503，不输出 raw 错误、snapshot 或载荷，不修改状态、数量、request、flows、Redis 或消息，也不把 proof 失败强制改写为 ALREADY_RESERVED。合法 `RESERVED` 的重放 API 字段和状态保持。
+
 ## 4. 验收矩阵
 
 - Unit：snapshot 非数组/空数组、缺字段/null、非整数、负数/溢出、额外字段、重复键、尾随 JSON、错误 order_no/scene、hash 错误、缺/多/重复 SKU、quantity 不同均 `UNKNOWN/items=[]`；合法 MySQL JSON 空白/key 顺序规范化控制样本通过；确认 ObjectMapper 全局配置不变。
 - 真实 MySQL：复用 16T4 普通旧/有 request flows，覆盖完整原载荷、缺 SKU、额外 SKU、重复 SKU、错误 quantity/hash、request identity/scene 冲突；原 Stock 表 checksum、request/flows facts 前后不变。
 - Order fallback：Stock GET 返回实际 proof 结果时，只有 snapshot+flows+request.status 全部一致才可让旧无 action Order 映射 `SUCCEEDED`；proof 失败保持 UNKNOWN，不调用 Stock 写接口、不推进 Pay/退款。Order Mapper 为替身，StockClient 只桥接实际 GET 结果，不宣称 HTTP/TC/真实资金全链。
 - 保留 16T4 六类旧 writes、秒杀与 API 回归；修正旧 request mock 使其携带真实 canonical snapshot/hash，不降低新 proof 门。
+- 专项覆盖相同 request hash 但 snapshot/flows 错配的重复 reserve：读到 UNKNOWN 时库存与 request facts 不变且不 ACK；直接 helper/service proof 失败也不能 coerce，合法 RESERVED 仍返回 ALREADY_RESERVED。
 
 ## 5. 交付边界
 
