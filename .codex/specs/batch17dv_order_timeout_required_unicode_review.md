@@ -15,7 +15,7 @@ DT 已保护消息原始 UTF-8 bytes；但 JSON escaped 的不配对代理序列
 - 其他 BMP 字符、合法代理对、中文、emoji、真实 U+FFFD 保持；
 - 不 trim、替换、归一化、重编码或修改原 String。
 
-校验失败沿现有 object 格式 `IllegalArgumentException` 返回，不委托 String legacy、不访问订单 Mapper/Stock/RPC。eventType 继续精确 ASCII `ORDER_TIMEOUT`，可选字段、expireAt ISO 语法、数据库期限事实由原路径处理。
+校验失败沿现有 object 格式 `IllegalArgumentException` 返回，不委托 String legacy、不访问订单 Mapper/Stock/RPC。eventType 继续精确 ASCII `ORDER_TIMEOUT`；本轮与原入口均不校验 Message 中 `expireAt` 的 ISO 语法，也不以它替代数据库期限事实，实际到期判定仍由原订单数据库 `expire_at` 路径处理。可选字段保持原语义。
 
 ## 3. 兼容与验收
 
