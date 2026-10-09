@@ -88,6 +88,89 @@ class OrderStockActionRecoveryTimeMySqlIT {
   }
 
   @Test
+  void retryDatesBelowTheSupportedRangeCannotAbortOrOccupyTheScanLimit() throws Exception {
+    System.out.println("CM17DY test JVM timezone: " + ZoneId.systemDefault());
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderStockActionMapper(modeJdbc);
+      List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
+      for (String readMode : List.of("STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE", "")) {
+        for (String invalid :
+            List.of(
+                "0000-00-00 00:00:00.000", "0000-01-01 12:34:56.789", "0999-12-31 23:59:59.999")) {
+          for (LocalDateTime healthyTime :
+              List.of(
+                  LocalDateTime.of(1000, 1, 1, 0, 0),
+                  LocalDateTime.of(2026, 10, 8, 10, 0, 0, 123_000_000))) {
+            checks.add(
+                () -> {
+                  modeJdbc.execute("SET SESSION sql_mode=''");
+                  seed(modeJdbc, modeMapper, LocalDateTime.of(2026, 10, 8, 10, 0));
+                  assertEquals(1, modeMapper.insert(2L, "healthy-retry", "CONFIRM", healthyTime));
+                  modeJdbc.update(
+                      "UPDATE order_stock_action SET next_retry_at=? WHERE id=1", invalid);
+                  var before = retryDateEvidence(modeJdbc);
+                  assertEquals(invalid, before.get(0).get("next_retry_at"));
+                  modeJdbc.execute("SET SESSION sql_mode='" + readMode + "'");
+                  var actions = modeMapper.findDue(LocalDateTime.of(2026, 10, 9, 12, 0), 1);
+                  assertEquals(1, actions.size());
+                  assertEquals(2L, actions.get(0).id);
+                  assertEquals("healthy-retry:CONFIRM", actions.get(0).operationKey);
+                  assertEquals(healthyTime, actions.get(0).nextRetryAt);
+                  assertEquals(before, retryDateEvidence(modeJdbc));
+                });
+          }
+        }
+      }
+      assertAll(checks);
+    }
+  }
+
+  @Test
+  void sixtyZeroDateActionsCannotStarveTheFollowingHealthyRecovery() throws Exception {
+    try (var connection = fixture.getDataSource().getConnection()) {
+      var modeJdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+      var modeMapper = new OrderStockActionMapper(modeJdbc);
+      modeJdbc.execute("SET SESSION sql_mode=''");
+      LocalDateTime createdAt = LocalDateTime.now(ZoneOffset.ofHours(8)).minusMinutes(1);
+      seed(modeJdbc, modeMapper, createdAt);
+      for (int identity = 2; identity <= 61; identity++) {
+        assertEquals(
+            1, modeMapper.insert(identity, "retry-lower" + identity, "CONFIRM", createdAt));
+      }
+      modeJdbc.update(
+          "UPDATE order_stock_action SET next_retry_at='0000-00-00 00:00:00.000' WHERE id<=60");
+      var before = retryDateEvidence(modeJdbc);
+      modeJdbc.execute("SET SESSION sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE'");
+      StockClient stock = mock(StockClient.class);
+      StockReservationStatusVO response = new StockReservationStatusVO();
+      response.orderNo = "retry-lower61";
+      response.status = "CONFIRMED";
+      when(stock.reservation(response.orderNo)).thenReturn(ApiResponse.ok(response));
+      OrderStockActionRecovery recovery = new OrderStockActionRecovery(modeMapper, stock);
+      assertAll(
+          () -> assertDoesNotThrow(recovery::recoverDue),
+          () ->
+              assertEquals(
+                  "SUCCEEDED",
+                  modeJdbc.queryForObject(
+                      "SELECT status FROM order_stock_action WHERE id=61", String.class)),
+          () -> verify(stock).reservation("retry-lower61"));
+      var after = retryDateEvidence(modeJdbc);
+      assertEquals(before.subList(0, 60), after.subList(0, 60));
+      assertEquals(1, ((Number) after.get(60).get("attempts")).intValue());
+      assertNull(after.get(60).get("lease_owner"));
+      assertNull(after.get(60).get("lease_until"));
+      for (String column :
+          List.of(
+              "id", "order_no", "action_type", "operation_key", "next_retry_at", "created_at")) {
+        assertEquals(before.get(60).get(column), after.get(60).get(column), column);
+      }
+      verifyNoMoreInteractions(stock);
+    }
+  }
+
+  @Test
   void validCalendarRetryDatesAreReadWithoutChangingDatabaseComponents() throws Exception {
     System.out.println("CM17DW test JVM timezone: " + ZoneId.systemDefault());
     try (var connection = fixture.getDataSource().getConnection()) {
