@@ -11,6 +11,7 @@ cloudmall.pay.debit-mode: LEGACY
 cloudmall.pay.tcc-reconciliation.enabled: false
 cloudmall.pay.tcc-user-evidence.enabled: false
 cloudmall.pay.tcc-order-evidence.enabled: false
+cloudmall.pay.tcc-stock-evidence.enabled: false
 cloudmall.pay.tcc-bridge.enabled: false
 cloudmall.pay.tcc-receipt.enabled: false
 cloudmall.pay.tcc-coordinator.enabled: false

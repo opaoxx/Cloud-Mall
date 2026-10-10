@@ -464,6 +464,35 @@ WHERE保留原候选，异常行不会被过滤后伪装NOT_FOUND；单次只读
 上述StockReservationTerminalProofMySqlIT已补实际SQL来源投影、异常旧数据、Order fallback
 和重放回归，可沿同一隔离验证命令执行。
 
+### CM-18 Pay直接Stock只读观察（16T7）
+
+同时开启本地 `cloudmall.pay.tcc-reconciliation.enabled` 和独立默认关闭的
+`cloudmall.pay.tcc-stock-evidence.enabled` 后，使用相同内部运维请求头直连 Pay：
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/stock-evidence`。
+不依赖User/Order诊断开关。第一次Pay RR可信原锚点提供orderNo，事务结束后新GET-only Feign
+查询现有Stock预扣GET，再次Pay RR核对；本地变化优先LOCAL_EVIDENCE_CHANGED。无可信锚点
+不发Stock请求。GET隔离并恢复调用方AuthContext，不传callback/user/role/XID给Stock，
+沿用3s/5s和默认不重试，没有写接口。
+
+响应固定PAY_STOCK_OBSERVED_ONLY/automaticActionsAllowed=false，只输出白名单状态、
+观察数组长度及完全校验后按SKU升序编码的向量指纹。原生文本订单号须匹配，item必须是原生
+正Long/int且唯一、与aggregate状态一致；不强转字符串或截断小数。UNKNOWN/NOT_FOUND/
+REJECTED/INIT、缺明细或坏值均缺证；重复/相反状态/错单冲突；HTTP/DB/解析不可用均阻塞。
+最高BLOCKED_REMAINING_EVIDENCE；合法Stock ROLLED_BACK和Pay COMMITTED不据此猜退款。
+
+报告不暴露原SKU明细、异常、XID、branch或凭证；User/Order/TC/MQ未查询。Stock现GET不是
+跨表RR，本切片不证明完整Order SKU、scene/user/payNo归属、Stock余额/raw flow、跨库原子性
+或全链资金终态。查询后Stock仍可能变化，完成CM18还需要完整统一取证和后续主项验收。
+
+真实隔离验收先构建Stock标准classes/Boot jar，再使用owned Pay/Stock库和随机loopback HTTP、
+实际Stock Controller/Mapper及Feign；仅从Stock Boot jar加载其已有Sentinel/Redis类型供测试反射，
+不新增生产依赖、不连接Redis/Rabbit/TC，不启动业务App或固定端口。finally清理全部自有资源：
+
+```powershell
+mvn -pl backend/cloud-mall-stock -am package -DskipTests
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccStockEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
