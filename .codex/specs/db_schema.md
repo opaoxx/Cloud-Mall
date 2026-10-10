@@ -437,6 +437,10 @@ DLQ consumer 先写入该表再确认死信消息；replayer 必须先通过 `GE
 
 16T6 `findReservationFlows` 仍是单次普通 flows 汇总 SELECT，保留 `WHERE order_no=?`、GROUP BY `sku_id`、原参数和数量汇总，并额外投影 `MIN(order_no)`、`COUNT(DISTINCT BINARY order_no)` 与 invalid flow metadata。binary distinct count 只作为 provenance 证明，不在 WHERE 过滤或伪装缺行；Service 先要求查询 orderNo 与 MIN 精确相等、count=1、invalid count=0，再执行 16T4/16T5 数量及 request proof。原 order alias、混合 order、unknown/NULL flow_type、非正 quantity、负值抵消、metadata 缺失/异常均保留 facts 并返回 UNKNOWN；不新增 DDL/索引/写入，不改变空 flows、秒杀和非 RR 语义。
 
+CM-18 16T7 不新增 Stock 表/列/索引。Pay 仅在 16T1 local flag、16T7 flag 通过且 Pay `ReadService.capture` 返回可信 anchor 后，事务外调用现有 Stock reservation GET；不依赖 User/Order flags，不发送 POST，不访问 Redis/Rabbit/TC。Stock GET 保持原非 RR/SELECT 语义；响应仅在内存解析为 native text/orderNo、白名单 status 和严格 item vector 后形成 `STOCK_EVIDENCE_*` 分类与 SHA-256 指纹。orderNo 缺失/非 native text 为 incomplete，native text 不匹配 anchor 为 conflict；items 缺/空/非数组/字段/number/范围错误为 incomplete，合法重复 SKU或 item state 与 aggregate 不一致为 conflict。状态摘要允许 RESERVED/CONFIRMED/ROLLED_BACK 及缺证状态 INIT/UNKNOWN/NOT_FOUND/REJECTED；未知状态 incomplete。非法/缺证/HTTP/DB 不可用保留 UNKNOWN/UNAVAILABLE，不改变 Stock/Pay facts。
+
+Stock evidence 的 item vector 只对排序后的 `sku:quantity:state;` 计算固定 ASCII SHA-256；不输出 raw items/orderNo/error/keys。响应固定 scope `PAY_STOCK_OBSERVED_ONLY`、auto false、Shanghai collectedAt、localEvidence 和 stockEvidence 摘要；observedItemCount 可为 NULL，itemVectorSha256 仅完全核验时存在。两次 Pay capture 的 anchor/local 摘要变化返回 `LOCAL_EVIDENCE_CHANGED`；合法 ROLLED_BACK 与 Pay COMMITTED 不作相反终态冲突。该读取不证明完整 Order SKU、Stock scene/user/payNo 归属、库存余额、raw flow、跨库原子性或资金终态；不改变 16T4/16T5/16T6 既有 ordinary flow proof。
+
 进入既有 `alreadyReserved()` 重放路径时，只有 `reservationResult()` 返回非空 data 且 proof status 精确为 `RESERVED` 才能返回 `ALREADY_RESERVED`。UNKNOWN、其他终态、缺 data 或读取异常固定为 `STOCK_RESERVATION_PROOF_UNAVAILABLE`/503，不修改 request/flows/数量/状态/Redis/消息，不修复或覆盖历史事实；合法 RESERVED 的既有重放 API 语义保持。本门只保护 16T5 snapshot proof 失败不被响应层强制 coerce。
 
 ### 6.3 `stock_cache_repair`
