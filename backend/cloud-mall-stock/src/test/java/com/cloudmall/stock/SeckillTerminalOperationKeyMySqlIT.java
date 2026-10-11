@@ -674,6 +674,8 @@ class SeckillTerminalOperationKeyMySqlIT {
     seedSettlement(state, operationKey);
     fixture.update(
         "UPDATE seckill_quota_settlement SET idempotency_key=? WHERE order_no=?", key, ORDER_NO);
+    fixture.update(
+        "UPDATE seckill_reservation SET idempotency_key=? WHERE order_no=?", key, ORDER_NO);
   }
 
   @Test
@@ -802,6 +804,241 @@ class SeckillTerminalOperationKeyMySqlIT {
         "UPDATE seckill_quota_settlement SET redis_revision=? WHERE order_no=?", receipt, ORDER_NO);
   }
 
+  @Test
+  void realTransitionsCannotWriteWithoutMatchingAcceptanceSource() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String transition : List.of("open-confirm", "open-rollback", "blocked-confirm"))
+      for (String variant : badTransitionSources())
+        assertions.add(
+            () -> {
+              reset();
+              seedTransition(transition);
+              corruptTransitionSource(variant);
+              var before = facts();
+              tracked.checking = true;
+              tracked.writePhase = true;
+              tracked.allowTransition = true;
+              Integer changed =
+                  new org.springframework.transaction.support.TransactionTemplate(transactions)
+                      .execute(transactionStatus -> applyTransition(transition));
+              assertAll(
+                  () -> assertEquals(Integer.valueOf(0), changed, transition + ":" + variant),
+                  () -> assertEquals(before, facts(), transition + ":" + variant),
+                  () -> assertEquals(1, tracked.sql.size()));
+              assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void transactionalServiceKeepsUnknown503ForUnprovenTransitionSource() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String transition : List.of("open-confirm", "open-rollback", "blocked-confirm"))
+      for (String variant : badTransitionSources())
+        assertions.add(
+            () -> {
+              reset();
+              seedTransition(transition);
+              corruptTransitionSource(variant);
+              var before = facts();
+              tracked.checking = true;
+              tracked.writePhase = true;
+              tracked.allowTransition = true;
+              var failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> settlementService.settle(ORDER_NO, transitionAction(transition)));
+              assertEquals(503, failure.getHttpStatus());
+              assertEquals("SECKILL_SETTLEMENT_UNKNOWN", failure.getCode());
+              assertEquals(3, tracked.sql.size());
+              assertTrue(tracked.sql.get(0).startsWith("INSERT IGNORE"));
+              assertTrue(tracked.sql.get(1).contains("FOR UPDATE"));
+              assertTrue(tracked.sql.get(2).startsWith("UPDATE"));
+              assertEquals(before, facts());
+              assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerCannotAcknowledgeOrClearMissingSourceTransitions() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var proxy = new ProxyFactory(controller);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    var mvc =
+        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String transition : List.of("open-confirm", "open-rollback", "blocked-confirm"))
+      assertions.add(
+          () -> {
+            reset();
+            seedTransition(transition);
+            corruptTransitionSource("missing");
+            var before = facts();
+            tracked.checking = true;
+            tracked.writePhase = true;
+            tracked.allowTransition = true;
+            mvc.perform(
+                    post(
+                        "/api/stock/reservations/"
+                            + ORDER_NO
+                            + "/"
+                            + transitionAction(transition).toLowerCase(Locale.ROOT)))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_UNKNOWN"));
+            assertEquals(3, tracked.sql.size());
+            assertEquals(before, facts());
+            assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void allOriginalAcceptedStatesKeepRealTransitionSetAndRevision() {
+    for (String acceptedState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String transition : List.of("open-confirm", "open-rollback", "blocked-confirm")) {
+        reset();
+        seedTransition(transition);
+        fixture.update("UPDATE seckill_reservation SET status=?", acceptedState);
+        var before = facts();
+        tracked.checking = true;
+        tracked.writePhase = true;
+        tracked.allowTransition = true;
+        var response = settlementService.settle(ORDER_NO, transitionAction(transition));
+        assertEquals("0", response.code);
+        if ("open-rollback".equals(transition)) {
+          assertEquals(false, ((Map<?, ?>) response.data).get("rolledBack"));
+          assertEquals(true, ((Map<?, ?>) response.data).get("pending"));
+        } else assertEquals(true, ((Map<?, ?>) response.data).get("confirmed"));
+        assertEquals(3, tracked.sql.size());
+        var after = facts();
+        for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+          if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
+        var stored = after.get(3).get(0);
+        assertEquals(
+            "open-rollback".equals(transition) ? "RELEASE_PENDING" : "CONFIRMED",
+            stored.get("status"));
+        assertEquals(
+            "open-confirm".equals(transition) ? 3L : 2L,
+            ((Number) stored.get("revision")).longValue());
+        assertEquals(ORDER_NO + ":" + transitionAction(transition), stored.get("operation_key"));
+        assertNull(stored.get("lease_owner"));
+        assertNull(stored.get("lease_until"));
+        assertNull(stored.get("last_error"));
+        assertNull(stored.get("redis_revision"));
+        if ("open-rollback".equals(transition)) assertNotNull(stored.get("next_retry_at"));
+        else assertNull(stored.get("next_retry_at"));
+        var originalStable = new java.util.HashMap<>(before.get(3).get(0));
+        var actualStable = new java.util.HashMap<>(stored);
+        for (String changed :
+            List.of(
+                "status",
+                "operation_key",
+                "revision",
+                "updated_at",
+                "next_retry_at",
+                "lease_owner",
+                "lease_until",
+                "last_error")) {
+          originalStable.remove(changed);
+          actualStable.remove(changed);
+        }
+        assertEquals(originalStable, actualStable);
+        assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+      }
+  }
+
+  /** 仅自有事实准备三个真实CAS路径；blocked诊断/租约可验证拒绝不清理。 */
+  private static void seedTransition(String transition) {
+    seedSettlement(
+        "blocked-confirm".equals(transition) ? "PROJECTION_BLOCKED" : "OPEN",
+        "blocked-confirm".equals(transition) ? ORDER_NO + ":CONFIRM" : null);
+    if ("blocked-confirm".equals(transition))
+      fixture.update(
+          "UPDATE seckill_quota_settlement SET"
+              + " lease_owner='owned-existing-lease',lease_until='2099-01-01',last_error='owned-diagnostic',next_retry_at='2000-01-01'");
+  }
+
+  /** 原方向，只用于测试请求，不从被测SQL派生结论。 */
+  private static String transitionAction(String transition) {
+    return "open-rollback".equals(transition) ? "ROLLBACK" : "CONFIRM";
+  }
+
+  /** 真实MyBatis SQL返回影响行数，事务由调用方管理。 */
+  private static int applyTransition(String transition) {
+    return switch (transition) {
+      case "open-confirm" ->
+          settlementMapper.transitionOpenToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L);
+      case "open-rollback" ->
+          settlementMapper.transitionToReleasePending(ORDER_NO, ORDER_NO + ":ROLLBACK", 2L);
+      case "blocked-confirm" ->
+          settlementMapper.transitionBlockedToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L);
+      default -> throw new AssertionError(transition);
+    };
+  }
+
+  /** 现存原列能够实际保存的错来源，拒绝通过排序规则借证。 */
+  private static List<String> badTransitionSources() {
+    return List.of(
+        "missing",
+        "pending",
+        "unknown",
+        "rejected",
+        "status-case",
+        "status-space",
+        "order-foreign",
+        "order-case",
+        "order-accent",
+        "order-space",
+        "activity",
+        "sku",
+        "user",
+        "idem-foreign",
+        "idem-case",
+        "idem-accent",
+        "idem-space");
+  }
+
+  /** 只改变owned原受理记录；settlement维度/操作键保持合法。 */
+  private static void corruptTransitionSource(String variant) {
+    switch (variant) {
+      case "missing" -> fixture.update("DELETE FROM seckill_reservation");
+      case "pending", "unknown", "rejected" ->
+          fixture.update(
+              "UPDATE seckill_reservation SET status=?", variant.toUpperCase(Locale.ROOT));
+      case "status-case" -> fixture.update("UPDATE seckill_reservation SET status='accepted'");
+      case "status-space" -> fixture.update("UPDATE seckill_reservation SET status='ACCEPTED '");
+      case "order-foreign" ->
+          fixture.update("UPDATE seckill_reservation SET order_no='foreign-owned-source'");
+      case "order-case" ->
+          fixture.update(
+              "UPDATE seckill_reservation SET order_no=?", ORDER_NO.toUpperCase(Locale.ROOT));
+      case "order-accent" ->
+          fixture.update("UPDATE seckill_reservation SET order_no='202610próof1'");
+      case "order-space" ->
+          fixture.update("UPDATE seckill_reservation SET order_no=?", ORDER_NO + " ");
+      case "activity" -> fixture.update("UPDATE seckill_reservation SET activity_id=11");
+      case "sku" -> fixture.update("UPDATE seckill_reservation SET sku_id=21");
+      case "user" -> fixture.update("UPDATE seckill_reservation SET user_id=9");
+      case "idem-foreign" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='foreign-owned-idem'");
+      case "idem-case" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='PRIVATE-IDEM'");
+      case "idem-accent" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='priváte-idem'");
+      case "idem-space" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='private-idem '");
+      default -> throw new AssertionError(variant);
+    }
+  }
+
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
   private static List<String> badKeys(String state) {
     String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
@@ -823,6 +1060,11 @@ class SeckillTerminalOperationKeyMySqlIT {
         state,
         key,
         "RELEASED".equals(state) ? 4L : null);
+    fixture.update(
+        "INSERT INTO"
+            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at)"
+            + " VALUES(1,?,10,20,8,'private-idem','ACCEPTED','2026-10-10','2026-10-10')",
+        ORDER_NO);
   }
 
   /** 原生产GET，任何数据库异常都不得当作终态证据。 */

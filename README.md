@@ -1614,3 +1614,11 @@ claim 在原租约/版本谓词上追加同一 SQL 的受理来源 EXISTS，核�
 保留原 ACCEPTED/PUBLISHED/ORDER_CREATED 三种受理态；缺失或错来源不领取租约、不执行释放 Lua。
 原 SET/参数、恢复点读/回执/扫描协议保持，无新增查询/DDL/API；关联读取可能改变 InnoDB 锁足迹。
 本门只核领取时当前同 tuple 来源，不证明请求/订单全因果、原 APPLIED 来源或关闭 claim 后跨存储窗口。
+
+
+### CM-18 秒杀状态变更的原受理来源绑定（16T45）
+
+OPEN确认、OPEN待释放、blocked确认三个CAS在同一UPDATE中核原订单/活动/SKU/用户/幂等受理来源，
+允许原ACCEPTED/PUBLISHED/ORDER_CREATED三态；缺失或错来源影响行数0，沿原UNKNOWN503，不改事实。
+原SET/参数、INSERT→FOR UPDATE事务顺序、终态noop及claim/Lua保持；无额外查询/DDL/API。
+关联读取可能改变InnoDB锁足迹；GET/noop来源、请求/订单完整因果及跨存储窗口仍待处理。

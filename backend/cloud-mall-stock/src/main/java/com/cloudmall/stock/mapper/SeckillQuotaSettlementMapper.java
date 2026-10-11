@@ -56,34 +56,58 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
   int insertOpenIfAbsent(
       @Param("orderNo") String orderNo, @Param("occurredAt") LocalDateTime occurredAt);
 
-  /** OPEN 按唯一 confirm 操作键迁移为 CONFIRMED。 */
+  /** 原受理来源一致时，OPEN 按唯一 confirm 操作键迁移为 CONFIRMED。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='CONFIRMED',operation_key=#{operationKey},revision=revision+1,updated_at=NOW(3)"
           + " WHERE order_no=#{orderNo} AND status='OPEN' AND revision=#{expectedRevision} AND"
-          + " (operation_key IS NULL OR operation_key=#{operationKey})")
+          + " (operation_key IS NULL OR operation_key=#{operationKey}) AND EXISTS (SELECT 1 FROM"
+          + " seckill_reservation accepted WHERE accepted.order_no=#{orderNo} AND BINARY"
+          + " accepted.order_no=BINARY #{orderNo} AND BINARY accepted.order_no=BINARY"
+          + " seckill_quota_settlement.order_no AND BINARY accepted.status IN (BINARY"
+          + " 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int transitionOpenToConfirmed(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
       @Param("expectedRevision") long expectedRevision);
 
-  /** 将保留 confirm 方向的投影阻塞事实直接确认，不写 Redis。 */
+  /** 原受理来源一致时，将保留 confirm 方向的投影阻塞事实直接确认，不写 Redis。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='CONFIRMED',last_error=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at=NULL,updated_at=NOW(3)"
           + " WHERE order_no=#{orderNo} AND status='PROJECTION_BLOCKED' AND"
-          + " revision=#{expectedRevision} AND operation_key=#{operationKey}")
+          + " revision=#{expectedRevision} AND operation_key=#{operationKey} AND EXISTS (SELECT 1"
+          + " FROM seckill_reservation accepted WHERE accepted.order_no=#{orderNo} AND BINARY"
+          + " accepted.order_no=BINARY #{orderNo} AND BINARY accepted.order_no=BINARY"
+          + " seckill_quota_settlement.order_no AND BINARY accepted.status IN (BINARY"
+          + " 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int transitionBlockedToConfirmed(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
       @Param("expectedRevision") long expectedRevision);
 
-  /** OPEN 按唯一 rollback 操作键迁移为 RELEASE_PENDING。 */
+  /** 原受理来源一致时，OPEN 按唯一 rollback 操作键迁移为 RELEASE_PENDING。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='RELEASE_PENDING',operation_key=#{operationKey},revision=2,next_retry_at=NOW(3),updated_at=NOW(3)"
           + " WHERE order_no=#{orderNo} AND status='OPEN' AND revision=#{expectedRevision} AND"
-          + " (operation_key IS NULL OR operation_key=#{operationKey})")
+          + " (operation_key IS NULL OR operation_key=#{operationKey}) AND EXISTS (SELECT 1 FROM"
+          + " seckill_reservation accepted WHERE accepted.order_no=#{orderNo} AND BINARY"
+          + " accepted.order_no=BINARY #{orderNo} AND BINARY accepted.order_no=BINARY"
+          + " seckill_quota_settlement.order_no AND BINARY accepted.status IN (BINARY"
+          + " 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int transitionToReleasePending(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
