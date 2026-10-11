@@ -39,7 +39,8 @@ class SeckillRecoveryCandidateGuardTest {
             when(mapper.claim(any(), any(), anyLong(), any(), any(), any())).thenReturn(1);
             when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any()))
                 .thenReturn(7L);
-            when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any())).thenReturn(1);
+            when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any(), any()))
+                .thenReturn(1);
             assertEquals(0, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
             verify(mapper).findDue(any(), eq(50));
             verifyNoMoreInteractions(mapper);
@@ -81,7 +82,12 @@ class SeckillRecoveryCandidateGuardTest {
                 eq("1")))
             .thenReturn(7L);
         when(mapper.markReleased(
-                eq(original.orderNo), eq(original.operationKey), eq(2L), eq(7L), any()))
+                eq(original.orderNo),
+                eq(original.operationKey),
+                eq(2L),
+                eq(7L),
+                any(),
+                same(original)))
             .thenReturn(1);
         assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
         verify(redis)
@@ -93,7 +99,13 @@ class SeckillRecoveryCandidateGuardTest {
                 eq("2"),
                 eq("1"));
         verify(mapper)
-            .markReleased(eq(original.orderNo), eq(original.operationKey), eq(2L), eq(7L), any());
+            .markReleased(
+                eq(original.orderNo),
+                eq(original.operationKey),
+                eq(2L),
+                eq(7L),
+                any(),
+                same(original));
         verify(mapper).findSettlement(original.orderNo);
         verifyNoMoreInteractions(redis);
         assertEquals(idempotency, original.idempotencyKey);
@@ -126,13 +138,14 @@ class SeckillRecoveryCandidateGuardTest {
     stubClaimReadback(mapper, healthy);
     when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any()))
         .thenReturn(7L);
-    when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any())).thenReturn(1);
+    when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any(), any())).thenReturn(1);
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
     verify(mapper).findDue(any(), eq(50));
     verify(mapper)
         .claim(eq(healthy.orderNo), eq(healthy.operationKey), eq(2L), any(), any(), any());
     verify(mapper)
-        .markReleased(eq(healthy.orderNo), eq(healthy.operationKey), eq(2L), eq(7L), any());
+        .markReleased(
+            eq(healthy.orderNo), eq(healthy.operationKey), eq(2L), eq(7L), any(), same(healthy));
     verify(mapper).findSettlement(healthy.orderNo);
     verifyNoMoreInteractions(mapper);
   }

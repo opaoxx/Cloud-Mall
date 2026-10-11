@@ -156,7 +156,12 @@ public class SeckillQuotaSettlementRecovery {
       // 4. 按既有回执/CAS及重试协议处理结果。
       if (redisRevision != null && redisRevision > 0) {
         if (settlementMapper.markReleased(
-                settlement.orderNo, settlement.operationKey, revision, redisRevision, owner)
+                settlement.orderNo,
+                settlement.operationKey,
+                revision,
+                redisRevision,
+                owner,
+                settlement)
             != 1) {
           SeckillQuotaSettlementPO current = settlementMapper.findSettlement(settlement.orderNo);
           if (releasedReadbackMatches(settlement, current, redisRevision)) return true;
@@ -172,7 +177,8 @@ public class SeckillQuotaSettlementRecovery {
               owner,
               "SECKILL_RELEASE_CAS_UNKNOWN",
               now().plusSeconds(10),
-              now());
+              now(),
+              settlement);
           return false;
         }
         return true;
@@ -184,7 +190,8 @@ public class SeckillQuotaSettlementRecovery {
           revision,
           "SECKILL_RELEASE_PROJECTION_BLOCKED",
           retryAt,
-          owner);
+          owner,
+          settlement);
       log.warn(
           "秒杀结算投影被阻塞，orderNo={},operationKey={},revision={},分类=PROJECTION_BLOCKED",
           settlement.orderNo,
@@ -200,7 +207,8 @@ public class SeckillQuotaSettlementRecovery {
           owner,
           errorSummary(failure),
           now().plusSeconds(10),
-          now());
+          now(),
+          settlement);
       log.warn(
           "秒杀结算释放重试，orderNo={},operationKey={},revision={},分类=REDIS_OR_CAS_FAILURE",
           settlement.orderNo,

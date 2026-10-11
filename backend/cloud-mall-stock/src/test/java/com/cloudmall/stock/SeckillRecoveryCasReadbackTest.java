@@ -48,9 +48,16 @@ class SeckillRecoveryCasReadbackTest {
                     anyString(),
                     eq("SECKILL_RELEASE_CAS_UNKNOWN"),
                     any(),
-                    any());
+                    any(),
+                    argThat(SeckillRecoveryCasReadbackTest::isOriginal));
             verify(mapper)
-                .markReleased(eq("order-24"), eq("order-24:ROLLBACK"), eq(2L), eq(7L), any());
+                .markReleased(
+                    eq("order-24"),
+                    eq("order-24:ROLLBACK"),
+                    eq(2L),
+                    eq(7L),
+                    any(),
+                    argThat(SeckillRecoveryCasReadbackTest::isOriginal));
             verify(mapper, times(2)).findSettlement("order-24");
             verify(mapper).findDue(any(), eq(50));
             verify(mapper)
@@ -83,7 +90,7 @@ class SeckillRecoveryCasReadbackTest {
     var redis = redis();
     stubClaimThenCurrent(mapper, current);
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
-    verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
+    verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
     verify(mapper, times(2)).findSettlement("order-24");
     verify(redis)
         .execute(
@@ -100,11 +107,17 @@ class SeckillRecoveryCasReadbackTest {
   void successfulOriginalCasStillReadsClaimProofOnly() {
     var mapper = mapper();
     stubClaimThenCurrent(mapper, releasedRow());
-    when(mapper.markReleased(eq("order-24"), eq("order-24:ROLLBACK"), eq(2L), eq(7L), any()))
+    when(mapper.markReleased(
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            eq(7L),
+            any(),
+            argThat(SeckillRecoveryCasReadbackTest::isOriginal)))
         .thenReturn(1);
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis()).recoverDue());
     verify(mapper).findSettlement("order-24");
-    verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
+    verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
   }
 
   @Test
@@ -121,7 +134,8 @@ class SeckillRecoveryCasReadbackTest {
             any(),
             contains("owned-readback-failure"),
             any(),
-            any());
+            any(),
+            argThat(SeckillRecoveryCasReadbackTest::isOriginal));
     verify(redis)
         .execute(
             any(RedisScript.class),
@@ -143,8 +157,9 @@ class SeckillRecoveryCasReadbackTest {
     when(missingMapper.findDue(any(), eq(50))).thenReturn(List.of(originalMissing));
     stubClaimThenCurrent(missingMapper, originalMissing, currentMissing);
     assertEquals(0, new SeckillQuotaSettlementRecovery(missingMapper, missingRedis).recoverDue());
-    verify(missingMapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
-    verify(missingMapper, never()).markReleased(any(), any(), anyLong(), anyLong(), any());
+    verify(missingMapper, never())
+        .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+    verify(missingMapper, never()).markReleased(any(), any(), anyLong(), anyLong(), any(), any());
     verifyNoInteractions(missingRedis);
     verify(missingMapper).findSettlement("order-24");
   }
@@ -301,5 +316,20 @@ class SeckillRecoveryCasReadbackTest {
     original.status = "RELEASE_PENDING";
     original.createdAt = LocalDateTime.of(2000, 1, 1, 0, 0);
     return original;
+  }
+
+  /** 写入末尾的original必须仍是原扫描immutable tuple。 */
+  private static boolean isOriginal(SeckillQuotaSettlementPO value) {
+    return value != null
+        && Long.valueOf(1L).equals(value.id)
+        && "order-24".equals(value.orderNo)
+        && Long.valueOf(11L).equals(value.activityId)
+        && Long.valueOf(22L).equals(value.skuId)
+        && Long.valueOf(33L).equals(value.userId)
+        && "original-key".equals(value.idempotencyKey)
+        && Integer.valueOf(1).equals(value.quantity)
+        && Long.valueOf(2L).equals(value.revision)
+        && "order-24:ROLLBACK".equals(value.operationKey)
+        && LocalDateTime.of(2000, 1, 1, 0, 0).equals(value.createdAt);
   }
 }

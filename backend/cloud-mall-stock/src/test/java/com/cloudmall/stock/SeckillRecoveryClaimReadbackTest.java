@@ -42,7 +42,7 @@ class SeckillRecoveryClaimReadbackTest {
           var redis = redis();
           assertEquals(0, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
           verifyNoInteractions(redis);
-          verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
+          verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
         });
     assertAll(assertions);
   }
@@ -58,7 +58,14 @@ class SeckillRecoveryClaimReadbackTest {
                 current.lastError = "diagnostic-only";
               });
       var redis = redis();
-      when(mapper.markReleased(any(), any(), eq(2L), eq(7L), any())).thenReturn(1);
+      when(mapper.markReleased(
+              any(),
+              any(),
+              eq(2L),
+              eq(7L),
+              any(),
+              argThat(SeckillRecoveryClaimReadbackTest::isOriginal)))
+          .thenReturn(1);
       assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
       verify(mapper).findSettlement("order-24");
       verify(redis)
@@ -89,7 +96,8 @@ class SeckillRecoveryClaimReadbackTest {
             any(),
             contains("owned-claim-read-failure"),
             any(),
-            any());
+            any(),
+            argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
   }
 
   @Test
@@ -112,7 +120,7 @@ class SeckillRecoveryClaimReadbackTest {
     var redis = redis();
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
     verify(mapper, times(2)).findSettlement("order-24");
-    verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
+    verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
     verify(redis)
         .execute(
             any(RedisScript.class),
@@ -214,5 +222,20 @@ class SeckillRecoveryClaimReadbackTest {
     original.operationKey = "order-24:ROLLBACK";
     original.createdAt = LocalDateTime.of(2000, 1, 1, 0, 0);
     return original;
+  }
+
+  /** 写调用末尾的original必须绑定原扫描candidate immutable字段。 */
+  private static boolean isOriginal(SeckillQuotaSettlementPO value) {
+    return value != null
+        && Long.valueOf(1L).equals(value.id)
+        && "order-24".equals(value.orderNo)
+        && Long.valueOf(11L).equals(value.activityId)
+        && Long.valueOf(22L).equals(value.skuId)
+        && Long.valueOf(33L).equals(value.userId)
+        && "original-key".equals(value.idempotencyKey)
+        && Integer.valueOf(1).equals(value.quantity)
+        && Long.valueOf(2L).equals(value.revision)
+        && "order-24:ROLLBACK".equals(value.operationKey)
+        && LocalDateTime.of(2000, 1, 1, 0, 0).equals(value.createdAt);
   }
 }

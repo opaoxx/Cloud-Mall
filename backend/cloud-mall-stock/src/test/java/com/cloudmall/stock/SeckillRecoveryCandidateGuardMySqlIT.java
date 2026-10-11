@@ -264,7 +264,13 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       verify(observedMapper, times(2))
           .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
       verify(observedMapper, times(2))
-          .markReleased(eq(original.orderNo), eq(original.operationKey), eq(2L), eq(4L), any());
+          .markReleased(
+              eq(original.orderNo),
+              eq(original.operationKey),
+              eq(2L),
+              eq(4L),
+              any(),
+              any(SeckillQuotaSettlementPO.class));
       verifyNoMoreInteractions(observedMapper);
     }
   }
@@ -329,7 +335,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
                             any(),
                             eq("SECKILL_RELEASE_CAS_UNKNOWN"),
                             any(),
-                            any()),
+                            any(),
+                            any(SeckillQuotaSettlementPO.class)),
                 () -> assertEquals(snapshot.get(), facts(), "被测路径不得修补当前坏终态: " + variant),
                 () -> assertSingleReleaseProjection(original, keys));
             verify(observedMapper).findDue(any(), eq(50));
@@ -338,7 +345,12 @@ class SeckillRecoveryCandidateGuardMySqlIT {
                     eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
             verify(observedMapper)
                 .markReleased(
-                    eq(original.orderNo), eq(original.operationKey), eq(2L), eq(4L), any());
+                    eq(original.orderNo),
+                    eq(original.operationKey),
+                    eq(2L),
+                    eq(4L),
+                    any(),
+                    any(SeckillQuotaSettlementPO.class));
             verify(observedMapper, times(2)).findSettlement(original.orderNo);
             verifyNoMoreInteractions(observedMapper);
           });
@@ -357,7 +369,16 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       clearInvocations(observedMapper, observedRedis);
       assertEquals(1, recovery.recoverDue());
       verify(observedMapper, times(2)).findSettlement(original.orderNo);
-      verify(observedMapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
+      verify(observedMapper, never())
+          .retry(
+              any(),
+              any(),
+              anyLong(),
+              any(),
+              any(),
+              any(),
+              any(),
+              any(SeckillQuotaSettlementPO.class));
       assertEquals(snapshot.get(), facts());
       assertReleased(original);
       assertSingleReleaseProjection(original, keys);
@@ -477,9 +498,11 @@ class SeckillRecoveryCandidateGuardMySqlIT {
               long revision = invocation.getArgument(2);
               long redisRevision = invocation.getArgument(3);
               String owner = invocation.getArgument(4);
+              SeckillQuotaSettlementPO expected = invocation.getArgument(5);
               assertEquals(
                   1,
-                  realMapper.markReleased(orderNo, operationKey, revision, redisRevision, owner));
+                  realMapper.markReleased(
+                      orderNo, operationKey, revision, redisRevision, owner, expected));
               switch (variant) {
                 case "id" -> fixture.update("UPDATE seckill_quota_settlement SET id=2");
                 case "order-case" ->
@@ -525,12 +548,14 @@ class SeckillRecoveryCandidateGuardMySqlIT {
               }
               snapshot.set(facts());
               int changed =
-                  realMapper.markReleased(orderNo, operationKey, revision, redisRevision, owner);
+                  realMapper.markReleased(
+                      orderNo, operationKey, revision, redisRevision, owner, expected);
               assertEquals(0, changed, "必须触发真实已提交终态的CAS0");
               return changed;
             })
         .when(observedMapper)
-        .markReleased(any(), any(), anyLong(), anyLong(), any());
+        .markReleased(
+            any(), any(), anyLong(), anyLong(), any(), any(SeckillQuotaSettlementPO.class));
     return snapshot;
   }
 
@@ -639,7 +664,13 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       verify(observedMapper)
           .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
       verify(observedMapper)
-          .markReleased(eq(original.orderNo), eq(original.operationKey), eq(2L), eq(4L), any());
+          .markReleased(
+              eq(original.orderNo),
+              eq(original.operationKey),
+              eq(2L),
+              eq(4L),
+              any(),
+              any(SeckillQuotaSettlementPO.class));
       verifyNoMoreInteractions(observedMapper);
       assertReleased(original);
       assertSingleReleaseProjection(original, keys);
@@ -863,15 +894,141 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     assertAll(assertions);
   }
 
-  /** 调用既有真实SQL签名，不调用被测私有helper伪造affected rows。 */
-  private static int applyRecoveryWrite(
+  @Test
+  void immutableTupleWriteBindingRejectsChangedFactsOrMissingOriginal() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String action : List.of("release", "block", "retry"))
+      for (String variant :
+          List.of(
+              "id",
+              "activity",
+              "sku",
+              "user",
+              "idem-case",
+              "idem-space",
+              "quantity",
+              "created",
+              "missing-original",
+              "missing-created",
+              "snapshot-order",
+              "snapshot-operation",
+              "snapshot-revision",
+              "snapshot-id-null"))
+        assertions.add(
+            () -> {
+              reset();
+              var original = row("RELEASE_PENDING", "owned-idem");
+              seed(original);
+              String owner = "owned-worker-" + UUID.randomUUID();
+              var occurredAt = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              assertEquals(
+                  1,
+                  realMapper.claim(
+                      original.orderNo,
+                      original.operationKey,
+                      2L,
+                      owner,
+                      occurredAt.plusMinutes(1),
+                      occurredAt));
+              var expected = realMapper.findSettlement(original.orderNo);
+              switch (variant) {
+                case "id" -> fixture.update("UPDATE seckill_quota_settlement SET id=2");
+                case "activity" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET activity_id=activity_id+1");
+                case "sku" -> fixture.update("UPDATE seckill_quota_settlement SET sku_id=sku_id+1");
+                case "user" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET user_id=user_id+1");
+                case "idem-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET idempotency_key='OWNED-IDEM'");
+                case "idem-space" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET idempotency_key='owned-idem '");
+                case "quantity" -> fixture.update("UPDATE seckill_quota_settlement SET quantity=2");
+                case "created" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET created_at='2000-01-01 00:00:00.001'");
+                case "missing-original" -> expected = null;
+                case "missing-created" -> expected.createdAt = null;
+                case "snapshot-order" -> expected.orderNo = "other-owned-order";
+                case "snapshot-operation" -> expected.operationKey = original.orderNo + ":CONFIRM";
+                case "snapshot-revision" -> expected.revision = 3L;
+                case "snapshot-id-null" -> expected.id = null;
+                default -> throw new AssertionError(variant);
+              }
+              var before = facts();
+              assertEquals(
+                  0,
+                  applyRecoveryWriteSnapshot(action, original, owner, occurredAt, expected),
+                  action + ":" + variant);
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void tupleChangedDuringLuaCannotBeMarkedBlockedOrRetriedAsOriginal() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String outcome : List.of("release", "block", "error"))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            if ("block".equals(outcome)) fixtureRedis.delete(keys.get(1));
+            var snapshot =
+                new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+            doAnswer(
+                    invocation -> {
+                      Object receipt = invocation.callRealMethod();
+                      fixture.update("UPDATE seckill_quota_settlement SET sku_id=sku_id+1");
+                      snapshot.set(facts());
+                      if ("error".equals(outcome))
+                        throw new org.springframework.data.redis.RedisConnectionFailureException(
+                            "owned-tuple-response-lost");
+                      return receipt;
+                    })
+                .when(observedRedis)
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    any(),
+                    any(),
+                    any(),
+                    any());
+            queryResultSizes.clear();
+            clearInvocations(observedMapper, observedRedis);
+            assertAll(
+                () -> assertEquals(0, recovery.recoverDue(), outcome),
+                () -> assertEquals(snapshot.get(), facts(), outcome));
+            verify(observedRedis, times(1))
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    eq(original.orderNo),
+                    eq(original.operationKey),
+                    eq("2"),
+                    eq("1"));
+            assertEquals(
+                "block".equals(outcome) ? "5" : "6", fixtureRedis.opsForValue().get(keys.get(0)));
+            assertEquals(
+                "block".equals(outcome) ? "3" : "4", fixtureRedis.opsForValue().get(keys.get(4)));
+            assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+          });
+    assertAll(assertions);
+  }
+
+  /** 调用唯一新增snapshot的真实Mapper签名，不保留旧签名旁路。 */
+  private static int applyRecoveryWriteSnapshot(
       String action,
       SeckillQuotaSettlementPO original,
       String owner,
-      java.time.LocalDateTime occurredAt) {
+      java.time.LocalDateTime occurredAt,
+      SeckillQuotaSettlementPO expected) {
     return switch (action) {
       case "release" ->
-          realMapper.markReleased(original.orderNo, original.operationKey, 2L, 4L, owner);
+          realMapper.markReleased(original.orderNo, original.operationKey, 2L, 4L, owner, expected);
       case "block" ->
           realMapper.markProjectionBlocked(
               original.orderNo,
@@ -879,7 +1036,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
               2L,
               "owned-write-test",
               occurredAt.plusSeconds(10),
-              owner);
+              owner,
+              expected);
       case "retry" ->
           realMapper.retry(
               original.orderNo,
@@ -888,7 +1046,40 @@ class SeckillRecoveryCandidateGuardMySqlIT {
               owner,
               "owned-write-test",
               occurredAt.plusSeconds(10),
-              occurredAt);
+              occurredAt,
+              expected);
+      default -> throw new AssertionError(action);
+    };
+  }
+
+  /** 调用既有真实SQL签名，不调用被测私有helper伪造affected rows。 */
+  private static int applyRecoveryWrite(
+      String action,
+      SeckillQuotaSettlementPO original,
+      String owner,
+      java.time.LocalDateTime occurredAt) {
+    return switch (action) {
+      case "release" ->
+          realMapper.markReleased(original.orderNo, original.operationKey, 2L, 4L, owner, original);
+      case "block" ->
+          realMapper.markProjectionBlocked(
+              original.orderNo,
+              original.operationKey,
+              2L,
+              "owned-write-test",
+              occurredAt.plusSeconds(10),
+              owner,
+              original);
+      case "retry" ->
+          realMapper.retry(
+              original.orderNo,
+              original.operationKey,
+              2L,
+              owner,
+              "owned-write-test",
+              occurredAt.plusSeconds(10),
+              occurredAt,
+              original);
       default -> throw new AssertionError(action);
     };
   }
@@ -1059,6 +1250,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   /** 使用随机原订单和随机维度，防止任何生产格式键和用户数据重合。 */
   private static SeckillQuotaSettlementPO row(String state, String idempotency) {
     var original = new SeckillQuotaSettlementPO();
+    original.id = 1L;
+    original.createdAt = java.time.LocalDateTime.of(2000, 1, 1, 0, 0);
     original.orderNo = "cm37-" + UUID.randomUUID().toString().replace("-", "");
     original.operationKey = original.orderNo + ":ROLLBACK";
     original.status = state;

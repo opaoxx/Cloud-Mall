@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -38,7 +39,13 @@ class SeckillQuotaSettlementRecoveryTest {
             eq("1")))
         .thenThrow(new RedisConnectionFailureException("response lost"))
         .thenReturn(7L);
-    when(mapper.markReleased(eq("order-24"), eq("order-24:ROLLBACK"), eq(2L), eq(7L), anyString()))
+    when(mapper.markReleased(
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            eq(7L),
+            anyString(),
+            argThat(SeckillQuotaSettlementRecoveryTest::isOriginal)))
         .thenReturn(1);
     SeckillQuotaSettlementRecovery recovery = new SeckillQuotaSettlementRecovery(mapper, redis);
 
@@ -53,9 +60,16 @@ class SeckillQuotaSettlementRecoveryTest {
             anyString(),
             anyString(),
             any(),
-            any());
+            any(),
+            argThat(SeckillQuotaSettlementRecoveryTest::isOriginal));
     verify(mapper)
-        .markReleased(eq("order-24"), eq("order-24:ROLLBACK"), eq(2L), eq(7L), anyString());
+        .markReleased(
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            eq(7L),
+            anyString(),
+            argThat(SeckillQuotaSettlementRecoveryTest::isOriginal));
   }
 
   @Test
@@ -69,9 +83,21 @@ class SeckillQuotaSettlementRecoveryTest {
 
     verify(mapper)
         .markProjectionBlocked(
-            eq("order-24"), eq("order-24:ROLLBACK"), eq(2L), anyString(), any(), anyString());
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            anyString(),
+            any(),
+            anyString(),
+            argThat(SeckillQuotaSettlementRecoveryTest::isOriginal));
     verify(mapper, never())
-        .markReleased(anyString(), anyString(), anyLong(), anyLong(), anyString());
+        .markReleased(
+            anyString(),
+            anyString(),
+            anyLong(),
+            anyLong(),
+            anyString(),
+            argThat(SeckillQuotaSettlementRecoveryTest::isOriginal));
   }
 
   @Test
@@ -137,5 +163,20 @@ class SeckillQuotaSettlementRecoveryTest {
     row.operationKey = "order-24:ROLLBACK";
     row.createdAt = LocalDateTime.of(2000, 1, 1, 0, 0);
     return row;
+  }
+
+  /** 追加写参数必须是原扫描tuple，而非claim后的新读回对象。 */
+  private static boolean isOriginal(SeckillQuotaSettlementPO value) {
+    return value != null
+        && Long.valueOf(1L).equals(value.id)
+        && "order-24".equals(value.orderNo)
+        && Long.valueOf(11L).equals(value.activityId)
+        && Long.valueOf(22L).equals(value.skuId)
+        && Long.valueOf(33L).equals(value.userId)
+        && "original-key".equals(value.idempotencyKey)
+        && Integer.valueOf(1).equals(value.quantity)
+        && Long.valueOf(2L).equals(value.revision)
+        && "order-24:ROLLBACK".equals(value.operationKey)
+        && LocalDateTime.of(2000, 1, 1, 0, 0).equals(value.createdAt);
   }
 }

@@ -89,7 +89,7 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
       @Param("operationKey") String operationKey,
       @Param("expectedRevision") long expectedRevision);
 
-  /** 以精确订单/操作键、revision及有效本owner租约CAS标记Redis释放已完成。 */
+  /** 以精确订单/操作键、revision及有效本owner租约及原完整tuple快照CAS标记Redis释放已完成。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='RELEASED',redis_revision=#{redisRevision},last_error=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at=NULL,updated_at=NOW(3)"
@@ -98,15 +98,22 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " lease_owner=#{owner} AND BINARY order_no=BINARY #{orderNo} AND BINARY"
           + " operation_key=BINARY #{operationKey} AND BINARY lease_owner=BINARY #{owner} AND"
           + " BINARY status IN (BINARY 'RELEASE_PENDING',BINARY 'PROJECTION_BLOCKED') AND"
-          + " lease_until IS NOT NULL AND lease_until>NOW(3)")
+          + " lease_until IS NOT NULL AND lease_until>NOW(3) AND id=#{original.id} AND"
+          + " activity_id=#{original.activityId} AND sku_id=#{original.skuId} AND"
+          + " user_id=#{original.userId} AND quantity=#{original.quantity} AND"
+          + " revision=#{original.revision} AND created_at=#{original.createdAt} AND BINARY"
+          + " order_no=BINARY #{original.orderNo} AND BINARY operation_key=BINARY"
+          + " #{original.operationKey} AND BINARY idempotency_key=BINARY"
+          + " #{original.idempotencyKey}")
   int markReleased(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
       @Param("expectedRevision") long expectedRevision,
       @Param("redisRevision") long redisRevision,
-      @Param("owner") String owner);
+      @Param("owner") String owner,
+      @Param("original") SeckillQuotaSettlementPO original);
 
-  /** 在精确订单/操作键、revision及有效本owner租约下保留方向并标记投影阻塞。 */
+  /** 在精确订单/操作键、revision及有效本owner租约及原完整tuple快照下保留方向并标记投影阻塞。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='PROJECTION_BLOCKED',last_error=#{error},next_retry_at=#{nextRetryAt},lease_owner=NULL,lease_until=NULL,updated_at=NOW(3)"
@@ -115,14 +122,21 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " ('RELEASE_PENDING','PROJECTION_BLOCKED') AND BINARY order_no=BINARY #{orderNo} AND"
           + " BINARY operation_key=BINARY #{operationKey} AND BINARY lease_owner=BINARY #{owner}"
           + " AND BINARY status IN (BINARY 'RELEASE_PENDING',BINARY 'PROJECTION_BLOCKED') AND"
-          + " lease_until IS NOT NULL AND lease_until>NOW(3)")
+          + " lease_until IS NOT NULL AND lease_until>NOW(3) AND id=#{original.id} AND"
+          + " activity_id=#{original.activityId} AND sku_id=#{original.skuId} AND"
+          + " user_id=#{original.userId} AND quantity=#{original.quantity} AND"
+          + " revision=#{original.revision} AND created_at=#{original.createdAt} AND BINARY"
+          + " order_no=BINARY #{original.orderNo} AND BINARY operation_key=BINARY"
+          + " #{original.operationKey} AND BINARY idempotency_key=BINARY"
+          + " #{original.idempotencyKey}")
   int markProjectionBlocked(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
       @Param("expectedRevision") long expectedRevision,
       @Param("error") String error,
       @Param("nextRetryAt") LocalDateTime nextRetryAt,
-      @Param("owner") String owner);
+      @Param("owner") String owner,
+      @Param("original") SeckillQuotaSettlementPO original);
 
   /** 查找到期的 rollback 恢复任务。 */
   @Select(
@@ -165,7 +179,7 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
       @Param("leaseUntil") LocalDateTime leaseUntil,
       @Param("now") LocalDateTime now);
 
-  /** 在精确订单/操作键、revision及有效本owner租约下记录失败并清租约，不改原动作/版本。 */
+  /** 在精确订单/操作键、revision及有效本owner租约及原完整tuple快照下记录失败并清租约，不改原动作/版本。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " last_error=#{error},next_retry_at=#{nextRetryAt},lease_owner=NULL,lease_until=NULL,updated_at=#{now}"
@@ -174,7 +188,12 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " AND BINARY order_no=BINARY #{orderNo} AND BINARY operation_key=BINARY #{operationKey}"
           + " AND BINARY lease_owner=BINARY #{owner} AND BINARY status IN (BINARY"
           + " 'RELEASE_PENDING',BINARY 'PROJECTION_BLOCKED') AND lease_until IS NOT NULL AND"
-          + " lease_until>NOW(3)")
+          + " lease_until>NOW(3) AND id=#{original.id} AND activity_id=#{original.activityId} AND"
+          + " sku_id=#{original.skuId} AND user_id=#{original.userId} AND"
+          + " quantity=#{original.quantity} AND revision=#{original.revision} AND"
+          + " created_at=#{original.createdAt} AND BINARY order_no=BINARY #{original.orderNo} AND"
+          + " BINARY operation_key=BINARY #{original.operationKey} AND BINARY"
+          + " idempotency_key=BINARY #{original.idempotencyKey}")
   int retry(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
@@ -182,7 +201,8 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
       @Param("owner") String owner,
       @Param("error") String error,
       @Param("nextRetryAt") LocalDateTime nextRetryAt,
-      @Param("now") LocalDateTime now);
+      @Param("now") LocalDateTime now,
+      @Param("original") SeckillQuotaSettlementPO original);
 
   /** 统计仍占用活动配额的结算事实。 */
   @Select(

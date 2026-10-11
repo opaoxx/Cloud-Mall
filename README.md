@@ -1591,3 +1591,11 @@ markReleased/markProjectionBlocked/retry保原revision/候选SQL与SET，只追�
 健康pending/blocked写入与原影响行数0处理保持；T40点读、T38 CAS证明、T39扫描及Lua不改。
 真实Lua后lease漂移覆盖release/block/丢响应retry，已执行Redis变化如实保留，不能假装跨库回滚。
 本门未绑定全部immutable tuple，不是跨SQLRedis原子/完整fencing；readback→Lua等窗口仍待后续处理。
+
+
+### CM-18 秒杀恢复状态写原快照绑定（16T42）
+
+三类恢复UPDATE唯一追加原扫描PO快照，除T41身份/有效lease之外，SQL绑定原id、活动/SKU/用户、
+幂等键、quantity、revision、createdAt及精确order/op；任何字段漂移、缺snapshot或scalar矛盾均affected0。
+正常/异常retry始终传原candidate，不从readback重建参数，无缺快照旧签名旁路；原SET/可变诊断保持。
+不新增查询/事务/DDL/公开API，T37–41/Lua/扫描保持；Redis已执行效果不伪回滚，完整来源与跨库窗口仍保留。

@@ -248,6 +248,10 @@ class SeckillRecoveryScanFairnessTest {
                 if ("markReleased".equals(method)) {
                   String orderNo = invocation.getArgument(0);
                   released.add(Long.parseLong(orderNo.substring(6)));
+                  var original = invocation.getArgument(5, SeckillQuotaSettlementPO.class);
+                  assertEquals(Long.valueOf(orderNo.substring(6)), original.id);
+                  assertEquals(orderNo, original.orderNo);
+                  assertEquals(orderNo + ":ROLLBACK", original.operationKey);
                   return 1;
                 }
                 throw new AssertionError("未预期的Mapper动作: " + method);
