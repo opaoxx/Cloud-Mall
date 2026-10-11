@@ -769,6 +769,21 @@ Try已有`TRYING`时，返回原冻结摘要前同样复用`requireNoLedger`：�
 最高仍为`BLOCKED_EXTERNAL_EVIDENCE`。候选完整仅指本次两known terminal CI范围，未知态、仅attempt空取消、
 超限历史、全账户因果以及Pay/Order/Stock/TC/MQ仍未闭环；旧活跃TRYING报告和生产DDL/写状态机不变。
 
+### CM-18 User同支付号账本只读核验（16T25）
+
+独立开关`cloudmall.user.tcc-payment-ledger-evidence.enabled=false`默认关闭，入口为
+`GET /api/internal/users/{userId}/balance/tcc-reconciliation/{payNo}/payment-ledger-evidence`。
+复用T9认证/local开关及T11只读代理，不要求旧退款入口flag；无事务/XID上下文门、no-store和Gateway隔离保持。
+
+原关联范围与同pay全部类型/状态/原关联键候选在一个只读RR里核验。新候选最多100行，包含原DEBIT；
+101立即缺证。逐行核精确身份、APPLIED、正金额/delta和全局操作键唯一性：原DEBIT金额单独等原金额，
+仅REFUND金额求和并与原关联范围的退款数/合计交叉核对。NULL/错误原关联只报`PAYMENT_REFUND_ORIGIN_UNPROVEN`，
+不猜原扣款、不自动补链或补退。完整范围才输出计数/退款合计/脱敏向量，合法partial仍保留缺证分类。
+
+最高仍`BLOCKED_EXTERNAL_EVIDENCE`，不证明其它pay或全账户因果；旧T11嵌套报告保留原scope。
+实际100行（1原扣款+99退款）为210纯SELECT同连接，101行不执行新范围逐key COUNT。
+生产DDL/index/资金状态机/旧APIflags不变，CM-18其它证据及发布/真实故障验收仍待完成。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

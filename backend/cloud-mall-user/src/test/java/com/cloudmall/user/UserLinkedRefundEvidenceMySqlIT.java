@@ -195,6 +195,26 @@ class UserLinkedRefundEvidenceMySqlIT {
     }
   }
 
+  /** 旧关联入口保持原范围，NULL/错link同pay退款须由新入口补证。 */
+  @Test
+  void unlinkedSamePaymentRowsStayOutsideOriginalKeyScope() {
+    for (String originalKey : new String[] {null, "other-private-key"}) {
+      seed("CONFIRMED");
+      linkedRefund(2, "orphan-private-key", "10.00");
+      fixture.update("UPDATE balance_ledger SET original_operation_key=? WHERE id=2", originalKey);
+      var before = facts();
+      tracked.reset();
+      tracked.checking = true;
+      var report = inspect();
+      assertTrue(report.unlinkedLedgerRowsNotInspected);
+      assertTrue(report.candidatesComplete);
+      assertEquals(0, report.observedCount);
+      assertEquals("0.00", report.validatedTotalAmount);
+      assertEquals(10, tracked.statements.size());
+      assertEquals(before, facts());
+    }
+  }
+
   @Test
   void multipleDifferentKeysAreObservedAndFixedPartialCanBeResolvedInOneRr() {
     for (String variant : List.of("custom", "fixedPartial", "partial", "empty")) {
