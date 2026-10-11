@@ -3,6 +3,7 @@ package com.cloudmall.stock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -85,6 +86,7 @@ class SeckillQuotaSettlementServiceTest {
     row.orderNo = "order-4";
     row.operationKey = "order-4:ROLLBACK";
     when(mapper.findSettlement("order-4")).thenReturn(row);
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
 
     StockReservationVO response =
         new SeckillQuotaSettlementService(

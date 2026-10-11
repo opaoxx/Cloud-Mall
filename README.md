@@ -1637,3 +1637,10 @@ CONFIRMED/RELEASED GET通过原身份/维度/操作键/回执门后，再按原�
 CONFIRMED+CONFIRM、RELEASED+ROLLBACK在原proof通过后复用只读来源查询，缺/错来源沿原UNKNOWN503，
 来源查询异常保留；合法三受理态仍幂等成功。同向noop原2变3SQL，反向409/2SQL及其它路径保持。
 不新增表/查询方法/锁/事务或Redis操作；同事务非锁source观察不证明源冻结、完整因果或跨存储fencing。
+
+
+### CM-18 秒杀非终态查询的受理来源观察（16T48）
+
+OPEN/RELEASE_PENDING/PROJECTION_BLOCKED也在原proof后复用受理来源只读查询，缺/错来源返回UNKNOWN/空明细，
+合法来源保原RESERVED或UNKNOWN及原明细；这三态由1次增至2次SELECT，终态规则保持。
+不改源SQL/写入/恢复/legacy/未识别状态；两个非锁点读不证明RR、来源冻结、完整因果或跨存储fencing。

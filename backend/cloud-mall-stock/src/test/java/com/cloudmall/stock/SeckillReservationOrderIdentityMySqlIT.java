@@ -287,7 +287,7 @@ class SeckillReservationOrderIdentityMySqlIT {
       assertEquals(1, result.items.size());
       assertEquals(20L, result.items.get(0).skuId);
       assertEquals(1, result.items.get(0).quantity);
-      assertEquals(List.of("CONFIRMED", "RELEASED").contains(state) ? 2 : 1, tracked.sql.size());
+      assertEquals(2, tracked.sql.size());
       if (List.of("CONFIRMED", "RELEASED").contains(state))
         assertEquals("SUCCEEDED", orderFallback("RELEASED".equals(state) ? "CANCELLED" : "PAID"));
       assertOnlySelects();

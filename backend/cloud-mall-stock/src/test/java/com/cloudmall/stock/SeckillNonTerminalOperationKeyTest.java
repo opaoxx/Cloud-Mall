@@ -74,6 +74,7 @@ class SeckillNonTerminalOperationKeyTest {
         for (String action : List.of("CONFIRM", "ROLLBACK")) {
           var mapper = mock(SeckillQuotaSettlementMapper.class);
           when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, key));
+          when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
           when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row(state, key));
           var service = new SeckillQuotaSettlementService(mapper, mock(StockSqlMapper.class));
           var result = service.reservation(ORDER_NO);

@@ -1237,6 +1237,92 @@ class SeckillTerminalOperationKeyMySqlIT {
       }
   }
 
+  @Test
+  void nonterminalGetCannotExposeUnprovenSourceItemsOrCompleteOrderFallback() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String variant : badTransitionSources())
+        assertions.add(
+            () -> {
+              reset();
+              seedSettlement(state, "OPEN".equals(state) ? null : ORDER_NO + ":ROLLBACK");
+              corruptTransitionSource(variant);
+              var before = facts();
+              tracked.checking = true;
+              var result = read();
+              assertAll(
+                  () -> assertEquals("UNKNOWN", result.status, state + ":" + variant),
+                  () -> assertTrue(result.items.isEmpty()),
+                  () -> assertEquals(ORDER_NO, result.orderNo),
+                  () -> assertEquals(2, tracked.sql.size()));
+              assertOnlySelects();
+              for (String orderState : List.of("PAID", "CANCELLED")) {
+                tracked.sql.clear();
+                assertEquals("UNKNOWN", orderFallback(orderState));
+                assertEquals(2, tracked.sql.size());
+                assertOnlySelects();
+              }
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerReturnsUnknownEmptyForUnprovenNonterminalSource() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var mvc =
+        MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      assertions.add(
+          () -> {
+            reset();
+            seedSettlement(state, "OPEN".equals(state) ? null : ORDER_NO + ":ROLLBACK");
+            corruptTransitionSource("missing");
+            var before = facts();
+            tracked.checking = true;
+            mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+                .andExpect(jsonPath("$.data.items").isEmpty());
+            assertEquals(2, tracked.sql.size());
+            assertOnlySelects();
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void originalAcceptedStatesKeepAllNonterminalItemsAndStatuses() throws Exception {
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String acceptedState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED")) {
+        reset();
+        seedSettlement(state, "OPEN".equals(state) ? null : ORDER_NO + ":ROLLBACK");
+        fixture.update("UPDATE seckill_reservation SET status=?", acceptedState);
+        var before = facts();
+        tracked.checking = true;
+        var result = read();
+        assertEquals("OPEN".equals(state) ? "RESERVED" : "UNKNOWN", result.status);
+        assertEquals(1, result.items.size());
+        assertEquals(20L, result.items.get(0).skuId);
+        assertEquals(1, result.items.get(0).quantity);
+        assertEquals(2, tracked.sql.size());
+        assertOnlySelects();
+        for (String orderState : List.of("PAID", "CANCELLED")) {
+          tracked.sql.clear();
+          assertEquals("UNKNOWN", orderFallback(orderState));
+          assertEquals(2, tracked.sql.size());
+          assertOnlySelects();
+        }
+        assertEquals(before, facts());
+      }
+  }
+
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
   private static List<String> badKeys(String state) {
     String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";

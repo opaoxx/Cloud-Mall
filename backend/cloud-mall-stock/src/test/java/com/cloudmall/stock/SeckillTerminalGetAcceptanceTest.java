@@ -98,16 +98,38 @@ class SeckillTerminalGetAcceptanceTest {
     original.operationKey = ORDER_NO + ":ROLLBACK";
     original.redisRevision = null;
     assertEquals("UNKNOWN", service.reservation(ORDER_NO).status);
-    for (String state :
-        List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED", "CONFLICT", "unrecognized")) {
-      when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state));
-      assertEquals(1, service.reservation(ORDER_NO).items.size());
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+      var healthyMapper = mock(SeckillQuotaSettlementMapper.class);
+      var healthy = row(state);
+      when(healthyMapper.findSettlement(ORDER_NO)).thenReturn(healthy);
+      when(healthyMapper.findMatchingAcceptanceId(same(healthy))).thenReturn(1L);
+      var healthyResult =
+          new SeckillQuotaSettlementService(healthyMapper, mock(StockSqlMapper.class))
+              .reservation(ORDER_NO);
+      assertEquals("OPEN".equals(state) ? "RESERVED" : "UNKNOWN", healthyResult.status);
+      assertEquals(1, healthyResult.items.size());
+      verify(healthyMapper).findSettlement(ORDER_NO);
+      verify(healthyMapper).findMatchingAcceptanceId(same(healthy));
+      verifyNoMoreInteractions(healthyMapper);
     }
-    when(mapper.findSettlement(ORDER_NO)).thenReturn(null);
-    when(stocks.findSeckillByOrderNo(ORDER_NO))
+    for (String state : List.of("CONFLICT", "unrecognized")) {
+      var unknownMapper = mock(SeckillQuotaSettlementMapper.class);
+      when(unknownMapper.findSettlement(ORDER_NO)).thenReturn(row(state));
+      var unknownResult =
+          new SeckillQuotaSettlementService(unknownMapper, mock(StockSqlMapper.class))
+              .reservation(ORDER_NO);
+      assertEquals("UNKNOWN", unknownResult.status);
+      assertEquals(1, unknownResult.items.size());
+      verify(unknownMapper, never()).findMatchingAcceptanceId(any());
+    }
+    var legacyMapper = mock(SeckillQuotaSettlementMapper.class);
+    var legacyStocks = mock(StockSqlMapper.class);
+    when(legacyStocks.findSeckillByOrderNo(ORDER_NO))
         .thenReturn(Map.of("status", "ACCEPTED", "order_no", ORDER_NO, "sku_id", 20L));
-    assertEquals("RESERVED", service.reservation(ORDER_NO).status);
-    verify(mapper, never()).findMatchingAcceptanceId(any());
+    assertEquals(
+        "RESERVED",
+        new SeckillQuotaSettlementService(legacyMapper, legacyStocks).reservation(ORDER_NO).status);
+    verify(legacyMapper, never()).findMatchingAcceptanceId(any());
   }
 
   /** 原基础事实合法，终态key/receipt保持原规范。 */

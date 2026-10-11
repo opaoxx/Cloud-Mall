@@ -119,16 +119,33 @@ class SeckillTerminalOperationKeyTest {
       assertEquals("SECKILL_SETTLEMENT_CORRUPT", failure.getCode());
       assertEquals("秒杀结算事实维度无效", failure.getMessage());
     }
-    for (String state :
-        List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED", "CONFLICT", "unrecognized")) {
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED")) {
       String key =
           "RELEASE_PENDING".equals(state) || "PROJECTION_BLOCKED".equals(state)
               ? ORDER_NO + ":ROLLBACK"
               : null;
-      when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, key));
-      var result = service.reservation(ORDER_NO);
+      var healthyMapper = mock(SeckillQuotaSettlementMapper.class);
+      var healthy = row(state, key);
+      when(healthyMapper.findSettlement(ORDER_NO)).thenReturn(healthy);
+      when(healthyMapper.findMatchingAcceptanceId(same(healthy))).thenReturn(1L);
+      var result =
+          new SeckillQuotaSettlementService(healthyMapper, mock(StockSqlMapper.class))
+              .reservation(ORDER_NO);
       assertEquals("OPEN".equals(state) ? "RESERVED" : "UNKNOWN", result.status);
       assertEquals(1, result.items.size());
+      verify(healthyMapper).findSettlement(ORDER_NO);
+      verify(healthyMapper).findMatchingAcceptanceId(same(healthy));
+      verifyNoMoreInteractions(healthyMapper);
+    }
+    for (String state : List.of("CONFLICT", "unrecognized")) {
+      var unknownMapper = mock(SeckillQuotaSettlementMapper.class);
+      when(unknownMapper.findSettlement(ORDER_NO)).thenReturn(row(state, null));
+      var result =
+          new SeckillQuotaSettlementService(unknownMapper, mock(StockSqlMapper.class))
+              .reservation(ORDER_NO);
+      assertEquals("UNKNOWN", result.status);
+      assertEquals(1, result.items.size());
+      verify(unknownMapper, never()).findMatchingAcceptanceId(any());
     }
   }
 
