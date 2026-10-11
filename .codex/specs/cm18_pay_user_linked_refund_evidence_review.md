@@ -43,7 +43,7 @@ User 关联退款报告必须满足：
 
 旧 T10 校验器继续保持原行为：旧 `verify(capture, oldDTO)` 始终调用新的私有校验实现，参数等价于 `fullLinkedRefund=false, allowFixedPartial=false`。新消费者只使用同包 `verifyLinkedRefundBase(capture, newBaseDTO, boolean fullLinkedRefund)`；不改变旧入口的 public API、Feign 契约或其它验证门。
 
-只有嵌套 base 身份、四个 hash、状态/账本、账户和固定退款门全部匹配，且结果为 `MATCHED`，新消费者才可输出整体账户摘要。只有外层关联退款候选已完整且总额等于原 Pay 金额时，才可令 `fullLinkedRefund=true` 并进入 `allowFixedPartial` 分支；此时 base 原生 `reasonCodes` 必须是数组，去掉 `EXTERNAL_EVIDENCE_NOT_QUERIED` 后仍非空，且每个元素都必须是文本 `REFUND_PARTIAL_OBSERVED`，不接受未知值、null 或其它原因，也不改写 base 分类。该路径仍要求固定退款存在且 `0 < fixedRefundAmount < originalAmount`，否则归冲突。其它 base 缺证、冲突、projection 缺口和未知原因不因新候选而抬高。
+只有嵌套 base 身份、四个 hash、状态/账本、账户和固定退款门全部匹配，且结果为 `MATCHED`，新消费者才可输出整体账户摘要。只有外层关联退款候选已完整且总额等于原 Pay 金额时，才可令 `fullLinkedRefund=true` 并进入 `allowFixedPartial` 分支；此时 base 原生 `reasonCodes` 必须是数组，去掉 `EXTERNAL_EVIDENCE_NOT_QUERIED` 后仍非空，且每个元素都必须是文本 `REFUND_PARTIAL_OBSERVED`，不接受未知值、null 或其它原因，也不改写 base 分类。`fullLinkedRefund` 可解除 Pay `REFUNDED` 情况下 fixed refund 缺失门，但不得单独绕过 base 为 `BLOCKED_EXTERNAL_EVIDENCE` 时的 fixed partial 门；只有上述严格 `allowFixedPartial` 分支可解除固定 `REFUND_PARTIAL_OBSERVED`，且仍要求固定退款存在且 `0 < fixedRefundAmount < originalAmount`，否则归冲突。其它 base 缺证、冲突、projection 缺口和未知原因不因新候选而抬高。
 
 ## 4. 外层候选摘要校验
 

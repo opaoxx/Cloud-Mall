@@ -1450,3 +1450,16 @@ README.md
 ## 项目范围
 
 CloudMall 是个人学习型项目，不承诺生产级高可用、生产安全或真实第三方支付能力。当前支付使用本地余额模型，收藏、评价、优惠券、物流和售后等能力暂未纳入业务契约。
+
+
+### CM-18 Pay消费User关联退款集合（16T28）
+
+独立开关`cloudmall.pay.tcc-user-linked-refund-evidence.enabled=false`默认关闭，入口为
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/user-linked-refund-evidence`。
+消费既有User16T11 `refund-evidence`，保持可信原Pay锚点、事务外GET/AuthContext隔离和双Pay RR变更优先。
+原生范围/标志/计数/金额/向量与原账户全部门通过才给有限摘要；正数候选必须合计原金额。
+完整全额集合仅解除原固定退款部分覆盖缺口及REFUNDED无固定键缺口；固定退款身份、金额、账本、
+四hash、状态与账户投影继续核验，旧T10/T26/T27行为保持。空集合不能证明Pay已退款。
+范围`PAY_USER_LINKED_REFUNDS_OBSERVED_ONLY`，明确未关联账本未检查、全账户因果未证明、禁止自动动作。
+最高`BLOCKED_REMAINING_EVIDENCE`；source partial/缺证/冲突/超限不输出账户或新集合统计。
+不补退、不补链、不改资金事实。T25同pay未关联退款、全历史/统一证据包及M2–M4继续保留。

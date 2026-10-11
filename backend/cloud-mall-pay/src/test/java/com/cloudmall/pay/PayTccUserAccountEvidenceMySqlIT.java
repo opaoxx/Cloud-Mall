@@ -422,6 +422,23 @@ class PayTccUserAccountEvidenceMySqlIT {
 
   /** 原账户入口不承诺逐笔冻结归属，等额缺原receive行须由新消费者检查。 */
   @Test
+  void fixedOnlyScopeCannotProveCustomKeyFullRefundForRefundedPay() {
+    seedRefund("10.00");
+    userFixture.update("UPDATE balance_ledger SET operation_key='private-other-refund' WHERE id=2");
+    fixture.update("UPDATE pay_record SET status='REFUNDED'");
+    var payBefore = facts();
+    var userBefore = userFacts();
+    enableChecks();
+    var report = inspectUser();
+    assertEquals("PAY_USER_ACCOUNT_OBSERVED_ONLY", report.scope);
+    assertEquals("USER_EVIDENCE_INCOMPLETE", report.classification);
+    assertTrue(report.reasonCodes.contains("USER_REFUNDED_FIXED_PROOF_MISSING"));
+    assertEquals(12, tracked.statements.size());
+    assertEquals(9, userTracked.statements.size());
+    assertUnchanged(payBefore, userBefore);
+  }
+
+  @Test
   void otherTryingOriginIsOutsideOriginalAccountObservation() {
     userFixture.update(
         "INSERT INTO"

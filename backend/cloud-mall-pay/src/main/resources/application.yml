@@ -45,3 +45,6 @@ cloudmall.pay.tcc-cancel.enabled: false
 cloudmall.pay.tcc-user-frozen-ownership-evidence.enabled: false
 cloudmall.pay.tcc-user-terminal-frozen-ownership-evidence.enabled: false
 cloudmall.pay.tcc-cancel.interval-ms: 5000
+
+# CM18 16T28 只读关联退款集合消费，独立默认关闭。
+cloudmall.pay.tcc-user-linked-refund-evidence.enabled: false

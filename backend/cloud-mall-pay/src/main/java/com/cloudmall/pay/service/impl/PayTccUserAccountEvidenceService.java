@@ -6,6 +6,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.dto.PayTccEvidenceAnchorDTO;
 import com.cloudmall.pay.domain.dto.PayTccEvidenceCaptureDTO;
 import com.cloudmall.pay.domain.dto.UserAccountEvidenceDTO;
+import com.cloudmall.pay.domain.dto.UserRefundBaseEvidenceDTO;
 import com.cloudmall.pay.domain.vo.PayTccUserAccountEvidenceVO;
 import com.cloudmall.pay.domain.vo.PayTccUserAccountReconciliationVO;
 import com.cloudmall.pay.feign.UserAccountEvidenceClient;
@@ -152,6 +153,40 @@ public class PayTccUserAccountEvidenceService {
   /** 先验证原身份与指纹，再核源分类和完整账户/固定退款摘要，不猜资金动作。 */
   static PayTccUserAccountReconciliationVO verify(
       PayTccEvidenceCaptureDTO capture, UserAccountEvidenceDTO observed) {
+    return verifyBase(capture, observed, false, false);
+  }
+
+  /** 只有外层完整全额集合才可解除固定部分退款缺口，旧入口永远不进入该上下文。 */
+  static PayTccUserAccountReconciliationVO verifyLinkedRefundBase(
+      PayTccEvidenceCaptureDTO capture,
+      UserRefundBaseEvidenceDTO observed,
+      boolean fullLinkedRefund) {
+    boolean allowFixedPartial =
+        fullLinkedRefund
+            && "BLOCKED_LOCAL_EVIDENCE".equals(text(observed.classification))
+            && onlyFixedPartialReasons(observed.reasonCodes);
+    return verifyBase(capture, observed, fullLinkedRefund, allowFixedPartial);
+  }
+
+  /** 不改源分类；仅接受原生数组中已知固定部分退款原因，未知原因继续阻塞。 */
+  private static boolean onlyFixedPartialReasons(JsonNode reasons) {
+    if (reasons == null || !reasons.isArray()) return false;
+    boolean partialPresent = false;
+    for (JsonNode reason : reasons) {
+      String code = text(reason);
+      if ("EXTERNAL_EVIDENCE_NOT_QUERIED".equals(code)) continue;
+      if (!"REFUND_PARTIAL_OBSERVED".equals(code)) return false;
+      partialPresent = true;
+    }
+    return partialPresent;
+  }
+
+  /** 保留原身份/资金/hash/状态/projection全部门，完整集合只解除两个固定覆盖限制。 */
+  private static PayTccUserAccountReconciliationVO verifyBase(
+      PayTccEvidenceCaptureDTO capture,
+      UserAccountEvidenceDTO observed,
+      boolean fullLinkedRefund,
+      boolean allowFixedPartial) {
     var anchor = capture.trustedAnchor();
     if (!"USER_ACCOUNT_FROZEN_REFUND_OBSERVED_ONLY".equals(text(observed.scope))
         || !isBoolean(observed.automaticActionsAllowed, false)
@@ -160,9 +195,9 @@ public class PayTccUserAccountEvidenceService {
     String sourceClassification = text(observed.classification);
     if ("LOCAL_CONFLICT".equals(sourceClassification))
       return conflict(capture, "USER_REPORTED_LOCAL_CONFLICT", observed);
-    if ("BLOCKED_LOCAL_EVIDENCE".equals(sourceClassification))
+    if ("BLOCKED_LOCAL_EVIDENCE".equals(sourceClassification) && !allowFixedPartial)
       return incomplete(capture, "USER_REPORTED_INCOMPLETE", observed);
-    if (!"BLOCKED_EXTERNAL_EVIDENCE".equals(sourceClassification))
+    if (!"BLOCKED_EXTERNAL_EVIDENCE".equals(sourceClassification) && !allowFixedPartial)
       return incomplete(capture, "USER_CLASSIFICATION_INVALID", observed);
     if (observed.userId == null
         || !observed.userId.isIntegralNumber()
@@ -238,7 +273,7 @@ public class PayTccUserAccountEvidenceService {
       for (String field : REFUND_FIELDS)
         if (!refund.has(field) || !refund.get(field).isNull())
           return incomplete(capture, "USER_ABSENT_REFUND_FIELDS_INVALID", observed);
-      if ("REFUNDED".equals(capture.localReport().snapshot.paymentState()))
+      if ("REFUNDED".equals(capture.localReport().snapshot.paymentState()) && !fullLinkedRefund)
         return incomplete(capture, "USER_REFUNDED_FIXED_PROOF_MISSING", observed);
     } else {
       if (text(refund.get("state")) == null || bool(refund.get("identityMatched")) == null)
@@ -272,9 +307,15 @@ public class PayTccUserAccountEvidenceService {
       }
       if (!"CONFIRMED".equals(state))
         return conflict(capture, "USER_REFUND_TCC_STATE_CONFLICT", observed);
-      if (refundAmount.compareTo(originalAmount) < 0)
+      if (refundAmount.compareTo(originalAmount) < 0 && !allowFixedPartial)
         return incomplete(capture, "REFUND_PARTIAL_OBSERVED", observed);
     }
+    if (allowFixedPartial
+        && (!present
+            || refundAmount == null
+            || refundAmount.signum() <= 0
+            || refundAmount.compareTo(originalAmount) >= 0))
+      return conflict(capture, "USER_FIXED_PARTIAL_REASON_CONFLICT", observed);
     return new PayTccUserAccountReconciliationVO(
         "BLOCKED_REMAINING_EVIDENCE",
         List.of("ORDER_STOCK_TC_MQ_NOT_QUERIED"),
