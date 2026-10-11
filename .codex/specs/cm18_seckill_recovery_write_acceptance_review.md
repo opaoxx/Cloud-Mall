@@ -4,7 +4,7 @@
 
 本切片 GO，补足 T44 claim source gate 后，accepted 来源在 claim/Lua 之后被删除或改变时，三条 final UPDATE 仍可能清 lease、标 RELEASED/PROJECTION_BLOCKED 或写 retry 的问题。
 
-本批只扩展 `markReleased`、`markProjectionBlocked`、`retry` 三条 UPDATE 的 WHERE，保留 T41 lease fence、T42 original tuple、标量参数、SET、签名、Recovery/Java/Lua、claim、SQL/DDL/API 和现有事务边界。
+本批只扩展 `markReleased`、`markProjectionBlocked`、`retry` 三条 UPDATE 的 WHERE，保留 T41 lease fence、T42 original tuple、标量参数、SET、签名、Recovery/Java/Lua、claim、其它 Mapper SQL、DDL/API 以及现有显式事务边界；不新增显式锁序。WHERE 关联 EXISTS 可能改变读取/锁足迹，具体边界见下文。
 
 ## 2. Final write source EXISTS
 

@@ -123,7 +123,7 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
       @Param("operationKey") String operationKey,
       @Param("expectedRevision") long expectedRevision);
 
-  /** 以精确订单/操作键、revision及有效本owner租约及原完整tuple快照CAS标记Redis释放已完成。 */
+  /** 原受理来源一致时，以精确身份/有效租约及原完整tuple快照CAS标记Redis释放已完成。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='RELEASED',redis_revision=#{redisRevision},last_error=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at=NULL,updated_at=NOW(3)"
@@ -137,8 +137,15 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " user_id=#{original.userId} AND quantity=#{original.quantity} AND"
           + " revision=#{original.revision} AND created_at=#{original.createdAt} AND BINARY"
           + " order_no=BINARY #{original.orderNo} AND BINARY operation_key=BINARY"
-          + " #{original.operationKey} AND BINARY idempotency_key=BINARY"
-          + " #{original.idempotencyKey}")
+          + " #{original.operationKey} AND BINARY idempotency_key=BINARY #{original.idempotencyKey}"
+          + " AND EXISTS (SELECT 1 FROM seckill_reservation accepted WHERE"
+          + " accepted.order_no=#{orderNo} AND BINARY accepted.order_no=BINARY #{orderNo} AND"
+          + " BINARY accepted.order_no=BINARY seckill_quota_settlement.order_no AND BINARY"
+          + " accepted.status IN (BINARY 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int markReleased(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
@@ -147,7 +154,7 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
       @Param("owner") String owner,
       @Param("original") SeckillQuotaSettlementPO original);
 
-  /** 在精确订单/操作键、revision及有效本owner租约及原完整tuple快照下保留方向并标记投影阻塞。 */
+  /** 原受理来源一致时，在精确身份/有效租约及原完整tuple快照下保留方向并标记投影阻塞。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " status='PROJECTION_BLOCKED',last_error=#{error},next_retry_at=#{nextRetryAt},lease_owner=NULL,lease_until=NULL,updated_at=NOW(3)"
@@ -161,8 +168,15 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " user_id=#{original.userId} AND quantity=#{original.quantity} AND"
           + " revision=#{original.revision} AND created_at=#{original.createdAt} AND BINARY"
           + " order_no=BINARY #{original.orderNo} AND BINARY operation_key=BINARY"
-          + " #{original.operationKey} AND BINARY idempotency_key=BINARY"
-          + " #{original.idempotencyKey}")
+          + " #{original.operationKey} AND BINARY idempotency_key=BINARY #{original.idempotencyKey}"
+          + " AND EXISTS (SELECT 1 FROM seckill_reservation accepted WHERE"
+          + " accepted.order_no=#{orderNo} AND BINARY accepted.order_no=BINARY #{orderNo} AND"
+          + " BINARY accepted.order_no=BINARY seckill_quota_settlement.order_no AND BINARY"
+          + " accepted.status IN (BINARY 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int markProjectionBlocked(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
@@ -221,7 +235,7 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
       @Param("leaseUntil") LocalDateTime leaseUntil,
       @Param("now") LocalDateTime now);
 
-  /** 在精确订单/操作键、revision及有效本owner租约及原完整tuple快照下记录失败并清租约，不改原动作/版本。 */
+  /** 原受理来源一致时，在精确身份/有效租约及原完整tuple快照下记录失败并清租约，不改原动作/版本。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " last_error=#{error},next_retry_at=#{nextRetryAt},lease_owner=NULL,lease_until=NULL,updated_at=#{now}"
@@ -235,7 +249,15 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " quantity=#{original.quantity} AND revision=#{original.revision} AND"
           + " created_at=#{original.createdAt} AND BINARY order_no=BINARY #{original.orderNo} AND"
           + " BINARY operation_key=BINARY #{original.operationKey} AND BINARY"
-          + " idempotency_key=BINARY #{original.idempotencyKey}")
+          + " idempotency_key=BINARY #{original.idempotencyKey} AND EXISTS (SELECT 1 FROM"
+          + " seckill_reservation accepted WHERE accepted.order_no=#{orderNo} AND BINARY"
+          + " accepted.order_no=BINARY #{orderNo} AND BINARY accepted.order_no=BINARY"
+          + " seckill_quota_settlement.order_no AND BINARY accepted.status IN (BINARY"
+          + " 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int retry(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,

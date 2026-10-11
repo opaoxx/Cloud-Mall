@@ -1665,3 +1665,10 @@ main ACCEPTED损坏上下文返回固定CORRUPT500，outer各状态损坏返回U
 RELEASE_PENDING/rollback方向PROJECTION_BLOCKED同向重试在原方向proof后复用source getter，缺/错来源沿原UNKNOWN503，
 来源查询故障保留；合法来源继续原pending/false/UNKNOWN响应，不改租约诊断。同向2变3SQL，反向与初次CAS保持。
 不新增SQL/DDL/API字段/锁/事务或Redis操作；该非锁来源观察不证明源冻结、完整因果或跨存储fencing。
+
+
+### CM-18 秒杀恢复后续写入的受理来源约束（16T52）
+
+markReleased/markProjectionBlocked/retry保原lease/不可变snapshot谓词及SET，追加同语句精确受理tuple/合法三态EXISTS。
+claim/Lua后source删/变时UPDATE0不清租约、不造完成或改诊断；Java恢复、参数/查询/API/DDL/Lua保持。
+若Redis已实际释放而后SQL拒绝，其效果保留，不伪回滚；关联读取锁足迹可能改变，跨存储原子/fencing及完整来源仍待处理。

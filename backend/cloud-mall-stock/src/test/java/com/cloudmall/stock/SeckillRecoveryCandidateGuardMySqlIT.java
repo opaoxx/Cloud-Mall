@@ -882,6 +882,164 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     return contents;
   }
 
+  @Test
+  void recoveryWritesCannotFinalizeOrDiagnoseMissingOrChangedAcceptanceSource() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String action : List.of("release", "block", "retry"))
+      for (String variant : badAcceptanceSources())
+        assertions.add(
+            () -> {
+              reset();
+              var original = row("RELEASE_PENDING", "owned-idem");
+              seed(original);
+              String owner = "owned-source-writer-" + UUID.randomUUID();
+              var occurredAt = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              assertEquals(
+                  1,
+                  realMapper.claim(
+                      original.orderNo,
+                      original.operationKey,
+                      2L,
+                      owner,
+                      occurredAt.plusMinutes(1),
+                      occurredAt));
+              corruptAcceptanceSource(original, variant);
+              var before = facts();
+              int affected = applyRecoveryWrite(action, original, owner, occurredAt);
+              assertAll(
+                  () -> assertEquals(0, affected, action + ":" + variant),
+                  () -> assertEquals(before, facts(), action + ":" + variant));
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void sourceChangedAfterRealLuaCannotBeFinalizedBlockedOrRetriedByOldRecovery() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String outcome : List.of("release", "block", "error"))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            if ("block".equals(outcome)) fixtureRedis.delete(keys.get(1));
+            var snapshot =
+                new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+            var redisSnapshot = new java.util.concurrent.atomic.AtomicReference<List<String>>();
+            doAnswer(
+                    invocation -> {
+                      Object receipt = invocation.callRealMethod();
+                      fixture.update("UPDATE seckill_reservation SET sku_id=sku_id+1");
+                      snapshot.set(facts());
+                      redisSnapshot.set(redisDumpFacts(keys));
+                      if ("error".equals(outcome))
+                        throw new org.springframework.data.redis.RedisConnectionFailureException(
+                            "owned-source-response-lost");
+                      return receipt;
+                    })
+                .when(observedRedis)
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    any(),
+                    any(),
+                    any(),
+                    any());
+            clearInvocations(observedMapper, observedRedis);
+            assertAll(
+                () -> assertEquals(0, recovery.recoverDue(), outcome),
+                () -> assertEquals(snapshot.get(), facts(), outcome),
+                () -> assertEquals(redisSnapshot.get(), redisDumpFacts(keys), outcome));
+            verify(observedRedis)
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    eq(original.orderNo),
+                    eq(original.operationKey),
+                    eq("2"),
+                    eq("1"));
+            assertEquals(
+                "RELEASE_PENDING",
+                fixture.queryForObject(
+                    "SELECT status FROM seckill_quota_settlement", String.class));
+            assertNull(
+                fixture
+                    .queryForMap("SELECT * FROM seckill_quota_settlement")
+                    .get("redis_revision"));
+            assertEquals(
+                "block".equals(outcome) ? "5" : "6", fixtureRedis.opsForValue().get(keys.get(0)));
+            assertEquals(
+                "block".equals(outcome) ? "3" : "4", fixtureRedis.opsForValue().get(keys.get(4)));
+            assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+            assertEquals(
+                "block".equals(outcome)
+                    ? "RESERVED|" + original.orderNo + "|1"
+                    : "APPLIED|" + original.operationKey + "|2|4",
+                fixtureRedis.opsForValue().get(keys.get(3)));
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void allAcceptedStatesKeepOriginalRecoveryWriteSetAndSnapshotSemantics() {
+    for (String state : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String action : List.of("release", "block", "retry")) {
+        reset();
+        var original = row("RELEASE_PENDING", "owned-idem");
+        seed(original);
+        fixture.update("UPDATE seckill_reservation SET status=?", state);
+        String owner = "owned-valid-writer-" + UUID.randomUUID();
+        var occurredAt = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        assertEquals(
+            1,
+            realMapper.claim(
+                original.orderNo,
+                original.operationKey,
+                2L,
+                owner,
+                occurredAt.plusMinutes(1),
+                occurredAt));
+        var before = facts();
+        assertEquals(1, applyRecoveryWrite(action, original, owner, occurredAt));
+        var after = facts();
+        for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+          if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
+        var stored = after.get(3).get(0);
+        assertEquals(
+            "release".equals(action)
+                ? "RELEASED"
+                : "block".equals(action) ? "PROJECTION_BLOCKED" : "RELEASE_PENDING",
+            stored.get("status"));
+        assertNull(stored.get("lease_owner"));
+        assertNull(stored.get("lease_until"));
+        if ("release".equals(action)) {
+          assertEquals(4L, ((Number) stored.get("redis_revision")).longValue());
+          assertNull(stored.get("last_error"));
+          assertNull(stored.get("next_retry_at"));
+        } else {
+          assertNull(stored.get("redis_revision"));
+          assertEquals("owned-write-test", stored.get("last_error"));
+          assertNotNull(stored.get("next_retry_at"));
+        }
+        var beforeImmutable = new java.util.HashMap<>(before.get(3).get(0));
+        var afterImmutable = new java.util.HashMap<>(stored);
+        for (String changed :
+            List.of(
+                "status",
+                "redis_revision",
+                "last_error",
+                "next_retry_at",
+                "lease_owner",
+                "lease_until",
+                "updated_at")) {
+          beforeImmutable.remove(changed);
+          afterImmutable.remove(changed);
+        }
+        assertEquals(beforeImmutable, afterImmutable);
+      }
+  }
+
   /** 测试间仅清自有库，不重启中间件/改其它键。 */
   private static void reset() {
     org.mockito.Mockito.reset(observedMapper, observedRedis);
