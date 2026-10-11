@@ -33,7 +33,7 @@ markReleased=0 继续使用 T38 immutable readback proof；blocked/retry 影响�
 
 ## 4. 验收矩阵
 
-- Direct Mapper owned MySQL：三方法分别覆盖 order/op/owner/status 的 null、case/accent/trailing-space alias、不同 owner、过期/null lease；每次 affected rows=0，owned 全 facts 不变。健康 pending/blocked 且 lease 有效时，mark/retry 沿原 SET 变化。
+- Direct Mapper owned MySQL：三方法覆盖 10 组 order/operation/owner alias 与失效 lease，以及 operation_key=NULL、lease_owner=NULL、不同 owner、`CONFIRMED` status 等 4 个控制；源 `order_no`/`status` 保持生产 NOT NULL，不 ALTER 以声称可持久化其 null。每次 affected rows=0，owned 全 facts 不变。健康 pending/blocked 且 lease 有效时，mark/retry 沿原 SET 变化；其它 NULL 参数自然按 SQL 结果处理，不新增 mirror 单元。
 - 真实 T37/T40 MySQL+Redis fixture：在 post-point Lua hook 修改 owner/expiry，观测 recovery SQL 不写错 lease；Lua 已执行不伪称无 Redis 动作，事实/回执按原协议核验。
 - 原 source Stock checksum、owned DB/Redis/lease 资源 finally 清理；不改 DDL/索引/参数，不启动业务 App/RM/TC/固定端口。
 - 保留 T31–T40、ordinary/legacy/settlement、Lua/retry/CAS/scan 回归；不宣称跨 SQL/Redis 原子或完整资金 tuple/CM18 M1–M4。

@@ -555,7 +555,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
 
   /** 测试间仅清自有库，不重启中间件/改其它键。 */
   private static void reset() {
-    org.mockito.Mockito.reset(observedMapper);
+    org.mockito.Mockito.reset(observedMapper, observedRedis);
     queryResultSizes.clear();
     recovery = new SeckillQuotaSettlementRecovery(observedMapper, observedRedis);
     for (String table : TABLES) fixture.update("DELETE FROM " + table);
@@ -644,6 +644,253 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       assertReleased(original);
       assertSingleReleaseProjection(original, keys);
     }
+  }
+
+  @Test
+  void recoveryUpdatesRejectAliasIdentityAndInvalidLeaseWithoutMutatingFacts() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String action : List.of("release", "block", "retry"))
+      for (String variant :
+          List.of(
+              "owner-case",
+              "owner-space",
+              "order-case",
+              "order-accent",
+              "order-space",
+              "operation-case",
+              "operation-space",
+              "state-case",
+              "lease-null",
+              "lease-expired",
+              "operation-null",
+              "owner-null",
+              "different-owner",
+              "different-state"))
+        assertions.add(
+            () -> {
+              reset();
+              var original = row("RELEASE_PENDING", "owned-idem");
+              seed(original);
+              String owner = "owned-worker-" + UUID.randomUUID();
+              var occurredAt = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              assertEquals(
+                  1,
+                  realMapper.claim(
+                      original.orderNo,
+                      original.operationKey,
+                      2L,
+                      owner,
+                      occurredAt.plusMinutes(1),
+                      occurredAt));
+              switch (variant) {
+                case "owner-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET lease_owner=?",
+                        owner.toUpperCase(java.util.Locale.ROOT));
+                case "owner-space" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET lease_owner=?", owner + " ");
+                case "order-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?",
+                        original.orderNo.toUpperCase(java.util.Locale.ROOT));
+                case "order-accent" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?",
+                        original.orderNo.replace("cm37", "cḿ37"));
+                case "order-space" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?", original.orderNo + " ");
+                case "operation-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET operation_key=?",
+                        original.operationKey.toUpperCase(java.util.Locale.ROOT));
+                case "operation-space" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET operation_key=?",
+                        original.operationKey + " ");
+                case "state-case" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET status='release_pending'");
+                case "lease-null" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET lease_until=NULL");
+                case "lease-expired" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET lease_until='2000-01-01'");
+                case "operation-null" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET operation_key=NULL");
+                case "owner-null" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET lease_owner=NULL");
+                case "different-owner" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET lease_owner='another-owned-worker'");
+                case "different-state" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET status='CONFIRMED'");
+                default -> throw new AssertionError(variant);
+              }
+              var before = facts();
+              assertEquals(
+                  0,
+                  applyRecoveryWrite(action, original, owner, occurredAt),
+                  action + ":" + variant);
+              assertEquals(before, facts(), "原状态/租约/时间不得被修补");
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void healthyPendingAndBlockedExactUnexpiredLeaseKeepOriginalWriteSemantics() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String action : List.of("release", "block", "retry")) {
+        reset();
+        var original = row(state, "😺".repeat(128));
+        seed(original);
+        String owner = "owned-worker-" + UUID.randomUUID();
+        var occurredAt = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        assertEquals(
+            1,
+            realMapper.claim(
+                original.orderNo,
+                original.operationKey,
+                2L,
+                owner,
+                occurredAt.plusMinutes(1),
+                occurredAt));
+        var before = facts();
+        assertEquals(1, applyRecoveryWrite(action, original, owner, occurredAt));
+        var after = facts();
+        for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+          if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
+        var stored =
+            fixture.queryForMap(
+                "SELECT * FROM seckill_quota_settlement WHERE order_no=?", original.orderNo);
+        assertEquals(
+            "release".equals(action)
+                ? "RELEASED"
+                : "block".equals(action) ? "PROJECTION_BLOCKED" : state,
+            stored.get("status"));
+        assertEquals(original.orderNo, stored.get("order_no"));
+        assertEquals(original.operationKey, stored.get("operation_key"));
+        assertEquals(original.idempotencyKey, stored.get("idempotency_key"));
+        assertEquals(2L, ((Number) stored.get("revision")).longValue());
+        assertNull(stored.get("lease_owner"));
+        assertNull(stored.get("lease_until"));
+        if ("release".equals(action)) {
+          assertEquals(4L, ((Number) stored.get("redis_revision")).longValue());
+          assertNull(stored.get("last_error"));
+          assertNull(stored.get("next_retry_at"));
+        } else {
+          assertEquals("owned-write-test", stored.get("last_error"));
+          assertNotNull(stored.get("next_retry_at"));
+          assertNull(stored.get("redis_revision"));
+        }
+        var beforeImmutable = new java.util.HashMap<>(before.get(3).get(0));
+        var afterImmutable = new java.util.HashMap<>(stored);
+        for (String changed :
+            List.of(
+                "status",
+                "redis_revision",
+                "last_error",
+                "next_retry_at",
+                "lease_owner",
+                "lease_until",
+                "updated_at")) {
+          beforeImmutable.remove(changed);
+          afterImmutable.remove(changed);
+        }
+        assertEquals(beforeImmutable, afterImmutable);
+      }
+  }
+
+  @Test
+  void leaseChangedDuringLuaCannotBeMarkedOrClearedByOldRecovery() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String outcome : List.of("release", "block", "error"))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            if ("block".equals(outcome)) fixtureRedis.delete(keys.get(1));
+            var snapshot =
+                new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+            doAnswer(
+                    invocation -> {
+                      Object receipt = invocation.callRealMethod();
+                      if ("block".equals(outcome))
+                        fixture.update(
+                            "UPDATE seckill_quota_settlement SET lease_until='2000-01-01'");
+                      else {
+                        String owner =
+                            fixture.queryForObject(
+                                "SELECT lease_owner FROM seckill_quota_settlement", String.class);
+                        fixture.update(
+                            "UPDATE seckill_quota_settlement SET lease_owner=?",
+                            owner.toUpperCase(java.util.Locale.ROOT));
+                      }
+                      snapshot.set(facts());
+                      if ("error".equals(outcome))
+                        throw new org.springframework.data.redis.RedisConnectionFailureException(
+                            "owned-post-lua-response-lost");
+                      return receipt;
+                    })
+                .when(observedRedis)
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    any(),
+                    any(),
+                    any(),
+                    any());
+            queryResultSizes.clear();
+            clearInvocations(observedMapper, observedRedis);
+            assertAll(
+                () -> assertEquals(0, recovery.recoverDue(), outcome),
+                () -> assertEquals(snapshot.get(), facts(), "不得修改失效租约: " + outcome));
+            verify(observedRedis, times(1))
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    eq(original.orderNo),
+                    eq(original.operationKey),
+                    eq("2"),
+                    eq("1"));
+            assertEquals(
+                "block".equals(outcome) ? "5" : "6", fixtureRedis.opsForValue().get(keys.get(0)));
+            assertEquals(
+                "block".equals(outcome) ? "3" : "4", fixtureRedis.opsForValue().get(keys.get(4)));
+            assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+          });
+    assertAll(assertions);
+  }
+
+  /** 调用既有真实SQL签名，不调用被测私有helper伪造affected rows。 */
+  private static int applyRecoveryWrite(
+      String action,
+      SeckillQuotaSettlementPO original,
+      String owner,
+      java.time.LocalDateTime occurredAt) {
+    return switch (action) {
+      case "release" ->
+          realMapper.markReleased(original.orderNo, original.operationKey, 2L, 4L, owner);
+      case "block" ->
+          realMapper.markProjectionBlocked(
+              original.orderNo,
+              original.operationKey,
+              2L,
+              "owned-write-test",
+              occurredAt.plusSeconds(10),
+              owner);
+      case "retry" ->
+          realMapper.retry(
+              original.orderNo,
+              original.operationKey,
+              2L,
+              owner,
+              "owned-write-test",
+              occurredAt.plusSeconds(10),
+              occurredAt);
+      default -> throw new AssertionError(action);
+    };
   }
 
   /** 原claim确实取得lease后才受控提交当前事实变化，fresh query仍由真实MyBatis读取。 */

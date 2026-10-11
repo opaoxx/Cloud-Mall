@@ -1582,3 +1582,12 @@ claim成功后、Lua前沿原findSettlement点读当前行，核同一immutable�
 拒绝路径不Lua/mark/retry或repair，查询异常仍原catch/retry且不Lua；允许pending/blocked及诊断字段变化。
 T38 CAS读回仍独立，T39扫描预算不包括新点读；SQL/DDL/事务/Lua/API和其它协议保持。
 只覆盖本次观察到的claim后漂移，不声称读回到Lua之间窗口已消失或实现跨SQL/Redis fencing/fullsource证明。
+
+
+### CM-18 秒杀恢复状态写身份/有效租约保护（16T41）
+
+markReleased/markProjectionBlocked/retry保原revision/候选SQL与SET，只追加BINARY精确order/op/owner/status，
+且leaseUntil非NULL晚于数据库语句NOW(3)。别名身份、过期/缺失lease返回0，不标记或清除失效租约。
+健康pending/blocked写入与原影响行数0处理保持；T40点读、T38 CAS证明、T39扫描及Lua不改。
+真实Lua后lease漂移覆盖release/block/丢响应retry，已执行Redis变化如实保留，不能假装跨库回滚。
+本门未绑定全部immutable tuple，不是跨SQLRedis原子/完整fencing；readback→Lua等窗口仍待后续处理。
