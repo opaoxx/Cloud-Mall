@@ -124,7 +124,12 @@ class SeckillSettlementWriteIdentityTest {
     row.quantity = 1;
     row.status = state;
     row.revision = 1L;
-    row.operationKey = ORDER_NO + ":" + action;
+    row.operationKey =
+        ORDER_NO
+            + ":"
+            + ("CONFIRMED".equals(state)
+                ? "CONFIRM"
+                : "RELEASED".equals(state) ? "ROLLBACK" : action);
     when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row);
     when(mapper.transitionOpenToConfirmed(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);
     when(mapper.transitionBlockedToConfirmed(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);

@@ -353,15 +353,18 @@ class SeckillReservationOrderIdentityMySqlIT {
   private static void seedSettlement(String orderNo, String status) {
     fixture.update(
         "INSERT INTO"
-            + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,created_at,updated_at)"
-            + " VALUES(?,?,?,?,?,?,1,?,1,'2026-10-10 02:00:00.123','2026-10-10 02:00:00.123')",
+            + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,operation_key,created_at,updated_at)"
+            + " VALUES(?,?,?,?,?,?,1,?,1,?,'2026-10-10 02:00:00.123','2026-10-10 02:00:00.123')",
         1L,
         orderNo,
         10L,
         20L,
         8L,
         orderNo + ":idempotency",
-        status);
+        status,
+        "CONFIRMED".equals(status)
+            ? orderNo + ":CONFIRM"
+            : "RELEASED".equals(status) ? orderNo + ":ROLLBACK" : null);
   }
 
   /** 准备旧秒杀受理行；状态仅由实际Stock fallback读取。 */

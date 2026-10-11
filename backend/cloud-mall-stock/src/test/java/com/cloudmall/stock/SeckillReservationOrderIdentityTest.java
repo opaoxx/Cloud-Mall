@@ -140,6 +140,8 @@ class SeckillReservationOrderIdentityTest {
     row.quantity = 1;
     row.status = state;
     row.revision = 1L;
+    if ("CONFIRMED".equals(state)) row.operationKey = original + ":CONFIRM";
+    if ("RELEASED".equals(state)) row.operationKey = original + ":ROLLBACK";
     return row;
   }
 

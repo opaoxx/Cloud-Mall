@@ -1516,3 +1516,13 @@ fallback坏SKU返回`UNKNOWN/items=[]`，不把非法REJECTED明细映成Order�
 T31原订单身份仍先核，合法BigDecimal尾零、Long.MAX_VALUE及原状态/数量保持。
 正常生产列仍signed BIGINT；小数/大数/浮点仅owned遗留列验证，不修改生产DDL或猜恢复已丢精度。
 无新增SQL/事务/写，T32写门、settlement/迁移/恢复/Redis/MQ和普通流程保持，CM18其余M1–M4保留。
+
+
+### CM-18 秒杀终态原操作键保护（16T34）
+
+秒杀结算只有原订单/既有维度和原操作键均通过，才能将CONFIRMED/RELEASED作为完成证据。
+原键必须精确为原orderNo加`:CONFIRM`/`:ROLLBACK`，拒绝缺失、别单、反方向及大小写/重音/尾空格别名。
+GET缺证返回`UNKNOWN/items=[]`、不落普通库存或使Order fallback误报完成；写前在noop/CAS前返回
+原`SECKILL_SETTLEMENT_CORRUPT`/500，消息不回显原键，既有REQUIRED事务完整回滚。
+合法终态同向幂等、反向409保持，原身份与维度错误优先；OPEN/pending/blocked/其它状态不新增规则。
+无SQL/DDL/锁序/事务/Redis/MQ/恢复/API变更；完整tuple、其它状态原操作键及CM18其余M1–M4仍待完成。

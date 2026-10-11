@@ -53,7 +53,8 @@ public class SeckillQuotaSettlementService {
       if (accepted == null || !"ACCEPTED".equals(String.valueOf(accepted.get("status"))))
         return null;
       // CI查询仅返回候选；原身份缺失或错别名不能作为当前订单的保留事实。
-      if (!Objects.equals(orderNo, accepted.get("order_no"))) return unknownOrderIdentity(orderNo);
+      if (!Objects.equals(orderNo, accepted.get("order_no")))
+        return unknownSettlementProof(orderNo);
       long skuId = requiredPositive(accepted.get("sku_id"), "sku_id");
       return new StockReservationVO(
           orderNo,
@@ -61,9 +62,11 @@ public class SeckillQuotaSettlementService {
           List.of(new com.cloudmall.stock.domain.vo.StockReservationItemVO(skuId, 1, "RESERVED")));
     }
     // 2. 先核原订单号再验维度；不能借别单终态或落入普通库存路径。
-    if (!Objects.equals(orderNo, settlement.orderNo)) return unknownOrderIdentity(orderNo);
+    if (!Objects.equals(orderNo, settlement.orderNo)) return unknownSettlementProof(orderNo);
     validateSettlement(settlement);
-    // 3. 原身份和维度完整后仅映射查询状态，不执行任何结算或库存动作。
+    // 3. 终态必须有原订单对应方向的操作键；缺证仍返回已观察候选，阻止普通库存fallback。
+    if (!terminalOperationKeyMatches(settlement)) return unknownSettlementProof(orderNo);
+    // 4. 证据完整后仅映射查询状态，不执行任何结算或库存动作。
     String status = externalStatus(settlement.status);
     return new StockReservationVO(
         orderNo,
@@ -73,8 +76,8 @@ public class SeckillQuotaSettlementService {
                 settlement.skuId, settlement.quantity, status)));
   }
 
-  /** 错原身份仍是已观察候选，不伪装成缺行；空明细不回显别单SKU或允许fallback。 */
-  private static StockReservationVO unknownOrderIdentity(String orderNo) {
+  /** 原身份或终态操作键缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
+  private static StockReservationVO unknownSettlementProof(String orderNo) {
     return new StockReservationVO(orderNo, "UNKNOWN", List.of());
   }
 
@@ -96,6 +99,8 @@ public class SeckillQuotaSettlementService {
     if (!Objects.equals(orderNo, settlement.orderNo))
       throw new BizException("SECKILL_SETTLEMENT_CONFLICT", "秒杀结算原订单归属冲突", 409);
     validateSettlement(settlement);
+    if (!terminalOperationKeyMatches(settlement))
+      throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀结算终态操作键缺证", 500);
     String operationKey = orderNo + ":" + actionType;
     String status = settlement.status;
     long revision = settlement.revision;
@@ -142,6 +147,15 @@ public class SeckillQuotaSettlementService {
   /** CAS 竞争或提交结果未知时返回 503，交给订单动作恢复器重试。 */
   private static BizException unknownCas(String orderNo) {
     return new BizException("SECKILL_SETTLEMENT_UNKNOWN", "秒杀结算提交结果未知: " + orderNo, 503);
+  }
+
+  /** 仅核两个终态的原订单与动作方向；不规范化原键，也不扩展非终态规则。 */
+  private static boolean terminalOperationKeyMatches(SeckillQuotaSettlementPO settlement) {
+    if ("CONFIRMED".equals(settlement.status))
+      return Objects.equals(settlement.orderNo + ":CONFIRM", settlement.operationKey);
+    if ("RELEASED".equals(settlement.status))
+      return Objects.equals(settlement.orderNo + ":ROLLBACK", settlement.operationKey);
+    return true;
   }
 
   /** 严格拒绝损坏的结算维度，避免以默认值掩盖事实。 */
