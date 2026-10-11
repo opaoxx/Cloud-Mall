@@ -784,6 +784,20 @@ Try已有`TRYING`时，返回原冻结摘要前同样复用`requireNoLedger`：�
 实际100行（1原扣款+99退款）为210纯SELECT同连接，101行不执行新范围逐key COUNT。
 生产DDL/index/资金状态机/旧APIflags不变，CM-18其它证据及发布/真实故障验收仍待完成。
 
+### CM-18 Pay消费User活跃冻结归属（16T26）
+
+独立开关`cloudmall.pay.tcc-user-frozen-ownership-evidence.enabled=false`默认关闭，入口为
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/user-frozen-ownership-evidence`。
+复用Pay取证共享门，通过原持久锚点userId/payNo GET既有User16T12入口；远端User的T9/T12启用门仍生效。
+
+第一次Pay RR结束后隔离AuthContext并使用实例凭证GET，不透调用方用户/角色或XID。
+无论GET成功/失败都再次Pay RR，完整本地摘要变化优先。外层proof保原生JSON类型，嵌套T9报告先复用原
+身份/四指纹/状态/账本/账户/固定退款门，必须完整MATCHED；再核100上限、完整候选、金额与两个冻结投影相等、
+SHA向量，空候选须零金额/空向量指纹，正候选须正金额。User冲突/部分退款/缺证/超限不抬高，不回显原body。
+
+最高仍`BLOCKED_REMAINING_EVIDENCE`，禁止自动资金动作；历史终态冻结、其它退款和Order/Stock/TC/MQ仍未闭环。
+实际Pay两次6SELECT/User一次10+5N SELECT，503不重试，原库/资金事实不改。原T10校验仅包内复用，旧合同保持。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

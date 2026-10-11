@@ -420,6 +420,26 @@ class PayTccUserAccountEvidenceMySqlIT {
         "CM16T10 original Pay/User checksums unchanged; owned databases and HTTP listener removed");
   }
 
+  /** 原账户入口不承诺逐笔冻结归属，等额缺原receive行须由新消费者检查。 */
+  @Test
+  void otherTryingOriginIsOutsideOriginalAccountObservation() {
+    userFixture.update(
+        "INSERT INTO"
+            + " balance_tcc_debit(id,operation_key,xid,branch_id,user_id,pay_no,order_no,amount,state,balance_before,balance_after_try,created_at,updated_at)"
+            + " VALUES(2,'tcc-debit:pay2','private-peer-xid',302,7,'pay2','202610order2',10,'TRYING',100,90,'2026-10-11','2026-10-11')");
+    userFixture.update("UPDATE mall_user SET frozen_balance=10 WHERE id=7");
+    var payBefore = facts();
+    var userBefore = userFacts();
+    enableChecks();
+    var report = inspectUser();
+    assertEquals("BLOCKED_REMAINING_EVIDENCE", report.classification);
+    assertEquals("PAY_USER_ACCOUNT_OBSERVED_ONLY", report.scope);
+    assertEquals("10.00", report.userAccountEvidence.tryingFrozenTotal());
+    assertEquals(12, tracked.statements.size());
+    assertEquals(9, userTracked.statements.size());
+    assertUnchanged(payBefore, userBefore);
+  }
+
   @Test
   void actualUserAccountGetPreservesBothDatabasesAndCallerContext() {
     for (String state : List.of("CONFIRMED", "CANCELLED")) {

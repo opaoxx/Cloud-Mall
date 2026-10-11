@@ -42,4 +42,5 @@ seata:
   service.grouplist.default: ${CLOUDMALL_SEATA_TC:127.0.0.1:18091}
 
 cloudmall.pay.tcc-cancel.enabled: false
+cloudmall.pay.tcc-user-frozen-ownership-evidence.enabled: false
 cloudmall.pay.tcc-cancel.interval-ms: 5000

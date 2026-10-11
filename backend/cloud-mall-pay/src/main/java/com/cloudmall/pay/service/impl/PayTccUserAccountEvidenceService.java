@@ -150,7 +150,7 @@ public class PayTccUserAccountEvidenceService {
   }
 
   /** 先验证原身份与指纹，再核源分类和完整账户/固定退款摘要，不猜资金动作。 */
-  private static PayTccUserAccountReconciliationVO verify(
+  static PayTccUserAccountReconciliationVO verify(
       PayTccEvidenceCaptureDTO capture, UserAccountEvidenceDTO observed) {
     var anchor = capture.trustedAnchor();
     if (!"USER_ACCOUNT_FROZEN_REFUND_OBSERVED_ONLY".equals(text(observed.scope))
