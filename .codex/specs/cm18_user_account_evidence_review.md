@@ -21,6 +21,7 @@ GET /api/internal/users/{userId}/balance/tcc-reconciliation/{payNo}
 ```
 
 - callback token、caller=`cm18-reconciliation`、positive userId、ASCII payNo、无 Spring active transaction/无 Seata XID 必须在任何连接前校验；Gateway 禁止该路径，错误与成功都 `Cache-Control: no-store`。
+- 新 Controller 必须本地处理 `MethodArgumentTypeMismatchException`（userId 非数字/溢出等 Spring 绑定失败），返回固定 400 `ApiResponse` 并添加 `Cache-Control: no-store`；BizException 保持既有 code/status 处理。该 handler 不修改 global ExceptionHandler 或旧 API。
 - 不依赖或开启 `cloudmall.user.tcc-http.enabled`，不绑定 RM/RootContext，不接受请求覆盖 userId/payNo/operation key/XID/branch/金额。
 - 独立 `@Service` ReadService 通过构造器创建 plain delegate 的原 `UserTccStateQuery` 纯读取委托，不注册新的同类型 Spring bean；外层 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)` 先建立，原委托不依赖自身 Spring 代理/事务注解，所有 SQL 都在该外层 readOnly RR 内执行。
 
