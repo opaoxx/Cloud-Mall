@@ -10,6 +10,7 @@ cloudmall.user.tcc-resource.enabled: false
 cloudmall.user.tcc-http.enabled: false
 cloudmall.user.tcc-reconciliation.enabled: false
 cloudmall.user.tcc-refund-evidence.enabled: false
+cloudmall.user.tcc-frozen-ownership-evidence.enabled: false
 cloudmall.internal.callback-token: ${CLOUDMALL_INTERNAL_CALLBACK_TOKEN:cloudmall-local-callback}
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root

@@ -11,6 +11,12 @@ import org.apache.ibatis.annotations.Update;
 /** TCC 冻结状态数据访问接口。 */
 @Mapper
 public interface BalanceTccDebitMapper extends BaseMapper<BalanceTccDebitPO> {
+  /** 保留该用户TRYING的CI候选，100加一哨兵，原行由Service精确校验。 */
+  @Select(
+      "SELECT * FROM balance_tcc_debit WHERE user_id=#{userId} AND state='TRYING'"
+          + " ORDER BY updated_at,id LIMIT 101")
+  java.util.List<BalanceTccDebitPO> findTryingOwnershipCandidates(@Param("userId") Long userId);
+
   /** 按用户观察原TRYING总额与非法原行，不过滤坏状态/金额或修改冻结事实。 */
   @Select(
       "SELECT COALESCE(SUM(CASE WHEN BINARY state='TRYING' THEN amount ELSE 0 END),0) AS"

@@ -601,6 +601,33 @@ Gate先于连接，成功/已知错误均no-store，Gateway禁止；不接收客
 mvn -pl backend/cloud-mall-user -am test '-Dtest=UserLinkedRefundEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 User当前TRYING冻结归属观察（16T12）
+
+同时开启 `cloudmall.user.tcc-reconciliation.enabled` 与独立默认关闭的
+`cloudmall.user.tcc-frozen-ownership-evidence.enabled`，以相同内部运维凭证直连User：
+`GET /api/internal/users/{userId}/balance/tcc-reconciliation/{payNo}/frozen-ownership-evidence`。
+共享gate先于连接，成功/已知错误no-store，Gateway禁止，不接收HTTP覆盖原资金参数。
+
+同一只读RR先读16T9基线，再按userId/TRYING现有索引读100加一哨兵候选。超过100不继续查peer，
+不输出总额/指纹。逐行核原身份/op/XID/branch/状态/金额与before-afterTry增量，复用原
+UserTccStateQuery核receive、TCC attempt、冻结行、无DEBIT及TRYING Fence；缺原请求为缺证，
+已知持久冲突保留，DB错误仍固定503，不伪装为无冻结。
+
+全部候选归属完成后合计须同时匹配账户frozen_balance与原TRYING总额。其他交易的非零冻结
+可合法证明，不能用合计相等替代原资金归属。源其他缺证（包括退款partial）保留，历史终态行
+和全账户财务因果未核验。完整基线加N peer为9+1+5N次SELECT、同一readOnly RR连接。
+
+报告固定 `USER_TRYING_FROZEN_OWNERSHIP_OBSERVED_ONLY`、`automaticActionsAllowed=false`、
+`terminalFrozenRowsNotInspected=true`；最高 `BLOCKED_EXTERNAL_EVIDENCE`。只输出核验合计与
+按peer支付号指纹升序的归属/金额向量SHA256，其他原payNo/XID/branch/key/错误不返回。
+0候选不说明全局无资金行为；Pay/Order/Stock/TC/MQ及统一证据包仍待后续。
+
+隔离验收使用随机owned User库、真实原校验器/Mapper/RR，原库只核checksum，最终清理：
+
+```powershell
+mvn -pl backend/cloud-mall-user -am test '-Dtest=UserFrozenOwnershipEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
