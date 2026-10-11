@@ -227,52 +227,55 @@ class SeckillRecoveryCandidateGuardMySqlIT {
 
   @Test
   void healthyPendingAndBlockedRollbackKeepOneRealQuotaReleaseAndReceiptReplay() {
-    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
-      reset();
-      var original = row(state, "😺".repeat(128));
-      seed(original);
-      var keys = prepareRedis(original);
-      var before = facts();
-      queryResultSizes.clear();
-      clearInvocations(observedMapper, observedRedis);
-      assertEquals(1, recovery.recoverDue());
-      assertEquals("6", fixtureRedis.opsForValue().get(keys.get(0)));
-      assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
-      assertEquals(
-          "APPLIED|" + original.operationKey + "|2|4", fixtureRedis.opsForValue().get(keys.get(3)));
-      assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
-      assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
-      assertReleased(original);
-      var after = facts();
-      for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
-        if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
-      // 演练“Redis成功后DB结果丢失”：原意图重放，Lua回执不能二次INCR。
-      fixture.update(
-          "UPDATE seckill_quota_settlement SET"
-              + " status=?,redis_revision=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at='2000-01-01'"
-              + " WHERE order_no=?",
-          state,
-          original.orderNo);
-      assertEquals(1, recovery.recoverDue());
-      assertReleased(original);
-      assertEquals("6", fixtureRedis.opsForValue().get(keys.get(0)));
-      assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
-      assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
-      verify(observedMapper, times(2)).findDue(any(), eq(50));
-      verify(observedMapper, times(2)).findSettlement(original.orderNo);
-      verify(observedMapper).findDueAfter(any(), eq(1L), eq(50));
-      verify(observedMapper, times(2))
-          .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
-      verify(observedMapper, times(2))
-          .markReleased(
-              eq(original.orderNo),
-              eq(original.operationKey),
-              eq(2L),
-              eq(4L),
-              any(),
-              any(SeckillQuotaSettlementPO.class));
-      verifyNoMoreInteractions(observedMapper);
-    }
+    for (String acceptedState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+        reset();
+        var original = row(state, "😺".repeat(128));
+        seed(original);
+        fixture.update("UPDATE seckill_reservation SET status=?", acceptedState);
+        var keys = prepareRedis(original);
+        var before = facts();
+        queryResultSizes.clear();
+        clearInvocations(observedMapper, observedRedis);
+        assertEquals(1, recovery.recoverDue());
+        assertEquals("6", fixtureRedis.opsForValue().get(keys.get(0)));
+        assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
+        assertEquals(
+            "APPLIED|" + original.operationKey + "|2|4",
+            fixtureRedis.opsForValue().get(keys.get(3)));
+        assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
+        assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+        assertReleased(original);
+        var after = facts();
+        for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+          if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
+        // 演练“Redis成功后DB结果丢失”：原意图重放，Lua回执不能二次INCR。
+        fixture.update(
+            "UPDATE seckill_quota_settlement SET"
+                + " status=?,redis_revision=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at='2000-01-01'"
+                + " WHERE order_no=?",
+            state,
+            original.orderNo);
+        assertEquals(1, recovery.recoverDue());
+        assertReleased(original);
+        assertEquals("6", fixtureRedis.opsForValue().get(keys.get(0)));
+        assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
+        assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+        verify(observedMapper, times(2)).findDue(any(), eq(50));
+        verify(observedMapper, times(2)).findSettlement(original.orderNo);
+        verify(observedMapper).findDueAfter(any(), eq(1L), eq(50));
+        verify(observedMapper, times(2))
+            .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
+        verify(observedMapper, times(2))
+            .markReleased(
+                eq(original.orderNo),
+                eq(original.operationKey),
+                eq(2L),
+                eq(4L),
+                any(),
+                any(SeckillQuotaSettlementPO.class));
+        verifyNoMoreInteractions(observedMapper);
+      }
   }
 
   @Test
@@ -578,6 +581,131 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
   }
 
+  @Test
+  void realClaimCannotLeaseMissingOrMismatchedAcceptanceSource() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String variant : badAcceptanceSources())
+        assertions.add(
+            () -> {
+              reset();
+              var original = row(state, "owned-idem");
+              seed(original);
+              corruptAcceptanceSource(original, variant);
+              var before = facts();
+              var sampledNow = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              int leased =
+                  realMapper.claim(
+                      original.orderNo,
+                      original.operationKey,
+                      original.revision,
+                      "owned-source-claim",
+                      sampledNow.plusSeconds(30),
+                      sampledNow);
+              assertAll(
+                  () -> assertEquals(0, leased, state + ":" + variant),
+                  () -> assertEquals(before, facts(), state + ":" + variant));
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void recoveryWithHealthyRedisCannotReleaseUnprovenAcceptanceSource() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String variant : badAcceptanceSources())
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            corruptAcceptanceSource(original, variant);
+            var keys = prepareRedis(original);
+            var before = facts();
+            var redisBefore = redisFacts(keys);
+            clearInvocations(observedMapper, observedRedis);
+            int handled = recovery.recoverDue();
+            assertAll(
+                () -> assertEquals(0, handled, variant),
+                () -> {
+                  verify(observedMapper).findDue(any(), eq(50));
+                  verify(observedMapper)
+                      .claim(
+                          eq(original.orderNo),
+                          eq(original.operationKey),
+                          eq(2L),
+                          any(),
+                          any(),
+                          any());
+                  verifyNoMoreInteractions(observedMapper);
+                },
+                () -> verifyNoInteractions(observedRedis),
+                () -> assertEquals(before, facts(), variant),
+                () -> assertEquals(redisBefore, redisFacts(keys), variant));
+          });
+    assertAll(assertions);
+  }
+
+  /** 原 NOTNULL/VARCHAR/BIGINT 能实际保存的缺来源矩阵，不 ALTER。 */
+  private static List<String> badAcceptanceSources() {
+    return List.of(
+        "missing",
+        "pending",
+        "unknown",
+        "rejected",
+        "status-case",
+        "status-space",
+        "order-foreign",
+        "order-case",
+        "order-accent",
+        "order-space",
+        "activity",
+        "sku",
+        "user",
+        "idem-foreign",
+        "idem-case",
+        "idem-accent",
+        "idem-space");
+  }
+
+  /** 只改变自有受理事实；结算与Redis均保原合法tuple以复现错来源领取。 */
+  private static void corruptAcceptanceSource(SeckillQuotaSettlementPO original, String variant) {
+    switch (variant) {
+      case "missing" -> fixture.update("DELETE FROM seckill_reservation");
+      case "pending", "unknown", "rejected" ->
+          fixture.update(
+              "UPDATE seckill_reservation SET status=?",
+              variant.toUpperCase(java.util.Locale.ROOT));
+      case "status-case" -> fixture.update("UPDATE seckill_reservation SET status='accepted'");
+      case "status-space" -> fixture.update("UPDATE seckill_reservation SET status='ACCEPTED '");
+      case "order-foreign" ->
+          fixture.update("UPDATE seckill_reservation SET order_no='foreign-owned-source'");
+      case "order-case" ->
+          fixture.update(
+              "UPDATE seckill_reservation SET order_no=?",
+              original.orderNo.toUpperCase(java.util.Locale.ROOT));
+      case "order-accent" ->
+          fixture.update(
+              "UPDATE seckill_reservation SET order_no=?",
+              original.orderNo.replace("cm37", "cḿ37"));
+      case "order-space" ->
+          fixture.update("UPDATE seckill_reservation SET order_no=?", original.orderNo + " ");
+      case "activity" ->
+          fixture.update("UPDATE seckill_reservation SET activity_id=?", original.activityId + 1);
+      case "sku" -> fixture.update("UPDATE seckill_reservation SET sku_id=?", original.skuId + 1);
+      case "user" ->
+          fixture.update("UPDATE seckill_reservation SET user_id=?", original.userId + 1);
+      case "idem-foreign" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='foreign-owned-idem'");
+      case "idem-case" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='OWNED-IDEM'");
+      case "idem-accent" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='owned-idém'");
+      case "idem-space" ->
+          fixture.update("UPDATE seckill_reservation SET idempotency_key='owned-idem '");
+      default -> throw new AssertionError(variant);
+    }
+  }
+
   /** 测试间仅清自有库，不重启中间件/改其它键。 */
   private static void reset() {
     org.mockito.Mockito.reset(observedMapper, observedRedis);
@@ -600,6 +728,15 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         original.idempotencyKey,
         original.status,
         original.operationKey);
+    fixture.update(
+        "INSERT INTO"
+            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at)"
+            + " VALUES(1,?,?,?,?,?,'ACCEPTED','1999-12-31','1999-12-31')",
+        original.orderNo,
+        original.activityId,
+        original.skuId,
+        original.userId,
+        original.idempotencyKey);
   }
 
   @Test

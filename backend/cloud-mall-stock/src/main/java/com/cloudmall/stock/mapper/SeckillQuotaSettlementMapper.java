@@ -154,13 +154,21 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
   List<SeckillQuotaSettlementPO> findDueAfter(
       @Param("now") LocalDateTime now, @Param("afterId") long afterId, @Param("limit") int limit);
 
-  /** 以 revision 和状态认领恢复任务。 */
+  /** 原受理状态及订单/活动/SKU/用户/幂等来源一致时，按原revision/状态/租约认领恢复任务。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"
           + " lease_owner=#{owner},lease_until=#{leaseUntil},updated_at=#{now} WHERE"
           + " order_no=#{orderNo} AND revision=#{revision} AND operation_key=#{operationKey} AND"
           + " status IN ('RELEASE_PENDING','PROJECTION_BLOCKED') AND next_retry_at<=#{now} AND"
-          + " (lease_until IS NULL OR lease_until<#{now})")
+          + " (lease_until IS NULL OR lease_until<#{now}) AND EXISTS (SELECT 1 FROM"
+          + " seckill_reservation accepted WHERE accepted.order_no=#{orderNo} AND BINARY"
+          + " accepted.order_no=BINARY #{orderNo} AND BINARY accepted.order_no=BINARY"
+          + " seckill_quota_settlement.order_no AND BINARY accepted.status IN (BINARY"
+          + " 'ACCEPTED',BINARY 'PUBLISHED',BINARY 'ORDER_CREATED') AND"
+          + " accepted.activity_id=seckill_quota_settlement.activity_id AND"
+          + " accepted.sku_id=seckill_quota_settlement.sku_id AND"
+          + " accepted.user_id=seckill_quota_settlement.user_id AND BINARY"
+          + " accepted.idempotency_key=BINARY seckill_quota_settlement.idempotency_key)")
   int claim(
       @Param("orderNo") String orderNo,
       @Param("operationKey") String operationKey,
