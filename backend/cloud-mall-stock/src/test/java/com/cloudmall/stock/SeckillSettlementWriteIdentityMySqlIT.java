@@ -331,13 +331,14 @@ class SeckillSettlementWriteIdentityMySqlIT {
   private static void seedSettlement(String original, String state) {
     fixture.update(
         "INSERT INTO"
-            + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,operation_key,created_at,updated_at)"
-            + " VALUES(1,?,10,20,8,'private-idem',1,?,2,?,'2026-10-11','2026-10-11')",
+            + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,operation_key,redis_revision,created_at,updated_at)"
+            + " VALUES(1,?,10,20,8,'private-idem',1,?,2,?,?,'2026-10-11','2026-10-11')",
         original,
         state,
         "OPEN".equals(state)
             ? null
-            : original + ("RELEASED".equals(state) ? ":ROLLBACK" : ":CONFIRM"));
+            : original + ("RELEASED".equals(state) ? ":ROLLBACK" : ":CONFIRM"),
+        "RELEASED".equals(state) ? 4L : null);
   }
 
   /** 原ACCEPTED事实，仅允许旧mapper的INSERT SELECT创建对应OPEN。 */

@@ -140,6 +140,7 @@ class SeckillReservationOrderIdentityTest {
     row.quantity = 1;
     row.status = state;
     row.revision = 1L;
+    if ("RELEASED".equals(state)) row.redisRevision = 4L;
     if ("CONFIRMED".equals(state)) row.operationKey = original + ":CONFIRM";
     if ("RELEASED".equals(state)
         || "RELEASE_PENDING".equals(state)

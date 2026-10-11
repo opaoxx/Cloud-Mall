@@ -156,6 +156,7 @@ class SeckillTerminalOperationKeyTest {
     row.quantity = 1;
     row.revision = 2L;
     row.status = state;
+    if ("RELEASED".equals(state)) row.redisRevision = 4L;
     row.operationKey = key;
     return row;
   }

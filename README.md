@@ -1599,3 +1599,10 @@ markReleased/markProjectionBlocked/retry保原revision/候选SQL与SET，只追�
 幂等键、quantity、revision、createdAt及精确order/op；任何字段漂移、缺snapshot或scalar矛盾均affected0。
 正常/异常retry始终传原candidate，不从readback重建参数，无缺快照旧签名旁路；原SET/可变诊断保持。
 不新增查询/事务/DDL/公开API，T37–41/Lua/扫描保持；Redis已执行效果不伪回滚，完整来源与跨库窗口仍保留。
+
+
+### CM-18 秒杀释放终态持久回执保护（16T43）
+
+RELEASED 在原订单、维度和操作键核验后，要求持久 redisRevision 属于原释放 Lua 的 1..1000000000000 回执范围。
+缺失或越界时 GET 返回 UNKNOWN/空明细，写前返回固定 CORRUPT500；合法回执保留回滚重放及反向409。
+其它状态不新增回执限制，不增加 Redis GET 或改动 SQL/事务；本门不证明原 APPLIED 来源或跨存储原子性。

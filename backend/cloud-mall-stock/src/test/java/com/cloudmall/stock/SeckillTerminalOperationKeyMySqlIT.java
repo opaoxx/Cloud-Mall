@@ -676,6 +676,132 @@ class SeckillTerminalOperationKeyMySqlIT {
         "UPDATE seckill_quota_settlement SET idempotency_key=? WHERE order_no=?", key, ORDER_NO);
   }
 
+  @Test
+  void badReleasedReceiptsStayUnknownForStockAndActualOrderFallback() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (Long receipt :
+        java.util.Arrays.asList(null, 0L, -1L, Long.MIN_VALUE, 1000000000001L, Long.MAX_VALUE))
+      assertions.add(
+          () -> {
+            reset();
+            seedReleasedReceipt(receipt);
+            var before = facts();
+            tracked.checking = true;
+            var result = read();
+            assertAll(
+                () -> assertEquals("UNKNOWN", result.status, String.valueOf(receipt)),
+                () -> assertTrue(result.items.isEmpty()),
+                () -> assertEquals(ORDER_NO, result.orderNo));
+            assertOnlySelects();
+            for (String orderState : List.of("PAID", "CANCELLED")) {
+              tracked.sql.clear();
+              assertEquals("UNKNOWN", orderFallback(orderState));
+              assertEquals(1, tracked.sql.size());
+              assertOnlySelects();
+            }
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void badReleasedReceiptsBlockRealTransactionalWritesAndActualController() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (Long receipt :
+        java.util.Arrays.asList(null, 0L, -1L, Long.MIN_VALUE, 1000000000001L, Long.MAX_VALUE))
+      for (String action : List.of("CONFIRM", "ROLLBACK"))
+        assertions.add(
+            () -> {
+              reset();
+              seedReleasedReceipt(receipt);
+              var before = facts();
+              tracked.checking = true;
+              tracked.writePhase = true;
+              var failure =
+                  assertThrows(
+                      BizException.class, () -> settlementService.settle(ORDER_NO, action));
+              assertEquals(500, failure.getHttpStatus());
+              assertEquals("SECKILL_SETTLEMENT_CORRUPT", failure.getCode());
+              assertEquals("秒杀释放回执缺证", failure.getMessage());
+              assertEquals(2, tracked.sql.size());
+              assertEquals(before, facts());
+              assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+            });
+    assertAll(assertions);
+    reset();
+    seedReleasedReceipt(null);
+    var before = facts();
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var proxy = new ProxyFactory(controller);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    var mvc =
+        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    tracked.checking = true;
+    mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+        .andExpect(jsonPath("$.data.items").isEmpty());
+    assertOnlySelects();
+    for (String action : List.of("confirm", "rollback")) {
+      tracked.sql.clear();
+      tracked.writePhase = true;
+      byte[] response =
+          mvc.perform(post("/api/stock/reservations/" + ORDER_NO + "/" + action))
+              .andExpect(status().isInternalServerError())
+              .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_CORRUPT"))
+              .andReturn()
+              .getResponse()
+              .getContentAsByteArray();
+      assertEquals("秒杀释放回执缺证", new ObjectMapper().readTree(response).get("message").asText());
+      assertEquals(2, tracked.sql.size());
+    }
+    assertEquals(before, facts());
+  }
+
+  @Test
+  void exactReleasedReceiptBoundariesKeepRealGetNoopAndConflict() throws Exception {
+    for (long receipt : new long[] {1L, 4L, 1000000000000L}) {
+      reset();
+      seedReleasedReceipt(receipt);
+      var before = facts();
+      tracked.checking = true;
+      var result = read();
+      assertEquals("ROLLED_BACK", result.status);
+      assertEquals(1, result.items.size());
+      assertOnlySelects();
+      tracked.sql.clear();
+      assertEquals("SUCCEEDED", orderFallback("CANCELLED"));
+      assertOnlySelects();
+      tracked.sql.clear();
+      tracked.writePhase = true;
+      var replay = (Map<?, ?>) settlementService.settle(ORDER_NO, "ROLLBACK").data;
+      assertEquals(true, replay.get("rolledBack"));
+      assertEquals(true, replay.get("idempotent"));
+      assertEquals(2, tracked.sql.size());
+      tracked.sql.clear();
+      assertEquals(
+          409,
+          assertThrows(BizException.class, () -> settlementService.settle(ORDER_NO, "CONFIRM"))
+              .getHttpStatus());
+      assertEquals(2, tracked.sql.size());
+      assertEquals(before, facts());
+    }
+  }
+
+  /** 仅 owned 原 BIGINT 列准备回执变异，不改表结构。 */
+  private static void seedReleasedReceipt(Long receipt) {
+    seedSettlement("RELEASED", ORDER_NO + ":ROLLBACK");
+    fixture.update(
+        "UPDATE seckill_quota_settlement SET redis_revision=? WHERE order_no=?", receipt, ORDER_NO);
+  }
+
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
   private static List<String> badKeys(String state) {
     String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
@@ -691,11 +817,12 @@ class SeckillTerminalOperationKeyMySqlIT {
   private static void seedSettlement(String state, String key) {
     fixture.update(
         "INSERT INTO"
-            + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,operation_key,created_at,updated_at)"
-            + " VALUES(1,?,10,20,8,'private-idem',1,?,2,?,'2026-10-11','2026-10-11')",
+            + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,operation_key,redis_revision,created_at,updated_at)"
+            + " VALUES(1,?,10,20,8,'private-idem',1,?,2,?,?,'2026-10-11','2026-10-11')",
         ORDER_NO,
         state,
-        key);
+        key,
+        "RELEASED".equals(state) ? 4L : null);
   }
 
   /** 原生产GET，任何数据库异常都不得当作终态证据。 */

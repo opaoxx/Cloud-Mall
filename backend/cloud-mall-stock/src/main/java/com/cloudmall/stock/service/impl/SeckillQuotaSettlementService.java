@@ -64,8 +64,9 @@ public class SeckillQuotaSettlementService {
     // 2. 先核原订单号再验维度；不能借别单终态或落入普通库存路径。
     if (!Objects.equals(orderNo, settlement.orderNo)) return unknownSettlementProof(orderNo);
     validateSettlement(settlement);
-    // 3. 五种结算状态按原订单及允许方向核操作键；缺证仍返回已观察候选，阻止普通库存fallback。
-    if (!settlementOperationKeyMatches(settlement)) return unknownSettlementProof(orderNo);
+    // 3. 五种结算状态核操作键，RELEASED 再核持久回执；缺证仍返回已观察候选，阻止普通库存fallback。
+    if (!settlementOperationKeyMatches(settlement) || !releasedReceiptMatches(settlement))
+      return unknownSettlementProof(orderNo);
     // 4. 证据完整后仅映射查询状态，不执行任何结算或库存动作。
     String status = externalStatus(settlement.status);
     return new StockReservationVO(
@@ -76,7 +77,7 @@ public class SeckillQuotaSettlementService {
                 settlement.skuId, settlement.quantity, status)));
   }
 
-  /** 原身份或操作键缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
+  /** 原身份、操作键或释放回执缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
   private static StockReservationVO unknownSettlementProof(String orderNo) {
     return new StockReservationVO(orderNo, "UNKNOWN", List.of());
   }
@@ -101,6 +102,8 @@ public class SeckillQuotaSettlementService {
     validateSettlement(settlement);
     if (!settlementOperationKeyMatches(settlement))
       throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀结算操作键缺证", 500);
+    if (!releasedReceiptMatches(settlement))
+      throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀释放回执缺证", 500);
     String operationKey = orderNo + ":" + actionType;
     String status = settlement.status;
     long revision = settlement.revision;
@@ -162,6 +165,14 @@ public class SeckillQuotaSettlementService {
       return Objects.equals(confirmKey, settlement.operationKey)
           || Objects.equals(rollbackKey, settlement.operationKey);
     return true;
+  }
+
+  /** RELEASED 仅接收原释放 Lua 的合法回执域；数值合法不代表原 Redis 来源已证明。 */
+  private static boolean releasedReceiptMatches(SeckillQuotaSettlementPO settlement) {
+    return !"RELEASED".equals(settlement.status)
+        || (settlement.redisRevision != null
+            && settlement.redisRevision > 0
+            && settlement.redisRevision <= 1000000000000L);
   }
 
   /** 严格拒绝损坏的结算维度，避免以默认值掩盖事实。 */

@@ -124,6 +124,7 @@ class SeckillSettlementWriteIdentityTest {
     row.quantity = 1;
     row.status = state;
     row.revision = 1L;
+    if ("RELEASED".equals(state)) row.redisRevision = 4L;
     row.operationKey =
         ORDER_NO
             + ":"
