@@ -493,6 +493,31 @@ mvn -pl backend/cloud-mall-stock -am package -DskipTests
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccStockEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 Pay交付、退款与扣款前取消只读取证（16T8）
+
+同时开启 `cloudmall.pay.tcc-reconciliation.enabled` 和默认关闭的
+`cloudmall.pay.tcc-delivery-evidence.enabled`，使用16T1相同内部运维请求头直连Pay：
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/delivery-evidence`。
+入口在连接前验证开关、凭证、调用者、支付号以及无本地事务/Seata上下文；Gateway禁止该入口，
+响应 `Cache-Control: no-store`，客户端参数不能覆盖原支付归属。
+
+原六来源capture与已有delivery/cancel纯SELECT共享一个本地只读RR事务；完整样本为一个连接、
+八次SELECT。核验原payNo/userId/orderNo/金额、delivery原XID指纹与固定退款键、白名单状态、
+Pay状态映射及取消与资金事实的互斥。已提交而缺delivery只报告缺证，不创建台账；BEGIN_UNKNOWN
+不猜提交。合法COMMITTED后的REFUNDED不会误判，cancel已记录CONFLICT明确报告本地冲突。
+
+输出固定 `PAY_LOCAL_DELIVERY_CANCEL_ONLY` 与 `automaticActionsAllowed=false`，包含原报告与
+不可变台账摘要。XID/退款键只有SHA256；错误、租约owner和凭证不返回。重试次数、时间、租约
+存在性仅供观察，不授予恢复权。原缺证保留；即使本地一致，最高仍为BLOCKED_EXTERNAL_EVIDENCE。
+该入口不执行写入、锁、建表、Store、远端请求、TC或MQ，不代表CM-18资金主项闭环。
+
+隔离真实MySQL验收只写随机自有测试库，前后核原Pay库表清单和校验和，结束删除自有库；
+不启动应用、调度器或固定端口：
+
+```powershell
+mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccDeliveryEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
