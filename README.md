@@ -711,6 +711,18 @@ balance/frozenBalance存在、非负且可无损表示为DECIMAL(18,2)。NULL、
 原SQL/锁序/条件更新/API/flags/RM、disabled清算与余额不足响应保持；真实owned演练
 验证坏账户后三路径四资金表完整不变，不代表全账户因果或CM-18主项闭环。
 
+### CM-18 User原冻结到确认账本的来源校验（16T20）
+
+原资金Service进一步核验冻结before/afterTry合法非负18.2且差额等于amount。
+确认账本before/after也必须合法、差额正确，逐项数值等于原冻结快照；返回账本operationKey
+必须精确匹配原ledgerKey，CI别名不能充当原已扣款证明。坏原事实沿
+`BALANCE_TCC_UNKNOWN`/409拒绝，重放也不能把坏快照认作已成功。
+
+不新增SQL或锁，不改变正常冻结/清算/释放、T19当前钱包写前门及空取消无冻结协议；
+合法零/无损尾零和不同scale的数值等值保持。仅私有ledger校验传入原debit，不变更API/flags/RM
+或生产DDL，不比较历史到当前余额、不修历史。owned事务验收四表完整不变及原回归保持，
+不代表全账户资金因果或CM-18闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

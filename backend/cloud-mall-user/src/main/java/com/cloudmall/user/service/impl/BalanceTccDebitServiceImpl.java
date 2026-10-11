@@ -75,7 +75,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     if (attempt != null) {
       if (debit == null && "CANCELLED".equals(attempt.state)) return view(attempt);
       requireConsistent(attempt, debit, request);
-      if ("CONFIRMED".equals(debit.state)) requireLedger(attempt, request);
+      if ("CONFIRMED".equals(debit.state)) requireLedger(attempt, debit, request);
       return BalanceTccDebitVO.from(debit);
     }
     if (debit != null) throw unknown();
@@ -117,7 +117,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
     requireConsistent(attempt, debit, request);
     if ("CONFIRMED".equals(debit.state)) {
-      requireLedger(attempt, request);
+      requireLedger(attempt, debit, request);
       return BalanceTccDebitVO.from(debit);
     }
     if (!"TRYING".equals(debit.state)) throw conflict("已取消的冻结不能确认");
@@ -218,6 +218,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     if (attempt == null || debit == null) throw unknown();
     validateAttempt(attempt, request);
     if (debit.amount == null
+        || !validDebitSnapshot(debit.balanceBefore, debit.balanceAfterTry, debit.amount)
         || !Objects.equals(debit.userId, request.userId)
         || !Objects.equals(debit.payNo, request.payNo)
         || !Objects.equals(debit.orderNo, request.orderNo)
@@ -251,16 +252,29 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   }
 
   /** 已确认必须同时具备真实 APPLIED 账本，不能只凭状态返回成功。 */
-  private void requireLedger(BalanceDebitAttemptPO attempt, BalanceTccDebitTryDTO request) {
+  private void requireLedger(
+      BalanceDebitAttemptPO attempt, BalanceTccDebitPO debit, BalanceTccDebitTryDTO request) {
     BalanceLedgerPO ledger = ledgerMapper.selectByOperationKey(attempt.ledgerKey);
     if (ledger == null
         || ledger.amount == null
+        || !validDebitSnapshot(ledger.balanceBefore, ledger.balanceAfter, ledger.amount)
+        || ledger.balanceBefore.compareTo(debit.balanceBefore) != 0
+        || ledger.balanceAfter.compareTo(debit.balanceAfterTry) != 0
+        || !Objects.equals(ledger.operationKey, attempt.ledgerKey)
         || !"APPLIED".equals(ledger.state)
         || !"DEBIT".equals(ledger.operationType)
         || !Objects.equals(ledger.userId, request.userId)
         || !Objects.equals(ledger.payNo, request.payNo)
         || !Objects.equals(ledger.orderNo, request.orderNo)
         || ledger.amount.compareTo(request.amount) != 0) throw unknown();
+  }
+
+  /** 调用处已判金额非NULL；原快照须合法且差额对应实际资金量，不修复原记录。 */
+  private static boolean validDebitSnapshot(
+      BigDecimal balanceBefore, BigDecimal balanceAfter, BigDecimal amount) {
+    return validAccountMoney(balanceBefore)
+        && validAccountMoney(balanceAfter)
+        && balanceBefore.subtract(balanceAfter).compareTo(amount) == 0;
   }
 
   /** 仅实际资金写前核当前金额，不影响终态重放/空取消，也不补0或比旧快照。 */

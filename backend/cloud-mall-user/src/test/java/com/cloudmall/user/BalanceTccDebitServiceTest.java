@@ -41,6 +41,12 @@ class BalanceTccDebitServiceTest {
   /** 原冻结载荷和状态写替身。 */
   private BalanceTccDebitMapper tccMapper;
 
+  /** 当前用例原冻结事实，可修改目标快照字段。 */
+  private BalanceTccDebitPO originalFrozen;
+
+  /** 当前用例已确认账本，保持原SQL归属基线。 */
+  private BalanceLedgerPO originalLedger;
+
   /** 实际本地资金服务，不连接业务库。 */
   private BalanceTccDebitServiceImpl service;
 
@@ -228,6 +234,70 @@ class BalanceTccDebitServiceTest {
     return value;
   }
 
+  /** 错原冻结快照不可在replay/清算/释放时充当原资金证明。 */
+  @Test
+  void corruptedFrozenSnapshotCannotReachSuccessfulStateOrFundsWrite() {
+    for (String operation : List.of("try", "confirm", "cancel")) {
+      for (String mutation :
+          List.of("delta", "beforeNull", "afterNull", "negative", "scale", "capacity")) {
+        installFunds("TRYING", "none");
+        when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(null);
+        switch (mutation) {
+          case "delta" -> originalFrozen.balanceAfterTry = new BigDecimal("99.00");
+          case "beforeNull" -> originalFrozen.balanceBefore = null;
+          case "afterNull" -> originalFrozen.balanceAfterTry = null;
+          case "negative" -> originalFrozen.balanceAfterTry = new BigDecimal("-1");
+          case "scale" -> originalFrozen.balanceBefore = new BigDecimal("100.001");
+          case "capacity" -> originalFrozen.balanceBefore = new BigDecimal("10000000000000000");
+          default -> throw new AssertionError(mutation);
+        }
+        assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+      }
+    }
+  }
+
+  /** 正确amount不能代替原DEBIT快照的合法差额。 */
+  @Test
+  void corruptedConfirmedLedgerSnapshotCannotBeAcknowledged() {
+    for (String operation : List.of("try", "confirm")) {
+      for (String mutation :
+          List.of("delta", "beforeNull", "afterNull", "negative", "scale", "capacity")) {
+        installFunds("CONFIRMED", "none");
+        switch (mutation) {
+          case "delta" -> originalLedger.balanceAfter = new BigDecimal("99.00");
+          case "beforeNull" -> originalLedger.balanceBefore = null;
+          case "afterNull" -> originalLedger.balanceAfter = null;
+          case "negative" -> originalLedger.balanceAfter = new BigDecimal("-1");
+          case "scale" -> originalLedger.balanceBefore = new BigDecimal("100.001");
+          case "capacity" -> originalLedger.balanceBefore = new BigDecimal("10000000000000000");
+          default -> throw new AssertionError(mutation);
+        }
+        assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+      }
+    }
+  }
+
+  /** 各自delta合法仍必须证明确认ledger复制原冻结pair。 */
+  @Test
+  void confirmedLedgerMustCopyOriginalFrozenSnapshot() {
+    for (String operation : List.of("try", "confirm")) {
+      installFunds("CONFIRMED", "none");
+      originalLedger.balanceBefore = new BigDecimal("200.00");
+      originalLedger.balanceAfter = new BigDecimal("190.00");
+      assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+    }
+  }
+
+  /** CI读取原行不能以操作键别名充当当前原ledger。 */
+  @Test
+  void confirmedLedgerOperationKeyMustMatchExactly() {
+    for (String operation : List.of("try", "confirm")) {
+      installFunds("CONFIRMED", "none");
+      originalLedger.operationKey = "PAY-UNIT-1";
+      assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+    }
+  }
+
   /** 完整原元组仅将目标金额置NULL，不使用资金写替身掩盖错误。 */
   private void installFunds(String state, String missing) {
     ReflectionTestUtils.setField(service, "enabled", true);
@@ -236,6 +306,7 @@ class BalanceTccDebitServiceTest {
     user.id = 7L;
     user.status = 1;
     user.balance = new BigDecimal("100.00");
+    user.frozenBalance = new BigDecimal("TRYING".equals(state) ? "10.00" : "0.00");
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
     BalanceDebitAttemptPO owner = new BalanceDebitAttemptPO();
     owner.mode = "TCC";
@@ -261,6 +332,7 @@ class BalanceTccDebitServiceTest {
     frozen.state = state;
     frozen.balanceBefore = new BigDecimal("100.00");
     frozen.balanceAfterTry = new BigDecimal("90.00");
+    originalFrozen = frozen;
     when(tccMapper.selectByPayNo(original.payNo)).thenReturn(frozen);
     BalanceLedgerPO applied = new BalanceLedgerPO();
     applied.userId = original.userId;
@@ -270,6 +342,9 @@ class BalanceTccDebitServiceTest {
     applied.operationType = "DEBIT";
     applied.state = "APPLIED";
     applied.amount = "ledger".equals(missing) ? null : original.amount;
+    applied.balanceBefore = new BigDecimal("100.00");
+    applied.balanceAfter = new BigDecimal("90.00");
+    originalLedger = applied;
     when(ledgerMapper.selectByOperationKey(original.ledgerKey)).thenReturn(applied);
   }
 

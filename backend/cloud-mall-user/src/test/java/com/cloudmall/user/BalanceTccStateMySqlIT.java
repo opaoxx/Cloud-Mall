@@ -711,6 +711,107 @@ class BalanceTccStateMySqlIT {
     fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1");
   }
 
+  /** 错原冻结快照不允许被复制为确认账本或清算成功。 */
+  @Test
+  void invalidOriginalFrozenSnapshotCannotBeConfirmedOrReplayed() {
+    fixture.execute(
+        "ALTER TABLE balance_tcc_debit MODIFY balance_before DECIMAL(20,3) NULL,MODIFY"
+            + " balance_after_try DECIMAL(20,3) NULL");
+    try {
+      for (String operation : List.of("confirm", "try", "cancel")) {
+        for (String mutation :
+            List.of(
+                "balance_after_try=99",
+                "balance_before=NULL",
+                "balance_after_try=NULL",
+                "balance_after_try=-1",
+                "balance_before=100.001",
+                "balance_before=10000000000000000.00")) {
+          resetOwnedWalletScenario();
+          BalanceTccDebitTryDTO original = request("bad-original-snapshot", 7L, "10.00");
+          service.tryDebit(original);
+          fixture.update("UPDATE balance_tcc_debit SET " + mutation);
+          assertOriginalSnapshotConflict(operation, original);
+        }
+      }
+      resetOwnedWalletScenario();
+      BalanceTccDebitTryDTO valid = request("valid-snapshot-scale", 7L, "10.00");
+      service.tryDebit(valid);
+      fixture.update(
+          "UPDATE balance_tcc_debit SET balance_before=100.000,balance_after_try=90.000");
+      assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(valid)).state);
+      var before = allFundsFacts();
+      assertEquals("CONFIRMED", service.tryDebit(valid).state);
+      assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(valid)).state);
+      assertEquals(before, allFundsFacts());
+    } finally {
+      resetOwnedWalletScenario();
+      fixture.execute(
+          "ALTER TABLE balance_tcc_debit MODIFY balance_before DECIMAL(18,2) NOT NULL,MODIFY"
+              + " balance_after_try DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 正确金额或CI键候选不足以证明原确认ledger的来源。 */
+  @Test
+  void confirmedLedgerSnapshotAndOperationKeyMustMatchOriginalFreeze() {
+    fixture.execute(
+        "ALTER TABLE balance_ledger MODIFY balance_before DECIMAL(20,3) NULL,MODIFY balance_after"
+            + " DECIMAL(20,3) NULL");
+    try {
+      for (String operation : List.of("try", "confirm")) {
+        for (String mutation :
+            List.of(
+                "operation_key=UPPER(operation_key)",
+                "balance_before=200,balance_after=190",
+                "balance_after=99",
+                "balance_before=NULL",
+                "balance_after=NULL",
+                "balance_after=-1",
+                "balance_before=100.001",
+                "balance_before=10000000000000000.00")) {
+          resetOwnedWalletScenario();
+          BalanceTccDebitTryDTO original = request("original-ledger-snapshot", 7L, "10.00");
+          service.tryDebit(original);
+          service.confirmDebit(finalizeRequest(original));
+          fixture.update("UPDATE balance_ledger SET " + mutation);
+          if (mutation.startsWith("operation_key"))
+            assertEquals(
+                1,
+                fixture.queryForObject(
+                    "SELECT COUNT(*) FROM balance_ledger WHERE operation_key=?",
+                    Integer.class,
+                    original.ledgerKey));
+          assertOriginalSnapshotConflict(operation, original);
+        }
+      }
+    } finally {
+      resetOwnedWalletScenario();
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY balance_before DECIMAL(18,2) NOT NULL,MODIFY"
+              + " balance_after DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 只读核原坏事实，409后四表完整状态与当前钱包均不变。 */
+  private void assertOriginalSnapshotConflict(String operation, BalanceTccDebitTryDTO original) {
+    var before = allFundsFacts();
+    BizException failure =
+        assertThrows(
+            BizException.class,
+            () -> {
+              switch (operation) {
+                case "try" -> service.tryDebit(original);
+                case "confirm" -> service.confirmDebit(finalizeRequest(original));
+                case "cancel" -> service.cancelDebit(finalizeRequest(original));
+                default -> throw new AssertionError(operation);
+              }
+            });
+    assertEquals(409, failure.getHttpStatus());
+    assertEquals("BALANCE_TCC_UNKNOWN", failure.getCode());
+    assertEquals(before, allFundsFacts());
+  }
+
   /** 只从owned库核完整资金四表，包含所有身份、金额、状态和时间。 */
   private List<List<Map<String, Object>>> allFundsFacts() {
     return List.of("mall_user", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger")
