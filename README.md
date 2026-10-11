@@ -675,6 +675,19 @@ T9已有接收保护与错误码保持，T12其他peer原接收标记异常按�
 不改SQL/readOnly RR/API/flags、claim/bind或资金写，也不修改历史接收记录；
 原state缓存契约和三个诊断no-store保持，不代表完整User资金因果或CM-18闭环。
 
+### CM-18 User接收重放与分支绑定保护（16T17）
+
+接收claim重放遇到旧NULL金额时返回原`IDEMPOTENCY_CONFLICT`/409，不再变成500；
+不会继续派发资源或查询资金。正常唯一winner/replay和非null金额比较保持。
+分支绑定拒绝非正branch，null原noop保留；原CI UPDATE后核readback精确payNo/XID/branch，
+支付号别名冲突在原REQUIRES_NEW中回滚整行，包括branch和updated_at。
+
+原INSERT IGNORE/UPDATE/SELECT FOR UPDATE及事务传播不变，非法分支无prepared SQL，
+事务代理仍可能已创建连接。正常正分支首次/同分支幂等与错误rebind不覆盖保持；
+不改变余额写入、RM/TC、flags/API或生产DDL，不自动修复历史接收记录。
+隔离SQL验收使用owned单表验证实际可写事务、回滚与独立提交；原库只核checksum并清理owned，
+不启动应用、RM或固定端口，也不代表CM-18资金主项闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

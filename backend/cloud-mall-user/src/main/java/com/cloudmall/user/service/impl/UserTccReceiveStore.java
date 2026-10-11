@@ -40,6 +40,7 @@ public class UserTccReceiveStore {
     // 2. 唯一键冲突不得换用户、金额、事务或操作键。
     UserTccReceivePO stored = mapper.lockByPayNo(request.payNo);
     if (stored == null
+        || stored.amount == null
         || !Objects.equals(stored.userId, userId)
         || !Objects.equals(stored.payNo, request.payNo)
         || !Objects.equals(stored.orderNo, request.orderNo)
@@ -54,10 +55,15 @@ public class UserTccReceiveStore {
   /** POST 成功后补记首次观察分支，既有分支不能被覆盖。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void bindBranch(String payNo, String xid, Long branchId) {
+    // 1. 未观察分支保持noop，非法分支不执行Mapper。
     if (branchId == null) return;
+    if (branchId <= 0) throw conflict();
+    // 2. 原候选更新与锁读留在同一个独立事务中。
     mapper.bindBranch(payNo, xid, branchId, LocalDateTime.now(ZoneId.of("Asia/Shanghai")));
     UserTccReceivePO stored = mapper.lockByPayNo(payNo);
+    // 3. 原支付/事务/分支不匹配时，整个元数据事务回滚。
     if (stored == null
+        || !Objects.equals(stored.payNo, payNo)
         || !Objects.equals(stored.xid, xid)
         || !Objects.equals(stored.branchId, branchId)) throw conflict();
   }
