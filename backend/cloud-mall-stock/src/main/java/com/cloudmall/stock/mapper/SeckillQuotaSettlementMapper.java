@@ -126,6 +126,14 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
   List<SeckillQuotaSettlementPO> findDue(
       @Param("now") LocalDateTime now, @Param("limit") int limit);
 
+  /** 查询原到期条件下游标后的候选；不隐藏坏事实，也不修改重试/租约状态。 */
+  @Select(
+      "SELECT * FROM seckill_quota_settlement WHERE status IN"
+          + " ('RELEASE_PENDING','PROJECTION_BLOCKED') AND next_retry_at<=#{now} AND (lease_until"
+          + " IS NULL OR lease_until<#{now}) AND id>#{afterId} ORDER BY id LIMIT #{limit}")
+  List<SeckillQuotaSettlementPO> findDueAfter(
+      @Param("now") LocalDateTime now, @Param("afterId") long afterId, @Param("limit") int limit);
+
   /** 以 revision 和状态认领恢复任务。 */
   @Update(
       "UPDATE seckill_quota_settlement SET"

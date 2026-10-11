@@ -4,7 +4,7 @@
 
 本切片 GO，基线为 `6fa7220`，修正固定 `ORDER BY id LIMIT 50` 在坏 candidate、blocked-confirm 或 claim 失败行长期占据头部时造成的健康候选饥饿。它只增加进程内扫描游标，不改变任何结算事实或恢复动作。
 
-本批不改变 T37 candidate guard、T38 CAS readback、claim/Lua/retry、SQL/DDL/index、API、Redis/MQ、恢复状态机或单实例业务语义；不承诺重启后、持续无限新增行或多实例之间的强公平。
+本批保留既有 `findDue` SQL，仅新增语义化 `findDueAfter` 查询；不改变 T37 candidate guard、T38 CAS readback、claim/Lua/retry、DDL/index、API、Redis/MQ、恢复状态机或单实例业务语义；不承诺重启后、持续无限新增行或多实例之间的强公平。
 
 ## 2. 进程内游标与查询
 
@@ -12,10 +12,10 @@
 
 - 游标为 null 时沿原 `findDue(now, 50)` 首段查询；
 - 游标非 null 时调用新的语义化 Mapper `findDueAfter(now, afterId, limit)`，保留原 due/status/lease 条件，只增加 `id > afterId`、`ORDER BY id`、`LIMIT`；
-- 当前轮固定一个 `now`，最多读取/处理 50 行。游标只代表扫描进度，不代表任何 candidate 已完成或已成功；
+- 当前轮固定一个 `now`，最多执行两次有界 query；以 query 返回候选行数/resultset cardinality 计，返回候选行数之和与实际处理行数均不超过 50。游标只代表扫描进度，不代表任何 candidate 已完成或已成功；
 - after 页不足 50 时，以剩余预算查询原 `findDue(remaining)` 头段，但只接收 `id <= 本轮 startCursor` 的行，避免 wrap 后重复本轮已扫描区间。首轮 startCursor 为 null 时不执行 wrap；
 - 首段空时本轮末游标为 null；任何用于推进的 row.id 为 null 时不能作为可靠游标，末游标置 null，下一轮从首段重新开始；
-- after 页满 50 时不 wrap；after 页不足且过滤后仍不足时，读取预算仍不超过 50。
+- after 页满 50 时不 wrap；after 页不足且过滤后仍不足时，第二次 head query 的返回候选行数加总仍不超过 50。本批不声称 MySQL rows_examined、存储引擎物理扫描行数或数据库性能上限不超过 50。
 
 Mapper 新方法只封装 SQL，不隐藏坏 candidate、不延期事实、不 repair/删除行；原 `findDue` 保留给首段和其它既有调用。
 
@@ -33,7 +33,7 @@ Mapper 新方法只封装 SQL，不隐藏坏 candidate、不延期事实、不 r
 
 ## 4. 验收矩阵
 
-- Unit：游标 null 首段、after 页满/不足、wrap 过滤 `id<=startCursor`、空首段归 null、null id 不推进、并发 CAS 不倒退、查询异常保持原游标、坏/claim0 仍推进均覆盖；每轮读取预算不超过 50。
+- Unit：游标 null 首段、after 页满/不足、wrap 过滤 `id<=startCursor`、空首段归 null、null id 不推进、并发 CAS 不倒退、查询异常保持原游标、坏/claim0 仍推进均覆盖；每轮最多两次有界 query，query 返回候选行数/resultset cardinality 之和及处理行数均不超过 50，不声称物理扫描或性能完成。
 - 复用 T37/T38 真实 MySQL+Redis fixture：前 50 甚至 150 个坏行后有健康行，多轮扫描最终释放健康 candidate；坏事实不变，坏 row 不被延期/repair；head 重新 due、lease 失败仍推进；两轮 Lua/receipt 重放保持幂等。
 - owned database、Redis keys、线程/执行器 finally 清理；source Stock checksum 不变；不启动业务 App、固定端口、RM/TC，不使用 SCAN/FLUSH。
 - 保留 T31–T38、T37 candidate guard、T38 CAS proof、单批 50、原 Mapper/DDL/index/API/状态机和所有普通/秒杀回归。

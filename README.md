@@ -1564,3 +1564,12 @@ markReleased未命中时，只有读回exact RELEASED、同一行ID/原始tuple/
 缺证沿原CAS_UNKNOWN/retry原候选，读回坏终态不修补、不重复Lua；markReleased1仍直接成功。
 忽略updatedAt/lease/lastError等可变诊断字段，允许合法writer已完成同一释放的读回。
 SQL/DDL/Lua/租约/批50/GET/settle/API不变；扫描窗口、claim后TOCTOU及完整source/CM18其余M1–M4保留。
+
+
+### CM-18 秒杀恢复有界环形扫描（16T39）
+
+恢复器保单轮最多50行与同一now，用进程内id游标跨轮推进；坏候选、blocked-confirm、租约失败也推进。
+首段沿原findDue，后段findDueAfter只新增id>cursor，后段不足时以剩余预算回首段并避免重复。
+查询异常保进度，空/不可靠id回首段；游标CAS避免慢轮覆盖并发进度，不表示释放成功，不持久化或输出API。
+坏行不延期/repair，原T37候选、T38读回、claim/Lua/receipt/lease保持；DDL/索引/原SQL/状态机不改。
+有限稳定候选跨轮覆盖，重启从首段；持续无限新增/频繁重启/多实例不承诺强公平，claim后TOCTOU等仍保留。

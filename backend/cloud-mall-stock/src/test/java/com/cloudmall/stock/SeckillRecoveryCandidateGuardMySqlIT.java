@@ -56,6 +56,9 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   /** 执行生产Lua的可观测真实模板。 */
   private static StringRedisTemplate observedRedis;
 
+  /** 实际候选查询返回行数；请求limit与物理返回分开计数。 */
+  private static final List<Integer> queryResultSizes = new ArrayList<>();
+
   /** 当前恢复器，未注册定时任务或业务App。 */
   private static SeckillQuotaSettlementRecovery recovery;
 
@@ -99,10 +102,17 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     realMapper =
         new SqlSessionTemplate(factory.getObject()).getMapper(SeckillQuotaSettlementMapper.class);
     realMapper.ensureTable();
+    var sqlAnswer = org.mockito.AdditionalAnswers.delegatesTo(realMapper);
     observedMapper =
         mock(
             SeckillQuotaSettlementMapper.class,
-            org.mockito.AdditionalAnswers.delegatesTo(realMapper));
+            invocation -> {
+              Object result = sqlAnswer.answer(invocation);
+              if ("findDue".equals(invocation.getMethod().getName())
+                  || "findDueAfter".equals(invocation.getMethod().getName()))
+                queryResultSizes.add(((List<?>) result).size());
+              return result;
+            });
     var redisConfiguration =
         new RedisStandaloneConfiguration("127.0.0.1", Integer.parseInt(redisPort));
     redisConfiguration.setPassword("root");
@@ -199,6 +209,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
             var keys = prepareRedis(original);
             var before = facts();
             var redisBefore = redisFacts(keys);
+            queryResultSizes.clear();
             clearInvocations(observedMapper, observedRedis);
             int handled = recovery.recoverDue();
             assertAll(
@@ -222,6 +233,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       seed(original);
       var keys = prepareRedis(original);
       var before = facts();
+      queryResultSizes.clear();
       clearInvocations(observedMapper, observedRedis);
       assertEquals(1, recovery.recoverDue());
       assertEquals("6", fixtureRedis.opsForValue().get(keys.get(0)));
@@ -247,6 +259,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
       assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
       verify(observedMapper, times(2)).findDue(any(), eq(50));
+      verify(observedMapper).findDueAfter(any(), eq(1L), eq(50));
       verify(observedMapper, times(2))
           .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
       verify(observedMapper, times(2))
@@ -264,6 +277,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     var keys = prepareRedis(original);
     var before = facts();
     var redisBefore = redisFacts(keys);
+    queryResultSizes.clear();
     clearInvocations(observedMapper, observedRedis);
     assertEquals(0, recovery.recoverDue());
     verify(observedMapper).findDue(any(), eq(50));
@@ -300,6 +314,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
             seed(original);
             var keys = prepareRedis(original);
             var snapshot = installReleasedWriter(original, variant);
+            queryResultSizes.clear();
             clearInvocations(observedMapper, observedRedis);
             int handled = recovery.recoverDue();
             assertAll(
@@ -337,6 +352,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       seed(original);
       var keys = prepareRedis(original);
       var snapshot = installReleasedWriter(original, "exact");
+      queryResultSizes.clear();
       clearInvocations(observedMapper, observedRedis);
       assertEquals(1, recovery.recoverDue());
       verify(observedMapper).findSettlement(original.orderNo);
@@ -345,6 +361,107 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       assertReleased(original);
       assertSingleReleaseProjection(original, keys);
     }
+  }
+
+  @Test
+  void realBadHeadPagesCannotStarveHealthyTailAcrossRecoveryRounds() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (int badCount : List.of(50, 150))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            fixture.update("UPDATE seckill_quota_settlement SET id=?", badCount + 1);
+            seedBadHead(badCount);
+            var keys = prepareRedis(original);
+            var badBefore =
+                fixture.queryForList(
+                    "SELECT * FROM seckill_quota_settlement WHERE id<=? ORDER BY id", badCount);
+            for (int round = 0; round <= badCount / 50; round++) {
+              queryResultSizes.clear();
+              clearInvocations(observedMapper, observedRedis);
+              assertEquals(round == badCount / 50 ? 1 : 0, recovery.recoverDue());
+              assertBoundedQueries();
+            }
+            assertReleased(original);
+            assertEquals(
+                badBefore,
+                fixture.queryForList(
+                    "SELECT * FROM seckill_quota_settlement WHERE id<=? ORDER BY id", badCount));
+            assertSingleReleaseProjection(original, keys);
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void realRingWrapRecoversRequeuedHeadWithoutDuplicateQuota() {
+    reset();
+    var original = row("RELEASE_PENDING", "owned-idem");
+    seed(original);
+    fixture.update("UPDATE seckill_quota_settlement SET id=51");
+    seedBadHead(50);
+    var keys = prepareRedis(original);
+    assertEquals(0, recovery.recoverDue());
+    queryResultSizes.clear();
+    clearInvocations(observedMapper, observedRedis);
+    assertEquals(1, recovery.recoverDue());
+    assertBoundedQueries();
+    assertReleased(original);
+    // 重新放回本次已成功事实，原Lua回执重放不回补第二次，首段坏记录不被修。
+    fixture.update(
+        "UPDATE seckill_quota_settlement SET"
+            + " id=-1,status='RELEASE_PENDING',redis_revision=NULL,next_retry_at='2000-01-01' WHERE"
+            + " order_no=?",
+        original.orderNo);
+    queryResultSizes.clear();
+    clearInvocations(observedMapper, observedRedis);
+    assertEquals(1, recovery.recoverDue());
+    assertBoundedQueries();
+    assertReleased(original);
+    assertSingleReleaseProjection(original, keys);
+    assertEquals(
+        50,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM seckill_quota_settlement WHERE id>=1 AND id<=50 AND revision=1"
+                + " AND lease_owner IS NULL",
+            Integer.class));
+  }
+
+  /** 实际当前BIGINT id可负可正；原坏revision台账只准备，不延期/repair。 */
+  private static void seedBadHead(int count) {
+    String prefix = "bad-" + UUID.randomUUID().toString().replace("-", "");
+    for (int recordId = 1; recordId <= count; recordId++) {
+      String orderNo = prefix + "-" + recordId;
+      fixture.update(
+          "INSERT INTO"
+              + " seckill_quota_settlement(id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,operation_key,next_retry_at,created_at,updated_at)"
+              + " VALUES(?,?,10,20,30,'bad-owned',1,'RELEASE_PENDING',1,?,'2000-01-01','2000-01-01','2000-01-01')",
+          recordId,
+          orderNo,
+          orderNo + ":ROLLBACK");
+    }
+  }
+
+  /** 所有候选查询实际返回行加总<=50且同now；单query limit<=50，不作无界遍历。 */
+  private static void assertBoundedQueries() {
+    var queries =
+        org.mockito.Mockito.mockingDetails(observedMapper).getInvocations().stream()
+            .filter(
+                invocation ->
+                    invocation.getMethod().getName().equals("findDue")
+                        || invocation.getMethod().getName().equals("findDueAfter"))
+            .toList();
+    assertFalse(queries.isEmpty());
+    assertTrue(queries.size() <= 2);
+    assertEquals(queries.size(), queryResultSizes.size());
+    assertTrue(queryResultSizes.stream().mapToInt(Integer::intValue).sum() <= 50);
+    for (var query : queries) {
+      int requested = (Integer) query.getArguments()[query.getArguments().length - 1];
+      assertTrue(requested > 0 && requested <= 50);
+    }
+    Object occurredAt = queries.get(0).getArgument(0);
+    for (var query : queries) assertEquals(occurredAt, query.getArgument(0));
   }
 
   /** 在被测CAS之前提交真实writer，再真实执行重复CAS0；仅owned注入当前行故障。 */
@@ -438,6 +555,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   /** 测试间仅清自有库，不重启中间件/改其它键。 */
   private static void reset() {
     org.mockito.Mockito.reset(observedMapper);
+    queryResultSizes.clear();
+    recovery = new SeckillQuotaSettlementRecovery(observedMapper, observedRedis);
     for (String table : TABLES) fixture.update("DELETE FROM " + table);
     if (!ownedKeys.isEmpty()) fixtureRedis.delete(ownedKeys);
   }
@@ -511,7 +630,9 @@ class SeckillRecoveryCandidateGuardMySqlIT {
 
   /** 核合法方向的DB回执，所有原不可变维度不被重写。 */
   private static void assertReleased(SeckillQuotaSettlementPO original) {
-    var stored = fixture.queryForMap("SELECT * FROM seckill_quota_settlement");
+    var stored =
+        fixture.queryForMap(
+            "SELECT * FROM seckill_quota_settlement WHERE order_no=?", original.orderNo);
     assertEquals("RELEASED", stored.get("status"));
     assertEquals(original.orderNo, stored.get("order_no"));
     assertEquals(original.operationKey, stored.get("operation_key"));

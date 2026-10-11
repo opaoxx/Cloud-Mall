@@ -5,9 +5,11 @@ import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
@@ -27,6 +29,9 @@ public class SeckillQuotaSettlementRecovery {
 
   /** 恢复租约秒数。 */
   private static final int LEASE_SECONDS = 30;
+
+  /** 进程内环形扫描位置，不是完成证据；重启首段，同实例并发以CAS保护进度。 */
+  private final AtomicReference<Long> scanAfterId = new AtomicReference<>();
 
   /** 结算事实 Mapper。 */
   private final SeckillQuotaSettlementMapper settlementMapper;
@@ -58,21 +63,50 @@ public class SeckillQuotaSettlementRecovery {
     }
   }
 
-  /** 扫描最多 50 条到期记录并使用原 operationKey/revision 重试。 */
+  /** 环形扫描最多50条到期记录；坏候选与租约失败也推进，原动作/回执协议保持。 */
   public int recoverDue() {
+    // 1. 固定本轮时间/起始游标，查询最多50行；后段不足时以剩余读取预算回绕。
     LocalDateTime now = now();
+    Long startCursor = scanAfterId.get();
+    Long endCursor;
     List<SeckillQuotaSettlementPO> due;
     try {
-      due = settlementMapper.findDue(now, BATCH_SIZE);
+      due =
+          new ArrayList<>(
+              startCursor == null
+                  ? settlementMapper.findDue(now, BATCH_SIZE)
+                  : settlementMapper.findDueAfter(now, startCursor, BATCH_SIZE));
+      SeckillQuotaSettlementPO last = due.isEmpty() ? null : due.get(due.size() - 1);
+      endCursor = last == null ? null : last.id;
+      if (startCursor != null && due.size() < BATCH_SIZE) {
+        List<SeckillQuotaSettlementPO> head =
+            settlementMapper.findDue(now, BATCH_SIZE - due.size());
+        endCursor = null;
+        for (SeckillQuotaSettlementPO candidate : head) {
+          // 首段只接收原起点之前的行，不能重复本轮已经读取的后段。
+          if (candidate == null || candidate.id == null) {
+            endCursor = null;
+          } else if (candidate.id <= startCursor) {
+            due.add(candidate);
+            endCursor = candidate.id;
+          }
+        }
+      }
     } catch (RuntimeException scanFailure) {
       log.warn("秒杀结算恢复查询失败，分类=SCAN_FAILURE", scanFailure);
       return 0;
     }
+    // 2. 候选按既有门/claim/Lua/回执处理，不写坏行以腾出扫描窗口。
     int handled = 0;
-    for (SeckillQuotaSettlementPO settlement : due) {
-      if (recoverOne(settlement, now)) handled++;
+    try {
+      for (SeckillQuotaSettlementPO settlement : due) {
+        if (recoverOne(settlement, now)) handled++;
+      }
+      return handled;
+    } finally {
+      // 3. 扫描位置不依赖成功；慢轮次不能覆盖其他并发轮次已提交的游标。
+      scanAfterId.compareAndSet(startCursor, endCursor);
     }
-    return handled;
   }
 
   /** 恢复单条结算事实。 */
