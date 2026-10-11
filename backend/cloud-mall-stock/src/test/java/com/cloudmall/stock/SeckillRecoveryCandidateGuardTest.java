@@ -7,9 +7,11 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -62,6 +64,7 @@ class SeckillRecoveryCandidateGuardTest {
         when(mapper.claim(
                 eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any()))
             .thenReturn(1);
+        stubClaimReadback(mapper, original);
         List<String> expectedKeys =
             List.of(
                 "seckill:stock:11:22",
@@ -91,6 +94,7 @@ class SeckillRecoveryCandidateGuardTest {
                 eq("1"));
         verify(mapper)
             .markReleased(eq(original.orderNo), eq(original.operationKey), eq(2L), eq(7L), any());
+        verify(mapper).findSettlement(original.orderNo);
         verifyNoMoreInteractions(redis);
         assertEquals(idempotency, original.idempotencyKey);
       }
@@ -119,6 +123,7 @@ class SeckillRecoveryCandidateGuardTest {
     var redis = mock(StringRedisTemplate.class);
     when(mapper.findDue(any(), eq(50))).thenReturn(List.of(invalid, healthy));
     when(mapper.claim(any(), any(), anyLong(), any(), any(), any())).thenReturn(1);
+    stubClaimReadback(mapper, healthy);
     when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any()))
         .thenReturn(7L);
     when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any())).thenReturn(1);
@@ -128,6 +133,7 @@ class SeckillRecoveryCandidateGuardTest {
         .claim(eq(healthy.orderNo), eq(healthy.operationKey), eq(2L), any(), any(), any());
     verify(mapper)
         .markReleased(eq(healthy.orderNo), eq(healthy.operationKey), eq(2L), eq(7L), any());
+    verify(mapper).findSettlement(healthy.orderNo);
     verifyNoMoreInteractions(mapper);
   }
 
@@ -167,6 +173,7 @@ class SeckillRecoveryCandidateGuardTest {
   /** 原合法待释放候选，无source证明/自动修复含义。 */
   private static SeckillQuotaSettlementPO row() {
     var original = new SeckillQuotaSettlementPO();
+    original.id = 1L;
     original.orderNo = "order-24";
     original.operationKey = "order-24:ROLLBACK";
     original.status = "RELEASE_PENDING";
@@ -176,6 +183,47 @@ class SeckillRecoveryCandidateGuardTest {
     original.skuId = 22L;
     original.userId = 33L;
     original.idempotencyKey = "original-key";
+    original.createdAt = LocalDateTime.of(2000, 1, 1, 0, 0);
     return original;
+  }
+
+  /** claim后返回独立原行副本，注入动态owner/lease，满足16T40读回门。 */
+  private static void stubClaimReadback(
+      SeckillQuotaSettlementMapper mapper, SeckillQuotaSettlementPO original) {
+    var owner = new AtomicReference<String>();
+    var leaseUntil = new AtomicReference<LocalDateTime>();
+    doAnswer(
+            invocation -> {
+              owner.set(invocation.getArgument(3));
+              leaseUntil.set(invocation.getArgument(4));
+              return 1;
+            })
+        .when(mapper)
+        .claim(any(), any(), anyLong(), any(), any(), any());
+    when(mapper.findSettlement(eq(original.orderNo)))
+        .thenAnswer(
+            invocation -> {
+              var current = copy(original);
+              current.leaseOwner = owner.get();
+              current.leaseUntil = leaseUntil.get();
+              return current;
+            });
+  }
+
+  /** 复制不可变事实字段，避免读回与扫描候选共享对象。 */
+  private static SeckillQuotaSettlementPO copy(SeckillQuotaSettlementPO source) {
+    var copy = new SeckillQuotaSettlementPO();
+    copy.id = source.id;
+    copy.orderNo = source.orderNo;
+    copy.activityId = source.activityId;
+    copy.skuId = source.skuId;
+    copy.userId = source.userId;
+    copy.idempotencyKey = source.idempotencyKey;
+    copy.quantity = source.quantity;
+    copy.status = source.status;
+    copy.revision = source.revision;
+    copy.operationKey = source.operationKey;
+    copy.createdAt = source.createdAt;
+    return copy;
   }
 }

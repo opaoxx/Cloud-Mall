@@ -1573,3 +1573,12 @@ SQL/DDL/Lua/租约/批50/GET/settle/API不变；扫描窗口、claim后TOCTOU及
 查询异常保进度，空/不可靠id回首段；游标CAS避免慢轮覆盖并发进度，不表示释放成功，不持久化或输出API。
 坏行不延期/repair，原T37候选、T38读回、claim/Lua/receipt/lease保持；DDL/索引/原SQL/状态机不改。
 有限稳定候选跨轮覆盖，重启从首段；持续无限新增/频繁重启/多实例不承诺强公平，claim后TOCTOU等仍保留。
+
+
+### CM-18 秒杀恢复claim后事实与租约保护（16T40）
+
+claim成功后、Lua前沿原findSettlement点读当前行，核同一immutable原行/tuple/创建时间、仍为合法rollback、
+租约owner精确本次owner及leaseUntil晚于点读后的fresh now；已观察漂移/失租/过期/null返回false。
+拒绝路径不Lua/mark/retry或repair，查询异常仍原catch/retry且不Lua；允许pending/blocked及诊断字段变化。
+T38 CAS读回仍独立，T39扫描预算不包括新点读；SQL/DDL/事务/Lua/API和其它协议保持。
+只覆盖本次观察到的claim后漂移，不声称读回到Lua之间窗口已消失或实现跨SQL/Redis fencing/fullsource证明。

@@ -7,7 +7,9 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -134,6 +136,11 @@ class SeckillRecoveryScanFairnessTest {
     /** 正常markReleased成功的原id。 */
     final Set<Long> released = new HashSet<>();
 
+    /** 每次claim后读回所需的本次owner和lease。 */
+    final java.util.Map<String, String> owners = new HashMap<>();
+
+    final java.util.Map<String, LocalDateTime> leases = new HashMap<>();
+
     /** 本次查询物理返回行数，wrap也计入。 */
     int readCount;
 
@@ -173,6 +180,7 @@ class SeckillRecoveryScanFairnessTest {
         row.revision = recordId == healthyId ? 2L : 1L;
         row.status = "RELEASE_PENDING";
         row.operationKey = row.orderNo + ":ROLLBACK";
+        row.createdAt = LocalDateTime.of(2000, 1, 1, 0, 0);
         records.add(row);
       }
       var mapper =
@@ -207,7 +215,35 @@ class SeckillRecoveryScanFairnessTest {
                 if ("claim".equals(method)) {
                   String orderNo = invocation.getArgument(0);
                   long recordId = Long.parseLong(orderNo.substring(6));
-                  return leaseLosers.contains(recordId) ? 0 : 1;
+                  if (leaseLosers.contains(recordId)) return 0;
+                  owners.put(orderNo, invocation.getArgument(3));
+                  leases.put(orderNo, invocation.getArgument(4));
+                  return 1;
+                }
+                if ("findSettlement".equals(method)) {
+                  String orderNo = invocation.getArgument(0);
+                  return records.stream()
+                      .filter(row -> orderNo.equals(row.orderNo))
+                      .map(
+                          row -> {
+                            var current = new SeckillQuotaSettlementPO();
+                            current.id = row.id;
+                            current.orderNo = row.orderNo;
+                            current.activityId = row.activityId;
+                            current.skuId = row.skuId;
+                            current.userId = row.userId;
+                            current.idempotencyKey = row.idempotencyKey;
+                            current.quantity = row.quantity;
+                            current.status = row.status;
+                            current.revision = row.revision;
+                            current.operationKey = row.operationKey;
+                            current.createdAt = row.createdAt;
+                            current.leaseOwner = owners.get(orderNo);
+                            current.leaseUntil = leases.get(orderNo);
+                            return current;
+                          })
+                      .findFirst()
+                      .orElse(null);
                 }
                 if ("markReleased".equals(method)) {
                   String orderNo = invocation.getArgument(0);

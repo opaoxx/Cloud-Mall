@@ -120,7 +120,10 @@ public class SeckillQuotaSettlementRecovery {
             settlement.orderNo, settlement.operationKey, revision, owner, leaseUntil, now)
         != 1) return false;
     try {
-      // 2. 仅用通过校验的原字段调用既有Lua投影，不重写动作方向。
+      // 2. claim成功后核当前事实和本租约；已观察漂移不得投影或以旧条件补偿。
+      SeckillQuotaSettlementPO claimed = settlementMapper.findSettlement(settlement.orderNo);
+      if (!claimReadbackMatches(settlement, claimed, owner, now())) return false;
+      // 3. 仅用通过原行/租约证明的字段调用既有Lua投影，不重写动作方向。
       List<String> keys =
           List.of(
               "seckill:stock:" + settlement.activityId + ":" + settlement.skuId,
@@ -150,7 +153,7 @@ public class SeckillQuotaSettlementRecovery {
                 if (outcome == null) throw StockDependencyGuard.redisProtocolFailure();
                 return outcome;
               });
-      // 3. 按既有回执/CAS及重试协议处理结果。
+      // 4. 按既有回执/CAS及重试协议处理结果。
       if (redisRevision != null && redisRevision > 0) {
         if (settlementMapper.markReleased(
                 settlement.orderNo, settlement.operationKey, revision, redisRevision, owner)
@@ -208,11 +211,31 @@ public class SeckillQuotaSettlementRecovery {
     }
   }
 
+  /** claim点读必须仍为同一释放事实、本owner且租约未过期；未观察窗口留待独立fencing。 */
+  private static boolean claimReadbackMatches(
+      SeckillQuotaSettlementPO original,
+      SeckillQuotaSettlementPO current,
+      String owner,
+      LocalDateTime freshNow) {
+    return isRollbackCandidate(current)
+        && sameSettlementIdentity(original, current)
+        && Objects.equals(owner, current.leaseOwner)
+        && current.leaseUntil != null
+        && current.leaseUntil.isAfter(freshNow);
+  }
+
   /** CAS读回必须绑定同一不可变行及本次Lua回执；可变诊断不参与，缺证沿原重试。 */
   private static boolean releasedReadbackMatches(
       SeckillQuotaSettlementPO original, SeckillQuotaSettlementPO current, Long redisRevision) {
-    return current != null
+    return sameSettlementIdentity(original, current)
         && "RELEASED".equals(current.status)
+        && Objects.equals(redisRevision, current.redisRevision);
+  }
+
+  /** 复用T38原行基础tuple和创建事实证明，保持exact比较，不规范化原字段。 */
+  private static boolean sameSettlementIdentity(
+      SeckillQuotaSettlementPO original, SeckillQuotaSettlementPO current) {
+    return current != null
         && current.id != null
         && Objects.equals(original.id, current.id)
         && Objects.equals(original.orderNo, current.orderNo)
@@ -224,8 +247,7 @@ public class SeckillQuotaSettlementRecovery {
         && Objects.equals(original.revision, current.revision)
         && Objects.equals(original.operationKey, current.operationKey)
         && original.createdAt != null
-        && Objects.equals(original.createdAt, current.createdAt)
-        && Objects.equals(redisRevision, current.redisRevision);
+        && Objects.equals(original.createdAt, current.createdAt);
   }
 
   /** 只接受原待释放方向及合法基础维度；非法/confirm候选跳过，不领取租约或规范化原字段。 */

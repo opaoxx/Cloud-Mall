@@ -259,6 +259,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
       assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
       verify(observedMapper, times(2)).findDue(any(), eq(50));
+      verify(observedMapper, times(2)).findSettlement(original.orderNo);
       verify(observedMapper).findDueAfter(any(), eq(1L), eq(50));
       verify(observedMapper, times(2))
           .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
@@ -338,7 +339,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
             verify(observedMapper)
                 .markReleased(
                     eq(original.orderNo), eq(original.operationKey), eq(2L), eq(4L), any());
-            verify(observedMapper).findSettlement(original.orderNo);
+            verify(observedMapper, times(2)).findSettlement(original.orderNo);
             verifyNoMoreInteractions(observedMapper);
           });
     assertAll(assertions);
@@ -355,7 +356,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       queryResultSizes.clear();
       clearInvocations(observedMapper, observedRedis);
       assertEquals(1, recovery.recoverDue());
-      verify(observedMapper).findSettlement(original.orderNo);
+      verify(observedMapper, times(2)).findSettlement(original.orderNo);
       verify(observedMapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
       assertEquals(snapshot.get(), facts());
       assertReleased(original);
@@ -574,6 +575,143 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         original.idempotencyKey,
         original.status,
         original.operationKey);
+  }
+
+  @Test
+  void changedClaimFactsOrLostLeaseCannotReleaseOldProjection() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String variant :
+        List.of(
+            "id",
+            "order-case",
+            "activity",
+            "sku",
+            "user",
+            "idem",
+            "quantity",
+            "revision",
+            "operation",
+            "state",
+            "state-case",
+            "owner",
+            "owner-case",
+            "lease-null",
+            "lease-expired",
+            "created"))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            var redisBefore = redisFacts(keys);
+            var snapshot = installClaimWriter(original, variant);
+            queryResultSizes.clear();
+            clearInvocations(observedMapper, observedRedis);
+            assertAll(
+                () -> assertEquals(0, recovery.recoverDue(), variant),
+                () -> verifyNoInteractions(observedRedis),
+                () -> assertEquals(snapshot.get(), facts(), "不修当前漂移事实/失租行: " + variant),
+                () -> assertEquals(redisBefore, redisFacts(keys), variant));
+            verify(observedMapper).findDue(any(), eq(50));
+            verify(observedMapper)
+                .claim(
+                    eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
+            verify(observedMapper).findSettlement(original.orderNo);
+            verifyNoMoreInteractions(observedMapper);
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void healthyClaimFreshReadAllowsBlockedStateAndDiagnosticChanges() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+      reset();
+      var original = row(state, "😺".repeat(128));
+      seed(original);
+      var keys = prepareRedis(original);
+      installClaimWriter(original, "healthy");
+      queryResultSizes.clear();
+      clearInvocations(observedMapper, observedRedis);
+      assertEquals(1, recovery.recoverDue());
+      verify(observedMapper).findSettlement(original.orderNo);
+      verify(observedMapper).findDue(any(), eq(50));
+      verify(observedMapper)
+          .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
+      verify(observedMapper)
+          .markReleased(eq(original.orderNo), eq(original.operationKey), eq(2L), eq(4L), any());
+      verifyNoMoreInteractions(observedMapper);
+      assertReleased(original);
+      assertSingleReleaseProjection(original, keys);
+    }
+  }
+
+  /** 原claim确实取得lease后才受控提交当前事实变化，fresh query仍由真实MyBatis读取。 */
+  private static java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>
+      installClaimWriter(SeckillQuotaSettlementPO original, String variant) {
+    var snapshot =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    doAnswer(
+            invocation -> {
+              String orderNo = invocation.getArgument(0);
+              String operationKey = invocation.getArgument(1);
+              long revision = invocation.getArgument(2);
+              String owner = invocation.getArgument(3);
+              java.time.LocalDateTime leaseUntil = invocation.getArgument(4);
+              java.time.LocalDateTime occurredAt = invocation.getArgument(5);
+              assertEquals(
+                  1,
+                  realMapper.claim(orderNo, operationKey, revision, owner, leaseUntil, occurredAt));
+              switch (variant) {
+                case "id" -> fixture.update("UPDATE seckill_quota_settlement SET id=2");
+                case "order-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?",
+                        original.orderNo.toUpperCase(java.util.Locale.ROOT));
+                case "activity" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET activity_id=activity_id+1");
+                case "sku" -> fixture.update("UPDATE seckill_quota_settlement SET sku_id=sku_id+1");
+                case "user" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET user_id=user_id+1");
+                case "idem" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET idempotency_key='other-owned-idem'");
+                case "quantity" -> fixture.update("UPDATE seckill_quota_settlement SET quantity=2");
+                case "revision" -> fixture.update("UPDATE seckill_quota_settlement SET revision=3");
+                case "operation" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET operation_key=?",
+                        original.orderNo + ":CONFIRM");
+                case "state" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET status='CONFIRMED'");
+                case "state-case" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET status='release_pending'");
+                case "owner" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET lease_owner='another-owned-worker'");
+                case "owner-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET lease_owner=?",
+                        owner.toUpperCase(java.util.Locale.ROOT));
+                case "lease-null" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET lease_until=NULL");
+                case "lease-expired" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET lease_until='2000-01-01'");
+                case "created" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET created_at='2000-01-01 00:00:00.001'");
+                case "healthy" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET"
+                            + " status='PROJECTION_BLOCKED',last_error='diagnostic-only',updated_at='2026-10-12'");
+                default -> throw new AssertionError(variant);
+              }
+              snapshot.set(facts());
+              return 1;
+            })
+        .when(observedMapper)
+        .claim(any(), any(), anyLong(), any(), any(), any());
+    return snapshot;
   }
 
   /** 每个原键确认不存在后才拥有；不使用SCAN/FLUSH，不清用户已存在键。 */
