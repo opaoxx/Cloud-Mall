@@ -335,6 +335,142 @@ class SeckillLegacySkuExactMySqlIT {
         new StockServiceImpl(null, mapper, null, new ObjectMapper()).reservation(ORDER_NO).data;
   }
 
+  @Test
+  void currentBigintAndVarcharContextCannotBecomeLegacyEvidence() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String variant :
+        List.of(
+            "activity-zero",
+            "activity-negative",
+            "user-zero",
+            "user-negative",
+            "idem-empty",
+            "idem-space",
+            "idem-unicode",
+            "idem-null"))
+      for (String state : List.of("ACCEPTED", "REJECTED", "PENDING"))
+        assertions.add(
+            () -> {
+              reset();
+              seedLegacy(state, 7L);
+              switch (variant) {
+                case "activity-zero" ->
+                    fixture.update("UPDATE seckill_reservation SET activity_id=0");
+                case "activity-negative" ->
+                    fixture.update("UPDATE seckill_reservation SET activity_id=-1");
+                case "user-zero" -> fixture.update("UPDATE seckill_reservation SET user_id=0");
+                case "user-negative" -> fixture.update("UPDATE seckill_reservation SET user_id=-1");
+                case "idem-empty" ->
+                    fixture.update("UPDATE seckill_reservation SET idempotency_key=''");
+                case "idem-space" ->
+                    fixture.update("UPDATE seckill_reservation SET idempotency_key=' '");
+                case "idem-unicode" ->
+                    fixture.update("UPDATE seckill_reservation SET idempotency_key=?", "\u2003");
+                case "idem-null" ->
+                    fixture.update("UPDATE seckill_reservation SET idempotency_key='null'");
+                default -> throw new AssertionError(variant);
+              }
+              var before = facts();
+              tracked.checking = true;
+              if ("ACCEPTED".equals(state)) {
+                var failure = assertThrows(BizException.class, () -> read());
+                assertEquals(500, failure.getHttpStatus());
+                assertEquals("SECKILL_SETTLEMENT_CORRUPT", failure.getCode());
+                assertEquals("秒杀受理事实维度无效", failure.getMessage());
+                assertEquals(2, tracked.sql.size());
+              } else {
+                assertUnknownSku(read());
+                assertEquals(3, tracked.sql.size());
+                tracked.sql.clear();
+                assertEquals("UNKNOWN", orderFallback("PAID"));
+                assertEquals("UNKNOWN", orderFallback("CANCELLED"));
+              }
+              assertOnlySelects();
+              tracked.sql.clear();
+              assertUnknownSku(bareRead());
+              assertEquals(1, tracked.sql.size());
+              assertOnlySelects();
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerKeepsPrimaryCorruptionAndOuterUnknownWithoutWrites() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var mvc =
+        MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("ACCEPTED", "REJECTED"))
+      assertions.add(
+          () -> {
+            reset();
+            seedLegacy(state, 7L);
+            fixture.update("UPDATE seckill_reservation SET user_id=0");
+            var before = facts();
+            tracked.checking = true;
+            var response = mvc.perform(get("/api/stock/reservations/" + ORDER_NO));
+            if ("ACCEPTED".equals(state)) {
+              byte[] body =
+                  response
+                      .andExpect(status().isInternalServerError())
+                      .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_CORRUPT"))
+                      .andReturn()
+                      .getResponse()
+                      .getContentAsByteArray();
+              assertEquals("秒杀受理事实维度无效", new ObjectMapper().readTree(body).get("message").asText());
+              assertEquals(2, tracked.sql.size());
+            } else {
+              response
+                  .andExpect(status().isOk())
+                  .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+                  .andExpect(jsonPath("$.data.items").isEmpty());
+              assertEquals(3, tracked.sql.size());
+            }
+            assertOnlySelects();
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void exactLongAndUnicodeContextBoundariesKeepLegacyReadProtocol() {
+    for (long identity : List.of(1L, Long.MAX_VALUE))
+      for (String key :
+          List.of(
+              "private-idem", " private-idem ", "NULL", "null ", "x".repeat(128), "😺".repeat(128)))
+        for (String state : List.of("ACCEPTED", "REJECTED", "PENDING")) {
+          reset();
+          seedLegacy(state, 7L);
+          fixture.update(
+              "UPDATE seckill_reservation SET activity_id=?,user_id=?,idempotency_key=?",
+              identity,
+              identity,
+              key);
+          var before = facts();
+          tracked.checking = true;
+          var result = read();
+          assertEquals(
+              "ACCEPTED".equals(state)
+                  ? "RESERVED"
+                  : "REJECTED".equals(state) ? "REJECTED" : "UNKNOWN",
+              result.status);
+          assertEquals(1, result.items.size());
+          assertEquals(7L, result.items.get(0).skuId);
+          assertEquals("ACCEPTED".equals(state) ? 2 : 3, tracked.sql.size());
+          assertOnlySelects();
+          tracked.sql.clear();
+          assertEquals(result.status, bareRead().status);
+          assertEquals(1, tracked.sql.size());
+          assertEquals(before, facts());
+        }
+  }
+
   /** 不伪造正SKU，不让无效REJECTED变成Order冲突/成功依据。 */
   private static void assertUnknownSku(StockReservationVO result) {
     assertEquals(ORDER_NO, result.orderNo);

@@ -16,6 +16,7 @@ import com.cloudmall.stock.domain.vo.StockReservationItemVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockService;
+import com.cloudmall.stock.util.SeckillAcceptanceDimensions;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -330,6 +331,9 @@ public class StockServiceImpl implements StockService {
       } catch (IllegalArgumentException | ArithmeticException invalidIdentity) {
         return ApiResponse.ok(unknownReservationProof(orderNo));
       }
+      // 与主legacy读共用原维度门；缺证不回显SKU或保留REJECTED等已知状态。
+      if (!SeckillAcceptanceDimensions.hasValidContext(seckillFact))
+        return ApiResponse.ok(unknownReservationProof(orderNo));
       String acceptedStatus = String.valueOf(seckillFact.get("status"));
       String status =
           "ACCEPTED".equals(acceptedStatus)

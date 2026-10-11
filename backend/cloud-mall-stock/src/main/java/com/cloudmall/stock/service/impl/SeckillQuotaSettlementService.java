@@ -6,6 +6,7 @@ import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.util.SeckillAcceptanceDimensions;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -56,6 +57,9 @@ public class SeckillQuotaSettlementService {
       if (!Objects.equals(orderNo, accepted.get("order_no")))
         return unknownSettlementProof(orderNo);
       long skuId = requiredPositive(accepted.get("sku_id"), "sku_id");
+      // 原SKU优先保持；缺活动/用户/幂等维度不能把历史受理包装为可用库存。
+      if (!SeckillAcceptanceDimensions.hasValidContext(accepted))
+        throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀受理事实维度无效", 500);
       return new StockReservationVO(
           orderNo,
           "RESERVED",

@@ -125,7 +125,20 @@ class SeckillTerminalGetAcceptanceTest {
     var legacyMapper = mock(SeckillQuotaSettlementMapper.class);
     var legacyStocks = mock(StockSqlMapper.class);
     when(legacyStocks.findSeckillByOrderNo(ORDER_NO))
-        .thenReturn(Map.of("status", "ACCEPTED", "order_no", ORDER_NO, "sku_id", 20L));
+        .thenReturn(
+            Map.of(
+                "status",
+                "ACCEPTED",
+                "order_no",
+                ORDER_NO,
+                "sku_id",
+                20L,
+                "activity_id",
+                10L,
+                "user_id",
+                8L,
+                "idempotency_key",
+                "private-idem"));
     assertEquals(
         "RESERVED",
         new SeckillQuotaSettlementService(legacyMapper, legacyStocks).reservation(ORDER_NO).status);

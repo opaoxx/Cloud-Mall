@@ -148,6 +148,9 @@ class SeckillLegacySkuExactTest {
     row.put("order_no", orderNo);
     row.put("status", state);
     row.put("sku_id", sku);
+    row.put("activity_id", 10L);
+    row.put("user_id", 8L);
+    row.put("idempotency_key", "private-idem");
     return row;
   }
 }

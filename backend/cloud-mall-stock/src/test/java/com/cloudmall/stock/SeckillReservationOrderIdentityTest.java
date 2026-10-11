@@ -155,6 +155,9 @@ class SeckillReservationOrderIdentityTest {
     row.put("order_no", original);
     row.put("sku_id", 7L);
     row.put("status", state);
+    row.put("activity_id", 10L);
+    row.put("user_id", 8L);
+    row.put("idempotency_key", "private-idem");
     return row;
   }
 }

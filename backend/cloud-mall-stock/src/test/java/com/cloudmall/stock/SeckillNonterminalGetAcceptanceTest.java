@@ -103,7 +103,20 @@ class SeckillNonterminalGetAcceptanceTest {
     }
     when(mapper.findSettlement(ORDER_NO)).thenReturn(null);
     when(stocks.findSeckillByOrderNo(ORDER_NO))
-        .thenReturn(Map.of("status", "ACCEPTED", "order_no", ORDER_NO, "sku_id", 20L));
+        .thenReturn(
+            Map.of(
+                "status",
+                "ACCEPTED",
+                "order_no",
+                ORDER_NO,
+                "sku_id",
+                20L,
+                "activity_id",
+                10L,
+                "user_id",
+                8L,
+                "idempotency_key",
+                "private-idem"));
     assertEquals("RESERVED", service.reservation(ORDER_NO).status);
     verify(mapper, never()).findMatchingAcceptanceId(any());
   }

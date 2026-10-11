@@ -1644,3 +1644,10 @@ CONFIRMED+CONFIRM、RELEASED+ROLLBACK在原proof通过后复用只读来源查�
 OPEN/RELEASE_PENDING/PROJECTION_BLOCKED也在原proof后复用受理来源只读查询，缺/错来源返回UNKNOWN/空明细，
 合法来源保原RESERVED或UNKNOWN及原明细；这三态由1次增至2次SELECT，终态规则保持。
 不改源SQL/写入/恢复/legacy/未识别状态；两个非锁点读不证明RR、来源冻结、完整因果或跨存储fencing。
+
+
+### CM-18 历史秒杀GET的原上下文维度（16T49）
+
+legacy两条只读路径在原order/SKU核验后检查activity/user无损正long与原生合法幂等键，保整数DECIMAL/long上界与Unicode128边界。
+main ACCEPTED损坏上下文返回固定CORRUPT500，outer各状态损坏返回UNKNOWN/空明细；原SKU与身份错误优先级保持。
+共享纯字段validator不改Map/SQL/DDL/事务/Redis；此门只核基本上下文，不证明原请求/hash/订单完整因果。

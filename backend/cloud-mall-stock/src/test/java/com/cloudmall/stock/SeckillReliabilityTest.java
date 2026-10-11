@@ -190,7 +190,21 @@ class SeckillReliabilityTest {
             any(String.class),
             eq(hash),
             any());
-    when(mapper.findSeckillByOrderNo(orderNo)).thenReturn(Map.of("status", "ACCEPTED"));
+    when(mapper.findSeckillByOrderNo(orderNo))
+        .thenReturn(
+            Map.of(
+                "status",
+                "ACCEPTED",
+                "order_no",
+                orderNo,
+                "activity_id",
+                10L,
+                "user_id",
+                8L,
+                "sku_id",
+                20L,
+                "idempotency_key",
+                "private-idem"));
     when(mapper.findSeckillOutboxByOrderNo(orderNo))
         .thenReturn(Map.of("event_id", eventId, "request_hash", hash));
 

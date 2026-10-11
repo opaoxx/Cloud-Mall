@@ -30,7 +30,20 @@ class SeckillSettlementRoutingTest {
     StockSqlMapper stockMapper = mock(StockSqlMapper.class);
     when(stockMapper.findReservationRequest("cm24-order")).thenReturn(null);
     when(stockMapper.findSeckillByOrderNo("cm24-order"))
-        .thenReturn(Map.of("status", "ACCEPTED", "order_no", "cm24-order", "sku_id", 7L));
+        .thenReturn(
+            Map.of(
+                "status",
+                "ACCEPTED",
+                "order_no",
+                "cm24-order",
+                "sku_id",
+                7L,
+                "activity_id",
+                10L,
+                "user_id",
+                8L,
+                "idempotency_key",
+                "private-idem"));
     StockServiceImpl service =
         new StockServiceImpl(
             mock(StringRedisTemplate.class),
@@ -68,7 +81,20 @@ class SeckillSettlementRoutingTest {
   void unacceptedSeckillCannotReturnEmptyNormalFlowSuccess() {
     StockSqlMapper stockMapper = mock(StockSqlMapper.class);
     when(stockMapper.findSeckillByOrderNo("pending-order"))
-        .thenReturn(Map.of("status", "PENDING", "sku_id", 7L));
+        .thenReturn(
+            Map.of(
+                "status",
+                "PENDING",
+                "order_no",
+                "pending-order",
+                "sku_id",
+                7L,
+                "activity_id",
+                10L,
+                "user_id",
+                8L,
+                "idempotency_key",
+                "private-idem"));
     StockServiceImpl service =
         new StockServiceImpl(
             mock(StringRedisTemplate.class),
