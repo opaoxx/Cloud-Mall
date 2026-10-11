@@ -73,9 +73,13 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     BalanceDebitAttemptPO attempt = existingAttempt(request);
     BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
     if (attempt != null) {
-      if (debit == null && "CANCELLED".equals(attempt.state)) return view(attempt);
+      if (debit == null && "CANCELLED".equals(attempt.state)) {
+        requireNoLedger(request);
+        return view(attempt);
+      }
       requireConsistent(attempt, debit, request);
       if ("CONFIRMED".equals(debit.state)) requireLedger(attempt, debit, request);
+      if ("CANCELLED".equals(debit.state)) requireNoLedger(request);
       return BalanceTccDebitVO.from(debit);
     }
     if (debit != null) throw unknown();
@@ -162,10 +166,16 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
       requireNoLedger(request);
       return view(claim(request, "CANCELLED", now()));
     }
-    if (debit == null && "CANCELLED".equals(attempt.state)) return view(attempt);
+    if (debit == null && "CANCELLED".equals(attempt.state)) {
+      requireNoLedger(request);
+      return view(attempt);
+    }
     requireConsistent(attempt, debit, request);
     if ("CONFIRMED".equals(debit.state)) throw conflict("已确认的冻结不能取消");
-    if ("CANCELLED".equals(debit.state)) return BalanceTccDebitVO.from(debit);
+    if ("CANCELLED".equals(debit.state)) {
+      requireNoLedger(request);
+      return BalanceTccDebitVO.from(debit);
+    }
     requireNoLedger(request);
     requireValidAccountFunds(user);
     if (user.frozenBalance.compareTo(request.amount) < 0

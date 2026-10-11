@@ -884,6 +884,108 @@ class BalanceTccStateMySqlIT {
     assertEquals(before, allFundsFacts());
   }
 
+  /** 四个取消重放分支均核两类原账本占用，CI查询命中不隐藏矛盾。 */
+  @Test
+  void cancelledReplaysRejectConflictingLedgerFacts() {
+    for (boolean emptyCancellation : List.of(true, false)) {
+      for (String operation : List.of("try", "cancel")) {
+        for (String source :
+            List.of("payApplied", "payRejected", "payAlias", "keyDebit", "keyRefund", "keyAlias")) {
+          resetOwnedWalletScenario();
+          BalanceTccDebitTryDTO original = request("cancelled-ledger", 7L, "10.00");
+          if (!emptyCancellation) service.tryDebit(original);
+          service.cancelDebit(finalizeRequest(original));
+          boolean paySource = source.startsWith("pay");
+          String ledgerKey = paySource ? "legacy:cancelled-ledger" : original.ledgerKey;
+          String ledgerPayNo = paySource ? original.payNo : "unrelated-pay";
+          if ("payAlias".equals(source))
+            ledgerPayNo = ledgerPayNo.toUpperCase(java.util.Locale.ROOT);
+          if ("keyAlias".equals(source)) ledgerKey = ledgerKey.toUpperCase(java.util.Locale.ROOT);
+          String ledgerType = paySource || "keyDebit".equals(source) ? "DEBIT" : "REFUND";
+          String ledgerState =
+              "payRejected".equals(source) || "keyDebit".equals(source) ? "REJECTED" : "APPLIED";
+          fixture.update(
+              "INSERT INTO balance_ledger"
+                  + "(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,"
+                  + "balance_before,balance_after,created_at)"
+                  + " VALUES(999999,8,?,?,?,'other-order',10,?,100,90,NOW(3))",
+              ledgerKey,
+              ledgerType,
+              ledgerPayNo,
+              ledgerState);
+          assertEquals(
+              1,
+              paySource
+                  ? fixture.queryForObject(
+                      "SELECT COUNT(*) FROM balance_ledger WHERE pay_no=? AND"
+                          + " operation_type='DEBIT'",
+                      Integer.class,
+                      original.payNo)
+                  : fixture.queryForObject(
+                      "SELECT COUNT(*) FROM balance_ledger WHERE operation_key=?",
+                      Integer.class,
+                      original.ledgerKey));
+          var before = allFundsFacts();
+          BizException failure =
+              assertThrows(
+                  BizException.class,
+                  () -> {
+                    if ("try".equals(operation)) service.tryDebit(original);
+                    else service.cancelDebit(finalizeRequest(original));
+                  });
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+          assertEquals(before, allFundsFacts());
+        }
+      }
+    }
+  }
+
+  /** 无目标账本仍按取消摘要重放，不新增钱包门或误阻无关记录。 */
+  @Test
+  void legitimateCancelledReplaysPreserveNoOpAndDisabledSemantics() {
+    fixture.execute(
+        "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NULL,MODIFY frozen_balance"
+            + " DECIMAL(18,2) NULL");
+    try {
+      for (boolean emptyCancellation : List.of(true, false)) {
+        resetOwnedWalletScenario();
+        BalanceTccDebitTryDTO original = request("cancelled-noop", 7L, "10.00");
+        if (!emptyCancellation) service.tryDebit(original);
+        service.cancelDebit(finalizeRequest(original));
+        fixture.update(
+            "INSERT INTO balance_ledger"
+                + "(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,"
+                + "balance_before,balance_after,created_at)"
+                + " VALUES(999999,8,'unrelated-key','DEBIT','unrelated-pay','unrelated-order',"
+                + "10,'APPLIED',100,90,NOW(3))");
+        fixture.update("UPDATE mall_user SET balance=NULL,frozen_balance=NULL,status=0 WHERE id=7");
+        setEnabled(false);
+        var before = allFundsFacts();
+        assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(original)).state);
+        assertEquals(before, allFundsFacts());
+        assertEquals(
+            "PAY_DEBIT_MODE_UNAVAILABLE",
+            assertThrows(BizException.class, () -> service.tryDebit(original)).getCode());
+        setEnabled(true);
+        assertEquals(
+            "IDEMPOTENCY_CONFLICT",
+            assertThrows(BizException.class, () -> service.tryDebit(original)).getCode());
+        fixture.update("UPDATE mall_user SET status=1 WHERE id=7");
+        before = allFundsFacts();
+        assertEquals("CANCELLED", service.tryDebit(original).state);
+        assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(original)).state);
+        assertEquals(before, allFundsFacts());
+      }
+    } finally {
+      resetOwnedWalletScenario();
+      setEnabled(true);
+      fixture.execute(
+          "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL DEFAULT 10000.00,"
+              + "MODIFY frozen_balance DECIMAL(18,2) NOT NULL DEFAULT 0.00");
+    }
+  }
+
   /** 只从owned库核完整资金四表，包含所有身份、金额、状态和时间。 */
   private List<List<Map<String, Object>>> allFundsFacts() {
     return List.of("mall_user", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger")

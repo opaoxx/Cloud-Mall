@@ -734,6 +734,16 @@ NoOp/replay/空取消不计算未发生的加法；disabled用户实际清算仍
 原余额不足`PAYMENT_FAILED`优先、条件UPDATE/requireOne回滚、SQL/锁序/状态/RM/API/flags保持。
 仅本地TCC路径，不涵盖Legacy/refund整体金额边界，也不证明全账户因果或CM-18闭环。
 
+### CM-18 User已取消重放的账本冲突核验（16T22）
+
+Try/Cancel重放已取消结果时，空取消attempt摘要和已释放debit摘要均先复用原`requireNoLedger`：
+同支付号存在任意状态DEBIT，或固定`ledgerKey`已被账本占用，返回原`IDEMPOTENCY_CONFLICT`/409，
+不将矛盾记录报告为已取消。保留原CI查询命中及短路，不隐藏别名或改写账本。
+
+正常无目标账本的取消仍幂等，不增加当前钱包金额门；禁用用户/关闭Try开关仍可Cancel重放。
+Try的开关及用户状态优先级、CONFIRMED和反方向冲突、首次空取消、SQL/锁/CAS/RM/Fence保持。
+仅本地资金服务的取消摘要核验，不涵盖全部历史账本/退款归属、全账户因果或CM-18闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

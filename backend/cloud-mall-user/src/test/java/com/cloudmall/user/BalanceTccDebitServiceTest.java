@@ -161,6 +161,44 @@ class BalanceTccDebitServiceTest {
     verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
   }
 
+  /** 空取消迟到Try不能以CANCELLED掩盖原账本占用。 */
+  @Test
+  void emptyCancelledTryRejectsConflictingLedger() {
+    assertCancelledLedgerConflict("try", true);
+  }
+
+  /** 空取消重复Cancel仍须核验原账本矛盾。 */
+  @Test
+  void emptyCancelledCancelRejectsConflictingLedger() {
+    assertCancelledLedgerConflict("cancel", true);
+  }
+
+  /** 已释放Try重放不能将原DEBIT误报成已取消。 */
+  @Test
+  void releasedCancelledTryRejectsConflictingLedger() {
+    assertCancelledLedgerConflict("try", false);
+  }
+
+  /** 已释放Cancel重放不能跳过固定ledgerKey占用。 */
+  @Test
+  void releasedCancelledCancelRejectsConflictingLedger() {
+    assertCancelledLedgerConflict("cancel", false);
+  }
+
+  /** 两种原查询来源分别命中；无任何新归属、资金或状态写。 */
+  private void assertCancelledLedgerConflict(String operation, boolean emptyCancellation) {
+    for (String source : List.of("payDebit", "ledgerKey")) {
+      setUp();
+      installFunds("CANCELLED", "none");
+      if (emptyCancellation) when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
+      if ("payDebit".equals(source))
+        when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(originalLedger);
+      else when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(originalLedger);
+      assertPersistedAmountConflict(operation, "IDEMPOTENCY_CONFLICT");
+      verify(attemptMapper, never()).insert(any());
+    }
+  }
+
   /** 只让原资金条件写成功，校验缺失前原实现会错误到达写操作。 */
   private void rejectWallet(String operation, String field) {
     for (BigDecimal invalid :
@@ -395,7 +433,8 @@ class BalanceTccDebitServiceTest {
     applied.balanceBefore = new BigDecimal("100.00");
     applied.balanceAfter = new BigDecimal("90.00");
     originalLedger = applied;
-    when(ledgerMapper.selectByOperationKey(original.ledgerKey)).thenReturn(applied);
+    when(ledgerMapper.selectByOperationKey(original.ledgerKey))
+        .thenReturn("CONFIRMED".equals(state) ? applied : null);
   }
 
   /** 固定409及原code，所有金额/状态写Mapper都不得调用。 */
