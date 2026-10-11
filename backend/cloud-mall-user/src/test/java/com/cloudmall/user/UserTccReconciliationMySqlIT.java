@@ -856,6 +856,166 @@ class UserTccReconciliationMySqlIT {
     }
   }
 
+  /** 原接收标记/固定键损坏早停，合法CLAIMED未bind原分支保留。 */
+  @Test
+  void originalReceiveSourceContractIsCheckedBeforeAllFundsQueries() throws Exception {
+    tracked.checking = false;
+    fixture.execute(
+        "ALTER TABLE user_tcc_receive MODIFY state VARCHAR(32) NULL,MODIFY order_no VARCHAR(64)"
+            + " NULL");
+    var receives = session.getMapper(UserTccReceiveMapper.class);
+    var attempts = session.getMapper(BalanceDebitAttemptMapper.class);
+    var debits = session.getMapper(BalanceTccDebitMapper.class);
+    var ledgers = session.getMapper(BalanceLedgerMapper.class);
+    var fences = session.getMapper(TccFenceLogMapper.class);
+    var users = session.getMapper(UserMapper.class);
+    var queryTarget = new UserTccStateQuery(receives, attempts, debits, ledgers, fences);
+    var queryProxy = readProxy(queryTarget);
+    var query = (UserTccStateQuery) queryProxy.getProxy();
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var baseReader =
+        (UserTccReconciliationReadService)
+            readProxy(
+                    new UserTccReconciliationReadService(
+                        receives, attempts, debits, ledgers, fences, users))
+                .getProxy();
+    var baseService = new UserTccReconciliationService(baseReader, true, "ops-secret");
+    var linkedReader =
+        (UserLinkedRefundEvidenceReadService)
+            readProxy(new UserLinkedRefundEvidenceReadService(baseReader, ledgers)).getProxy();
+    var frozenReader =
+        (UserFrozenOwnershipEvidenceReadService)
+            readProxy(
+                    new UserFrozenOwnershipEvidenceReadService(
+                        baseReader, receives, attempts, debits, ledgers, fences))
+                .getProxy();
+    MockMvc mvc =
+        MockMvcBuilders.standaloneSetup(
+                new UserTccController(bridge),
+                new UserTccReconciliationController(baseService),
+                new UserLinkedRefundEvidenceController(
+                    new UserLinkedRefundEvidenceService(baseService, linkedReader, true)),
+                new UserFrozenOwnershipEvidenceController(
+                    new UserFrozenOwnershipEvidenceService(baseService, frozenReader, true)))
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    String stateRoute = "/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1";
+    String diagnosticRoute = "/api/internal/users/7/balance/tcc-reconciliation/pay1";
+    try {
+      for (String mutation :
+          List.of(
+              "state=NULL",
+              "state='claimed'",
+              "state='CLAIMED '",
+              "state='APPLIED'",
+              "order_no=NULL",
+              "order_no=' '",
+              "ledger_key='other-ledger'",
+              "branch_id=0",
+              "branch_id=-1")) {
+        seed("UNKNOWN");
+        fixture.update("UPDATE user_tcc_receive SET " + mutation + " WHERE id=1");
+        assertReceiveConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute);
+      }
+      for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+        for (String variant : List.of("operation", "ledger")) {
+          seed(state);
+          String actualStateRoute = stateRoute;
+          if ("operation".equals(variant)) {
+            fixture.update(
+                "UPDATE user_tcc_receive SET operation_key='tcc-debit:other' WHERE id=1");
+            fixture.update(
+                "UPDATE balance_debit_attempt SET operation_key='tcc-debit:other' WHERE id=1");
+            fixture.update(
+                "UPDATE balance_tcc_debit SET operation_key='tcc-debit:other' WHERE id=1");
+            actualStateRoute = "/api/internal/users/7/balance/tcc-debits/tcc-debit:other";
+          } else {
+            fixture.update("UPDATE user_tcc_receive SET ledger_key='other-ledger' WHERE id=1");
+            fixture.update("UPDATE balance_debit_attempt SET ledger_key='other-ledger' WHERE id=1");
+            fixture.update("UPDATE balance_ledger SET operation_key='other-ledger' WHERE id=1");
+          }
+          assertReceiveConflictThroughFourRoutes(mvc, actualStateRoute, diagnosticRoute);
+        }
+      }
+      for (String state : List.of("UNKNOWN", "TRYING", "CONFIRMED", "CANCELLED")) {
+        seed(state);
+        fixture.update("UPDATE user_tcc_receive SET branch_id=NULL WHERE id=1");
+        var before = facts();
+        tracked.reset();
+        tracked.checking = true;
+        mvc.perform(
+                get(stateRoute)
+                    .header("X-User-Id", "7")
+                    .header("X-Internal-Service", "cloud-mall-pay")
+                    .header("X-Internal-Callback-Token", "ops-secret")
+                    .param("xid", "private-tc:8091:original"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.state").value(state));
+        assertEquals("UNKNOWN".equals(state) ? 4 : 5, tracked.statements.size());
+        assertEquals(1, tracked.connections);
+        assertEquals(before, facts());
+        tracked.reset();
+        mvc.perform(
+                get(diagnosticRoute)
+                    .header("X-Internal-Service", "cm18-reconciliation")
+                    .header("X-Internal-Callback-Token", "ops-secret"))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(
+                jsonPath("$.data.classification")
+                    .value(
+                        "UNKNOWN".equals(state)
+                            ? "BLOCKED_LOCAL_EVIDENCE"
+                            : "BLOCKED_EXTERNAL_EVIDENCE"));
+        assertEquals("UNKNOWN".equals(state) ? 8 : 9, tracked.statements.size());
+        assertEquals(1, tracked.connections);
+        assertEquals(before, facts());
+      }
+      verifyNoInteractions(resource, receiveStore);
+    } finally {
+      tracked.checking = false;
+      seed("CONFIRMED");
+      fixture.execute(
+          "ALTER TABLE user_tcc_receive MODIFY state VARCHAR(16) NOT NULL,MODIFY order_no"
+              + " VARCHAR(64) NOT NULL");
+      tracked.reset();
+    }
+  }
+
+  /** 原state和已有诊断原错误码保留，坏receive只有一个SELECT/只读RR且不改行。 */
+  private static void assertReceiveConflictThroughFourRoutes(
+      MockMvc mvc, String stateRoute, String diagnosticRoute) throws Exception {
+    var before = facts();
+    tracked.reset();
+    tracked.checking = true;
+    mvc.perform(
+            get(stateRoute)
+                .header("X-User-Id", "7")
+                .header("X-Internal-Service", "cloud-mall-pay")
+                .header("X-Internal-Callback-Token", "ops-secret")
+                .param("xid", "private-tc:8091:original"))
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+    assertEquals(1, tracked.statements.size());
+    assertEquals(1, tracked.connections);
+    assertEquals(before, facts());
+    for (String suffix : List.of("", "/refund-evidence", "/frozen-ownership-evidence")) {
+      tracked.reset();
+      mvc.perform(
+              get(diagnosticRoute + suffix)
+                  .header("X-Internal-Service", "cm18-reconciliation")
+                  .header("X-Internal-Callback-Token", "ops-secret"))
+          .andExpect(status().isConflict())
+          .andExpect(header().string("Cache-Control", "no-store"))
+          .andExpect(jsonPath("$.code").value("USER_TCC_RECONCILIATION_CONFLICT"));
+      assertEquals(1, tracked.statements.size());
+      assertEquals(1, tracked.connections);
+      assertEquals(before, facts());
+    }
+  }
+
   /** 坏历史沿原409与诊断no-store传播，单只读RR且全部行/键/时间不变。 */
   private static void assertPersistedConflictThroughFourRoutes(
       MockMvc mvc,

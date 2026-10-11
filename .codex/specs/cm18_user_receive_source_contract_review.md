@@ -31,8 +31,8 @@
 ## 4. 验收矩阵
 
 - Unit：合法 amount 下 receive state、payNo、operation/ledger、order/xid/user/branch 每个坏变体均 409；相互一致的非 canonical ledger/op 和 known states 不得输出状态；合法 CLAIMED+branch null 保持。
-- 真实 owned MySQL：case/padded/null metadata、旧 peer Query、四诊断 Controller 固定 code/no-store；原库 checksum、无写、资源清理保持。
-- 保持旧 User state GET 缓存契约、T9–T15 取证和原 RR/Fence/金额门回归；不启动 RM/TC，不扩展 API/DDL。
+- 真实 owned MySQL：case/padded/null metadata、旧 peer Query；四个现有路由中，原 User state GET 只验证固定 code/409并保持缓存契约，另外三个 User 诊断 GET 验证固定 code/409/no-store；原库 checksum、无写、资源清理保持。
+- 保持旧 User state GET 缓存契约、T9–T15 取证和原 RR/Fence/金额门回归；T9 是诊断保护切片，不是原 TCC HTTP validate 的轮号；原 HTTP/claim 契约保持。不启动 RM/TC，不扩展 API/DDL。
 
 ## 5. 交付边界
 

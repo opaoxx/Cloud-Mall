@@ -220,12 +220,21 @@ class UserFrozenOwnershipEvidenceTest {
   void actualOriginalQueryRejectsMissingReceiveAttemptBadModeAndFence() {
     for (String variant :
         List.of(
-            "receive", "attempt", "mode", "branch", "fence", "fenceStatus", "xid", "legacyNull")) {
+            "receive",
+            "receiveState",
+            "attempt",
+            "mode",
+            "branch",
+            "fence",
+            "fenceStatus",
+            "xid",
+            "legacyNull")) {
       Fixture fixture = new Fixture();
       fixture.addPeer("pay2", 12L);
       switch (variant) {
         case "receive" ->
             when(fixture.receives.findByOperationKey("tcc-debit:pay2")).thenReturn(null);
+        case "receiveState" -> fixture.receiveRows.get(0).state = "claimed";
         case "attempt" -> when(fixture.attempts.selectByPayNo("pay2")).thenReturn(null);
         case "mode" -> fixture.attemptRows.get(0).mode = "LEGACY";
         case "branch" -> fixture.attemptRows.get(0).branchId = 99L;

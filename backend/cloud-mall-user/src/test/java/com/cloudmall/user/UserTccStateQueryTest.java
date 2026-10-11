@@ -3,6 +3,7 @@ package com.cloudmall.user;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.cloudmall.common.error.BizException;
@@ -197,6 +198,119 @@ class UserTccStateQueryTest {
     when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
     when(fences.findByBranch("xid-query-1", 12L)).thenReturn(fence(4, 12L));
     assertEquals("CANCELLED", query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+  }
+
+  /** 坏原接收即使尚无资金行，也不能用UNKNOWN掩盖源契约损坏。 */
+  @Test
+  void invalidReceiveMetadataStopsBeforeFundsQueries() {
+    for (String variant :
+        List.of(
+            "stateNull",
+            "stateCase",
+            "statePadding",
+            "stateOther",
+            "userNull",
+            "userZero",
+            "payNull",
+            "payInvalid",
+            "payLong",
+            "orderNull",
+            "orderBlank",
+            "orderLong",
+            "xidNull",
+            "xidBlank",
+            "xidLong",
+            "branchZero",
+            "branchNegative",
+            "operation",
+            "ledger")) {
+      UserTccReceivePO original = receive(null);
+      switch (variant) {
+        case "stateNull" -> original.state = null;
+        case "stateCase" -> original.state = "claimed";
+        case "statePadding" -> original.state = "CLAIMED ";
+        case "stateOther" -> original.state = "APPLIED";
+        case "userNull" -> original.userId = null;
+        case "userZero" -> original.userId = 0L;
+        case "payNull" -> original.payNo = null;
+        case "payInvalid" -> original.payNo = "pay:invalid";
+        case "payLong" -> original.payNo = "p".repeat(65);
+        case "orderNull" -> original.orderNo = null;
+        case "orderBlank" -> original.orderNo = " ";
+        case "orderLong" -> original.orderNo = "o".repeat(65);
+        case "xidNull" -> original.xid = null;
+        case "xidBlank" -> original.xid = " ";
+        case "xidLong" -> original.xid = "x".repeat(129);
+        case "branchZero" -> original.branchId = 0L;
+        case "branchNegative" -> original.branchId = -1L;
+        case "operation" -> original.operationKey = "tcc-debit:other";
+        case "ledger" -> original.ledgerKey = "other-ledger";
+        default -> throw new AssertionError(variant);
+      }
+      when(receives.findByOperationKey(original.operationKey)).thenReturn(original);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> query.read(original.userId, original.operationKey, original.xid),
+              variant);
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+      verifyNoInteractions(attempts, debits, ledgers, fences);
+    }
+  }
+
+  /** 相互一致的错误op/ledger键也不能代替原固定支付绑定。 */
+  @Test
+  void consistentlyAlteredKeysCannotProveKnownFundsState() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+      for (String variant : List.of("operation", "ledger")) {
+        UserTccReceivePO original = receive(12L);
+        BalanceDebitAttemptPO ownership = attempt(state, 12L);
+        BalanceTccDebitPO frozen = debit(state, 12L);
+        BalanceLedgerPO applied = ledger();
+        if ("operation".equals(variant)) {
+          original.operationKey = "tcc-debit:other";
+          ownership.operationKey = original.operationKey;
+          frozen.operationKey = original.operationKey;
+        } else {
+          original.ledgerKey = "other-ledger";
+          ownership.ledgerKey = original.ledgerKey;
+          applied.operationKey = original.ledgerKey;
+        }
+        when(receives.findByOperationKey(original.operationKey)).thenReturn(original);
+        when(attempts.selectByPayNo(original.payNo)).thenReturn(ownership);
+        when(debits.selectByPayNo(original.payNo)).thenReturn(frozen);
+        when(ledgers.selectByOperationKey(original.ledgerKey))
+            .thenReturn("CONFIRMED".equals(state) ? applied : null);
+        when(fences.findByBranch(original.xid, 12L))
+            .thenReturn(fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L));
+        BizException failure =
+            assertThrows(
+                BizException.class,
+                () -> query.read(7L, original.operationKey, original.xid),
+                state + variant);
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+      }
+    }
+  }
+
+  /** 合法CLAIMED在未bind接收分支时仍保UNKNOWN或由原attempt观察known状态。 */
+  @Test
+  void canonicalClaimedReceiveAllowsUnobservedBranchAcrossStates() {
+    for (String state : List.of("UNKNOWN", "TRYING", "CONFIRMED", "CANCELLED")) {
+      UserTccReceivePO original = receive(null);
+      when(receives.findByOperationKey(original.operationKey)).thenReturn(original);
+      when(attempts.selectByPayNo(original.payNo))
+          .thenReturn("UNKNOWN".equals(state) ? null : attempt(state, 12L));
+      when(debits.selectByPayNo(original.payNo))
+          .thenReturn("UNKNOWN".equals(state) ? null : debit(state, 12L));
+      when(ledgers.selectByOperationKey(original.ledgerKey))
+          .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
+      when(fences.findByBranch(original.xid, 12L))
+          .thenReturn(fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L));
+      assertEquals(state, query.read(7L, original.operationKey, original.xid).state);
+    }
   }
 
   /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */

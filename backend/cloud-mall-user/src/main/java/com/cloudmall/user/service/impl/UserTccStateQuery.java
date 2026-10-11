@@ -62,6 +62,7 @@ public class UserTccStateQuery {
         Objects.equals(receive.userId, userId)
             && Objects.equals(receive.operationKey, operationKey)
             && Objects.equals(receive.xid, xid));
+    require(validReceiveMetadata(receive));
     require(validPositiveMoney(receive.amount));
     UserTccStateVO view = new UserTccStateVO();
     view.userId = receive.userId;
@@ -142,6 +143,24 @@ public class UserTccStateQuery {
     else require(!"TRYING".equals(attempt.state));
     view.state = attempt.state;
     return view;
+  }
+
+  /** 原claim载荷先于任何资金查询核验，null分支是尚未bind的合法状态，不补造接收事实。 */
+  private static boolean validReceiveMetadata(UserTccReceivePO receive) {
+    return "CLAIMED".equals(receive.state)
+        && receive.userId != null
+        && receive.userId > 0
+        && receive.payNo != null
+        && receive.payNo.matches("[A-Za-z0-9_-]{1,64}")
+        && Objects.equals(receive.operationKey, "tcc-debit:" + receive.payNo)
+        && Objects.equals(receive.ledgerKey, receive.payNo)
+        && receive.orderNo != null
+        && !receive.orderNo.isBlank()
+        && receive.orderNo.length() <= 64
+        && receive.xid != null
+        && !receive.xid.isBlank()
+        && receive.xid.length() <= 128
+        && (receive.branchId == null || receive.branchId > 0);
   }
 
   /** 原金额缺失或非法均为持久事实冲突，避免NULL变500或相等坏值被当成资金证明。 */

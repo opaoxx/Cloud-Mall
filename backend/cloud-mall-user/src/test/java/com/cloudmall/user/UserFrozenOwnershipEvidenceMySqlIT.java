@@ -228,12 +228,23 @@ class UserFrozenOwnershipEvidenceMySqlIT {
   @Test
   void matchingAggregateCannotReplaceMissingPeerOriginOrBadModeAndFence() {
     for (String variant :
-        List.of("receive", "attempt", "mode", "branch", "xid", "fence", "fenceState", "ledger")) {
+        List.of(
+            "receive",
+            "receiveState",
+            "attempt",
+            "mode",
+            "branch",
+            "xid",
+            "fence",
+            "fenceState",
+            "ledger")) {
       seed("CONFIRMED");
       peer(2, 7L, "10.00", true);
       fixture.update("UPDATE mall_user SET frozen_balance=10");
       switch (variant) {
         case "receive" -> fixture.update("DELETE FROM user_tcc_receive WHERE id=2");
+        case "receiveState" ->
+            fixture.update("UPDATE user_tcc_receive SET state='claimed' WHERE id=2");
         case "attempt" -> fixture.update("DELETE FROM balance_debit_attempt WHERE id=2");
         case "mode" -> fixture.update("UPDATE balance_debit_attempt SET mode='LEGACY' WHERE id=2");
         case "branch" -> fixture.update("UPDATE balance_debit_attempt SET branch_id=99 WHERE id=2");

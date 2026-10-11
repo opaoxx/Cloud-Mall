@@ -663,6 +663,18 @@ NULL、非法余额或不一致快照沿原`USER_TCC_STATE_CONFLICT`/409拒绝�
 终态缺Fence保留原过期兼容语义。原SELECT/readOnly RR、缓存禁用、API及资金写入保持。
 原state GET缓存契约保持，三个诊断GET错误仍no-store；本批不证明TC决议或全链资金终态。
 
+### CM-18 User原接收事实契约校验（16T16）
+
+原User状态查询在后续资金查询前校验接收事实：`CLAIMED`、正用户ID、ASCII支付号，
+`operationKey=tcc-debit:<payNo>`、`ledgerKey=payNo`，以及订单/XID范围和可空正分支。
+损坏标记或多份相互一致的错误固定键沿原`USER_TCC_STATE_CONFLICT`/409拒绝，
+不能以UNKNOWN或已知资金状态掩盖源契约损坏；坏接收仅执行原接收一条SELECT。
+
+`CLAIMED + branchId=null`是尚未bind的正常事实，保留原UNKNOWN和已知状态观察。
+T9已有接收保护与错误码保持，T12其他peer原接收标记异常按原持久冲突阻塞。
+不改SQL/readOnly RR/API/flags、claim/bind或资金写，也不修改历史接收记录；
+原state缓存契约和三个诊断no-store保持，不代表完整User资金因果或CM-18闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
