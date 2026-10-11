@@ -199,6 +199,46 @@ class BalanceTccDebitServiceTest {
     }
   }
 
+  /** TRYING重放也不能跳过同支付DEBIT或固定账本键占用。 */
+  @Test
+  void tryingReplayRejectsConflictingLedger() {
+    for (String source : List.of("payDebit", "ledgerKey")) {
+      setUp();
+      installFunds("TRYING", "none");
+      if ("payDebit".equals(source))
+        when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(originalLedger);
+      else when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(originalLedger);
+      assertPersistedAmountConflict("try", "IDEMPOTENCY_CONFLICT");
+      verify(attemptMapper, never()).insert(any());
+    }
+  }
+
+  /** 两份原state均NULL时三入口不能在不可变集合contains中抛NPE。 */
+  @Test
+  void missingPersistedStateIsUnknownAtEveryFundsEntry() {
+    for (String operation : List.of("try", "confirm", "cancel")) {
+      setUp();
+      installFunds(null, "none");
+      assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+      verify(attemptMapper, never()).insert(any());
+    }
+  }
+
+  /** 合法TRYING无账本重放不新增当前钱包门、归属或资金写。 */
+  @Test
+  void legitimateTryingReplayKeepsNoOpWalletSemantics() {
+    installFunds("TRYING", "none");
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(account(null, null));
+    assertEquals("TRYING", service.tryDebit(request()).state);
+    verify(userMapper, never()).freezeBalance(any(), any(), any());
+    verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+    verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+    verify(attemptMapper, never()).insert(any());
+    verify(attemptMapper, never()).transitionState(any(), any(), any(), any());
+    verify(tccMapper, never()).insert(any());
+    verify(ledgerMapper, never()).insert(any());
+  }
+
   /** 只让原资金条件写成功，校验缺失前原实现会错误到达写操作。 */
   private void rejectWallet(String operation, String field) {
     for (BigDecimal invalid :

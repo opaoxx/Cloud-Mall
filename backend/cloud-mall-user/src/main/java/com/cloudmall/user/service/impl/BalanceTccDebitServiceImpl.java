@@ -79,7 +79,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
       }
       requireConsistent(attempt, debit, request);
       if ("CONFIRMED".equals(debit.state)) requireLedger(attempt, debit, request);
-      if ("CANCELLED".equals(debit.state)) requireNoLedger(request);
+      if ("TRYING".equals(debit.state) || "CANCELLED".equals(debit.state)) requireNoLedger(request);
       return BalanceTccDebitVO.from(debit);
     }
     if (debit != null) throw unknown();
@@ -232,6 +232,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     if (attempt == null || debit == null) throw unknown();
     validateAttempt(attempt, request);
     if (debit.amount == null
+        || debit.state == null
         || !validDebitSnapshot(debit.balanceBefore, debit.balanceAfterTry, debit.amount)
         || !Objects.equals(debit.userId, request.userId)
         || !Objects.equals(debit.payNo, request.payNo)

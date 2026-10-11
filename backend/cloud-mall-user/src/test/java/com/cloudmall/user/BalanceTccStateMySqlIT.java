@@ -884,23 +884,38 @@ class BalanceTccStateMySqlIT {
     assertEquals(before, allFundsFacts());
   }
 
-  /** 四个取消重放分支均核两类原账本占用，CI查询命中不隐藏矛盾。 */
+  /** 取消及冻结重放均核两类原账本占用，CI查询命中不隐藏矛盾。 */
   @Test
-  void cancelledReplaysRejectConflictingLedgerFacts() {
-    for (boolean emptyCancellation : List.of(true, false)) {
-      for (String operation : List.of("try", "cancel")) {
+  void unconfirmedReplaysRejectConflictingLedgerFacts() {
+    for (String shape : List.of("EMPTY_CANCELLED", "RELEASED_CANCELLED", "TRYING")) {
+      List<String> operations = "TRYING".equals(shape) ? List.of("try") : List.of("try", "cancel");
+      for (String operation : operations) {
         for (String source :
-            List.of("payApplied", "payRejected", "payAlias", "keyDebit", "keyRefund", "keyAlias")) {
+            List.of(
+                "payApplied",
+                "payRejected",
+                "payAlias",
+                "payAccent",
+                "payTrailing",
+                "keyDebit",
+                "keyRefund",
+                "keyAlias",
+                "keyAccent",
+                "keyTrailing")) {
           resetOwnedWalletScenario();
           BalanceTccDebitTryDTO original = request("cancelled-ledger", 7L, "10.00");
-          if (!emptyCancellation) service.tryDebit(original);
-          service.cancelDebit(finalizeRequest(original));
+          if (!"EMPTY_CANCELLED".equals(shape)) service.tryDebit(original);
+          if (!"TRYING".equals(shape)) service.cancelDebit(finalizeRequest(original));
           boolean paySource = source.startsWith("pay");
           String ledgerKey = paySource ? "legacy:cancelled-ledger" : original.ledgerKey;
           String ledgerPayNo = paySource ? original.payNo : "unrelated-pay";
           if ("payAlias".equals(source))
             ledgerPayNo = ledgerPayNo.toUpperCase(java.util.Locale.ROOT);
           if ("keyAlias".equals(source)) ledgerKey = ledgerKey.toUpperCase(java.util.Locale.ROOT);
+          if ("payAccent".equals(source)) ledgerPayNo = ledgerPayNo.replace("ledger", "lédger");
+          if ("payTrailing".equals(source)) ledgerPayNo += " ";
+          if ("keyAccent".equals(source)) ledgerKey = ledgerKey.replace("ledger", "lédger");
+          if ("keyTrailing".equals(source)) ledgerKey += " ";
           String ledgerType = paySource || "keyDebit".equals(source) ? "DEBIT" : "REFUND";
           String ledgerState =
               "payRejected".equals(source) || "keyDebit".equals(source) ? "REJECTED" : "APPLIED";
@@ -983,6 +998,48 @@ class BalanceTccStateMySqlIT {
       fixture.execute(
           "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL DEFAULT 10000.00,"
               + "MODIFY frozen_balance DECIMAL(18,2) NOT NULL DEFAULT 0.00");
+    }
+  }
+
+  /** 仅owned模拟遗留nullable state，三入口缺证/旧未知态不变成500或合法状态。 */
+  @Test
+  void missingOrUnknownPersistedStatesAreBusinessConflicts() {
+    for (String table : List.of("balance_debit_attempt", "balance_tcc_debit"))
+      fixture.execute("ALTER TABLE " + table + " MODIFY state VARCHAR(16) NULL");
+    try {
+      for (String state : new String[] {null, "trying", "TRYÍNG", "TRYING ", "FUTURE"}) {
+        for (String operation : List.of("try", "confirm", "cancel")) {
+          resetOwnedWalletScenario();
+          BalanceTccDebitTryDTO original = request("missing-state", 7L, "10.00");
+          service.tryDebit(original);
+          fixture.update("UPDATE balance_debit_attempt SET state=?", state);
+          fixture.update("UPDATE balance_tcc_debit SET state=?", state);
+          assertOriginalSnapshotConflict(operation, original);
+        }
+      }
+      resetOwnedWalletScenario();
+      BalanceTccDebitTryDTO original = request("trying-noop", 7L, "10.00");
+      service.tryDebit(original);
+      fixture.update("UPDATE mall_user SET balance=-1,frozen_balance=-1 WHERE id=7");
+      var before = allFundsFacts();
+      assertEquals("TRYING", service.tryDebit(original).state);
+      assertEquals(before, allFundsFacts());
+      setEnabled(false);
+      assertEquals(
+          "PAY_DEBIT_MODE_UNAVAILABLE",
+          assertThrows(BizException.class, () -> service.tryDebit(original)).getCode());
+      setEnabled(true);
+      fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+      before = allFundsFacts();
+      assertEquals(
+          "IDEMPOTENCY_CONFLICT",
+          assertThrows(BizException.class, () -> service.tryDebit(original)).getCode());
+      assertEquals(before, allFundsFacts());
+    } finally {
+      resetOwnedWalletScenario();
+      setEnabled(true);
+      for (String table : List.of("balance_debit_attempt", "balance_tcc_debit"))
+        fixture.execute("ALTER TABLE " + table + " MODIFY state VARCHAR(16) NOT NULL");
     }
   }
 

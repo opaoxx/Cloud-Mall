@@ -744,6 +744,17 @@ Try/Cancel重放已取消结果时，空取消attempt摘要和已释放debit摘�
 Try的开关及用户状态优先级、CONFIRMED和反方向冲突、首次空取消、SQL/锁/CAS/RM/Fence保持。
 仅本地资金服务的取消摘要核验，不涵盖全部历史账本/退款归属、全账户因果或CM-18闭环。
 
+### CM-18 User冻结重放与缺失状态保护（16T23）
+
+Try已有`TRYING`时，返回原冻结摘要前同样复用`requireNoLedger`：同pay任意DEBIT或固定
+`ledgerKey`占用沿原`IDEMPOTENCY_CONFLICT`/409阻塞；原`CANCELLED`门和`CONFIRMED`账本证明保持。
+原SQL的CI候选不以大小写、重音或尾空格别名隐藏，不改查询、短路或账本。
+
+`requireConsistent`显式拒绝NULL debit状态，沿原`BALANCE_TCC_UNKNOWN`/409，避免状态集合检查NPE。
+当前生产列仍为NOT NULL；nullable遗留缺证只在owned库模拟。未知非NULL状态仍按原409拒绝，
+不改状态机/DDL/RM/Fence/API/flags。合法TRYING无账本重放仍不写资金、不增加当前钱包金额门，
+原开关/status优先保持。本切片不证明全账户因果或CM-18闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
