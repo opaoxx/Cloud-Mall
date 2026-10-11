@@ -64,8 +64,8 @@ public class SeckillQuotaSettlementService {
     // 2. 先核原订单号再验维度；不能借别单终态或落入普通库存路径。
     if (!Objects.equals(orderNo, settlement.orderNo)) return unknownSettlementProof(orderNo);
     validateSettlement(settlement);
-    // 3. 终态必须有原订单对应方向的操作键；缺证仍返回已观察候选，阻止普通库存fallback。
-    if (!terminalOperationKeyMatches(settlement)) return unknownSettlementProof(orderNo);
+    // 3. 五种结算状态按原订单及允许方向核操作键；缺证仍返回已观察候选，阻止普通库存fallback。
+    if (!settlementOperationKeyMatches(settlement)) return unknownSettlementProof(orderNo);
     // 4. 证据完整后仅映射查询状态，不执行任何结算或库存动作。
     String status = externalStatus(settlement.status);
     return new StockReservationVO(
@@ -76,7 +76,7 @@ public class SeckillQuotaSettlementService {
                 settlement.skuId, settlement.quantity, status)));
   }
 
-  /** 原身份或终态操作键缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
+  /** 原身份或操作键缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
   private static StockReservationVO unknownSettlementProof(String orderNo) {
     return new StockReservationVO(orderNo, "UNKNOWN", List.of());
   }
@@ -99,8 +99,8 @@ public class SeckillQuotaSettlementService {
     if (!Objects.equals(orderNo, settlement.orderNo))
       throw new BizException("SECKILL_SETTLEMENT_CONFLICT", "秒杀结算原订单归属冲突", 409);
     validateSettlement(settlement);
-    if (!terminalOperationKeyMatches(settlement))
-      throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀结算终态操作键缺证", 500);
+    if (!settlementOperationKeyMatches(settlement))
+      throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀结算操作键缺证", 500);
     String operationKey = orderNo + ":" + actionType;
     String status = settlement.status;
     long revision = settlement.revision;
@@ -149,12 +149,18 @@ public class SeckillQuotaSettlementService {
     return new BizException("SECKILL_SETTLEMENT_UNKNOWN", "秒杀结算提交结果未知: " + orderNo, 503);
   }
 
-  /** 仅核两个终态的原订单与动作方向；不规范化原键，也不扩展非终态规则。 */
-  private static boolean terminalOperationKeyMatches(SeckillQuotaSettlementPO settlement) {
+  /** 按五种既有状态核原订单与允许方向；OPEN空键兼容，未知状态不扩展规则。 */
+  private static boolean settlementOperationKeyMatches(SeckillQuotaSettlementPO settlement) {
+    String confirmKey = settlement.orderNo + ":CONFIRM";
+    String rollbackKey = settlement.orderNo + ":ROLLBACK";
     if ("CONFIRMED".equals(settlement.status))
-      return Objects.equals(settlement.orderNo + ":CONFIRM", settlement.operationKey);
-    if ("RELEASED".equals(settlement.status))
-      return Objects.equals(settlement.orderNo + ":ROLLBACK", settlement.operationKey);
+      return Objects.equals(confirmKey, settlement.operationKey);
+    if ("RELEASED".equals(settlement.status) || "RELEASE_PENDING".equals(settlement.status))
+      return Objects.equals(rollbackKey, settlement.operationKey);
+    if ("OPEN".equals(settlement.status) && settlement.operationKey == null) return true;
+    if ("OPEN".equals(settlement.status) || "PROJECTION_BLOCKED".equals(settlement.status))
+      return Objects.equals(confirmKey, settlement.operationKey)
+          || Objects.equals(rollbackKey, settlement.operationKey);
     return true;
   }
 

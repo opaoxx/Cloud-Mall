@@ -129,7 +129,9 @@ class SeckillSettlementWriteIdentityTest {
             + ":"
             + ("CONFIRMED".equals(state)
                 ? "CONFIRM"
-                : "RELEASED".equals(state) ? "ROLLBACK" : action);
+                : "RELEASED".equals(state) || "RELEASE_PENDING".equals(state)
+                    ? "ROLLBACK"
+                    : action);
     when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row);
     when(mapper.transitionOpenToConfirmed(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);
     when(mapper.transitionBlockedToConfirmed(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);

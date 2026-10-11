@@ -1526,3 +1526,13 @@ GET缺证返回`UNKNOWN/items=[]`、不落普通库存或使Order fallback误报
 原`SECKILL_SETTLEMENT_CORRUPT`/500，消息不回显原键，既有REQUIRED事务完整回滚。
 合法终态同向幂等、反向409保持，原身份与维度错误优先；OPEN/pending/blocked/其它状态不新增规则。
 无SQL/DDL/锁序/事务/Redis/MQ/恢复/API变更；完整tuple、其它状态原操作键及CM18其余M1–M4仍待完成。
+
+
+### CM-18 秒杀非终态原操作键保护（16T35）
+
+在16T34两终态校验基础上，OPEN只允许NULL或原订单的exact CONFIRM/ROLLBACK键，
+RELEASE_PENDING只允许exact ROLLBACK，PROJECTION_BLOCKED保持两种exact方向的既有兼容。
+拒绝大小写/重音/尾空格等别名通过MySQL CI比较进入CAS；GET缺证为`UNKNOWN/items=[]`，
+write在原identity/维度门后、派生/noop/CAS前沿原CORRUPT500固定消息拒绝。
+合法OPEN跨向仍由原CAS不命中返回503，pending/blocked与终态的合法协议保持。
+SQL/DDL/锁序/事务/恢复/Redis/MQ/API不变；未知/CONFLICT状态、完整tuple及CM18其余M1–M4保留。

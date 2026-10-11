@@ -120,7 +120,11 @@ class SeckillTerminalOperationKeyTest {
     }
     for (String state :
         List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED", "CONFLICT", "unrecognized")) {
-      when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, null));
+      String key =
+          "RELEASE_PENDING".equals(state) || "PROJECTION_BLOCKED".equals(state)
+              ? ORDER_NO + ":ROLLBACK"
+              : null;
+      when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, key));
       var result = service.reservation(ORDER_NO);
       assertEquals("OPEN".equals(state) ? "RESERVED" : "UNKNOWN", result.status);
       assertEquals(1, result.items.size());

@@ -83,6 +83,7 @@ class SeckillQuotaSettlementServiceTest {
     SeckillQuotaSettlementMapper mapper = mock(SeckillQuotaSettlementMapper.class);
     SeckillQuotaSettlementPO row = settlement("PROJECTION_BLOCKED");
     row.orderNo = "order-4";
+    row.operationKey = "order-4:ROLLBACK";
     when(mapper.findSettlement("order-4")).thenReturn(row);
 
     StockReservationVO response =

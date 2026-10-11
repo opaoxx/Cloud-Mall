@@ -46,7 +46,7 @@ import org.springframework.transaction.annotation.AnnotationTransactionAttribute
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-/** 真实终态操作键读写及实际Order fallback证明；Order行用Mapper替身，不冒充HTTP/分布式验收。 */
+/** 真实结算状态操作键读写及实际Order fallback证明；Order行用Mapper替身，不冒充HTTP/分布式验收。 */
 class SeckillTerminalOperationKeyMySqlIT {
   /** 原Stock库只读连接。 */
   private static JdbcTemplate source;
@@ -187,6 +187,7 @@ class SeckillTerminalOperationKeyMySqlIT {
   void reset() {
     tracked.checking = false;
     tracked.writePhase = false;
+    tracked.allowTransition = false;
     for (String table : TABLES) fixture.update("DELETE FROM " + table);
     tracked.sql.clear();
   }
@@ -305,7 +306,11 @@ class SeckillTerminalOperationKeyMySqlIT {
     for (String state :
         List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED", "CONFLICT", "other-state")) {
       reset();
-      seedSettlement(state, null);
+      String key =
+          "RELEASE_PENDING".equals(state) || "PROJECTION_BLOCKED".equals(state)
+              ? ORDER_NO + ":ROLLBACK"
+              : null;
+      seedSettlement(state, key);
       var before = facts();
       tracked.checking = true;
       var result = read();
@@ -318,44 +323,192 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   @Test
   void actualControllerGetAndTransactionalWriteDoNotLeakOrGrantSuccess() throws Exception {
-    reset();
-    seedSettlement("CONFIRMED", "private-other:CONFIRM");
-    var before = facts();
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-    var proxy = new ProxyFactory(controller);
-    proxy.setProxyTargetClass(true);
-    proxy.addAdvice(
-        new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
-    var mvc =
-        MockMvcBuilders.standaloneSetup(proxy.getProxy())
-            .setControllerAdvice(new GlobalExceptionHandler())
-            .build();
-    tracked.checking = true;
-    String getBody =
-        mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
-            .andExpect(jsonPath("$.data.items").isEmpty())
-            .andReturn()
-            .getResponse()
-            .getContentAsString();
-    assertFalse(getBody.contains("private-other"));
-    assertOnlySelects();
-    tracked.sql.clear();
-    tracked.writePhase = true;
-    String postBody =
-        mvc.perform(post("/api/stock/reservations/" + ORDER_NO + "/confirm"))
-            .andExpect(status().isInternalServerError())
-            .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_CORRUPT"))
-            .andReturn()
-            .getResponse()
-            .getContentAsString();
-    assertFalse(postBody.contains("private-other"));
-    assertEquals(2, tracked.sql.size());
-    assertEquals(before, facts());
+    for (String state : List.of("CONFIRMED", "OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+      reset();
+      seedSettlement(state, "private-other:CONFIRM");
+      var before = facts();
+      StockController controller = new StockController();
+      ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+      ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+      ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+      var proxy = new ProxyFactory(controller);
+      proxy.setProxyTargetClass(true);
+      proxy.addAdvice(
+          new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+      var mvc =
+          MockMvcBuilders.standaloneSetup(proxy.getProxy())
+              .setControllerAdvice(new GlobalExceptionHandler())
+              .build();
+      tracked.checking = true;
+      String getBody =
+          mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+              .andExpect(status().isOk())
+              .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+              .andExpect(jsonPath("$.data.items").isEmpty())
+              .andReturn()
+              .getResponse()
+              .getContentAsString();
+      assertFalse(getBody.contains("private-other"));
+      assertOnlySelects();
+      tracked.sql.clear();
+      tracked.writePhase = true;
+      String postBody =
+          mvc.perform(post("/api/stock/reservations/" + ORDER_NO + "/confirm"))
+              .andExpect(status().isInternalServerError())
+              .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_CORRUPT"))
+              .andReturn()
+              .getResponse()
+              .getContentAsString();
+      assertFalse(postBody.contains("private-other"));
+      assertEquals(2, tracked.sql.size());
+      assertEquals(before, facts());
+    }
+  }
+
+  @Test
+  void corruptedNonTerminalGetAndActualOrderFallbackCannotUseCandidateItems() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String key : badNonTerminalKeys(state))
+        assertions.add(
+            () -> {
+              reset();
+              seedSettlement(state, key);
+              var before = facts();
+              tracked.checking = true;
+              var observed = read();
+              assertEquals("UNKNOWN", observed.status, state + ":" + key);
+              assertTrue(observed.items.isEmpty());
+              assertEquals(ORDER_NO, observed.orderNo);
+              assertEquals(1, tracked.sql.size());
+              assertOnlySelects();
+              for (String orderState : List.of("PAID", "CANCELLED")) {
+                tracked.sql.clear();
+                assertEquals("UNKNOWN", orderFallback(orderState));
+                assertEquals(1, tracked.sql.size());
+                assertOnlySelects();
+              }
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void corruptedNonTerminalWriteCannotLetCiAliasPassRealCas() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String key : badNonTerminalKeys(state))
+        for (String action : List.of("CONFIRM", "ROLLBACK"))
+          assertions.add(
+              () -> {
+                reset();
+                seedSettlement(state, key);
+                var before = facts();
+                tracked.checking = true;
+                tracked.writePhase = true;
+                // 红阶段让原真实CAS暴露CI覆盖；绿阶段必须两SQL拒绝，绝无UPDATE。
+                tracked.allowTransition = true;
+                var failure =
+                    assertThrows(
+                        BizException.class, () -> settlementService.settle(ORDER_NO, action));
+                assertEquals(500, failure.getHttpStatus(), state + ":" + key);
+                assertEquals("SECKILL_SETTLEMENT_CORRUPT", failure.getCode());
+                assertFalse(failure.getMessage().contains("202610"));
+                assertEquals(2, tracked.sql.size());
+                assertTrue(tracked.sql.get(1).contains("FOR UPDATE"));
+                assertEquals(before, facts());
+                assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+              });
+    assertAll(assertions);
+  }
+
+  @Test
+  void exactNonTerminalKeysKeepRealCasRevisionAndCrossDirectionProtocol() {
+    for (String state : List.of("OPEN", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String key : legalNonTerminalKeys(state))
+        for (String action : List.of("CONFIRM", "ROLLBACK")) {
+          reset();
+          seedSettlement(state, key);
+          var before = facts();
+          tracked.checking = true;
+          var observed = read();
+          assertEquals("OPEN".equals(state) ? "RESERVED" : "UNKNOWN", observed.status);
+          assertEquals(1, observed.items.size());
+          assertOnlySelects();
+          assertEquals(before, facts());
+          tracked.sql.clear();
+          tracked.writePhase = true;
+          tracked.allowTransition = true;
+          boolean sameDirection = key == null || key.equals(ORDER_NO + ":" + action);
+          if (!sameDirection || "RELEASE_PENDING".equals(state) && "CONFIRM".equals(action)) {
+            var failure =
+                assertThrows(BizException.class, () -> settlementService.settle(ORDER_NO, action));
+            assertEquals("OPEN".equals(state) ? 503 : 409, failure.getHttpStatus());
+            assertEquals(
+                "OPEN".equals(state) ? "SECKILL_SETTLEMENT_UNKNOWN" : "SECKILL_SETTLEMENT_CONFLICT",
+                failure.getCode());
+            assertEquals("OPEN".equals(state) ? 3 : 2, tracked.sql.size());
+            assertEquals(before, facts());
+          } else {
+            Map<?, ?> response = (Map<?, ?>) settlementService.settle(ORDER_NO, action).data;
+            if ("CONFIRM".equals(action)) assertEquals(true, response.get("confirmed"));
+            else {
+              assertEquals(false, response.get("rolledBack"));
+              assertEquals(true, response.get("pending"));
+              assertEquals("UNKNOWN", response.get("status"));
+            }
+            var after = facts();
+            for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+              if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
+            var actual = after.get(3).get(0);
+            String expectedState =
+                "CONFIRM".equals(action)
+                    ? "CONFIRMED"
+                    : "OPEN".equals(state) ? "RELEASE_PENDING" : state;
+            assertEquals(expectedState, actual.get("status"));
+            assertEquals(ORDER_NO + ":" + action, actual.get("operation_key"));
+            assertEquals(
+                "OPEN".equals(state) && "CONFIRM".equals(action) ? 3L : 2L,
+                ((Number) actual.get("revision")).longValue());
+            var originalStable = new java.util.HashMap<>(before.get(3).get(0));
+            var actualStable = new java.util.HashMap<>(actual);
+            for (String changed :
+                List.of("status", "operation_key", "revision", "updated_at", "next_retry_at")) {
+              originalStable.remove(changed);
+              actualStable.remove(changed);
+            }
+            assertEquals(originalStable, actualStable);
+            assertEquals(
+                "OPEN".equals(state) || "CONFIRM".equals(action) ? 3 : 2, tracked.sql.size());
+            if (!"OPEN".equals(state) && "ROLLBACK".equals(action)) assertEquals(before, after);
+          }
+          assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+        }
+  }
+
+  /** 不规范化真实坏键；OPEN允许NULL，pending不能保confirm方向。 */
+  private static List<String> badNonTerminalKeys(String state) {
+    List<String> keys =
+        new ArrayList<>(
+            List.of(
+                "",
+                "private-other:ROLLBACK",
+                "202610PROOF1:ROLLBACK",
+                "202610próof1:ROLLBACK",
+                ORDER_NO + ":ROLLBACK ",
+                ORDER_NO + ":rollback",
+                ORDER_NO + ":OTHER"));
+    if (!"OPEN".equals(state)) keys.add(null);
+    if ("RELEASE_PENDING".equals(state)) keys.add(ORDER_NO + ":CONFIRM");
+    return keys;
+  }
+
+  /** 保既有OPEN空键/两方向与blocked兼容，不把跨向CAS503改成409。 */
+  private static List<String> legalNonTerminalKeys(String state) {
+    if ("OPEN".equals(state))
+      return java.util.Arrays.asList(null, ORDER_NO + ":CONFIRM", ORDER_NO + ":ROLLBACK");
+    if ("RELEASE_PENDING".equals(state)) return List.of(ORDER_NO + ":ROLLBACK");
+    return List.of(ORDER_NO + ":CONFIRM", ORDER_NO + ":ROLLBACK");
   }
 
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
@@ -369,7 +522,7 @@ class SeckillTerminalOperationKeyMySqlIT {
         ORDER_NO + ":" + action + " ");
   }
 
-  /** 仅owned准备原VARCHAR终态键，无ALTER或生产迁移。 */
+  /** 仅owned准备原VARCHAR状态操作键，无ALTER或生产迁移。 */
   private static void seedSettlement(String state, String key) {
     fixture.update(
         "INSERT INTO"
@@ -491,11 +644,14 @@ class SeckillTerminalOperationKeyMySqlIT {
     /** owned底层数据源。 */
     final DataSource delegate;
 
-    /** 仅GET阶段启用断言。 */
+    /** 仅被测GET/settle/POST阶段启用断言。 */
     boolean checking;
 
-    /** 只在settle/POST期间允许原INSERT+锁读，禁止任何额外CAS或普通写。 */
+    /** 只在settle/POST期间允许原INSERT+锁读；专用矩阵另允许原表CAS，始终禁止普通写。 */
     boolean writePhase;
+
+    /** 状态矩阵允许原表CAS；负例以两SQL及完整事实证明零UPDATE。 */
+    boolean allowTransition;
 
     /** 实际准备的SQL。 */
     final List<String> sql = new ArrayList<>();
@@ -504,7 +660,7 @@ class SeckillTerminalOperationKeyMySqlIT {
       this.delegate = delegate;
     }
 
-    /** 每条被测SQL必须是无锁SELECT，不声称现GET是RR。 */
+    /** GET只准无锁SELECT；写核真实事务及允许的原SQL，不声称GET是RR。 */
     @Override
     public Connection getConnection() throws java.sql.SQLException {
       Connection connection = delegate.getConnection();
@@ -522,7 +678,9 @@ class SeckillTerminalOperationKeyMySqlIT {
                     assertTrue(
                         statement.startsWith("INSERT IGNORE INTO SECKILL_QUOTA_SETTLEMENT")
                             || statement.startsWith("SELECT * FROM SECKILL_QUOTA_SETTLEMENT")
-                                && statement.contains("FOR UPDATE"),
+                                && statement.contains("FOR UPDATE")
+                            || allowTransition
+                                && statement.startsWith("UPDATE SECKILL_QUOTA_SETTLEMENT SET"),
                         statement);
                   } else {
                     assertTrue(statement.startsWith("SELECT"), statement);

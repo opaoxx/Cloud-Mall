@@ -364,7 +364,11 @@ class SeckillReservationOrderIdentityMySqlIT {
         status,
         "CONFIRMED".equals(status)
             ? orderNo + ":CONFIRM"
-            : "RELEASED".equals(status) ? orderNo + ":ROLLBACK" : null);
+            : "RELEASED".equals(status)
+                    || "RELEASE_PENDING".equals(status)
+                    || "PROJECTION_BLOCKED".equals(status)
+                ? orderNo + ":ROLLBACK"
+                : null);
   }
 
   /** 准备旧秒杀受理行；状态仅由实际Stock fallback读取。 */
