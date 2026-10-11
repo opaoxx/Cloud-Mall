@@ -755,6 +755,20 @@ Try已有`TRYING`时，返回原冻结摘要前同样复用`requireNoLedger`：�
 不改状态机/DDL/RM/Fence/API/flags。合法TRYING无账本重放仍不写资金、不增加当前钱包金额门，
 原开关/status优先保持。本切片不证明全账户因果或CM-18闭环。
 
+### CM-18 User历史终态冻结归属只读核验（16T24）
+
+独立开关`cloudmall.user.tcc-terminal-frozen-ownership-evidence.enabled=false`默认关闭；入口为
+`GET /api/internal/users/{userId}/balance/tcc-reconciliation/{payNo}/terminal-frozen-ownership-evidence`。
+复用原User取证开关、内部凭证和noTx/noXID门；响应no-store，Gateway禁止公开访问。
+
+原基线、CONFIRMED/CANCELLED的CI候选及逐笔receive/attempt/TCC/账本/Fence证明共用一个只读RR。
+最多核100条，101哨兵立即阻塞。精确核状态、原tuple、金额/冻结快照；确认还核同pay原DEBIT复制关系，
+取消不允许存在任意状态DEBIT。终态Fence已清理时保留原TTL语义。只有原基线与所有候选都通过，
+才输出确认/取消行数及含精确状态的脱敏向量；不计算历史金额总额，不比较当前钱包，不执行资金动作。
+
+最高仍为`BLOCKED_EXTERNAL_EVIDENCE`。候选完整仅指本次两known terminal CI范围，未知态、仅attempt空取消、
+超限历史、全账户因果以及Pay/Order/Stock/TC/MQ仍未闭环；旧活跃TRYING报告和生产DDL/写状态机不变。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

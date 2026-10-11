@@ -225,6 +225,25 @@ class UserFrozenOwnershipEvidenceMySqlIT {
     }
   }
 
+  /** 原活跃入口保持明确范围，历史终态缺归属仍须由独立入口补证。 */
+  @Test
+  void historicalTerminalRowsStayOutsideActiveOwnershipScope() {
+    seed("CONFIRMED");
+    peer(2, 7L, "10.00", true);
+    fixture.update("UPDATE balance_tcc_debit SET state='CONFIRMED' WHERE id=2");
+    fixture.update("UPDATE balance_debit_attempt SET state='CONFIRMED' WHERE id=2");
+    fixture.update("DELETE FROM user_tcc_receive WHERE id=2");
+    var before = facts();
+    tracked.reset();
+    tracked.checking = true;
+    var report = inspect();
+    assertTrue(report.terminalFrozenRowsNotInspected);
+    assertEquals(0, report.observedCount);
+    assertTrue(report.candidatesComplete);
+    assertEquals(10, tracked.statements.size());
+    assertEquals(before, facts());
+  }
+
   @Test
   void matchingAggregateCannotReplaceMissingPeerOriginOrBadModeAndFence() {
     for (String variant :

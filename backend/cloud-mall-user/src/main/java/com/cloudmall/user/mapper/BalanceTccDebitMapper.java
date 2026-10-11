@@ -11,6 +11,12 @@ import org.apache.ibatis.annotations.Update;
 /** TCC 冻结状态数据访问接口。 */
 @Mapper
 public interface BalanceTccDebitMapper extends BaseMapper<BalanceTccDebitPO> {
+  /** 保留两种终态的CI候选，100加一哨兵，精确归属由只读Service验证。 */
+  @Select(
+      "SELECT * FROM balance_tcc_debit WHERE user_id=#{userId}"
+          + " AND state IN ('CONFIRMED','CANCELLED') ORDER BY updated_at,id LIMIT 101")
+  java.util.List<BalanceTccDebitPO> findTerminalOwnershipCandidates(@Param("userId") Long userId);
+
   /** 保留该用户TRYING的CI候选，100加一哨兵，原行由Service精确校验。 */
   @Select(
       "SELECT * FROM balance_tcc_debit WHERE user_id=#{userId} AND state='TRYING'"
