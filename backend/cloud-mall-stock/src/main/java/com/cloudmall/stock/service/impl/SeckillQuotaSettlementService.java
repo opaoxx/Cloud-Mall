@@ -151,6 +151,8 @@ public class SeckillQuotaSettlementService {
     }
     if ("RELEASE_PENDING".equals(status) || "PROJECTION_BLOCKED".equals(status)) {
       if (!operationKey.equals(settlement.operationKey)) return conflict();
+      // 已有待释放重试也核原受理来源；只观察，不修改租约或诊断以补证。
+      if (settlementMapper.findMatchingAcceptanceId(settlement) == null) throw unknownCas(orderNo);
       return pendingRollback();
     }
     return conflict();

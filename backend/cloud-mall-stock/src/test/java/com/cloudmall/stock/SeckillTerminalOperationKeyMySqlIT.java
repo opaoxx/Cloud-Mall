@@ -478,8 +478,7 @@ class SeckillTerminalOperationKeyMySqlIT {
               actualStable.remove(changed);
             }
             assertEquals(originalStable, actualStable);
-            assertEquals(
-                "OPEN".equals(state) || "CONFIRM".equals(action) ? 3 : 2, tracked.sql.size());
+            assertEquals(3, tracked.sql.size());
             if (!"OPEN".equals(state) && "ROLLBACK".equals(action)) assertEquals(before, after);
           }
           assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
@@ -658,8 +657,7 @@ class SeckillTerminalOperationKeyMySqlIT {
             assertEquals(true, response.get("pending"));
             assertEquals(false, response.get("rolledBack"));
           }
-          assertEquals(
-              List.of("CONFIRMED", "RELEASED").contains(state) ? 3 : 2, tracked.sql.size());
+          assertEquals(3, tracked.sql.size());
           assertEquals(before, facts());
           assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
         }
@@ -1321,6 +1319,118 @@ class SeckillTerminalOperationKeyMySqlIT {
         }
         assertEquals(before, facts());
       }
+  }
+
+  @Test
+  void pendingRollbackReplayCannotAcceptUnprovenSourceWithoutChangingFacts() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String variant : badTransitionSources())
+        assertions.add(
+            () -> {
+              reset();
+              seedPendingReplay(state);
+              corruptTransitionSource(variant);
+              var before = facts();
+              tracked.checking = true;
+              tracked.writePhase = true;
+              var failure =
+                  assertThrows(
+                      BizException.class, () -> settlementService.settle(ORDER_NO, "ROLLBACK"));
+              assertEquals(503, failure.getHttpStatus());
+              assertEquals("SECKILL_SETTLEMENT_UNKNOWN", failure.getCode());
+              assertEquals(3, tracked.sql.size());
+              assertTrue(tracked.sql.get(1).contains("FOR UPDATE"));
+              assertTrue(
+                  tracked.sql.get(2).startsWith("SELECT ACCEPTED.ID FROM SECKILL_RESERVATION"));
+              assertFalse(tracked.sql.get(2).contains("FOR UPDATE"));
+              assertEquals(before, facts());
+              assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+              if ("RELEASE_PENDING".equals(state)) {
+                tracked.sql.clear();
+                assertEquals(
+                    409,
+                    assertThrows(
+                            BizException.class, () -> settlementService.settle(ORDER_NO, "CONFIRM"))
+                        .getHttpStatus());
+                assertEquals(2, tracked.sql.size());
+                assertEquals(before, facts());
+              }
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerRejectsMissingSourcePendingReplays() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var proxy = new ProxyFactory(controller);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    var mvc =
+        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      assertions.add(
+          () -> {
+            reset();
+            seedPendingReplay(state);
+            corruptTransitionSource("missing");
+            var before = facts();
+            tracked.checking = true;
+            tracked.writePhase = true;
+            mvc.perform(post("/api/stock/reservations/" + ORDER_NO + "/rollback"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_UNKNOWN"));
+            assertEquals(3, tracked.sql.size());
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void originalAcceptedStatesKeepPendingResponseAndAllLeaseDiagnostics() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String acceptedState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED")) {
+        reset();
+        seedPendingReplay(state);
+        fixture.update("UPDATE seckill_reservation SET status=?", acceptedState);
+        var before = facts();
+        tracked.checking = true;
+        tracked.writePhase = true;
+        var response = (Map<?, ?>) settlementService.settle(ORDER_NO, "ROLLBACK").data;
+        assertEquals(false, response.get("rolledBack"));
+        assertEquals(true, response.get("pending"));
+        assertEquals("UNKNOWN", response.get("status"));
+        assertEquals(3, tracked.sql.size());
+        assertEquals(before, facts());
+        assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+      }
+    reset();
+    seedSettlement("PROJECTION_BLOCKED", ORDER_NO + ":CONFIRM");
+    corruptTransitionSource("missing");
+    var before = facts();
+    tracked.checking = true;
+    tracked.writePhase = true;
+    assertEquals(
+        409,
+        assertThrows(BizException.class, () -> settlementService.settle(ORDER_NO, "ROLLBACK"))
+            .getHttpStatus());
+    assertEquals(2, tracked.sql.size());
+    assertEquals(before, facts());
+  }
+
+  /** 租约/诊断字段保原有值，证明查询重放不清理任何恢复元数据。 */
+  private static void seedPendingReplay(String state) {
+    seedSettlement(state, ORDER_NO + ":ROLLBACK");
+    fixture.update(
+        "UPDATE seckill_quota_settlement SET"
+            + " lease_owner='owned-pending-owner',lease_until='2099-01-01',last_error='owned-pending-error',next_retry_at='2000-01-01'");
   }
 
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */

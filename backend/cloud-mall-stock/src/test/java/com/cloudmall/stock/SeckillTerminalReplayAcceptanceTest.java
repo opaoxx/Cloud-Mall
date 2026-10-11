@@ -120,13 +120,33 @@ class SeckillTerminalReplayAcceptanceTest {
     assertEquals(
         "秒杀释放回执缺证",
         assertThrows(BizException.class, () -> service.settle(ORDER_NO, "ROLLBACK")).getMessage());
-    when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row("RELEASE_PENDING"));
-    assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "ROLLBACK").data).get("pending"));
-    var open = row("OPEN");
-    when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(open);
-    when(mapper.transitionOpenToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L)).thenReturn(1);
-    assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "CONFIRM").data).get("confirmed"));
     verify(mapper, never()).findMatchingAcceptanceId(any());
+
+    var pendingMapper = mock(SeckillQuotaSettlementMapper.class);
+    var pending = row("RELEASE_PENDING");
+    when(pendingMapper.findSettlementForUpdate(ORDER_NO)).thenReturn(pending);
+    when(pendingMapper.findMatchingAcceptanceId(same(pending))).thenReturn(1L);
+    assertEquals(
+        true,
+        ((Map<?, ?>)
+                new SeckillQuotaSettlementService(pendingMapper, mock(StockSqlMapper.class))
+                    .settle(ORDER_NO, "ROLLBACK")
+                    .data)
+            .get("pending"));
+    verify(pendingMapper).findMatchingAcceptanceId(same(pending));
+
+    var openMapper = mock(SeckillQuotaSettlementMapper.class);
+    var open = row("OPEN");
+    when(openMapper.findSettlementForUpdate(ORDER_NO)).thenReturn(open);
+    when(openMapper.transitionOpenToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L)).thenReturn(1);
+    assertEquals(
+        true,
+        ((Map<?, ?>)
+                new SeckillQuotaSettlementService(openMapper, mock(StockSqlMapper.class))
+                    .settle(ORDER_NO, "CONFIRM")
+                    .data)
+            .get("confirmed"));
+    verify(openMapper, never()).findMatchingAcceptanceId(any());
   }
 
   /** 两种同向动作的固定原协议。 */

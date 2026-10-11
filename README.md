@@ -1658,3 +1658,10 @@ main ACCEPTED损坏上下文返回固定CORRUPT500，outer各状态损坏返回U
 释放Lua在APPLIED early return前核当前accepted marker为string且精确原order，缺失/错类型/别单/别名返回0，
 恢复沿原投影阻塞处理，不改Redis内容或造完成；合法witness保持正回执与无二次INCR，允许其它projection已丢失。
 当前受理marker无TTL保留至审计归档，witness丢失/过期/归档后保留缺证；不自动补marker，不证明完整APPLIED tuple或跨存储fencing。
+
+
+### CM-18 已存在待释放重试的受理来源观察（16T51）
+
+RELEASE_PENDING/rollback方向PROJECTION_BLOCKED同向重试在原方向proof后复用source getter，缺/错来源沿原UNKNOWN503，
+来源查询故障保留；合法来源继续原pending/false/UNKNOWN响应，不改租约诊断。同向2变3SQL，反向与初次CAS保持。
+不新增SQL/DDL/API字段/锁/事务或Redis操作；该非锁来源观察不证明源冻结、完整因果或跨存储fencing。

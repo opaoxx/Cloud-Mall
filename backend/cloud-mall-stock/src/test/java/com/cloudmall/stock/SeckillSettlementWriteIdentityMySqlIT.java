@@ -222,8 +222,7 @@ class SeckillSettlementWriteIdentityMySqlIT {
       tracked.sql.clear();
       service.settle(ORDER_NO, action);
       assertEquals(beforeReplay, facts());
-      if ("CONFIRM".equals(action)) assertEquals(3, tracked.sql.size());
-      else assertOriginalInsertThenLockOnly();
+      assertEquals(3, tracked.sql.size());
       tracked.sql.clear();
       assertConflict(
           () -> service.settle(ORDER_NO, "CONFIRM".equals(action) ? "ROLLBACK" : "CONFIRM"));
