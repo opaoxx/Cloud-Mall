@@ -175,7 +175,11 @@ public class SeckillQuotaSettlementService {
         || settlement.skuId == null
         || settlement.skuId <= 0
         || settlement.userId == null
-        || settlement.userId <= 0) {
+        || settlement.userId <= 0
+        || settlement.idempotencyKey == null
+        || "null".equals(settlement.idempotencyKey)
+        || settlement.idempotencyKey.isBlank()
+        || settlement.idempotencyKey.codePointCount(0, settlement.idempotencyKey.length()) > 128) {
       throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀结算事实维度无效", 500);
     }
   }

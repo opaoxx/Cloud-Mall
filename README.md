@@ -1536,3 +1536,13 @@ RELEASE_PENDING只允许exact ROLLBACK，PROJECTION_BLOCKED保持两种exact方�
 write在原identity/维度门后、派生/noop/CAS前沿原CORRUPT500固定消息拒绝。
 合法OPEN跨向仍由原CAS不命中返回503，pending/blocked与终态的合法协议保持。
 SQL/DDL/锁序/事务/恢复/Redis/MQ/API不变；未知/CONFLICT状态、完整tuple及CM18其余M1–M4保留。
+
+
+### CM-18 秒杀结算原受理幂等键保护（16T36）
+
+结算原idempotency_key沿受理入口范围校验：拒绝NULL、精确字面值`null`、blank和超过128 Unicode
+code points；不trim/casefold，合法包围空格、`NULL`、128 ASCII/非BMP字符保持原字段。
+GET/write沿既有维度`SECKILL_SETTLEMENT_CORRUPT`/500固定消息，原订单身份仍先核，
+操作键与状态/幂等/CAS在维度门之后，坏事实不落普通库存或参与状态写。
+正常VARCHAR128/NOTNULL不改；缺失/超限仅unit验证，真实SQL只写可保存的blank/literal null和合法边界。
+SQL/DDL/锁序/事务/Redis/MQ/恢复/legacy/API不变；完整tuple/原来源及CM18其余M1–M4仍保留。

@@ -511,6 +511,171 @@ class SeckillTerminalOperationKeyMySqlIT {
     return List.of(ORDER_NO + ":CONFIRM", ORDER_NO + ":ROLLBACK");
   }
 
+  @Test
+  void invalidOriginalIdempotencyDimensionRejectsGetAndActualController() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state :
+        List.of("OPEN", "CONFIRMED", "RELEASED", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String key : List.of("", " ", "\t\n", "\u2003", "null"))
+        assertions.add(
+            () -> {
+              reset();
+              seedIdempotencySettlement(state, key);
+              var before = facts();
+              tracked.checking = true;
+              var failure = assertThrows(BizException.class, () -> read());
+              assertEquals(500, failure.getHttpStatus());
+              assertEquals("SECKILL_SETTLEMENT_CORRUPT", failure.getCode());
+              assertEquals("秒杀结算事实维度无效", failure.getMessage());
+              assertEquals(1, tracked.sql.size());
+              assertOnlySelects();
+              for (String orderState : List.of("PAID", "CANCELLED")) {
+                tracked.sql.clear();
+                assertEquals("UNKNOWN", orderFallback(orderState));
+                assertEquals(1, tracked.sql.size());
+                assertOnlySelects();
+              }
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+    reset();
+    seedIdempotencySettlement("CONFIRMED", "null");
+    var before = facts();
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var proxy = new ProxyFactory(controller);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    var mvc =
+        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    tracked.checking = true;
+    mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_CORRUPT"))
+        .andExpect(
+            result ->
+                assertEquals(
+                    "秒杀结算事实维度无效",
+                    new ObjectMapper()
+                        .readTree(result.getResponse().getContentAsByteArray())
+                        .path("message")
+                        .asText()));
+    assertEquals(1, tracked.sql.size());
+    tracked.sql.clear();
+    tracked.writePhase = true;
+    mvc.perform(
+            post("/api/stock/reservations/" + ORDER_NO + "/confirm")
+                .contentType("application/json")
+                .content("{\"operationKey\":\"" + ORDER_NO + ":CONFIRM\"}"))
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_CORRUPT"))
+        .andExpect(
+            result ->
+                assertEquals(
+                    "秒杀结算事实维度无效",
+                    new ObjectMapper()
+                        .readTree(result.getResponse().getContentAsByteArray())
+                        .path("message")
+                        .asText()));
+    assertEquals(2, tracked.sql.size());
+    assertEquals(before, facts());
+  }
+
+  @Test
+  void invalidOriginalIdempotencyDimensionStopsRealWriteBeforeAnyUpdate() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state :
+        List.of("OPEN", "CONFIRMED", "RELEASED", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String key : List.of("", " ", "\t\n", "\u2003", "null"))
+        for (String action : List.of("CONFIRM", "ROLLBACK"))
+          assertions.add(
+              () -> {
+                reset();
+                seedIdempotencySettlement(state, key);
+                var before = facts();
+                tracked.checking = true;
+                tracked.writePhase = true;
+                // 红阶段允许原表CAS显示旧错误；绿阶段必须两SQL且所有事实不变。
+                tracked.allowTransition = true;
+                var failure =
+                    assertThrows(
+                        BizException.class, () -> settlementService.settle(ORDER_NO, action));
+                assertEquals(500, failure.getHttpStatus());
+                assertEquals("SECKILL_SETTLEMENT_CORRUPT", failure.getCode());
+                assertEquals("秒杀结算事实维度无效", failure.getMessage());
+                assertEquals(2, tracked.sql.size());
+                assertTrue(tracked.sql.get(1).contains("FOR UPDATE"));
+                assertEquals(before, facts());
+                assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+              });
+    assertAll(assertions);
+  }
+
+  @Test
+  void exactOriginalIdempotencyBoundaryKeepsDatabaseUnicodeAndReplay() {
+    for (String state :
+        List.of("OPEN", "CONFIRMED", "RELEASED", "RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String key :
+          List.of(
+              "private-idem",
+              " private-idem ",
+              "NULL",
+              "null ",
+              "x".repeat(128),
+              "😺".repeat(128))) {
+        reset();
+        seedIdempotencySettlement(state, key);
+        assertEquals(
+            key,
+            fixture.queryForObject(
+                "SELECT idempotency_key FROM seckill_quota_settlement", String.class));
+        var before = facts();
+        tracked.checking = true;
+        var observed = read();
+        assertEquals(
+            "OPEN".equals(state)
+                ? "RESERVED"
+                : "CONFIRMED".equals(state)
+                    ? "CONFIRMED"
+                    : "RELEASED".equals(state) ? "ROLLED_BACK" : "UNKNOWN",
+            observed.status);
+        assertEquals(1, observed.items.size());
+        assertOnlySelects();
+        assertEquals(before, facts());
+        if (!"OPEN".equals(state)) {
+          tracked.sql.clear();
+          tracked.writePhase = true;
+          String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
+          var response = (Map<?, ?>) settlementService.settle(ORDER_NO, action).data;
+          if ("CONFIRMED".equals(state) || "RELEASED".equals(state))
+            assertEquals(true, response.get("idempotent"));
+          else {
+            assertEquals(true, response.get("pending"));
+            assertEquals(false, response.get("rolledBack"));
+          }
+          assertEquals(2, tracked.sql.size());
+          assertEquals(before, facts());
+          assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+        }
+      }
+  }
+
+  /** 仅owned当前NOTNULL/VARCHAR128准备可存原键，不ALTER或补造受理来源。 */
+  private static void seedIdempotencySettlement(String state, String key) {
+    String operationKey =
+        "OPEN".equals(state)
+            ? null
+            : ORDER_NO + ("CONFIRMED".equals(state) ? ":CONFIRM" : ":ROLLBACK");
+    seedSettlement(state, operationKey);
+    fixture.update(
+        "UPDATE seckill_quota_settlement SET idempotency_key=? WHERE order_no=?", key, ORDER_NO);
+  }
+
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
   private static List<String> badKeys(String state) {
     String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
