@@ -6,6 +6,7 @@ import com.cloudmall.stock.util.StockDependencyGuard;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,18 +77,8 @@ public class SeckillQuotaSettlementRecovery {
 
   /** 恢复单条结算事实。 */
   private boolean recoverOne(SeckillQuotaSettlementPO settlement, LocalDateTime now) {
-    if (settlement.operationKey == null || !settlement.operationKey.endsWith(":ROLLBACK"))
-      return false;
-    if (settlement.revision == null
-        || settlement.revision != 2L
-        || settlement.quantity == null
-        || settlement.quantity != 1) {
-      log.warn(
-          "秒杀结算事实损坏，orderNo={},operationKey={},分类=CORRUPT_FACT",
-          settlement.orderNo,
-          settlement.operationKey);
-      return false;
-    }
+    // 1. 核原候选再领取租约；损坏字段不能拼Redis键或产生任何状态写。
+    if (!isRollbackCandidate(settlement)) return false;
     long revision = settlement.revision;
     String owner = "seckill-settlement-" + UUID.randomUUID();
     LocalDateTime leaseUntil = now.plusSeconds(LEASE_SECONDS);
@@ -95,6 +86,7 @@ public class SeckillQuotaSettlementRecovery {
             settlement.orderNo, settlement.operationKey, revision, owner, leaseUntil, now)
         != 1) return false;
     try {
+      // 2. 仅用通过校验的原字段调用既有Lua投影，不重写动作方向。
       List<String> keys =
           List.of(
               "seckill:stock:" + settlement.activityId + ":" + settlement.skuId,
@@ -124,6 +116,7 @@ public class SeckillQuotaSettlementRecovery {
                 if (outcome == null) throw StockDependencyGuard.redisProtocolFailure();
                 return outcome;
               });
+      // 3. 按既有回执/CAS及重试协议处理结果。
       if (redisRevision != null && redisRevision > 0) {
         if (settlementMapper.markReleased(
                 settlement.orderNo, settlement.operationKey, revision, redisRevision, owner)
@@ -179,6 +172,32 @@ public class SeckillQuotaSettlementRecovery {
           failure);
       return false;
     }
+  }
+
+  /** 只接受原待释放方向及合法基础维度；非法/confirm候选跳过，不领取租约或规范化原字段。 */
+  private static boolean isRollbackCandidate(SeckillQuotaSettlementPO settlement) {
+    return settlement != null
+        && settlement.orderNo != null
+        && !"null".equals(settlement.orderNo)
+        && !settlement.orderNo.isBlank()
+        && settlement.orderNo.codePointCount(0, settlement.orderNo.length()) <= 64
+        && ("RELEASE_PENDING".equals(settlement.status)
+            || "PROJECTION_BLOCKED".equals(settlement.status))
+        && Objects.equals(settlement.orderNo + ":ROLLBACK", settlement.operationKey)
+        && settlement.revision != null
+        && settlement.revision == 2L
+        && settlement.quantity != null
+        && settlement.quantity == 1
+        && settlement.activityId != null
+        && settlement.activityId > 0
+        && settlement.skuId != null
+        && settlement.skuId > 0
+        && settlement.userId != null
+        && settlement.userId > 0
+        && settlement.idempotencyKey != null
+        && !"null".equals(settlement.idempotencyKey)
+        && !settlement.idempotencyKey.isBlank()
+        && settlement.idempotencyKey.codePointCount(0, settlement.idempotencyKey.length()) <= 128;
   }
 
   /** 生成恢复任务统一使用的上海本地时间。 */

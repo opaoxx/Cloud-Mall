@@ -1546,3 +1546,12 @@ GET/write沿既有维度`SECKILL_SETTLEMENT_CORRUPT`/500固定消息，原订单
 操作键与状态/幂等/CAS在维度门之后，坏事实不落普通库存或参与状态写。
 正常VARCHAR128/NOTNULL不改；缺失/超限仅unit验证，真实SQL只写可保存的blank/literal null和合法边界。
 SQL/DDL/锁序/事务/Redis/MQ/恢复/legacy/API不变；完整tuple/原来源及CM18其余M1–M4仍保留。
+
+
+### CM-18 秒杀恢复候选事实保护（16T37）
+
+独立释放恢复入口在claim/租约owner/Redis key/Lua前核原候选：原orderNo有效且不超过64 code points、
+状态精确pending/blocked、原orderNo:ROLLBACK、revision2/quantity1、活动/SKU/用户正long和T36幂等键范围。
+坏候选返回false，零claim/Redis/状态写；合法blocked-confirm继续跳过，健康rollback沿原Lua/租约/回执重试。
+真实MySQL与Redis Lua覆盖损坏维度、大小写/外单原键及释放回执重放；保原用户计数不减少。
+SQL/DDL/Lua/批50/租约/GET/settle/API不改；claim后TOCTOU、CAS readback及完整tuple/CM18其余M1–M4保留。

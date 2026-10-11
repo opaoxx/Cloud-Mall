@@ -28,7 +28,7 @@
 
 ## 4. 验收矩阵
 
-- Unit：null/blank/literal null/超长 orderNo、状态错误、operation key suffix alias/CONFIRM/foreign/null、revision/quantity 错、activity/sku/user 非正或溢出、idempotency null/blank/literal null/超长，均在 claim 前返回 false 且无 Redis/SQL retry/write。
+- Unit：null/blank/literal null/超长 orderNo、状态错误、operation key suffix alias/CONFIRM/foreign/null、revision/quantity 错、activity/sku/user 非正或不可接受值、idempotency null/blank/literal null/超长，均在 claim 前返回 false 且无 Redis/SQL retry/write。三维度在 PO/生产中是 Long/signed BIGINT，本批不声称可构造或验证 long overflow 载体，不改 DDL。
 - Owned MyBatis/MySQL + 真实 Redis/Lua：坏候选保留原事实、不领取 lease、不生成/删除非预期 keys；健康 RELEASE_PENDING rollback candidate 执行原 release/receipt，重复恢复不多加 quota、不减少 user count。健康 PROJECTION_BLOCKED rollback 方向沿原链路；blocked-confirm 仅跳过。
 - 使用随机 owned database、activity/sku/order/idempotency 和精确预期 Redis keys；finally 精确 DEL/DROP，source Stock checksum 不变。不 ALTER 生产 schema；NULL/超长坏 schema 值仅 unit 或 owned 准备阶段演练。
 - 无业务 App、固定端口、RM/TC；T36 valid idempotency/Unicode边界与 T31–T36 read/write 回归保持。
