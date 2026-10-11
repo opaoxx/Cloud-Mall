@@ -87,6 +87,7 @@ class SeckillSettlementIdempotencyDimensionTest {
         var mapper = mock(SeckillQuotaSettlementMapper.class);
         var original = row(state, key);
         when(mapper.findSettlement(ORDER_NO)).thenReturn(original);
+        when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
         when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(original);
         when(mapper.transitionOpenToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L)).thenReturn(1);
         var service = new SeckillQuotaSettlementService(mapper, mock(StockSqlMapper.class));

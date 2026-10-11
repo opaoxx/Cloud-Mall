@@ -86,6 +86,7 @@ class SeckillReservationOrderIdentityTest {
       var settlements = mock(SeckillQuotaSettlementMapper.class);
       var stocks = mock(StockSqlMapper.class);
       when(settlements.findSettlement(ORDER_NO)).thenReturn(row(ORDER_NO, state));
+      when(settlements.findMatchingAcceptanceId(any())).thenReturn(1L);
       var result = new SeckillQuotaSettlementService(settlements, stocks).reservation(ORDER_NO);
       assertEquals(
           switch (state) {

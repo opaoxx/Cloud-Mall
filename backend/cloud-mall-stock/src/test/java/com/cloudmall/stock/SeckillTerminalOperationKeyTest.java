@@ -73,6 +73,7 @@ class SeckillTerminalOperationKeyTest {
       var mapper = mock(SeckillQuotaSettlementMapper.class);
       var stocks = mock(StockSqlMapper.class);
       when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, ORDER_NO + ":" + direction));
+      when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
       when(mapper.findSettlementForUpdate(ORDER_NO))
           .thenReturn(row(state, ORDER_NO + ":" + direction));
       var service = new SeckillQuotaSettlementService(mapper, stocks);

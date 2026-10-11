@@ -1039,6 +1039,90 @@ class SeckillTerminalOperationKeyMySqlIT {
     }
   }
 
+  @Test
+  void terminalGetAndActualOrderFallbackCannotBorrowUnprovenAcceptance() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("CONFIRMED", "RELEASED"))
+      for (String variant : badTransitionSources())
+        assertions.add(
+            () -> {
+              reset();
+              seedSettlement(
+                  state, ORDER_NO + ("CONFIRMED".equals(state) ? ":CONFIRM" : ":ROLLBACK"));
+              corruptTransitionSource(variant);
+              var before = facts();
+              tracked.checking = true;
+              var result = read();
+              assertAll(
+                  () -> assertEquals("UNKNOWN", result.status, state + ":" + variant),
+                  () -> assertTrue(result.items.isEmpty()),
+                  () -> assertEquals(ORDER_NO, result.orderNo),
+                  () -> assertEquals(2, tracked.sql.size()));
+              assertOnlySelects();
+              for (String orderState : List.of("PAID", "CANCELLED")) {
+                tracked.sql.clear();
+                assertEquals("UNKNOWN", orderFallback(orderState));
+                assertEquals(2, tracked.sql.size());
+                assertOnlySelects();
+              }
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerReturnsUnknownEmptyForMissingTerminalSource() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var mvc =
+        MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("CONFIRMED", "RELEASED"))
+      assertions.add(
+          () -> {
+            reset();
+            seedSettlement(
+                state, ORDER_NO + ("CONFIRMED".equals(state) ? ":CONFIRM" : ":ROLLBACK"));
+            corruptTransitionSource("missing");
+            var before = facts();
+            tracked.checking = true;
+            mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+                .andExpect(jsonPath("$.data.items").isEmpty());
+            assertEquals(2, tracked.sql.size());
+            assertOnlySelects();
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void originalAcceptedStatusesKeepBothTerminalGetProtocols() throws Exception {
+    for (String state : List.of("CONFIRMED", "RELEASED"))
+      for (String acceptedState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED")) {
+        reset();
+        seedSettlement(state, ORDER_NO + ("CONFIRMED".equals(state) ? ":CONFIRM" : ":ROLLBACK"));
+        fixture.update("UPDATE seckill_reservation SET status=?", acceptedState);
+        var before = facts();
+        tracked.checking = true;
+        var result = read();
+        assertEquals("CONFIRMED".equals(state) ? "CONFIRMED" : "ROLLED_BACK", result.status);
+        assertEquals(1, result.items.size());
+        assertEquals(2, tracked.sql.size());
+        assertOnlySelects();
+        tracked.sql.clear();
+        assertEquals("SUCCEEDED", orderFallback("CONFIRMED".equals(state) ? "PAID" : "CANCELLED"));
+        assertEquals(2, tracked.sql.size());
+        assertOnlySelects();
+        assertEquals(before, facts());
+      }
+  }
+
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
   private static List<String> badKeys(String state) {
     String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";

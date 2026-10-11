@@ -71,6 +71,7 @@ class SeckillReleasedReceiptEvidenceTest {
       var mapper = mock(SeckillQuotaSettlementMapper.class);
       var stocks = mock(StockSqlMapper.class);
       when(mapper.findSettlement(ORDER_NO)).thenReturn(row("RELEASED", receipt));
+      when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
       when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row("RELEASED", receipt));
       var service = new SeckillQuotaSettlementService(mapper, stocks);
       var result = service.reservation(ORDER_NO);
@@ -120,6 +121,7 @@ class SeckillReleasedReceiptEvidenceTest {
             "unrecognized"))
       for (Long receipt : badReceipts()) {
         when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, receipt));
+        when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
         var result = service.reservation(ORDER_NO);
         assertEquals(
             "CONFIRMED".equals(state) ? "CONFIRMED" : "OPEN".equals(state) ? "RESERVED" : "UNKNOWN",

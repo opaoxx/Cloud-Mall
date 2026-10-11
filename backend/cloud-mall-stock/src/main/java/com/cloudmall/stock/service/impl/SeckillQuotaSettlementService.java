@@ -67,7 +67,11 @@ public class SeckillQuotaSettlementService {
     // 3. 五种结算状态核操作键，RELEASED 再核持久回执；缺证仍返回已观察候选，阻止普通库存fallback。
     if (!settlementOperationKeyMatches(settlement) || !releasedReceiptMatches(settlement))
       return unknownSettlementProof(orderNo);
-    // 4. 证据完整后仅映射查询状态，不执行任何结算或库存动作。
+    // 4. 仅已知终态再只读观察同tuple原受理来源；缺证不能报告完成或落普通库存。
+    if (("CONFIRMED".equals(settlement.status) || "RELEASED".equals(settlement.status))
+        && settlementMapper.findMatchingAcceptanceId(settlement) == null)
+      return unknownSettlementProof(orderNo);
+    // 5. 通过本次观察后仅映射查询状态；两个点读不代表原子来源证明。
     String status = externalStatus(settlement.status);
     return new StockReservationVO(
         orderNo,
@@ -77,7 +81,7 @@ public class SeckillQuotaSettlementService {
                 settlement.skuId, settlement.quantity, status)));
   }
 
-  /** 原身份、操作键或释放回执缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
+  /** 原身份、操作键、释放回执或终态受理来源缺证仍是已观察候选；空明细不回显别单SKU或允许fallback。 */
   private static StockReservationVO unknownSettlementProof(String orderNo) {
     return new StockReservationVO(orderNo, "UNKNOWN", List.of());
   }

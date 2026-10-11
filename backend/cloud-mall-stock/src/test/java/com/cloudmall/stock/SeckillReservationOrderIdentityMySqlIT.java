@@ -287,7 +287,7 @@ class SeckillReservationOrderIdentityMySqlIT {
       assertEquals(1, result.items.size());
       assertEquals(20L, result.items.get(0).skuId);
       assertEquals(1, result.items.get(0).quantity);
-      assertEquals(1, tracked.sql.size());
+      assertEquals(List.of("CONFIRMED", "RELEASED").contains(state) ? 2 : 1, tracked.sql.size());
       if (List.of("CONFIRMED", "RELEASED").contains(state))
         assertEquals("SUCCEEDED", orderFallback("RELEASED".equals(state) ? "CANCELLED" : "PAID"));
       assertOnlySelects();
@@ -370,6 +370,12 @@ class SeckillReservationOrderIdentityMySqlIT {
                 ? orderNo + ":ROLLBACK"
                 : null,
         "RELEASED".equals(status) ? 4L : null);
+    fixture.update(
+        "INSERT INTO"
+            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at)"
+            + " VALUES(1,?,10,20,8,?,'ACCEPTED','2026-10-09','2026-10-09')",
+        orderNo,
+        orderNo + ":idempotency");
   }
 
   /** 准备旧秒杀受理行；状态仅由实际Stock fallback读取。 */

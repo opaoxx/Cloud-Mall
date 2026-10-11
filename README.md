@@ -1622,3 +1622,11 @@ OPEN确认、OPEN待释放、blocked确认三个CAS在同一UPDATE中核原订�
 允许原ACCEPTED/PUBLISHED/ORDER_CREATED三态；缺失或错来源影响行数0，沿原UNKNOWN503，不改事实。
 原SET/参数、INSERT→FOR UPDATE事务顺序、终态noop及claim/Lua保持；无额外查询/DDL/API。
 关联读取可能改变InnoDB锁足迹；GET/noop来源、请求/订单完整因果及跨存储窗口仍待处理。
+
+
+### CM-18 秒杀终态查询的受理来源观察（16T46）
+
+CONFIRMED/RELEASED GET通过原身份/维度/操作键/回执门后，再按原快照只读匹配受理订单/活动/SKU/用户/幂等键，
+允许原三受理态；缺证返回UNKNOWN/空明细并阻断普通fallback，查询异常保留，不修事实。
+合法终态查询由1次增至2次，两个独立点读不构成RR/原子来源证明；其它GET、legacy、settle/noop及恢复保持。
+终态写noop来源、请求/订单完整因果、APPLIED及跨存储窗口仍待处理。

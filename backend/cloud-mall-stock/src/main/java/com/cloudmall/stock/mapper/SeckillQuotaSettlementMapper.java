@@ -46,6 +46,16 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
   @Select("SELECT * FROM seckill_quota_settlement WHERE order_no=#{orderNo}")
   SeckillQuotaSettlementPO findSettlement(@Param("orderNo") String orderNo);
 
+  /** 按已核验结算快照只读匹配原受理身份/维度，缺证返回null；不加锁或证明两次观察原子性。 */
+  @Select(
+      "SELECT accepted.id FROM seckill_reservation accepted WHERE"
+          + " accepted.order_no=#{settlement.orderNo} AND BINARY accepted.order_no=BINARY"
+          + " #{settlement.orderNo} AND BINARY accepted.status IN (BINARY 'ACCEPTED',BINARY"
+          + " 'PUBLISHED',BINARY 'ORDER_CREATED') AND accepted.activity_id=#{settlement.activityId}"
+          + " AND accepted.sku_id=#{settlement.skuId} AND accepted.user_id=#{settlement.userId}"
+          + " AND BINARY accepted.idempotency_key=BINARY #{settlement.idempotencyKey}")
+  Long findMatchingAcceptanceId(@Param("settlement") SeckillQuotaSettlementPO settlement);
+
   /** 从已锁定的 ACCEPTED 受理事实幂等补建 OPEN 结算事实。 */
   @Insert(
       "INSERT IGNORE INTO seckill_quota_settlement"

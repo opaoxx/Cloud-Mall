@@ -25,8 +25,8 @@
 
 ## 4. 验收计划
 
-- Unit：source 缺失、wrong status、CI order alias、数字维度/幂等不一致、查询异常；identity/dimensions/key/receipt 优先级保持，返回 UNKNOWN/items0 或传播异常。
-- 复用 T34 owned MySQL/Stock Controller/Order fallback：17 bad-source 变体 × CONFIRMED/RELEASED 均只读、facts 不变且 Order fallback 不 SUCCEEDED；三合法 source 状态 × 两终态保持边界，查询数由 1 增至 2。
+- Unit：source 缺失、原 snapshot 传递、查询异常传播、identity/dimensions/key/receipt 优先级和 OPEN/非终态路径；断言 UNKNOWN/items0 或异常原样传播，不虚构数据库 alias/tuple 能力。
+- 复用 T34 owned MySQL/Stock Controller/Order fallback：真实 SQL 验证 17 个 bad-source（wrong status、CI order、数字维度/幂等不一致）× CONFIRMED/RELEASED 均只读、facts 不变且 Order fallback 不 SUCCEEDED；三合法 source 状态 × 两终态保持边界，查询数由 1 增至 2。
 - 健康 fixture 补同源 accepted；source checksum、owned DB/资源 finally 清理。保留 T34/T45/receipt/普通库存/legacy 回归；不宣称全 source/Order/资金因果闭环。
 
 本切片只冻结终态 GET 的受理来源观察，不处理 transition/write gate、跨 SQL/Redis 窗口、TC/MQ 或 CM18 M1–M4；CM20/CM21 仍等待 CM18 整体完成。
