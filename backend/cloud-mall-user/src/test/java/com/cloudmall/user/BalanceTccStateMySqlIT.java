@@ -22,6 +22,7 @@ import com.cloudmall.user.service.impl.UserServiceImpl;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -57,6 +58,9 @@ class BalanceTccStateMySqlIT {
   /** 原库只用于读取表结构和创建测试库，不执行资金写入。 */
   private static JdbcTemplate source;
 
+  /** 原库完整表清单/checksum，用于新增缺证验收的无副作用核验。 */
+  private static List<Map<String, Object>> sourceFingerprint;
+
   /** 由测试生成并严格校验的临时库名。 */
   private static String testDatabase;
 
@@ -84,6 +88,7 @@ class BalanceTccStateMySqlIT {
     String username = System.getProperty("cloudmall.mysql.test.username", "root");
     String password = System.getProperty("cloudmall.mysql.test.password", "root");
     source = new JdbcTemplate(new DriverManagerDataSource(sourceUrl, username, password));
+    sourceFingerprint = originalFingerprint();
     testDatabase = "cm14_tcc_it_" + UUID.randomUUID().toString().replace("-", "");
     source.execute(
         "CREATE DATABASE " + testDatabase + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
@@ -109,7 +114,19 @@ class BalanceTccStateMySqlIT {
     if (source != null
         && testDatabase != null
         && testDatabase.matches("cm14_tcc_it_[0-9a-f]{32}")) {
-      source.execute("DROP DATABASE IF EXISTS " + testDatabase);
+      try {
+        assertEquals(sourceFingerprint, originalFingerprint());
+        System.out.println("CM16T18 original User tables/checksums unchanged");
+      } finally {
+        source.execute("DROP DATABASE IF EXISTS " + testDatabase);
+        assertEquals(
+            0,
+            source.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?",
+                Integer.class,
+                testDatabase));
+        System.out.println("CM16T18 fixture dropped: " + testDatabase);
+      }
     }
   }
 
@@ -548,6 +565,72 @@ class BalanceTccStateMySqlIT {
     assertEquals(
         "TRYING", fixture.queryForObject("SELECT state FROM balance_tcc_debit", String.class));
     assertEquals(0, ledgerCount());
+  }
+
+  /** 缺原金额在重放/清算时返回既有409，所有资金字段/状态/时间不变。 */
+  @Test
+  void nullPersistedAmountsNeverReachFundsWritesOrUnexpected500() {
+    List<String> tables = List.of("balance_debit_attempt", "balance_tcc_debit", "balance_ledger");
+    for (String table : tables)
+      fixture.execute("ALTER TABLE " + table + " MODIFY amount DECIMAL(18,2) NULL");
+    try {
+      for (String table : tables) {
+        List<String> operations =
+            "balance_ledger".equals(table)
+                ? List.of("try", "confirm")
+                : List.of("try", "confirm", "cancel");
+        for (String operation : operations) {
+          BalanceTccDebitTryDTO original =
+              request("missing-" + table + "-" + operation, 7L, "10.00");
+          service.tryDebit(original);
+          if ("balance_ledger".equals(table)) service.confirmDebit(finalizeRequest(original));
+          fixture.update("UPDATE " + table + " SET amount=NULL WHERE pay_no=?", original.payNo);
+          var before = allFundsFacts();
+          BizException failure =
+              assertThrows(
+                  BizException.class,
+                  () -> {
+                    switch (operation) {
+                      case "try" -> service.tryDebit(original);
+                      case "confirm" -> service.confirmDebit(finalizeRequest(original));
+                      case "cancel" -> service.cancelDebit(finalizeRequest(original));
+                      default -> throw new AssertionError(operation);
+                    }
+                  });
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals(
+              "balance_debit_attempt".equals(table)
+                  ? "IDEMPOTENCY_CONFLICT"
+                  : "BALANCE_TCC_UNKNOWN",
+              failure.getCode());
+          assertEquals(before, allFundsFacts());
+        }
+      }
+    } finally {
+      for (String table : tables) fixture.update("DELETE FROM " + table);
+      fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0");
+      for (String table : tables)
+        fixture.execute("ALTER TABLE " + table + " MODIFY amount DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 只从owned库核完整资金四表，包含所有身份、金额、状态和时间。 */
+  private List<List<Map<String, Object>>> allFundsFacts() {
+    return List.of("mall_user", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger")
+        .stream()
+        .map(table -> fixture.queryForList("SELECT * FROM " + table + " ORDER BY id"))
+        .toList();
+  }
+
+  /** 原所有表仅校验checksum，不执行任何原资金写。 */
+  private static List<Map<String, Object>> originalFingerprint() {
+    List<Map<String, Object>> values =
+        new ArrayList<>(source.queryForList("SHOW TABLES FROM cloudmall_user"));
+    for (String table : source.queryForList("SHOW TABLES FROM cloudmall_user", String.class)) {
+      if (!table.matches("[A-Za-z0-9_]+")) throw new IllegalStateException("非法原表");
+      values.addAll(source.queryForList("CHECKSUM TABLE cloudmall_user." + table));
+    }
+    return values;
   }
 
   /** 按已批准脚本迁移独立库；同一物理连接保留 PREPARE 和会话变量。 */

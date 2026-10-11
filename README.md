@@ -688,6 +688,18 @@ T9已有接收保护与错误码保持，T12其他peer原接收标记异常按�
 隔离SQL验收使用owned单表验证实际可写事务、回滚与独立提交；原库只核checksum并清理owned，
 不启动应用、RM或固定端口，也不代表CM-18资金主项闭环。
 
+### CM-18 User资金入口缺失原金额保护（16T18）
+
+本地TCC资金入口在比较原归属、冻结及已确认DEBIT账本的金额前拒绝NULL：
+归属缺金额沿原`IDEMPOTENCY_CONFLICT`/409，冻结或账本缺金额沿原
+`BALANCE_TCC_UNKNOWN`/409，不再在重放/清算时产生空指针500。
+正常非null金额比较、请求校验、锁序、状态CAS和资金写步骤保持。
+
+只阻塞缺失原金额，不补零、不修历史、不猜资金终态，也不新增金额全规则或余额快照校验。
+真实资金验收复用owned事务库，验证坏事实后资金四表完整不变，并回归原23项金融/并发/
+初始化/迁移场景；原库仅核checksum。默认flags/RM/API/DDL不变，不启动真实TC或业务端口，
+不代表CM-18主项闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

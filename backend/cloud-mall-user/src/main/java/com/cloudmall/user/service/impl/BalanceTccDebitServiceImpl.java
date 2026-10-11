@@ -214,7 +214,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
       BalanceDebitAttemptPO attempt, BalanceTccDebitPO debit, BalanceTccDebitTryDTO request) {
     if (attempt == null || debit == null) throw unknown();
     validateAttempt(attempt, request);
-    if (!Objects.equals(debit.userId, request.userId)
+    if (debit.amount == null
+        || !Objects.equals(debit.userId, request.userId)
         || !Objects.equals(debit.payNo, request.payNo)
         || !Objects.equals(debit.orderNo, request.orderNo)
         || !Objects.equals(debit.operationKey, request.operationKey)
@@ -227,7 +228,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
 
   /** 原业务载荷和最终账本键不可因配置、重试或清算而改变。 */
   private void validateAttempt(BalanceDebitAttemptPO attempt, BalanceTccDebitTryDTO request) {
-    if (!"TCC".equals(attempt.mode)
+    if (attempt.amount == null
+        || !"TCC".equals(attempt.mode)
         || !Objects.equals(attempt.userId, request.userId)
         || !Objects.equals(attempt.payNo, request.payNo)
         || !Objects.equals(attempt.orderNo, request.orderNo)
@@ -249,6 +251,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   private void requireLedger(BalanceDebitAttemptPO attempt, BalanceTccDebitTryDTO request) {
     BalanceLedgerPO ledger = ledgerMapper.selectByOperationKey(attempt.ledgerKey);
     if (ledger == null
+        || ledger.amount == null
         || !"APPLIED".equals(ledger.state)
         || !"DEBIT".equals(ledger.operationType)
         || !Objects.equals(ledger.userId, request.userId)

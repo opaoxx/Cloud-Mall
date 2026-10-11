@@ -24,7 +24,7 @@ guards 必须位于对应 `compareTo` 之前；其他 non-null amount 比较、�
 
 - Unit：attempt/debit/confirmed ledger 分别 NULL，确认不再 NPE/500；既有 conflict/unknown code=409；正常金额回归。
 - Owned `BalanceTccStateMySqlIT` 随机库：仅 owned 演练三表 nullable amount，核对资金四表、余额、冻结、ledger、时间和 source checksum 完整不变，finally DROP；不启动 RM/TC/App/固定端口。
-- 保留原 21 项金融/幂等/并发/回滚场景、旧 User state/http/16T9–16T17 观察回归；旧 flags 关闭和读边界不变。
+- 保留原 23 项金融回归（21 项金融/幂等/并发/回滚 + 2 项初始化/迁移）、旧 User state/http/16T9–16T17 观察回归；旧 flags 关闭和读边界不变。
 
 ## 5. 交付边界
 
