@@ -7,12 +7,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean;
 import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.common.config.CommonWebConfiguration;
 import com.cloudmall.common.web.AuthInterceptor;
 import com.cloudmall.common.web.GlobalExceptionHandler;
 import com.cloudmall.pay.config.FeignAuthConfiguration;
 import com.cloudmall.pay.controller.PayTccOrderEvidenceController;
 import com.cloudmall.pay.domain.vo.PayTccOrderReconciliationVO;
-import com.cloudmall.pay.feign.OrderClient;
+import com.cloudmall.pay.feign.OrderBasicEvidenceClient;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
@@ -54,6 +55,8 @@ import org.junit.jupiter.api.Test;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.cloud.openfeign.support.SpringMvcContract;
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -143,6 +146,9 @@ class PayTccOrderEvidenceMySqlIT {
 
   /** 模拟HTTP503而不调用Order生产查询。 */
   private static volatile boolean remoteUnavailable;
+
+  /** 仅测试wire上的原生token变异，不改变Order原表或Controller。 */
+  private static volatile String responseMutation;
 
   /** 真实线上Order身份头，检验全局Feign拦截器不会污染持久锚点。 */
   private static final AtomicReference<List<String>> receivedCallerIds = new AtomicReference<>();
@@ -276,8 +282,11 @@ class PayTccOrderEvidenceMySqlIT {
             .newInstance();
     ReflectionTestUtils.setField(controller, "orderSqlMapper", sqlMapper);
     ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    Jackson2ObjectMapperBuilder moneyBuilder = new Jackson2ObjectMapperBuilder();
+    new CommonWebConfiguration().moneyAsString().customize(moneyBuilder);
     orderMvc =
         MockMvcBuilders.standaloneSetup(controller)
+            .setMessageConverters(new MappingJackson2HttpMessageConverter(moneyBuilder.build()))
             .addInterceptors(new AuthInterceptor())
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
@@ -320,6 +329,23 @@ class PayTccOrderEvidenceMySqlIT {
                   .forEach((name, values) -> request.header(name, values.toArray()));
               var result = orderMvc.perform(request).andReturn().getResponse();
               byte[] body = result.getContentAsByteArray();
+              if (result.getStatus() == 200 && responseMutation != null) {
+                ObjectMapper mutationMapper = new ObjectMapper();
+                var envelope = mutationMapper.readTree(body);
+                var observed =
+                    (com.fasterxml.jackson.databind.node.ObjectNode) envelope.get("data");
+                switch (responseMutation) {
+                  case "textId" -> observed.put("userId", "7");
+                  case "floatId" -> observed.put("userId", 7.9);
+                  case "numberMoney" ->
+                      observed.put("payAmount", new java.math.BigDecimal("10.00"));
+                  case "moneyScale" -> observed.put("payAmount", "10.001");
+                  case "statusType" -> observed.put("status", 1);
+                  case "validTail" -> observed.put("payAmount", "10.0000");
+                  default -> throw new AssertionError(responseMutation);
+                }
+                body = mutationMapper.writeValueAsBytes(envelope);
+              }
               exchange.getResponseHeaders().add("Content-Type", "application/json");
               exchange.sendResponseHeaders(result.getStatus(), body.length);
               exchange.getResponseBody().write(body);
@@ -336,7 +362,7 @@ class PayTccOrderEvidenceMySqlIT {
         new ObjectMapper()
             .disable(
                 com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-    OrderClient http =
+    OrderBasicEvidenceClient http =
         Feign.builder()
             .contract(new SpringMvcContract())
             .requestInterceptor(new FeignAuthConfiguration().authHeaders())
@@ -349,12 +375,14 @@ class PayTccOrderEvidenceMySqlIT {
                 })
             .retryer(feign.Retryer.NEVER_RETRY)
             .options(new feign.Request.Options(3000, 5000))
-            .target(OrderClient.class, "http://127.0.0.1:" + server.getAddress().getPort());
-    OrderClient onlyGet =
-        (OrderClient)
+            .target(
+                OrderBasicEvidenceClient.class,
+                "http://127.0.0.1:" + server.getAddress().getPort());
+    OrderBasicEvidenceClient onlyGet =
+        (OrderBasicEvidenceClient)
             Proxy.newProxyInstance(
-                OrderClient.class.getClassLoader(),
-                new Class<?>[] {OrderClient.class},
+                OrderBasicEvidenceClient.class.getClassLoader(),
+                new Class<?>[] {OrderBasicEvidenceClient.class},
                 (proxy, method, arguments) -> {
                   assertEquals("get", method.getName());
                   assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
@@ -377,6 +405,7 @@ class PayTccOrderEvidenceMySqlIT {
     tracked.checking = false;
     orderTracked.checking = false;
     remoteUnavailable = false;
+    responseMutation = null;
     afterOrderRead.set(null);
     transportAssertion.set(null);
     receivedCallerIds.set(null);
@@ -409,6 +438,37 @@ class PayTccOrderEvidenceMySqlIT {
     System.out.println(
         "CM16T3 original Pay/Order checksums unchanged; owned databases, core temp file and HTTP"
             + " removed");
+  }
+
+  @Test
+  void actualFeignNativeProofRejectsCoercibleWireTokensWithoutChangingSources() {
+    for (String mutation :
+        List.of("textId", "floatId", "numberMoney", "moneyScale", "statusType", "validTail")) {
+      responseMutation = mutation;
+      var payBefore = facts();
+      var orderBefore = orderFacts();
+      tracked.reset();
+      orderTracked.reset();
+      getRequests.set(0);
+      enableChecks();
+      var report = inspectOrder();
+      assertEquals(
+          "validTail".equals(mutation) ? "BLOCKED_REMAINING_EVIDENCE" : "ORDER_EVIDENCE_INCOMPLETE",
+          report.classification,
+          mutation);
+      assertEquals("validTail".equals(mutation), report.orderEvidence.identityMatched());
+      if (List.of("textId", "floatId").contains(mutation))
+        assertNull(report.orderEvidence.userIdSha256());
+      if (List.of("numberMoney", "moneyScale").contains(mutation))
+        assertNull(report.orderEvidence.payAmountSha256());
+      assertEquals(1, getRequests.get());
+      assertEquals(12, tracked.statements.size());
+      assertEquals(2, tracked.connections);
+      assertEquals(2, orderTracked.statements.size());
+      assertEquals(2, orderTracked.connections);
+      assertFalse(report.automaticActionsAllowed);
+      assertUnchanged(payBefore, orderBefore);
+    }
   }
 
   @Test

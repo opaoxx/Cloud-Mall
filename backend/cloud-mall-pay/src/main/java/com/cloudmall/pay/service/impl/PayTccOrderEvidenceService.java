@@ -3,11 +3,13 @@ package com.cloudmall.pay.service.impl;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.domain.dto.OrderBasicEvidenceDTO;
 import com.cloudmall.pay.domain.dto.PayTccEvidenceAnchorDTO;
 import com.cloudmall.pay.domain.dto.PayTccEvidenceCaptureDTO;
 import com.cloudmall.pay.domain.vo.PayTccOrderEvidenceVO;
 import com.cloudmall.pay.domain.vo.PayTccOrderReconciliationVO;
-import com.cloudmall.pay.feign.OrderClient;
+import com.cloudmall.pay.feign.OrderBasicEvidenceClient;
+import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -30,8 +32,8 @@ public class PayTccOrderEvidenceService {
   /** 独立RR快照代理，不使用恢复Store。 */
   private final PayTccReconciliationReadService reader;
 
-  /** 只调用订单get GET的既有客户端。 */
-  private final OrderClient orders;
+  /** 仅get GET且保原生token的取证客户端，不使用业务OrderClient。 */
+  private final OrderBasicEvidenceClient orders;
 
   /** 本切片独立默认关闭开关。 */
   private final boolean enabled;
@@ -44,7 +46,7 @@ public class PayTccOrderEvidenceService {
   public PayTccOrderEvidenceService(
       PayTccReconciliationService gate,
       PayTccReconciliationReadService reader,
-      OrderClient orders,
+      OrderBasicEvidenceClient orders,
       @Value("${cloudmall.pay.tcc-order-evidence.enabled:false}") boolean enabled) {
     this.gate = gate;
     this.reader = reader;
@@ -70,7 +72,7 @@ public class PayTccOrderEvidenceService {
     }
     // 2. 第一段RR事务已经结束，原始查询参数只来自可信Pay锚点。
     gate.validateForRead(payNo, caller, token);
-    ApiResponse<OrderClient.OrderView> response = null;
+    ApiResponse<OrderBasicEvidenceDTO> response = null;
     String failure = null;
     try {
       response = queryOrderWithoutCallerContext(anchor);
@@ -104,7 +106,7 @@ public class PayTccOrderEvidenceService {
   }
 
   /** 仅在此GET窗口隔离请求用户上下文，防止全局Feign拦截器追加身份；finally完整恢复。 */
-  private ApiResponse<OrderClient.OrderView> queryOrderWithoutCallerContext(
+  private ApiResponse<OrderBasicEvidenceDTO> queryOrderWithoutCallerContext(
       PayTccEvidenceAnchorDTO anchor) {
     Long originalUserId = AuthContext.userId();
     String originalRole = AuthContext.role();
@@ -130,17 +132,17 @@ public class PayTccOrderEvidenceService {
 
   /** 只核对订单主行基本事实，不把订单状态解释成资金或库存终态。 */
   private static PayTccOrderReconciliationVO verify(
-      PayTccEvidenceCaptureDTO capture, OrderClient.OrderView observed) {
-    if (observed.orderNo() == null
-        || observed.userId() == null
-        || observed.payAmount() == null
-        || observed.status() == null
-        || !ORDER_STATES.contains(observed.status()))
+      PayTccEvidenceCaptureDTO capture, OrderBasicEvidenceDTO observed) {
+    if (text(observed.orderNo) == null
+        || userId(observed.userId) == null
+        || money(observed.payAmount) == null
+        || text(observed.status) == null
+        || !ORDER_STATES.contains(text(observed.status)))
       return report(capture, "ORDER_EVIDENCE_INCOMPLETE", "ORDER_BASIC_FIELDS_MISSING", observed);
     PayTccEvidenceAnchorDTO anchor = capture.trustedAnchor();
-    if (!Objects.equals(anchor.orderNo(), observed.orderNo())
-        || !Objects.equals(anchor.userId(), observed.userId())
-        || new BigDecimal(anchor.amountString()).compareTo(observed.payAmount()) != 0)
+    if (!Objects.equals(anchor.orderNo(), text(observed.orderNo))
+        || !Objects.equals(anchor.userId(), userId(observed.userId))
+        || new BigDecimal(anchor.amountString()).compareTo(money(observed.payAmount)) != 0)
       return report(capture, "ORDER_EVIDENCE_CONFLICT", "ORDER_TUPLE_CONFLICT", observed);
     return new PayTccOrderReconciliationVO(
         "BLOCKED_REMAINING_EVIDENCE",
@@ -154,7 +156,7 @@ public class PayTccOrderEvidenceService {
       PayTccEvidenceCaptureDTO capture,
       String classification,
       String reason,
-      OrderClient.OrderView observed) {
+      OrderBasicEvidenceDTO observed) {
     return new PayTccOrderReconciliationVO(
         classification,
         List.of(reason),
@@ -164,20 +166,51 @@ public class PayTccOrderEvidenceService {
 
   /** 只输出白名单状态和基本事实指纹；错单响应身份也不原样回显。 */
   private static PayTccOrderEvidenceVO summary(
-      boolean attempted, String status, OrderClient.OrderView observed, boolean matched) {
+      boolean attempted, String status, OrderBasicEvidenceDTO observed, boolean matched) {
     return new PayTccOrderEvidenceVO(
         attempted,
         status,
-        observed != null && ORDER_STATES.contains(Objects.toString(observed.status(), ""))
-            ? observed.status()
+        observed != null && ORDER_STATES.contains(Objects.toString(text(observed.status), ""))
+            ? text(observed.status)
             : null,
         matched,
-        hash(observed == null ? null : observed.orderNo()),
-        hash(observed == null || observed.userId() == null ? null : observed.userId().toString()),
+        hash(observed == null ? null : text(observed.orderNo)),
         hash(
-            observed == null || observed.payAmount() == null
+            observed == null || userId(observed.userId) == null
                 ? null
-                : observed.payAmount().toString()));
+                : userId(observed.userId).toString()),
+        hash(
+            observed == null || money(observed.payAmount) == null
+                ? null
+                : money(observed.payAmount).toString()));
+  }
+
+  /** 仅原生正整数且可无损表示long；不接受text/float/boolean。 */
+  private static Long userId(JsonNode value) {
+    return value != null
+            && value.isIntegralNumber()
+            && value.canConvertToLong()
+            && value.longValue() > 0
+        ? value.longValue()
+        : null;
+  }
+
+  /** 原生有限十进制文本；尾零无损兼容，不接受number/指数/空白或截断精度。 */
+  private static BigDecimal money(JsonNode value) {
+    String raw = text(value);
+    if (raw == null || !raw.matches("-?(0|[1-9][0-9]*)([.][0-9]+)?")) return null;
+    BigDecimal amount = new BigDecimal(raw);
+    return amount.stripTrailingZeros().scale() <= 2
+            && amount.abs().compareTo(new BigDecimal("9999999999999999.99")) <= 0
+        ? amount
+        : null;
+  }
+
+  /** 原字段长度有界且必须原生text，不产生假身份/状态/金额指纹。 */
+  private static String text(JsonNode value) {
+    return value != null && value.isTextual() && value.textValue().length() <= 128
+        ? value.textValue()
+        : null;
   }
 
   /** 指纹仅用于比较，缺值保持null。 */

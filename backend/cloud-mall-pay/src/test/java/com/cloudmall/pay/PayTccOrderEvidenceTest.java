@@ -7,12 +7,14 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.domain.dto.OrderBasicEvidenceDTO;
 import com.cloudmall.pay.domain.dto.PayTccEvidenceAnchorDTO;
 import com.cloudmall.pay.domain.dto.PayTccEvidenceCaptureDTO;
 import com.cloudmall.pay.domain.vo.*;
-import com.cloudmall.pay.feign.OrderClient;
+import com.cloudmall.pay.feign.OrderBasicEvidenceClient;
 import com.cloudmall.pay.service.impl.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.seata.core.context.RootContext;
 import java.math.BigDecimal;
 import java.util.List;
@@ -23,6 +25,35 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /** Order基本事实分类、安全门及事务外唯一GET验证，不读取User或库存镜像。 */
 class PayTccOrderEvidenceTest {
+  @Test
+  void nonNativeOrderIdentityAndMoneyTokensCannotBecomeMatched() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String[] tokens :
+        new String[][] {{"\"7\"", "\"10.00\""}, {"7.9", "\"10.00\""}, {"7", "10.00"}}) {
+      assertions.add(
+          () -> {
+            Fixture fixture = new Fixture();
+            fixture.observed =
+                new ObjectMapper()
+                    .readValue(
+                        "{\"orderNo\":\"202610order1\",\"status\":\"PAID\",\"userId\":"
+                            + tokens[0]
+                            + ",\"payAmount\":"
+                            + tokens[1]
+                            + "}",
+                        OrderBasicEvidenceDTO.class);
+            var report = fixture.inspect();
+            assertEquals(
+                "ORDER_EVIDENCE_INCOMPLETE",
+                report.classification,
+                "userId=" + tokens[0] + "; payAmount=" + tokens[1]);
+            assertFalse(report.orderEvidence.identityMatched());
+          });
+    }
+    assertAll(assertions);
+  }
+
   @Test
   void flagsAuthenticationSyntaxAndTransactionContextFailBeforeAnyIo() {
     Fixture fixture = new Fixture();
@@ -102,9 +133,7 @@ class PayTccOrderEvidenceTest {
       throws Exception {
     for (String state : List.of("PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED")) {
       Fixture fixture = new Fixture();
-      fixture.observed =
-          new OrderClient.OrderView(
-              "202610order1", state, new BigDecimal("10.0000"), 7L, "CONFLICT");
+      fixture.observed = order("202610order1", state, new BigDecimal("10.0000"), 7L, "CONFLICT");
       var report = fixture.inspect();
       assertEquals("BLOCKED_REMAINING_EVIDENCE", report.classification);
       assertEquals("PAY_ORDER_BASIC_ONLY", report.scope);
@@ -129,11 +158,11 @@ class PayTccOrderEvidenceTest {
 
   @Test
   void wrongOrderUserAndNumericAmountAreConflictsWithoutEchoingWrongIdentity() throws Exception {
-    for (OrderClient.OrderView observed :
+    for (OrderBasicEvidenceDTO observed :
         List.of(
-            new OrderClient.OrderView("other-private-order", "PAID", BigDecimal.TEN, 7L),
-            new OrderClient.OrderView("202610order1", "PAID", BigDecimal.TEN, 8L),
-            new OrderClient.OrderView("202610order1", "PAID", new BigDecimal("10.01"), 7L))) {
+            order("other-private-order", "PAID", BigDecimal.TEN, 7L),
+            order("202610order1", "PAID", BigDecimal.TEN, 8L),
+            order("202610order1", "PAID", new BigDecimal("10.01"), 7L))) {
       Fixture fixture = new Fixture();
       fixture.observed = observed;
       var report = fixture.inspect();
@@ -145,13 +174,13 @@ class PayTccOrderEvidenceTest {
 
   @Test
   void missingBasicFieldsAndUnknownStateRemainIncompleteAndDoNotExposeRawStatus() throws Exception {
-    for (OrderClient.OrderView observed :
+    for (OrderBasicEvidenceDTO observed :
         List.of(
-            new OrderClient.OrderView(null, "PAID", BigDecimal.TEN, 7L),
-            new OrderClient.OrderView("202610order1", "PAID", null, 7L),
-            new OrderClient.OrderView("202610order1", "PAID", BigDecimal.TEN, null),
-            new OrderClient.OrderView("202610order1", null, BigDecimal.TEN, 7L),
-            new OrderClient.OrderView("202610order1", "password=secret", BigDecimal.TEN, 7L))) {
+            order(null, "PAID", BigDecimal.TEN, 7L),
+            order("202610order1", "PAID", null, 7L),
+            order("202610order1", "PAID", BigDecimal.TEN, null),
+            order("202610order1", null, BigDecimal.TEN, 7L),
+            order("202610order1", "password=secret", BigDecimal.TEN, 7L))) {
       Fixture fixture = new Fixture();
       fixture.observed = observed;
       var report = fixture.inspect();
@@ -230,20 +259,137 @@ class PayTccOrderEvidenceTest {
     verifyNoInteractions(fixture.orders);
   }
 
+  @Test
+  void wrongNativeTypesFormatsAndBoundsNeverProduceIdentityProof() throws Exception {
+    for (String field : List.of("orderNo", "status", "userId", "payAmount")) {
+      for (String variant : List.of("null", "object", "array", "boolean")) {
+        Fixture fixture = new Fixture();
+        ObjectNode raw = validJson();
+        switch (variant) {
+          case "null" -> raw.putNull(field);
+          case "object" -> raw.putObject(field).put("private", "password=secret");
+          case "array" -> raw.putArray(field).add("password=secret");
+          case "boolean" -> raw.put(field, true);
+          default -> throw new AssertionError(variant);
+        }
+        fixture.observed = new ObjectMapper().treeToValue(raw, OrderBasicEvidenceDTO.class);
+        var report = fixture.inspect();
+        assertEquals("ORDER_EVIDENCE_INCOMPLETE", report.classification, field + variant);
+        assertFalse(report.orderEvidence.identityMatched());
+        assertFalse(new ObjectMapper().writeValueAsString(report).contains("secret"));
+        if ("orderNo".equals(field)) assertNull(report.orderEvidence.orderNoSha256());
+        if ("userId".equals(field)) assertNull(report.orderEvidence.userIdSha256());
+        if ("payAmount".equals(field)) assertNull(report.orderEvidence.payAmountSha256());
+      }
+    }
+    for (String rawId : List.of("7.0", "0", "-1", "9223372036854775808")) {
+      Fixture fixture = new Fixture();
+      ObjectNode raw = validJson();
+      raw.set("userId", new ObjectMapper().readTree(rawId));
+      fixture.observed = new ObjectMapper().treeToValue(raw, OrderBasicEvidenceDTO.class);
+      assertEquals("ORDER_EVIDENCE_INCOMPLETE", fixture.inspect().classification);
+      assertNull(fixture.inspect().orderEvidence.userIdSha256());
+    }
+  }
+
+  @Test
+  void nativeMoneyPreservesLosslessTrailingZerosAndBlocksInvalidRepresentation() throws Exception {
+    for (String amount : List.of("10", "10.0", "10.0000", "10." + "0".repeat(100))) {
+      Fixture fixture = new Fixture();
+      fixture.observed = order("202610order1", "PAID", new BigDecimal(amount), 7L);
+      assertEquals("BLOCKED_REMAINING_EVIDENCE", fixture.inspect().classification, amount);
+    }
+    for (String amount : List.of("0", "-10.00", "10.01")) {
+      Fixture fixture = new Fixture();
+      fixture.observed = order("202610order1", "PAID", new BigDecimal(amount), 7L);
+      assertEquals("ORDER_EVIDENCE_CONFLICT", fixture.inspect().classification, amount);
+    }
+    for (String amount :
+        List.of(
+            "10.001",
+            "1e1",
+            "+10",
+            " 10.00",
+            "10.00 ",
+            "010.00",
+            "NaN",
+            "10000000000000000.00",
+            "10." + "0".repeat(126))) {
+      Fixture fixture = new Fixture();
+      ObjectNode raw = validJson();
+      raw.put("payAmount", amount);
+      fixture.observed = new ObjectMapper().treeToValue(raw, OrderBasicEvidenceDTO.class);
+      assertEquals("ORDER_EVIDENCE_INCOMPLETE", fixture.inspect().classification, amount);
+      assertNull(fixture.inspect().orderEvidence.payAmountSha256());
+    }
+  }
+
+  @Test
+  void boundedNativeTextAndUnknownBodyFieldsCannotLeakIntoImmutableReport() throws Exception {
+    for (String field : List.of("orderNo", "status")) {
+      Fixture fixture = new Fixture();
+      ObjectNode raw = validJson();
+      raw.put(field, "x".repeat(129));
+      fixture.observed = new ObjectMapper().treeToValue(raw, OrderBasicEvidenceDTO.class);
+      assertEquals("ORDER_EVIDENCE_INCOMPLETE", fixture.inspect().classification);
+    }
+    Fixture fixture = new Fixture();
+    ObjectNode raw = validJson();
+    raw.put("privateExtra", "password=secret");
+    fixture.observed = new ObjectMapper().treeToValue(raw, OrderBasicEvidenceDTO.class);
+    var report = fixture.inspect();
+    assertFalse(new ObjectMapper().writeValueAsString(report).contains("secret"));
+    assertThrows(UnsupportedOperationException.class, () -> report.reasonCodes.add("private"));
+    fixture.observed.payAmount = new ObjectMapper().readTree("\"999.00\"");
+    assertEquals("MATCHED", report.orderEvidence.status());
+  }
+
+  /** 真实响应契约：金额文本、用户整数；仍可携带本范围忽略的库存字段。 */
+  private static OrderBasicEvidenceDTO order(
+      String orderNo, String state, BigDecimal amount, Long userId) {
+    return order(orderNo, state, amount, userId, null);
+  }
+
+  /** 库存状态仍仅为本基本范围忽略的原字段。 */
+  private static OrderBasicEvidenceDTO order(
+      String orderNo, String state, BigDecimal amount, Long userId, String ignoredStockAction) {
+    ObjectNode raw = new ObjectMapper().createObjectNode();
+    raw.put("orderNo", orderNo).put("status", state);
+    if (amount == null) raw.putNull("payAmount");
+    else raw.put("payAmount", amount.toPlainString());
+    if (userId == null) raw.putNull("userId");
+    else raw.put("userId", userId);
+    raw.put("stockActionStatus", ignoredStockAction);
+    try {
+      return new ObjectMapper().treeToValue(raw, OrderBasicEvidenceDTO.class);
+    } catch (Exception failure) {
+      throw new AssertionError(failure);
+    }
+  }
+
+  /** 独立原生JSON正例，不从Service实现推导预期。 */
+  private static ObjectNode validJson() {
+    return new ObjectMapper()
+        .createObjectNode()
+        .put("orderNo", "202610order1")
+        .put("status", "PAID")
+        .put("userId", 7)
+        .put("payAmount", "10.00");
+  }
+
   /** 原可信Pay锚点以及唯一Order GET替身。 */
   private static final class Fixture {
     /** 本地只读快照替身。 */
     final PayTccReconciliationReadService reader = mock(PayTccReconciliationReadService.class);
 
     /** Order GET替身，其他方法不得调用。 */
-    final OrderClient orders = mock(OrderClient.class);
+    final OrderBasicEvidenceClient orders = mock(OrderBasicEvidenceClient.class);
 
     /** 不可变原Pay快照。 */
     final PayTccEvidenceCaptureDTO capture;
 
     /** 本次远端响应。 */
-    OrderClient.OrderView observed =
-        new OrderClient.OrderView("202610order1", "PAID", BigDecimal.TEN, 7L, null);
+    OrderBasicEvidenceDTO observed = order("202610order1", "PAID", BigDecimal.TEN, 7L, null);
 
     Fixture() {
       var snapshot =

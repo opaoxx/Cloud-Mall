@@ -1475,3 +1475,13 @@ AuthContext隔离及双Pay RR本地变化优先；不依赖其它Pay诊断flag�
 退款数/合计与已核关联集合一致，取消/冻结无账本为空范围。partial、错/缺origin、冲突、超限及嵌套缺证
 不输出账户/关联或账本统计。范围`PAY_USER_PAYMENT_LEDGER_OBSERVED_ONLY`、其它pay未检、全账户因果未证明，
 最高`BLOCKED_REMAINING_EVIDENCE`，不补链、不补退、不改资金。统一证据包及CM18其它M1–M4仍待完成。
+
+
+### CM-18 Order基本证据原生字段保护（16T30）
+
+既有Pay `order-evidence`独立默认关闭入口改用GET-only `OrderBasicEvidenceClient`，保原JSON token，
+不改变业务`OrderClient`、远端公开详情API或全局Jackson规则。用户必须原生正整数long；订单号/状态
+必须原生文本；金额必须原生、有限十进制文本且无损18.2，拒绝字符串/小数ID和number金额的隐式强转。
+`10.0000`等尾零数值等值及四状态（含CANCELLED+PayCOMMITTED）仍可基本匹配；合法字段矛盾仍冲突。
+非法字段对应指纹null、最高剩余缺证，scope仍`PAY_ORDER_BASIC_ONLY`；双Pay RR/身份隔离/唯一GET保持。
+不扩充SKU/库存动作或资金终态证明，不新增写/自动动作，CM18其它M1–M4仍保留。
