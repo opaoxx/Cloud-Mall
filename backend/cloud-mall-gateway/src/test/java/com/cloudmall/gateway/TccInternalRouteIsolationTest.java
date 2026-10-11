@@ -21,10 +21,13 @@ class TccInternalRouteIsolationTest {
         List.of(
             "/api/internal/payments/pay1/tcc-reconciliation/user-terminal-frozen-ownership-evidence",
             "/api/internal/payments/pay1/tcc-reconciliation/user-linked-refund-evidence",
+            "/api/internal/payments/pay1/tcc-reconciliation/user-payment-ledger-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/%74cc-reconciliation/user-terminal-frozen-ownership-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/%74cc-reconciliation/user-linked-refund-evidence",
+            "/cloud-mall-pay/api/internal/payments/pay1/%74cc-reconciliation/user-payment-ledger-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation;mode=inspect/user-terminal-frozen-ownership-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation;mode=inspect/user-linked-refund-evidence",
+            "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation;mode=inspect/user-payment-ledger-evidence",
             "/api/internal/payments/pay1/tcc-reconciliation/user-frozen-ownership-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/%74cc-reconciliation/user-frozen-ownership-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation;mode=inspect/user-frozen-ownership-evidence",

@@ -135,7 +135,7 @@ public class PayTccUserLinkedRefundEvidenceService {
   }
 
   /** 先核原生范围/完整总额，再以明确完整集合上下文复用原账户门，不推断资金动作。 */
-  private static PayTccUserLinkedRefundReconciliationVO verify(
+  static PayTccUserLinkedRefundReconciliationVO verify(
       PayTccEvidenceCaptureDTO capture, UserLinkedRefundEvidenceDTO observed) {
     // 1. 只接受既有User有界原关联范围，源缺证或冲突不抬高。
     if (!"USER_LINKED_REFUNDS_OBSERVED_ONLY".equals(text(observed.scope))

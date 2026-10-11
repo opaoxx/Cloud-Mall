@@ -48,3 +48,6 @@ cloudmall.pay.tcc-cancel.interval-ms: 5000
 
 # CM18 16T28 只读关联退款集合消费，独立默认关闭。
 cloudmall.pay.tcc-user-linked-refund-evidence.enabled: false
+
+# CM18 16T29 同支付号原账本只读消费，独立默认关闭。
+cloudmall.pay.tcc-user-payment-ledger-evidence.enabled: false

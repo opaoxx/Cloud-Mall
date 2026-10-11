@@ -466,6 +466,24 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
   }
 
   @Test
+  void linkedOnlyScopeDoesNotInspectUnlinkedRefundForSamePayment() {
+    seedRefundRow(9002, "private-unlinked-refund", "10.00");
+    userFixture.update("UPDATE balance_ledger SET original_operation_key=NULL WHERE id=9002");
+    var payBefore = facts();
+    var userBefore = userFacts();
+    enableChecks();
+    var report = inspectUser();
+    assertEquals("BLOCKED_REMAINING_EVIDENCE", report.classification);
+    assertTrue(report.unlinkedLedgerRowsNotInspected);
+    assertFalse(report.automaticActionsAllowed);
+    assertEquals(0, report.linkedRefundEvidence.observedCount());
+    assertEquals("0.00", report.linkedRefundEvidence.validatedTotalAmount());
+    assertEquals(12, tracked.statements.size());
+    assertEquals(10, userTracked.statements.size());
+    assertUnchanged(payBefore, userBefore);
+  }
+
+  @Test
   void fixedAndCustomKeysFormOneCompleteRefundSet() {
     seedUser("CONFIRMED");
     seedRefundRow(9001, "refund:pay1", "5.00");

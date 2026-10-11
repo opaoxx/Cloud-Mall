@@ -1463,3 +1463,15 @@ CloudMall 是个人学习型项目，不承诺生产级高可用、生产安全�
 范围`PAY_USER_LINKED_REFUNDS_OBSERVED_ONLY`，明确未关联账本未检查、全账户因果未证明、禁止自动动作。
 最高`BLOCKED_REMAINING_EVIDENCE`；source partial/缺证/冲突/超限不输出账户或新集合统计。
 不补退、不补链、不改资金事实。T25同pay未关联退款、全历史/统一证据包及M2–M4继续保留。
+
+
+### CM-18 Pay消费User同支付号账本（16T29）
+
+独立开关`cloudmall.pay.tcc-user-payment-ledger-evidence.enabled=false`默认关闭，入口为
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/user-payment-ledger-evidence`。
+消费User16T25 `payment-ledger-evidence`，复用T28完整关联退款/原账户证明，保可信anchor、事务外GET、
+AuthContext隔离及双Pay RR本地变化优先；不依赖其它Pay诊断flag或远端UserT11入口flag。
+原生scope/标志/limit100、三计数、退款合计与向量均核验；同pay范围包含原DEBIT，CONFIRMED恰好一条，
+退款数/合计与已核关联集合一致，取消/冻结无账本为空范围。partial、错/缺origin、冲突、超限及嵌套缺证
+不输出账户/关联或账本统计。范围`PAY_USER_PAYMENT_LEDGER_OBSERVED_ONLY`、其它pay未检、全账户因果未证明，
+最高`BLOCKED_REMAINING_EVIDENCE`，不补链、不补退、不改资金。统一证据包及CM18其它M1–M4仍待完成。
