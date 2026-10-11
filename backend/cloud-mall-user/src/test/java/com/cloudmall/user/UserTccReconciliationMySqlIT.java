@@ -681,7 +681,7 @@ class UserTccReconciliationMySqlIT {
         for (String raw : java.util.Arrays.asList(null, "-1", "100.001", "10000000000000000.00")) {
           seed("CONFIRMED");
           fixture.update("UPDATE " + field[0] + " SET " + field[1] + "=? WHERE id=1", raw);
-          assertBalanceConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute);
+          assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 4, 5);
         }
       }
       for (String mutation :
@@ -691,7 +691,7 @@ class UserTccReconciliationMySqlIT {
               "UPDATE balance_ledger SET balance_before=200,balance_after=190 WHERE id=1")) {
         seed("CONFIRMED");
         fixture.update(mutation);
-        assertBalanceConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute);
+        assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 4, 5);
       }
       seed("CONFIRMED");
       fixture.update(
@@ -739,9 +739,131 @@ class UserTccReconciliationMySqlIT {
     }
   }
 
+  /** 真实0900 CI别名及owned PAD SPACE遗留候选不能充当原Fence。 */
+  @Test
+  void observedFenceSourceAliasesAreConflictWithoutChangingExpirySemantics() throws Exception {
+    var receives = session.getMapper(UserTccReceiveMapper.class);
+    var attempts = session.getMapper(BalanceDebitAttemptMapper.class);
+    var debits = session.getMapper(BalanceTccDebitMapper.class);
+    var ledgers = session.getMapper(BalanceLedgerMapper.class);
+    var fences = session.getMapper(TccFenceLogMapper.class);
+    var users = session.getMapper(UserMapper.class);
+    var queryTarget = new UserTccStateQuery(receives, attempts, debits, ledgers, fences);
+    var queryProxy = readProxy(queryTarget);
+    var query = (UserTccStateQuery) queryProxy.getProxy();
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var baseReader =
+        (UserTccReconciliationReadService)
+            readProxy(
+                    new UserTccReconciliationReadService(
+                        receives, attempts, debits, ledgers, fences, users))
+                .getProxy();
+    var baseService = new UserTccReconciliationService(baseReader, true, "ops-secret");
+    var linkedReader =
+        (UserLinkedRefundEvidenceReadService)
+            readProxy(new UserLinkedRefundEvidenceReadService(baseReader, ledgers)).getProxy();
+    var frozenReader =
+        (UserFrozenOwnershipEvidenceReadService)
+            readProxy(
+                    new UserFrozenOwnershipEvidenceReadService(
+                        baseReader, receives, attempts, debits, ledgers, fences))
+                .getProxy();
+    MockMvc mvc =
+        MockMvcBuilders.standaloneSetup(
+                new UserTccController(bridge),
+                new UserTccReconciliationController(baseService),
+                new UserLinkedRefundEvidenceController(
+                    new UserLinkedRefundEvidenceService(baseService, linkedReader, true)),
+                new UserFrozenOwnershipEvidenceController(
+                    new UserFrozenOwnershipEvidenceService(baseService, frozenReader, true)))
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    String stateRoute = "/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1";
+    String diagnosticRoute = "/api/internal/users/7/balance/tcc-reconciliation/pay1";
+    String originalCollation =
+        (String)
+            fixture
+                .queryForMap("SHOW FULL COLUMNS FROM tcc_fence_log WHERE Field='xid'")
+                .get("Collation");
+    assertEquals("utf8mb4_0900_ai_ci", originalCollation);
+    try {
+      for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+        for (String alias : List.of("PRIVATE-TC:8091:ORIGINAL", "prívate-tc:8091:original")) {
+          seed(state);
+          fixture.update("UPDATE tcc_fence_log SET xid=?", alias);
+          assertEquals(
+              1,
+              fixture.queryForObject(
+                  "SELECT COUNT(*) FROM tcc_fence_log WHERE xid=? AND branch_id=11",
+                  Integer.class,
+                  "private-tc:8091:original"));
+          assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 5, 6);
+        }
+      }
+      tracked.checking = false;
+      fixture.execute(
+          "ALTER TABLE tcc_fence_log MODIFY xid VARCHAR(128) CHARACTER SET utf8mb4 COLLATE"
+              + " utf8mb4_unicode_ci NOT NULL");
+      for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+        seed(state);
+        fixture.update("UPDATE tcc_fence_log SET xid='private-tc:8091:original '");
+        assertEquals(
+            1,
+            fixture.queryForObject(
+                "SELECT COUNT(*) FROM tcc_fence_log WHERE xid=? AND branch_id=11",
+                Integer.class,
+                "private-tc:8091:original"));
+        assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 5, 6);
+      }
+      tracked.checking = false;
+      fixture.execute(
+          "ALTER TABLE tcc_fence_log MODIFY xid VARCHAR(128) CHARACTER SET utf8mb4 COLLATE"
+              + " utf8mb4_0900_ai_ci NOT NULL");
+      for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+        seed(state);
+        fixture.update("DELETE FROM tcc_fence_log");
+        var before = facts();
+        tracked.reset();
+        tracked.checking = true;
+        var request =
+            get(stateRoute)
+                .header("X-User-Id", "7")
+                .header("X-Internal-Service", "cloud-mall-pay")
+                .header("X-Internal-Callback-Token", "ops-secret")
+                .param("xid", "private-tc:8091:original");
+        if ("TRYING".equals(state))
+          mvc.perform(request)
+              .andExpect(status().isConflict())
+              .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+        else
+          mvc.perform(request)
+              .andExpect(status().isOk())
+              .andExpect(jsonPath("$.data.state").value(state));
+        assertEquals(1, tracked.connections);
+        assertEquals(5, tracked.statements.size());
+        assertEquals(before, facts());
+      }
+      verifyNoInteractions(resource, receiveStore);
+    } finally {
+      tracked.checking = false;
+      seed("CONFIRMED");
+      fixture.execute(
+          "ALTER TABLE tcc_fence_log MODIFY xid VARCHAR(128) CHARACTER SET utf8mb4 COLLATE"
+              + " utf8mb4_0900_ai_ci NOT NULL");
+      tracked.reset();
+    }
+  }
+
   /** 坏历史沿原409与诊断no-store传播，单只读RR且全部行/键/时间不变。 */
-  private static void assertBalanceConflictThroughFourRoutes(
-      MockMvc mvc, String stateRoute, String diagnosticRoute) throws Exception {
+  private static void assertPersistedConflictThroughFourRoutes(
+      MockMvc mvc,
+      String stateRoute,
+      String diagnosticRoute,
+      int expectedStateSelects,
+      int expectedDiagnosticSelects)
+      throws Exception {
     var before = facts();
     tracked.reset();
     tracked.checking = true;
@@ -754,7 +876,7 @@ class UserTccReconciliationMySqlIT {
         .andExpect(status().isConflict())
         .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
     assertEquals(1, tracked.connections);
-    assertTrue(tracked.statements.size() <= 5);
+    assertEquals(expectedStateSelects, tracked.statements.size());
     assertEquals(before, facts());
     for (String suffix : List.of("", "/refund-evidence", "/frozen-ownership-evidence")) {
       tracked.reset();
@@ -766,7 +888,7 @@ class UserTccReconciliationMySqlIT {
           .andExpect(header().string("Cache-Control", "no-store"))
           .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
       assertEquals(1, tracked.connections);
-      assertTrue(tracked.statements.size() <= 5);
+      assertEquals(expectedDiagnosticSelects, tracked.statements.size());
       assertEquals(before, facts());
     }
   }

@@ -135,7 +135,9 @@ public class UserTccStateQuery {
     TccFenceLogPO fence = fences.findByBranch(xid, attempt.branchId);
     if (fence != null)
       require(
-          BalanceTccDebitLocalResource.ACTION_NAME.equals(fence.actionName)
+          Objects.equals(fence.xid, xid)
+              && Objects.equals(fence.branchId, attempt.branchId)
+              && BalanceTccDebitLocalResource.ACTION_NAME.equals(fence.actionName)
               && expectedFence.equals(fence.status));
     else require(!"TRYING".equals(attempt.state));
     view.state = attempt.state;

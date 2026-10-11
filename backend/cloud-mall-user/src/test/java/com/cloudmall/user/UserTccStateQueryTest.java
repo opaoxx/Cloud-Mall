@@ -20,6 +20,7 @@ import com.cloudmall.user.mapper.UserTccReceiveMapper;
 import com.cloudmall.user.service.BalanceTccDebitLocalResource;
 import com.cloudmall.user.service.impl.UserTccStateQuery;
 import java.math.BigDecimal;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -64,7 +65,7 @@ class UserTccStateQueryTest {
     UserTccReceivePO receive = receive(11L);
     BalanceDebitAttemptPO attempt = attempt("TRYING", 11L);
     BalanceTccDebitPO debit = debit("TRYING", 11L);
-    TccFenceLogPO fence = fence(1);
+    TccFenceLogPO fence = fence(1, 11L);
     when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
     when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt);
     when(debits.selectByPayNo(receive.payNo)).thenReturn(debit);
@@ -89,7 +90,7 @@ class UserTccStateQueryTest {
     when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt);
     when(debits.selectByPayNo(receive.payNo)).thenReturn(debit);
     when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(ledger);
-    when(fences.findByBranch(receive.xid, 12L)).thenReturn(fence(2));
+    when(fences.findByBranch(receive.xid, 12L)).thenReturn(fence(2, 12L));
 
     UserTccStateVO state = query.read(7L, receive.operationKey, receive.xid);
 
@@ -106,7 +107,7 @@ class UserTccStateQueryTest {
     when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt);
     when(debits.selectByPayNo(receive.payNo)).thenReturn(null);
     when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(null);
-    when(fences.findByBranch(receive.xid, 13L)).thenReturn(fence(4));
+    when(fences.findByBranch(receive.xid, 13L)).thenReturn(fence(4, 13L));
 
     UserTccStateVO state = query.read(7L, receive.operationKey, receive.xid);
 
@@ -141,6 +142,75 @@ class UserTccStateQueryTest {
     when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(ledger);
 
     assertThrows(BizException.class, () -> query.read(7L, receive.operationKey, receive.xid));
+  }
+
+  /** CI候选原XID必须精确匹配，正确action/status不能替代原身份。 */
+  @Test
+  void observedFenceXidAliasesOrMissingIdentityCannotProveKnownState() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+      for (String xid :
+          new String[] {null, "XID-query-1", "xid-query-1 ", "xíd-query-1", "other"}) {
+        TccFenceLogPO observed = installKnownState(state);
+        observed.xid = xid;
+        BizException failure =
+            assertThrows(
+                BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+      }
+    }
+  }
+
+  /** 返回原Fence的branch不能缺失或指向其他分支。 */
+  @Test
+  void observedFenceBranchIdentityMustMatchOriginalAttempt() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+      for (Long branchId : new Long[] {null, 0L, 13L}) {
+        TccFenceLogPO observed = installKnownState(state);
+        observed.branchId = branchId;
+        BizException failure =
+            assertThrows(
+                BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+      }
+    }
+  }
+
+  /** 缺行保既有TTL：TRYING拒绝，已终态允许；空取消的Fence仍按原分支核验。 */
+  @Test
+  void originalFenceAndTerminalExpiryRemainValidButTryingNeedsFence() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
+      installKnownState(state);
+      assertEquals(state, query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+      when(fences.findByBranch("xid-query-1", 12L)).thenReturn(null);
+      if ("TRYING".equals(state)) {
+        assertEquals(
+            409,
+            assertThrows(
+                    BizException.class,
+                    () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"))
+                .getHttpStatus());
+      } else assertEquals(state, query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+    }
+    installKnownState("CANCELLED");
+    when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
+    when(fences.findByBranch("xid-query-1", 12L)).thenReturn(fence(4, 12L));
+    assertEquals("CANCELLED", query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+  }
+
+  /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
+  private TccFenceLogPO installKnownState(String state) {
+    UserTccReceivePO receive = receive(12L);
+    when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
+    when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt(state, 12L));
+    when(debits.selectByPayNo(receive.payNo)).thenReturn(debit(state, 12L));
+    when(ledgers.selectByOperationKey(receive.ledgerKey))
+        .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
+    TccFenceLogPO observed =
+        fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L);
+    when(fences.findByBranch(receive.xid, 12L)).thenReturn(observed);
+    return observed;
   }
 
   private UserTccReceivePO receive(Long branchId) {
@@ -201,8 +271,10 @@ class UserTccStateQueryTest {
     return ledger;
   }
 
-  private TccFenceLogPO fence(int status) {
+  private TccFenceLogPO fence(int status, Long branchId) {
     TccFenceLogPO fence = new TccFenceLogPO();
+    fence.xid = "xid-query-1";
+    fence.branchId = branchId;
     fence.actionName = BalanceTccDebitLocalResource.ACTION_NAME;
     fence.status = status;
     return fence;

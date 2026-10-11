@@ -261,6 +261,8 @@ class UserTccStateBalanceSnapshotTest {
   /** 原官方Fence状态基线。 */
   private TccFenceLogPO fence(int status) {
     TccFenceLogPO fence = new TccFenceLogPO();
+    fence.xid = "xid-query-1";
+    fence.branchId = 12L;
     fence.actionName = BalanceTccDebitLocalResource.ACTION_NAME;
     fence.status = status;
     return fence;

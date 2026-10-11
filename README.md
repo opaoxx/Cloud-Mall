@@ -652,6 +652,17 @@ NULL、非法余额或不一致快照沿原`USER_TCC_STATE_CONFLICT`/409拒绝�
 时不要求虚构快照。合法历史账本不必等于当前账户余额。原读取数量/RR/API、资金写入及历史
 数据保持；该校验只证明可见原冻结/扣款快照的一致性，不证明全账户资金因果或CM-18闭环。
 
+### CM-18 User返回Fence的精确来源校验（16T15）
+
+原User TCC状态查询现在逐项核对返回Fence的原XID和分支，再核官方action/status。
+现有CI查询条件保留，返回的大小写/重音别名、NULL或其他分支不会充当原Fence证据，
+统一沿原`USER_TCC_STATE_CONFLICT`/409拒绝；不以BINARY WHERE隐藏异常候选。
+
+原库XID使用`utf8mb4_0900_ai_ci`（NO PAD）；尾空格候选只在自有测试库的旧PAD SPACE
+比较规则下验收，不修改原库collation。只有实际返回的行核身份：TRYING缺Fence仍冲突，
+终态缺Fence保留原过期兼容语义。原SELECT/readOnly RR、缓存禁用、API及资金写入保持。
+原state GET缓存契约保持，三个诊断GET错误仍no-store；本批不证明TC决议或全链资金终态。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

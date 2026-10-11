@@ -394,6 +394,8 @@ class UserFrozenOwnershipEvidenceTest {
       attempt.mode = "TCC";
       attemptRows.add(attempt);
       TccFenceLogPO fence = new TccFenceLogPO();
+      fence.xid = row.xid;
+      fence.branchId = branchId;
       fence.actionName = BalanceTccDebitLocalResource.ACTION_NAME;
       fence.status = 1;
       fenceRows.add(fence);
