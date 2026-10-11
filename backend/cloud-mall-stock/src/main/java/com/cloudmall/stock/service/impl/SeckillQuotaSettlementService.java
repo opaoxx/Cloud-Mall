@@ -113,8 +113,12 @@ public class SeckillQuotaSettlementService {
     long revision = settlement.revision;
     // 2. 在 MySQL 中先完成唯一状态 CAS；Redis 只由恢复器在提交后投影。
     if ("CONFIRM".equals(actionType)) {
-      if ("CONFIRMED".equals(status))
+      if ("CONFIRMED".equals(status)) {
+        // 同向终态重放也核原受理来源；只读观察不替代原事实，不宣称源冻结。
+        if (settlementMapper.findMatchingAcceptanceId(settlement) == null)
+          throw unknownCas(orderNo);
         return ApiResponse.ok(Map.of("confirmed", true, "idempotent", true));
+      }
       if ("RELEASED".equals(status)
           || "RELEASE_PENDING".equals(status)
           || ("PROJECTION_BLOCKED".equals(status) && !operationKey.equals(settlement.operationKey)))
@@ -126,8 +130,11 @@ public class SeckillQuotaSettlementService {
       if (changed == 1) return ApiResponse.ok(Map.of("confirmed", true, "idempotent", false));
       throw unknownCas(orderNo);
     }
-    if ("RELEASED".equals(status))
+    if ("RELEASED".equals(status)) {
+      // 同向释放终态复查原受理来源；反向冲突仍保原语义且不读取来源。
+      if (settlementMapper.findMatchingAcceptanceId(settlement) == null) throw unknownCas(orderNo);
       return ApiResponse.ok(Map.of("rolledBack", true, "idempotent", true));
+    }
     if ("CONFIRMED".equals(status)) return conflict();
     if ("OPEN".equals(status)) {
       int changed = settlementMapper.transitionToReleasePending(orderNo, operationKey, revision);

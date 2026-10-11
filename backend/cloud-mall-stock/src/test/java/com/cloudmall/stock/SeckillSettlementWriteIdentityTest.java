@@ -134,6 +134,7 @@ class SeckillSettlementWriteIdentityTest {
                     ? "ROLLBACK"
                     : action);
     when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row);
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
     when(mapper.transitionOpenToConfirmed(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);
     when(mapper.transitionBlockedToConfirmed(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);
     when(mapper.transitionToReleasePending(eq(ORDER_NO), anyString(), eq(1L))).thenReturn(1);

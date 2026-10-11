@@ -222,7 +222,8 @@ class SeckillSettlementWriteIdentityMySqlIT {
       tracked.sql.clear();
       service.settle(ORDER_NO, action);
       assertEquals(beforeReplay, facts());
-      assertOriginalInsertThenLockOnly();
+      if ("CONFIRM".equals(action)) assertEquals(3, tracked.sql.size());
+      else assertOriginalInsertThenLockOnly();
       tracked.sql.clear();
       assertConflict(
           () -> service.settle(ORDER_NO, "CONFIRM".equals(action) ? "ROLLBACK" : "CONFIRM"));
@@ -235,7 +236,7 @@ class SeckillSettlementWriteIdentityMySqlIT {
     tracked.checking = true;
     assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "ROLLBACK").data).get("idempotent"));
     assertEquals(released, facts());
-    assertOriginalInsertThenLockOnly();
+    assertEquals(3, tracked.sql.size());
     reset();
     var missing = facts();
     tracked.checking = true;
@@ -339,6 +340,7 @@ class SeckillSettlementWriteIdentityMySqlIT {
             ? null
             : original + ("RELEASED".equals(state) ? ":ROLLBACK" : ":CONFIRM"),
         "RELEASED".equals(state) ? 4L : null);
+    seedAccepted(original);
   }
 
   /** 原ACCEPTED事实，仅允许旧mapper的INSERT SELECT创建对应OPEN。 */
@@ -413,7 +415,9 @@ class SeckillSettlementWriteIdentityMySqlIT {
                   assertTrue(
                       statement.startsWith("INSERT IGNORE INTO SECKILL_QUOTA_SETTLEMENT")
                           || statement.startsWith("SELECT * FROM SECKILL_QUOTA_SETTLEMENT")
-                          || statement.startsWith("UPDATE SECKILL_QUOTA_SETTLEMENT"),
+                          || statement.startsWith("UPDATE SECKILL_QUOTA_SETTLEMENT")
+                          || statement.startsWith("SELECT ACCEPTED.ID FROM SECKILL_RESERVATION")
+                              && !statement.contains("FOR UPDATE"),
                       statement);
                   sql.add(statement);
                 }

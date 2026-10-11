@@ -1630,3 +1630,10 @@ CONFIRMED/RELEASED GET通过原身份/维度/操作键/回执门后，再按原�
 允许原三受理态；缺证返回UNKNOWN/空明细并阻断普通fallback，查询异常保留，不修事实。
 合法终态查询由1次增至2次，两个独立点读不构成RR/原子来源证明；其它GET、legacy、settle/noop及恢复保持。
 终态写noop来源、请求/订单完整因果、APPLIED及跨存储窗口仍待处理。
+
+
+### CM-18 秒杀终态同向写重试的受理来源观察（16T47）
+
+CONFIRMED+CONFIRM、RELEASED+ROLLBACK在原proof通过后复用只读来源查询，缺/错来源沿原UNKNOWN503，
+来源查询异常保留；合法三受理态仍幂等成功。同向noop原2变3SQL，反向409/2SQL及其它路径保持。
+不新增表/查询方法/锁/事务或Redis操作；同事务非锁source观察不证明源冻结、完整因果或跨存储fencing。

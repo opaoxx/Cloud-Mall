@@ -289,7 +289,7 @@ class SeckillTerminalOperationKeyMySqlIT {
       tracked.writePhase = true;
       assertEquals(
           true, ((Map<?, ?>) settlementService.settle(ORDER_NO, action).data).get("idempotent"));
-      assertEquals(2, tracked.sql.size());
+      assertEquals(3, tracked.sql.size());
       assertEquals(before, facts());
       tracked.sql.clear();
       assertEquals(
@@ -658,7 +658,8 @@ class SeckillTerminalOperationKeyMySqlIT {
             assertEquals(true, response.get("pending"));
             assertEquals(false, response.get("rolledBack"));
           }
-          assertEquals(2, tracked.sql.size());
+          assertEquals(
+              List.of("CONFIRMED", "RELEASED").contains(state) ? 3 : 2, tracked.sql.size());
           assertEquals(before, facts());
           assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
         }
@@ -786,7 +787,7 @@ class SeckillTerminalOperationKeyMySqlIT {
       var replay = (Map<?, ?>) settlementService.settle(ORDER_NO, "ROLLBACK").data;
       assertEquals(true, replay.get("rolledBack"));
       assertEquals(true, replay.get("idempotent"));
-      assertEquals(2, tracked.sql.size());
+      assertEquals(3, tracked.sql.size());
       tracked.sql.clear();
       assertEquals(
           409,
@@ -1123,6 +1124,119 @@ class SeckillTerminalOperationKeyMySqlIT {
       }
   }
 
+  @Test
+  void sameDirectionTerminalReplayRejectsUnprovenSourceWithoutWrites() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("CONFIRMED", "RELEASED"))
+      for (String variant : badTransitionSources())
+        assertions.add(
+            () -> {
+              reset();
+              String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
+              seedSettlement(state, ORDER_NO + ":" + action);
+              corruptTransitionSource(variant);
+              var before = facts();
+              tracked.checking = true;
+              tracked.writePhase = true;
+              var failure =
+                  assertThrows(
+                      BizException.class, () -> settlementService.settle(ORDER_NO, action));
+              assertEquals(503, failure.getHttpStatus());
+              assertEquals("SECKILL_SETTLEMENT_UNKNOWN", failure.getCode());
+              assertEquals(3, tracked.sql.size());
+              assertTrue(tracked.sql.get(0).startsWith("INSERT IGNORE"));
+              assertTrue(tracked.sql.get(1).contains("FOR UPDATE"));
+              assertTrue(
+                  tracked.sql.get(2).startsWith("SELECT ACCEPTED.ID FROM SECKILL_RESERVATION"));
+              assertFalse(tracked.sql.get(2).contains("FOR UPDATE"));
+              assertEquals(before, facts());
+              assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+              tracked.sql.clear();
+              assertEquals(
+                  409,
+                  assertThrows(
+                          BizException.class,
+                          () ->
+                              settlementService.settle(
+                                  ORDER_NO, "CONFIRMED".equals(state) ? "ROLLBACK" : "CONFIRM"))
+                      .getHttpStatus());
+              assertEquals(2, tracked.sql.size());
+              assertEquals(before, facts());
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerCannotReturnSuccessForMissingTerminalReplaySource() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var proxy = new ProxyFactory(controller);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    var mvc =
+        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("CONFIRMED", "RELEASED"))
+      assertions.add(
+          () -> {
+            reset();
+            String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
+            seedSettlement(state, ORDER_NO + ":" + action);
+            corruptTransitionSource("missing");
+            var before = facts();
+            tracked.checking = true;
+            tracked.writePhase = true;
+            mvc.perform(
+                    post(
+                        "/api/stock/reservations/"
+                            + ORDER_NO
+                            + "/"
+                            + action.toLowerCase(Locale.ROOT)))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("SECKILL_SETTLEMENT_UNKNOWN"));
+            assertEquals(3, tracked.sql.size());
+            assertEquals(before, facts());
+            assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void allOriginalAcceptedStatesKeepSameNoopAndOppositeConflict() {
+    for (String state : List.of("CONFIRMED", "RELEASED"))
+      for (String acceptedState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED")) {
+        reset();
+        String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
+        seedSettlement(state, ORDER_NO + ":" + action);
+        fixture.update("UPDATE seckill_reservation SET status=?", acceptedState);
+        var before = facts();
+        tracked.checking = true;
+        tracked.writePhase = true;
+        var response = (Map<?, ?>) settlementService.settle(ORDER_NO, action).data;
+        assertEquals(true, response.get("idempotent"));
+        assertEquals(true, response.get("CONFIRMED".equals(state) ? "confirmed" : "rolledBack"));
+        assertEquals(3, tracked.sql.size());
+        assertEquals(before, facts());
+        tracked.sql.clear();
+        assertEquals(
+            409,
+            assertThrows(
+                    BizException.class,
+                    () ->
+                        settlementService.settle(
+                            ORDER_NO, "CONFIRMED".equals(state) ? "ROLLBACK" : "CONFIRM"))
+                .getHttpStatus());
+        assertEquals(2, tracked.sql.size());
+        assertEquals(before, facts());
+        assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+      }
+  }
+
   /** 两个终态的原键缺失、别单、方向及排序规则别名，不预归一化。 */
   private static List<String> badKeys(String state) {
     String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
@@ -1297,6 +1411,8 @@ class SeckillTerminalOperationKeyMySqlIT {
                         statement.startsWith("INSERT IGNORE INTO SECKILL_QUOTA_SETTLEMENT")
                             || statement.startsWith("SELECT * FROM SECKILL_QUOTA_SETTLEMENT")
                                 && statement.contains("FOR UPDATE")
+                            || statement.startsWith("SELECT ACCEPTED.ID FROM SECKILL_RESERVATION")
+                                && !statement.contains("FOR UPDATE")
                             || allowTransition
                                 && statement.startsWith("UPDATE SECKILL_QUOTA_SETTLEMENT SET"),
                         statement);
