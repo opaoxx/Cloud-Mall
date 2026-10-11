@@ -13,12 +13,16 @@ import com.cloudmall.user.mapper.BalanceTccDebitMapper;
 import com.cloudmall.user.mapper.TccFenceLogMapper;
 import com.cloudmall.user.mapper.UserTccReceiveMapper;
 import com.cloudmall.user.service.BalanceTccDebitLocalResource;
+import java.math.BigDecimal;
 import java.util.Objects;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 同一只读快照核对接收、资金和 Fence；缺少事实永远不等于未执行。 */
 public class UserTccStateQuery {
+  /** 原资金金额DECIMAL(18,2)容量上界，不截断或补造缺失金额。 */
+  private static final BigDecimal MAX_MONEY = new BigDecimal("9999999999999999.99");
+
   /** 接收事实。 */
   private final UserTccReceiveMapper receives;
 
@@ -58,6 +62,7 @@ public class UserTccStateQuery {
         Objects.equals(receive.userId, userId)
             && Objects.equals(receive.operationKey, operationKey)
             && Objects.equals(receive.xid, xid));
+    require(validPositiveMoney(receive.amount));
     UserTccStateVO view = new UserTccStateVO();
     view.userId = receive.userId;
     view.payNo = receive.payNo;
@@ -76,7 +81,8 @@ public class UserTccStateQuery {
     }
     // 2. 接收、归属和已知分支必须描述同一笔资金。
     require(
-        "TCC".equals(attempt.mode)
+        validPositiveMoney(attempt.amount)
+            && "TCC".equals(attempt.mode)
             && Objects.equals(attempt.userId, userId)
             && Objects.equals(attempt.payNo, receive.payNo)
             && Objects.equals(attempt.orderNo, receive.orderNo)
@@ -89,7 +95,8 @@ public class UserTccStateQuery {
             && (receive.branchId == null || Objects.equals(receive.branchId, attempt.branchId)));
     if (debit != null)
       require(
-          Objects.equals(debit.userId, userId)
+          validPositiveMoney(debit.amount)
+              && Objects.equals(debit.userId, userId)
               && Objects.equals(debit.payNo, receive.payNo)
               && Objects.equals(debit.orderNo, receive.orderNo)
               && Objects.equals(debit.operationKey, operationKey)
@@ -107,6 +114,7 @@ public class UserTccStateQuery {
       require(
           debit != null
               && ledger != null
+              && validPositiveMoney(ledger.amount)
               && "DEBIT".equals(ledger.operationType)
               && "APPLIED".equals(ledger.state)
               && Objects.equals(ledger.userId, userId)
@@ -128,6 +136,14 @@ public class UserTccStateQuery {
     else require(!"TRYING".equals(attempt.state));
     view.state = attempt.state;
     return view;
+  }
+
+  /** 原金额缺失或非法均为持久事实冲突，避免NULL变500或相等坏值被当成资金证明。 */
+  private static boolean validPositiveMoney(BigDecimal amount) {
+    return amount != null
+        && amount.signum() > 0
+        && amount.stripTrailingZeros().scale() <= 2
+        && amount.compareTo(MAX_MONEY) <= 0;
   }
 
   /** 不一致事实不能被输出为扣款成功或安全取消。 */

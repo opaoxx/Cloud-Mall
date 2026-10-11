@@ -237,9 +237,7 @@ class UserFrozenOwnershipEvidenceTest {
       }
       var report = fixture.inspect();
       assertEquals(
-          List.of("receive", "legacyNull").contains(variant)
-              ? "BLOCKED_LOCAL_EVIDENCE"
-              : "LOCAL_CONFLICT",
+          "receive".equals(variant) ? "BLOCKED_LOCAL_EVIDENCE" : "LOCAL_CONFLICT",
           report.classification,
           variant);
       assertNull(report.vectorSha256);

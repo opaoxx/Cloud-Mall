@@ -349,8 +349,8 @@ class UserFrozenOwnershipEvidenceMySqlIT {
     tracked.reset();
     tracked.checking = true;
     report = inspect();
-    assertEquals("BLOCKED_LOCAL_EVIDENCE", report.classification);
-    assertTrue(report.reasonCodes.contains("FROZEN_PEER_EVIDENCE_UNAVAILABLE"));
+    assertEquals("LOCAL_CONFLICT", report.classification);
+    assertTrue(report.reasonCodes.contains("FROZEN_PEER_PERSISTED_CONFLICT"));
     assertNull(report.vectorSha256);
     assertEquals(before, facts());
   }

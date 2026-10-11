@@ -1,6 +1,8 @@
 package com.cloudmall.user;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -8,6 +10,9 @@ import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.web.GlobalExceptionHandler;
+import com.cloudmall.user.controller.UserFrozenOwnershipEvidenceController;
+import com.cloudmall.user.controller.UserLinkedRefundEvidenceController;
+import com.cloudmall.user.controller.UserTccController;
 import com.cloudmall.user.controller.UserTccReconciliationController;
 import com.cloudmall.user.domain.vo.UserTccReconciliationVO;
 import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
@@ -17,8 +22,15 @@ import com.cloudmall.user.mapper.TccFenceLogMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.mapper.UserTccReceiveMapper;
 import com.cloudmall.user.service.BalanceTccDebitLocalResource;
+import com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceReadService;
+import com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceService;
+import com.cloudmall.user.service.impl.UserLinkedRefundEvidenceReadService;
+import com.cloudmall.user.service.impl.UserLinkedRefundEvidenceService;
+import com.cloudmall.user.service.impl.UserTccHttpService;
+import com.cloudmall.user.service.impl.UserTccReceiveStore;
 import com.cloudmall.user.service.impl.UserTccReconciliationReadService;
 import com.cloudmall.user.service.impl.UserTccReconciliationService;
+import com.cloudmall.user.service.impl.UserTccStateQuery;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -40,6 +52,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
@@ -475,6 +488,143 @@ class UserTccReconciliationMySqlIT {
     assertEquals(before, facts());
     assertEquals(9, tracked.statements.size());
     assertEquals(1, tracked.connections);
+  }
+
+  /** 实际四来源NULL、非正/超精度/超容量通过原HTTP和三层诊断均拒绝且不写。 */
+  @Test
+  void originalAmountGatesRejectOwnedLegacyRowsThroughActualHttpAndDiagnostics() throws Exception {
+    List<String> moneyTables =
+        List.of("user_tcc_receive", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger");
+    tracked.checking = false;
+    for (String table : moneyTables)
+      fixture.execute("ALTER TABLE " + table + " MODIFY amount DECIMAL(20,3) NULL");
+    var receives = session.getMapper(UserTccReceiveMapper.class);
+    var attempts = session.getMapper(BalanceDebitAttemptMapper.class);
+    var debits = session.getMapper(BalanceTccDebitMapper.class);
+    var ledgers = session.getMapper(BalanceLedgerMapper.class);
+    var fences = session.getMapper(TccFenceLogMapper.class);
+    var users = session.getMapper(UserMapper.class);
+    var queryTarget = new UserTccStateQuery(receives, attempts, debits, ledgers, fences);
+    var queryProxy = readProxy(queryTarget);
+    var query = (UserTccStateQuery) queryProxy.getProxy();
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var baseReader =
+        (UserTccReconciliationReadService)
+            readProxy(
+                    new UserTccReconciliationReadService(
+                        receives, attempts, debits, ledgers, fences, users))
+                .getProxy();
+    var baseService = new UserTccReconciliationService(baseReader, true, "ops-secret");
+    var linkedReader =
+        (UserLinkedRefundEvidenceReadService)
+            readProxy(new UserLinkedRefundEvidenceReadService(baseReader, ledgers)).getProxy();
+    var frozenReader =
+        (UserFrozenOwnershipEvidenceReadService)
+            readProxy(
+                    new UserFrozenOwnershipEvidenceReadService(
+                        baseReader, receives, attempts, debits, ledgers, fences))
+                .getProxy();
+    MockMvc mvc =
+        MockMvcBuilders.standaloneSetup(
+                new UserTccController(bridge),
+                new UserTccReconciliationController(baseService),
+                new UserLinkedRefundEvidenceController(
+                    new UserLinkedRefundEvidenceService(baseService, linkedReader, true)),
+                new UserFrozenOwnershipEvidenceController(
+                    new UserFrozenOwnershipEvidenceService(baseService, frozenReader, true)))
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    String stateRoute = "/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1";
+    String diagnosticRoute = "/api/internal/users/7/balance/tcc-reconciliation/pay1";
+    try {
+      for (String table : moneyTables) {
+        for (String raw :
+            java.util.Arrays.asList(null, "0", "-10", "10.001", "10000000000000000.00")) {
+          seed("CONFIRMED");
+          fixture.update("UPDATE " + table + " SET amount=? WHERE id=1", raw);
+          var before = facts();
+          tracked.reset();
+          tracked.checking = true;
+          mvc.perform(
+                  get(stateRoute)
+                      .header("X-User-Id", "7")
+                      .header("X-Internal-Service", "cloud-mall-pay")
+                      .header("X-Internal-Callback-Token", "ops-secret")
+                      .param("xid", "private-tc:8091:original"))
+              .andExpect(status().isConflict())
+              .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+          assertEquals(1, tracked.connections);
+          assertTrue(tracked.statements.size() <= 5);
+          assertEquals(before, facts());
+          for (String suffix : List.of("", "/refund-evidence", "/frozen-ownership-evidence")) {
+            tracked.reset();
+            mvc.perform(
+                    get(diagnosticRoute + suffix)
+                        .header("X-Internal-Service", "cm18-reconciliation")
+                        .header("X-Internal-Callback-Token", "ops-secret"))
+                .andExpect(status().isConflict())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(
+                    jsonPath("$.code")
+                        .value(
+                            "user_tcc_receive".equals(table)
+                                ? "USER_TCC_RECONCILIATION_CONFLICT"
+                                : "USER_TCC_STATE_CONFLICT"));
+            assertEquals(1, tracked.connections);
+            assertTrue(tracked.statements.size() <= 5);
+            assertEquals(before, facts());
+          }
+        }
+      }
+      for (String raw : List.of("0", "-10", "10.001", "10000000000000000.00")) {
+        seed("CONFIRMED");
+        for (String table : moneyTables)
+          fixture.update("UPDATE " + table + " SET amount=? WHERE id=1", raw);
+        var before = facts();
+        tracked.reset();
+        tracked.checking = true;
+        var failure =
+            assertThrows(
+                BizException.class,
+                () -> query.read(7L, "tcc-debit:pay1", "private-tc:8091:original"));
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+        assertEquals(before, facts());
+      }
+      for (String state : List.of("UNKNOWN", "TRYING", "CONFIRMED", "CANCELLED")) {
+        for (String raw : List.of("0.01", "1.000", "9999999999999999.99")) {
+          seed(state);
+          for (String table : moneyTables)
+            fixture.update("UPDATE " + table + " SET amount=? WHERE id=1", raw);
+          var before = facts();
+          tracked.reset();
+          tracked.checking = true;
+          assertEquals(state, query.read(7L, "tcc-debit:pay1", "private-tc:8091:original").state);
+          assertEquals(1, tracked.connections);
+          assertEquals("UNKNOWN".equals(state) ? 4 : 5, tracked.statements.size());
+          assertEquals(before, facts());
+        }
+      }
+      verifyNoInteractions(resource, receiveStore);
+    } finally {
+      tracked.checking = false;
+      seed("CONFIRMED");
+      for (String table : moneyTables)
+        fixture.execute("ALTER TABLE " + table + " MODIFY amount DECIMAL(18,2) NOT NULL");
+      tracked.reset();
+    }
+  }
+
+  /** 仅由owned数据源提供实际readOnly RR代理，不注入RM或启动应用。 */
+  private static ProxyFactory readProxy(Object target) {
+    ProxyFactory proxy = new ProxyFactory(target);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new TransactionInterceptor(
+            new DataSourceTransactionManager(tracked), new AnnotationTransactionAttributeSource()));
+    return proxy;
   }
 
   /** 认证通过的实际诊断请求。 */

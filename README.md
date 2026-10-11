@@ -628,6 +628,19 @@ UserTccStateQuery核receive、TCC attempt、冻结行、无DEBIT及TRYING Fence�
 mvn -pl backend/cloud-mall-user -am test '-Dtest=UserFrozenOwnershipEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 User原资金状态金额证据门（16T13）
+
+原User TCC只读状态查询现在对receive、attempt、冻结和已确认DEBIT账本的金额逐一核验：
+必须存在、为正、不超过DECIMAL(18,2)容量且能无损表示为两位小数。无损零尾数如`1.000`
+仍合法；缺失、零、负数、超精度或超容量统一返回既有`USER_TCC_STATE_CONFLICT`/409，
+不再因NULL变成500，也不以四来源数值相等替代合法性证明。
+
+查询参数/JSON字段、原SELECT数量/readOnly RR及合法状态/Fence过期语义保持。
+16T9已先核receive金额，本次补足其下游原amount比较门；16T11/12沿原409冲突链阻塞。
+其他TRYING的NULL原receive现在由16T12报告明确持久冲突，未观察到receive仍为缺证。
+诊断GET继续no-store，原资金state GET缓存契约保持；本批不改变任何资金写入或历史记录，
+不证明历史余额增量、全账户因果、统一证据包或CM-18整体完成。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
