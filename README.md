@@ -700,6 +700,17 @@ T9已有接收保护与错误码保持，T12其他peer原接收标记异常按�
 初始化/迁移场景；原库仅核checksum。默认flags/RM/API/DDL不变，不启动真实TC或业务端口，
 不代表CM-18主项闭环。
 
+### CM-18 User实际资金写前账户金额校验（16T19）
+
+fresh Try取得新归属/冻结前、首次Confirm清算前及已有冻结Cancel释放前，校验当前
+balance/frozenBalance存在、非负且可无损表示为DECIMAL(18,2)。NULL、负数、非法精度或
+超容量沿原`BALANCE_TCC_UNKNOWN`/409阻塞，防止提交无效冻结或返还投影。
+
+零余额/无损尾零合法；只在实际资金写点核验，已终态replay和空取消保持原无资金写协议。
+不在统一用户行锁入口加门，不比较旧快照/冻结聚合，不补0、修历史或证明算术溢出。
+原SQL/锁序/条件更新/API/flags/RM、disabled清算与余额不足响应保持；真实owned演练
+验证坏账户后三路径四资金表完整不变，不代表全账户因果或CM-18主项闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

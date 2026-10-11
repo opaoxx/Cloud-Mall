@@ -81,6 +81,7 @@ class BalanceTccDebitServiceTest {
     user.id = 7L;
     user.status = 1;
     user.balance = new BigDecimal("100.00");
+    user.frozenBalance = BigDecimal.ZERO;
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
     when(attemptMapper.insert(any())).thenReturn(1);
     assertThrows(IllegalStateException.class, () -> service.tryDebit(request()));
@@ -112,6 +113,119 @@ class BalanceTccDebitServiceTest {
       installFunds("CONFIRMED", "ledger");
       assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
     }
+  }
+
+  /** fresh Try缺失/非法可用额不应NPE或取得新的资金归属。 */
+  @Test
+  void freshTryRejectsMalformedAvailableBalance() {
+    rejectWallet("try", "balance");
+  }
+
+  /** frozen NULL不能减可用额后仍返回TRYING。 */
+  @Test
+  void freshTryRejectsMalformedFrozenBalance() {
+    rejectWallet("try", "frozen");
+  }
+
+  /** 实际清算/释放前校验两个金额，既有终态重放不在该门范围。 */
+  @Test
+  void actualClearAndReleaseRejectMalformedWallet() {
+    for (String operation : List.of("confirm", "cancel"))
+      for (String field : List.of("balance", "frozen")) rejectWallet(operation, field);
+  }
+
+  /** 已终态和空取消不写资金，当前坏账户不能让本批改掉其既有幂等协议。 */
+  @Test
+  void terminalReplaysAndEmptyCancellationKeepNoFundsWriteSemantics() {
+    installFunds("CONFIRMED", "none");
+    UserPO account = account(null, null);
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(account);
+    assertEquals("CONFIRMED", service.tryDebit(request()).state);
+    assertEquals("CONFIRMED", service.confirmDebit(completion()).state);
+    installFunds("CANCELLED", "none");
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(account);
+    assertEquals("CANCELLED", service.cancelDebit(completion()).state);
+    when(attemptMapper.selectByPayNo(request().payNo)).thenReturn(null);
+    when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
+    when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(null);
+    when(attemptMapper.insert(any())).thenReturn(1);
+    assertEquals("CANCELLED", service.cancelDebit(completion()).state);
+    verify(userMapper, never()).freezeBalance(any(), any(), any());
+    verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+    verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+  }
+
+  /** 只让原资金条件写成功，校验缺失前原实现会错误到达写操作。 */
+  private void rejectWallet(String operation, String field) {
+    for (BigDecimal invalid :
+        new BigDecimal[] {
+          null, new BigDecimal("-1"), new BigDecimal("100.001"), new BigDecimal("10000000000000000")
+        }) {
+      installFunds("TRYING", "none");
+      if ("try".equals(operation)) {
+        when(attemptMapper.selectByPayNo(request().payNo)).thenReturn(null);
+        when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
+      }
+      when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(null);
+      UserPO user =
+          account(
+              "balance".equals(field) ? invalid : new BigDecimal("100.00"),
+              "frozen".equals(field) ? invalid : new BigDecimal("10.00"));
+      when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+      when(attemptMapper.insert(any())).thenReturn(1);
+      when(userMapper.freezeBalance(any(), any(), any())).thenReturn(1);
+      when(userMapper.clearFrozenBalance(any(), any(), any())).thenReturn(1);
+      when(userMapper.releaseFrozenBalance(any(), any(), any())).thenReturn(1);
+      when(tccMapper.insert(any())).thenReturn(1);
+      when(ledgerMapper.insert(any())).thenReturn(1);
+      when(tccMapper.confirmTrying(any(), any())).thenReturn(1);
+      when(tccMapper.cancelTrying(any(), any())).thenReturn(1);
+      when(attemptMapper.transitionState(any(), any(), any(), any())).thenReturn(1);
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> {
+                switch (operation) {
+                  case "try" -> service.tryDebit(request());
+                  case "confirm" -> service.confirmDebit(completion());
+                  case "cancel" -> service.cancelDebit(completion());
+                  default -> throw new AssertionError(operation);
+                }
+              });
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals("BALANCE_TCC_UNKNOWN", failure.getCode());
+      verify(userMapper, never()).freezeBalance(any(), any(), any());
+      verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+      verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+      verify(ledgerMapper, never()).insert(any());
+      verify(attemptMapper, never()).transitionState(any(), any(), any(), any());
+      verify(tccMapper, never()).insert(any());
+    }
+  }
+
+  /** 账户范围由本次目标字段控制，不把两个余额与旧快照作相等比较。 */
+  private static UserPO account(BigDecimal balance, BigDecimal frozen) {
+    UserPO user = new UserPO();
+    user.id = 7L;
+    user.status = 1;
+    user.balance = balance;
+    user.frozenBalance = frozen;
+    return user;
+  }
+
+  /** 原合法分支回调的完整载荷。 */
+  private BalanceTccDebitFinalizeDTO completion() {
+    BalanceTccDebitTryDTO original = request();
+    BalanceTccDebitFinalizeDTO value = new BalanceTccDebitFinalizeDTO();
+    value.userId = original.userId;
+    value.payNo = original.payNo;
+    value.orderNo = original.orderNo;
+    value.amount = original.amount;
+    value.xid = original.xid;
+    value.branchId = original.branchId;
+    value.operationKey = original.operationKey;
+    value.ledgerKey = original.ledgerKey;
+    return value;
   }
 
   /** 完整原元组仅将目标金额置NULL，不使用资金写替身掩盖错误。 */

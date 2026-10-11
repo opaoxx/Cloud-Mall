@@ -80,6 +80,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     }
     if (debit != null) throw unknown();
     requireNoLedger(request);
+    requireValidAccountFunds(user);
     if (user.balance.compareTo(request.amount) < 0)
       throw new BizException("PAYMENT_FAILED", "余额不足", 409);
     // 2. 先认领唯一归属，再冻结；缺失归属不预先加间隙锁。
@@ -111,7 +112,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   public BalanceTccDebitVO confirmDebit(BalanceTccDebitFinalizeDTO completion) {
     // 1. 按用户、归属、冻结的顺序核验，清算不读取 Try 开关。
     BalanceTccDebitTryDTO request = request(completion);
-    lockUser(request.userId);
+    UserPO user = lockUser(request.userId);
     BalanceDebitAttemptPO attempt = existingAttempt(request);
     BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
     requireConsistent(attempt, debit, request);
@@ -121,6 +122,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     }
     if (!"TRYING".equals(debit.state)) throw conflict("已取消的冻结不能确认");
     requireNoLedger(request);
+    requireValidAccountFunds(user);
     // 2. 清算冻结与账本同事务，账本失败必须恢复冻结。
     LocalDateTime currentTime = now();
     requireOne(userMapper.clearFrozenBalance(request.userId, request.amount, currentTime));
@@ -150,7 +152,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   public BalanceTccDebitVO cancelDebit(BalanceTccDebitFinalizeDTO completion) {
     // 1. 关闭开关或禁用用户仍能清算，但必须携带完整原载荷。
     BalanceTccDebitTryDTO request = request(completion);
-    lockUser(request.userId);
+    UserPO user = lockUser(request.userId);
     BalanceDebitAttemptPO attempt = existingAttempt(request);
     BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
     if (attempt == null) {
@@ -163,6 +165,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     if ("CONFIRMED".equals(debit.state)) throw conflict("已确认的冻结不能取消");
     if ("CANCELLED".equals(debit.state)) return BalanceTccDebitVO.from(debit);
     requireNoLedger(request);
+    requireValidAccountFunds(user);
     // 2. 仅按原冻结金额释放一次，任何条件更新失败均整笔回滚。
     LocalDateTime currentTime = now();
     requireOne(userMapper.releaseFrozenBalance(request.userId, request.amount, currentTime));
@@ -258,6 +261,19 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
         || !Objects.equals(ledger.payNo, request.payNo)
         || !Objects.equals(ledger.orderNo, request.orderNo)
         || ledger.amount.compareTo(request.amount) != 0) throw unknown();
+  }
+
+  /** 仅实际资金写前核当前金额，不影响终态重放/空取消，也不补0或比旧快照。 */
+  private void requireValidAccountFunds(UserPO user) {
+    if (!validAccountMoney(user.balance) || !validAccountMoney(user.frozenBalance)) throw unknown();
+  }
+
+  /** 零余额和无损尾零合法；当前账户金额必须可无损表示在DECIMAL(18,2)中。 */
+  private static boolean validAccountMoney(BigDecimal amount) {
+    return amount != null
+        && amount.signum() >= 0
+        && amount.stripTrailingZeros().scale() <= 2
+        && amount.compareTo(MAX_AMOUNT) <= 0;
   }
 
   /** 用户行是所有资金方法的第一把锁；清算不要求用户仍启用。 */

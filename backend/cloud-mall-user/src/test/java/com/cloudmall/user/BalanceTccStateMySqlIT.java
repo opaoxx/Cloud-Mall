@@ -614,6 +614,103 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 非法当前账户不允许实际冻结/清算/释放，真实四表事实在409后保持。 */
+  @Test
+  void malformedWalletAmountsCannotCommitFundsOrOwnership() {
+    fixture.execute(
+        "ALTER TABLE mall_user MODIFY balance DECIMAL(20,3) NULL,MODIFY frozen_balance"
+            + " DECIMAL(20,3) NULL");
+    try {
+      for (String operation : List.of("try", "confirm", "cancel")) {
+        for (String field : List.of("frozen_balance", "balance")) {
+          for (String raw :
+              java.util.Arrays.asList(null, "-1", "100.001", "10000000000000000.00")) {
+            resetOwnedWalletScenario();
+            BalanceTccDebitTryDTO original =
+                request("wallet-" + operation + "-" + field, 7L, "10.00");
+            if (!"try".equals(operation)) service.tryDebit(original);
+            fixture.update("UPDATE mall_user SET " + field + "=? WHERE id=7", raw);
+            var before = allFundsFacts();
+            BizException failure =
+                assertThrows(
+                    BizException.class,
+                    () -> {
+                      switch (operation) {
+                        case "try" -> service.tryDebit(original);
+                        case "confirm" -> service.confirmDebit(finalizeRequest(original));
+                        case "cancel" -> service.cancelDebit(finalizeRequest(original));
+                        default -> throw new AssertionError(operation);
+                      }
+                    });
+            assertEquals(409, failure.getHttpStatus());
+            assertEquals("BALANCE_TCC_UNKNOWN", failure.getCode());
+            assertEquals(before, allFundsFacts());
+          }
+        }
+      }
+      resetOwnedWalletScenario();
+      fixture.update("UPDATE mall_user SET balance=10.000 WHERE id=7");
+      BalanceTccDebitTryDTO valid = request("wallet-valid-zero", 7L, "10.00");
+      assertEquals("TRYING", service.tryDebit(valid).state);
+      assertFunds(7L, "0.000", "10.000");
+      fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+      assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(valid)).state);
+      assertFunds(7L, "0.000", "0.000");
+    } finally {
+      resetOwnedWalletScenario();
+      fixture.execute(
+          "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL DEFAULT 10000.00,MODIFY"
+              + " frozen_balance DECIMAL(18,2) NOT NULL DEFAULT 0.00");
+    }
+  }
+
+  /** 坏当前钱包不阻断既有无资金写终态replay，空取消仅保原metadata。 */
+  @Test
+  void malformedWalletStillAllowsExistingTerminalAndEmptyCancelNoOps() {
+    fixture.execute(
+        "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NULL,MODIFY frozen_balance"
+            + " DECIMAL(18,2) NULL");
+    try {
+      BalanceTccDebitTryDTO confirmed = request("wallet-confirmed-noop", 7L, "10.00");
+      service.tryDebit(confirmed);
+      service.confirmDebit(finalizeRequest(confirmed));
+      fixture.update("UPDATE mall_user SET balance=NULL,frozen_balance=NULL WHERE id=7");
+      var before = allFundsFacts();
+      assertEquals("CONFIRMED", service.tryDebit(confirmed).state);
+      assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(confirmed)).state);
+      assertEquals(before, allFundsFacts());
+      resetOwnedWalletScenario();
+      BalanceTccDebitTryDTO cancelled = request("wallet-cancelled-noop", 7L, "10.00");
+      service.tryDebit(cancelled);
+      service.cancelDebit(finalizeRequest(cancelled));
+      fixture.update("UPDATE mall_user SET balance=NULL,frozen_balance=NULL,status=0 WHERE id=7");
+      setEnabled(false);
+      before = allFundsFacts();
+      assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(cancelled)).state);
+      assertEquals(before, allFundsFacts());
+      var accountsBefore = fixture.queryForList("SELECT * FROM mall_user ORDER BY id");
+      BalanceTccDebitTryDTO empty = request("wallet-empty-noop", 7L, "10.00");
+      assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(empty)).state);
+      assertEquals(accountsBefore, fixture.queryForList("SELECT * FROM mall_user ORDER BY id"));
+      assertEquals(0, ledgerCount());
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM balance_tcc_debit", Integer.class));
+    } finally {
+      setEnabled(true);
+      resetOwnedWalletScenario();
+      fixture.execute(
+          "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL DEFAULT 10000.00,MODIFY"
+              + " frozen_balance DECIMAL(18,2) NOT NULL DEFAULT 0.00");
+    }
+  }
+
+  /** 只清理owned演练，保留用户与唯一的账户准备语义。 */
+  private void resetOwnedWalletScenario() {
+    for (String table : List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+      fixture.update("DELETE FROM " + table);
+    fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1");
+  }
+
   /** 只从owned库核完整资金四表，包含所有身份、金额、状态和时间。 */
   private List<List<Map<String, Object>>> allFundsFacts() {
     return List.of("mall_user", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger")
