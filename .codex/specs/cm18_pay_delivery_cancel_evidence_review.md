@@ -50,6 +50,7 @@ delivery/cancel 摘要只包含 `present`、白名单 `state`、`identityMatched
 
 - cancel state 白名单：`REQUESTED`、`ORDER_CANCELLED`、`CANCEL_UNKNOWN`、`COMPLETED`、`CONFLICT`。
 - `COMPLETED` 要求 Pay `FAILED`；其他 cancel 状态要求 Pay `PENDING`。状态不符为本地冲突。
+- cancel state=`CONFLICT` 即使 Pay 为 `PENDING` 也必须分类 `LOCAL_CONFLICT`，reason 固定为 `CANCEL_RECORDED_CONFLICT`；该码只表示取消台账已记录本地冲突，不表示已查询 Order/Stock 或已处置资金，不得降级为 `BLOCKED_EXTERNAL_EVIDENCE` 或本地一致报告。
 - cancel 不得与 execution、dispatch、receipt、Legacy intent 或 delivery 同时存在；共存返回固定冲突码，不删除、不修复。
 - cancel 成功只证明本地取消台账事实，不消除 base local evidence 缺失、不证明 User/Order/Stock/TC/MQ 或资金终态。
 
