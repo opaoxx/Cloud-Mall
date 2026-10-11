@@ -8,6 +8,7 @@ management.endpoints.web.exposure.include: health,info,prometheus
 cloudmall.user.tcc-debit.enabled: false
 cloudmall.user.tcc-resource.enabled: false
 cloudmall.user.tcc-http.enabled: false
+cloudmall.user.tcc-reconciliation.enabled: false
 cloudmall.internal.callback-token: ${CLOUDMALL_INTERNAL_CALLBACK_TOKEN:cloudmall-local-callback}
 spring.cloud.nacos.discovery.server-addr: localhost:18848
 spring.cloud.nacos.discovery.username: root

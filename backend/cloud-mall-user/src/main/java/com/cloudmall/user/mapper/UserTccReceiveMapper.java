@@ -11,6 +11,10 @@ import org.apache.ibatis.annotations.Update;
 /** HTTP 接收认领的唯一数据库访问入口。 */
 @Mapper
 public interface UserTccReceiveMapper extends BaseMapper<UserTccReceivePO> {
+  /** 诊断保留按支付号的CI候选，由Service核验精确原身份；不锁定或认领。 */
+  @Select("SELECT * FROM user_tcc_receive WHERE pay_no=#{payNo}")
+  UserTccReceivePO findByPayNo(@Param("payNo") String payNo);
+
   /** 为新旧本地库幂等创建接收凭据。 */
   @Update(
       "CREATE TABLE IF NOT EXISTS user_tcc_receive (id BIGINT PRIMARY KEY,pay_no VARCHAR(64) NOT"

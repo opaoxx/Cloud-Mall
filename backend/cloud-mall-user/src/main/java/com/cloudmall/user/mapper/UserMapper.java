@@ -10,6 +10,10 @@ import org.apache.ibatis.annotations.Update;
 /** 用户表数据访问接口。 */
 @Mapper
 public interface UserMapper extends BaseMapper<UserPO> {
+  /** 内部只读取证仅投影账户资金字段，不读取密码、电话或角色。 */
+  @Select("SELECT id,status,balance,frozen_balance FROM mall_user WHERE id=#{userId}")
+  UserPO selectBalanceEvidenceById(@Param("userId") Long userId);
+
   /** 为旧用户表幂等补充 TCC 冻结余额列。 */
   @Select(
       "select count(*) from information_schema.columns where table_schema=database() and"

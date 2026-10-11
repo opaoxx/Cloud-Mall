@@ -11,6 +11,14 @@ import org.apache.ibatis.annotations.Update;
 /** TCC 冻结状态数据访问接口。 */
 @Mapper
 public interface BalanceTccDebitMapper extends BaseMapper<BalanceTccDebitPO> {
+  /** 按用户观察原TRYING总额与非法原行，不过滤坏状态/金额或修改冻结事实。 */
+  @Select(
+      "SELECT COALESCE(SUM(CASE WHEN BINARY state='TRYING' THEN amount ELSE 0 END),0) AS"
+          + " frozen_total, COUNT(CASE WHEN amount IS NULL OR amount<=0 OR state IS NULL OR BINARY"
+          + " state NOT IN ('TRYING','CONFIRMED','CANCELLED') THEN 1 END) AS invalid_row_count FROM"
+          + " balance_tcc_debit WHERE user_id=#{userId}")
+  java.util.Map<String, Object> selectFrozenEvidence(@Param("userId") Long userId);
+
   /** 创建 TCC 冻结状态表及其幂等约束。 */
   @Insert(
       "CREATE TABLE IF NOT EXISTS balance_tcc_debit (id BIGINT PRIMARY KEY,operation_key"

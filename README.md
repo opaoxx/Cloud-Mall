@@ -518,6 +518,35 @@ Pay状态映射及取消与资金事实的互斥。已提交而缺delivery只报
 mvn -pl backend/cloud-mall-pay -am test '-Dtest=PayTccDeliveryEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 User账户、冻结总额与固定退款键只读观察（16T9）
+
+独立默认关闭的 `cloudmall.user.tcc-reconciliation.enabled` 启用后，用内部运维请求头
+`X-Internal-Service: cm18-reconciliation` 与已有 callback token 直连 User：
+`GET /api/internal/users/{userId}/balance/tcc-reconciliation/{payNo}`。
+不需要开启 TCC HTTP/RM 或资金写入开关；Gateway 禁止该入口。入口先验证开关、凭证、正用户ID、
+ASCII支付号及无本地事务/Seata XID，再进入只读RR；成功和已知错误均禁止缓存。
+
+原数据库receive提供原XID和键，现有UserTccStateQuery在同一个外层RR中校验原资金事实；
+再读取账户资金部分投影、固定userId的TRYING金额聚合与 `refund:<payNo>` 账本。
+完整样本单连接九次SELECT，账户查询不读取密码、电话或角色。聚合保留非法金额/状态原行计数，
+合法原TRYING总额须等于账户frozen_balance；其他交易的非零冻结合法，不要求终态冻结为零。
+
+固定退款键存在时核原身份、DEBIT证明和退款前后余额增量；合法部分退款按缺证观察，不补退。
+固定键缺行不表示没有其他退款；报告显式 `otherRefundsNotInspected=true`。当前账户余额也
+不必等于历史扣款或退款后的余额。报告仅输出不可变资金摘要、白名单状态和原标识SHA256，
+不输出原XID/branch/操作键、敏感账户字段、凭证或异常。
+
+响应固定 `USER_ACCOUNT_FROZEN_REFUND_OBSERVED_ONLY` 与 `automaticActionsAllowed=false`，
+最高 `BLOCKED_EXTERNAL_EVIDENCE`；Pay/Order/Stock/TC/MQ未查询，不是全链资金终态。
+本批不验证所有冻结行的attempt关联或全部退款键，也不代替统一证据包与CM-18主项验收。
+
+隔离验收使用真实Mapper/RR和随机自有User测试库，原库仅核表清单/checksum；最终删除自有库，
+不启动应用、RM/TC、调度器或端口：
+
+```powershell
+mvn -pl backend/cloud-mall-user -am test '-Dtest=UserTccReconciliationMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
