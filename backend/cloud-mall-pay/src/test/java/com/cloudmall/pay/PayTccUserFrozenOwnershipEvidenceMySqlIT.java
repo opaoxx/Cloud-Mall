@@ -460,6 +460,25 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
         "CM16T26 original Pay/User checksums unchanged; owned databases and HTTP listener removed");
   }
 
+  /** 原活跃消费者保其scope，不将未检历史终态解释为逐笔已证明。 */
+  @Test
+  void terminalOriginRemainsOutsideCurrentTryingConsumerScope() {
+    peer(2, "10.00", true);
+    userFixture.update("UPDATE balance_tcc_debit SET state='CONFIRMED' WHERE id=2");
+    userFixture.update("UPDATE balance_debit_attempt SET state='CONFIRMED' WHERE id=2");
+    userFixture.update("DELETE FROM user_tcc_receive WHERE id=2");
+    var payBefore = facts();
+    var userBefore = userFacts();
+    enableChecks();
+    var report = inspectUser();
+    assertEquals("BLOCKED_REMAINING_EVIDENCE", report.classification);
+    assertTrue(report.terminalFrozenRowsNotInspected);
+    assertEquals(0, report.userFrozenOwnershipEvidence.observedCount());
+    assertEquals(12, tracked.statements.size());
+    assertEquals(10, userTracked.statements.size());
+    assertUnchanged(payBefore, userBefore);
+  }
+
   @Test
   void realUserOwnershipUsesPersistentAnchorAndRestoresCallerContext() {
     for (int peers : List.of(0, 1, 2)) {

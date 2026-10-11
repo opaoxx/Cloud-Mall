@@ -43,4 +43,5 @@ seata:
 
 cloudmall.pay.tcc-cancel.enabled: false
 cloudmall.pay.tcc-user-frozen-ownership-evidence.enabled: false
+cloudmall.pay.tcc-user-terminal-frozen-ownership-evidence.enabled: false
 cloudmall.pay.tcc-cancel.interval-ms: 5000

@@ -798,6 +798,21 @@ SHA向量，空候选须零金额/空向量指纹，正候选须正金额。User
 最高仍`BLOCKED_REMAINING_EVIDENCE`，禁止自动资金动作；历史终态冻结、其它退款和Order/Stock/TC/MQ仍未闭环。
 实际Pay两次6SELECT/User一次10+5N SELECT，503不重试，原库/资金事实不改。原T10校验仅包内复用，旧合同保持。
 
+### CM-18 Pay消费User终态冻结归属（16T27）
+
+独立开关`cloudmall.pay.tcc-user-terminal-frozen-ownership-evidence.enabled=false`默认关闭，入口为
+`GET /api/internal/payments/{payNo}/tcc-reconciliation/user-terminal-frozen-ownership-evidence`。
+按原Pay锚点GET既有User16T24，远端T9/T24启用门仍生效。继承身份隔离、实例凭证、双Pay RR变化优先、
+no-store/Gateway隔离；GET不可用也读第二次Pay，不重试或执行资金动作。
+
+先复用原T10完整账户/身份/指纹/状态/固定退款门，再核User终态scope、原生元数据和0..100计数，
+确认数+取消数必须等候选数，空范围必须空向量指纹，已CONFIRMED基线至少有一条确认行。
+仅attempt空取消可为零候选，仍标记不在冻结行范围；终态Fence缺失保留原TTL语义。
+完整匹配才给计数/脱敏指纹与账户摘要，不计算历史金额、不比当前钱包，不回显原响应或未核统计。
+
+最高仍`BLOCKED_REMAINING_EVIDENCE`；未知态/空取消全覆盖、全账户因果、其它退款、外部系统和统一包仍未闭环。
+实际Pay12SELECT，User10+6N单只读RR，100=610/101=10；旧T10/T26/资金接口及flags保持。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。
