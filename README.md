@@ -1496,3 +1496,13 @@ AuthContext隔离及双Pay RR本地变化优先；不依赖其它Pay诊断flag�
 精确合法记录的原状态/数量保留，非ACCEPTED主legacy仍沿原null、fallback REJECTED/PENDING原映射保持。
 不新增SQL/BINARY过滤/事务，原GET仍非RR；不改settle/迁移/恢复/CAS/Redis/MQ/DDL或API。
 完整秒杀原tuple、余额、Order SKU/动作、TC/MQ/统一包及CM18其它M1–M4仍待完成。
+
+
+### CM-18 秒杀结算写前原订单归属保护（16T32）
+
+确认/回滚沿原INSERT OPEN→SELECT FOR UPDATE锁序；锁定行必须以原orderNo精确绑定动作请求，
+在维度/操作键/终态幂等和CAS前拒绝CI别名、错单、缺身份，返回原`SECKILL_SETTLEMENT_CONFLICT`/409。
+既有REQUIRED事务保证临时错误OPEN INSERT随异常完整回滚，原ACCEPTED及普通库存事实不动，
+错误身份不能走终态noop成功或普通库存路径。精确原订单的状态、revision、操作键及重试语义保持。
+不新增SQL/查询/BINARY过滤/锁/事务，不改GET16T31、迁移、Redis/MQ/恢复或API。
+完整settlement tuple/其它维度、Order SKU/动作、TC/MQ/统一包及CM18其它M1–M4仍待完成。

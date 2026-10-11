@@ -35,7 +35,9 @@ class SeckillQuotaSettlementServiceTest {
   @Test
   void rollbackCommitsPendingWithoutTouchingRedis() {
     SeckillQuotaSettlementMapper mapper = mock(SeckillQuotaSettlementMapper.class);
-    when(mapper.findSettlementForUpdate("order-2")).thenReturn(settlement("OPEN"));
+    SeckillQuotaSettlementPO row = settlement("OPEN");
+    row.orderNo = "order-2";
+    when(mapper.findSettlementForUpdate("order-2")).thenReturn(row);
     when(mapper.transitionToReleasePending("order-2", "order-2:ROLLBACK", 1L)).thenReturn(1);
 
     ApiResponse<?> response =
@@ -52,6 +54,7 @@ class SeckillQuotaSettlementServiceTest {
   void conflictingConfirmAfterReleasePendingIsRejected() {
     SeckillQuotaSettlementMapper mapper = mock(SeckillQuotaSettlementMapper.class);
     SeckillQuotaSettlementPO row = settlement("RELEASE_PENDING");
+    row.orderNo = "order-3";
     row.operationKey = "order-3:ROLLBACK";
     when(mapper.findSettlementForUpdate("order-3")).thenReturn(row);
 

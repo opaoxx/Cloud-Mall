@@ -91,6 +91,9 @@ public class SeckillQuotaSettlementService {
     if (settlement == null) {
       return null;
     }
+    // CI锁定行只是候选；拒绝错原订单，让同事务中的临时OPEN插入整体回滚。
+    if (!Objects.equals(orderNo, settlement.orderNo))
+      throw new BizException("SECKILL_SETTLEMENT_CONFLICT", "秒杀结算原订单归属冲突", 409);
     validateSettlement(settlement);
     String operationKey = orderNo + ":" + actionType;
     String status = settlement.status;

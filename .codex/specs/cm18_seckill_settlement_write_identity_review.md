@@ -37,3 +37,7 @@ Guard 必须位于 `validateSettlement`、operation key 派生、状态终态/�
 - source Stock 表始终以全字段 checksum 证明未被修改；owned 负例全字段/状态/时间/数量前后不变，正例只按原 settlement 协议核对预期状态/CAS/revision/operation 变化。测试插入只允许 owned 资源，结束 finally DROP/清理。
 
 本切片只冻结写路径的原订单身份门，不宣称完整 settlement tuple、普通库存、TC/MQ 或 CM18 主项闭环；CM20/CM21 仍等待 CM18 整体完成。
+
+## 5. 当前实现只读复核
+
+当前 `SeckillQuotaSettlementService.settle` 仅在锁定行非 null 后新增原始 `orderNo` 精确比较，位置在 `validateSettlement`、operation key、状态 noop 和 CAS 之前；冲突使用固定 `SECKILL_SETTLEMENT_CONFLICT` 409，无 raw 标识。`insertOpenIfAbsent`、`findSettlementForUpdate`、事务传播及原状态写入顺序保持。生产复核结论为 GO；专项测试结果仍以 backend/qa 的最终绿证据为准。
