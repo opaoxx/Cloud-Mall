@@ -576,6 +576,31 @@ Pay两次6SELECT加User9SELECT。finally关闭监听/执行器/加载器和删�
 mvn -pl backend/cloud-mall-user,backend/cloud-mall-pay -am test '-Dtest=PayTccUserAccountEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_pay?allowPublicKeyRetrieval=true'
 ```
 
+### CM-18 User原扣款关联退款候选观察（16T11）
+
+同时开启User本地 `cloudmall.user.tcc-reconciliation.enabled` 与独立默认关闭的
+`cloudmall.user.tcc-refund-evidence.enabled`，以相同运维凭证直连User：
+`GET /api/internal/users/{userId}/balance/tcc-reconciliation/{payNo}/refund-evidence`。
+Gate先于连接，成功/已知错误均no-store，Gateway禁止；不接收客户端原操作键/XID/金额覆盖。
+
+同一只读RR复用16T9基线，按原 `original_operation_key=payNo` 索引查CI候选，不预过滤坏行；
+100条加一哨兵，超限不输出总额或指纹、不继续逐键查询。每行核原身份/类型/状态/金额/退款
+余额增量，并用有界操作键点查询确认全局CI候选恰好一条；重复/别名、累计超原款均冲突。
+合法多键部分退款保留，当前范围全部核验后可输出部分总额和指纹，仍不授权自动补退。
+
+只有原固定键partial这一缺口可由完整关联候选全额证明补齐；其他原缺证/冲突保留。原金额
+缺失/非法不查候选，不抛意外500。完整基线+N合法候选为9+1+N次只读SELECT、同一连接。
+摘要固定 `USER_LINKED_REFUNDS_OBSERVED_ONLY`、`automaticActionsAllowed=false`、
+`unlinkedLedgerRowsNotInspected=true`，仅当前原账本关联候选完整性，不是财务结清。
+0候选不说明不存在错link/未关联退款；Pay/Order/Stock/TC/MQ与统一包仍待后续。
+
+候选行和原键不输出；向量按键SHA256升序编码金额/余额增量字段后再次SHA256。原16T9报告
+保留在baseEvidence中。隔离验收使用随机owned User库、实际RR/Mapper，最终清理，原库仅核checksum：
+
+```powershell
+mvn -pl backend/cloud-mall-user -am test '-Dtest=UserLinkedRefundEvidenceMySqlIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dcloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:13307/cloudmall_user?allowPublicKeyRetrieval=true'
+```
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

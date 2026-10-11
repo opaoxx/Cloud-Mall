@@ -19,6 +19,9 @@ class TccInternalRouteIsolationTest {
   void reconciliationPathsCannotBeExposedThroughDiscoveryOrEncoding() {
     for (String path :
         List.of(
+            "/api/internal/users/7/balance/tcc-reconciliation/pay1/refund-evidence",
+            "/cloud-mall-user/api/internal/users/7/balance/%74cc-reconciliation/pay1/refund-evidence",
+            "/cloud-mall-user/api/internal/users/7/balance/tcc-reconciliation;mode=inspect/pay1/refund-evidence",
             "/api/internal/payments/pay1/tcc-reconciliation/user-account-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/%74cc-reconciliation/user-account-evidence",
             "/cloud-mall-pay/api/internal/payments/pay1/tcc-reconciliation;mode=inspect/user-account-evidence",

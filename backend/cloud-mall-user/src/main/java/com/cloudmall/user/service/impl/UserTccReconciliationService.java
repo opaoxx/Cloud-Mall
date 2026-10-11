@@ -41,6 +41,22 @@ public class UserTccReconciliationService {
   /** 认证、参数及上下文门在只读代理前执行，DB不可用固定503。 */
   public UserTccReconciliationVO inspect(Long userId, String payNo, String caller, String token) {
     // 1. 任一失败门不会启动事务或访问任何资金证据。
+    validateForRead(userId, payNo, caller, token);
+    // 2. 数据库错误不伪装为没冻结或没退款，不泄露连接文本。
+    try {
+      var report = reader.inspect(userId, payNo);
+      // 3. 固定分类审计不打印原标识、金额、账户或退款账本。
+      log.info(
+          "CM18 User取证 userId={} payNo={} classification={}", userId, payNo, report.classification);
+      return report;
+    } catch (DataAccessException unavailable) {
+      log.warn("CM18 User取证不可用 userId={} payNo={}", userId, payNo);
+      throw new BizException("USER_TCC_RECONCILIATION_UNAVAILABLE", "本地User资金证据暂不可用", 503);
+    }
+  }
+
+  /** 共享无DB入口门，在任何连接或事务前验证原local开关、凭证与范围/上下文。 */
+  public void validateForRead(Long userId, String payNo, String caller, String token) {
     if (!enabled) throw new BizException("USER_TCC_RECONCILIATION_DISABLED", "User取证入口未启用", 503);
     if (expectedToken == null
         || expectedToken.isBlank()
@@ -54,16 +70,5 @@ public class UserTccReconciliationService {
     if (TransactionSynchronizationManager.isActualTransactionActive()
         || RootContext.getXID() != null)
       throw new BizException("USER_TCC_RECONCILIATION_CONTEXT_INVALID", "取证不允许继承资金或本地事务上下文", 409);
-    // 2. 数据库错误不伪装为没冻结或没退款，不泄露连接文本。
-    try {
-      var report = reader.inspect(userId, payNo);
-      // 3. 固定分类审计不打印原标识、金额、账户或退款账本。
-      log.info(
-          "CM18 User取证 userId={} payNo={} classification={}", userId, payNo, report.classification);
-      return report;
-    } catch (DataAccessException unavailable) {
-      log.warn("CM18 User取证不可用 userId={} payNo={}", userId, payNo);
-      throw new BizException("USER_TCC_RECONCILIATION_UNAVAILABLE", "本地User资金证据暂不可用", 503);
-    }
   }
 }

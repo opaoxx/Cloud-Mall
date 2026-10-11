@@ -11,6 +11,17 @@ import org.apache.ibatis.annotations.Update;
 /** 用户余额账本数据访问接口。 */
 @Mapper
 public interface BalanceLedgerMapper extends BaseMapper<BalanceLedgerPO> {
+  /** 保留原扣款键的CI关联候选及坏原行，100加一哨兵，不锁定或过滤退款类型。 */
+  @Select(
+      "SELECT * FROM balance_ledger WHERE original_operation_key=#{originalOperationKey}"
+          + " ORDER BY id LIMIT 101")
+  java.util.List<BalanceLedgerPO> findLinkedRefundCandidates(
+      @Param("originalOperationKey") String originalOperationKey);
+
+  /** 只读核操作键全局CI候选数量，防止遗留重复或别名被摘要去重隐藏。 */
+  @Select("SELECT COUNT(*) FROM balance_ledger WHERE operation_key=#{operationKey}")
+  Long countOperationCandidates(@Param("operationKey") String operationKey);
+
   /** 为已有本地数据库幂等创建余额账本。 */
   @Update(
       "CREATE TABLE IF NOT EXISTS balance_ledger (id BIGINT PRIMARY KEY,user_id BIGINT NOT"
