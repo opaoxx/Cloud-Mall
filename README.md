@@ -1555,3 +1555,12 @@ SQL/DDL/锁序/事务/Redis/MQ/恢复/legacy/API不变；完整tuple/原来源�
 坏候选返回false，零claim/Redis/状态写；合法blocked-confirm继续跳过，健康rollback沿原Lua/租约/回执重试。
 真实MySQL与Redis Lua覆盖损坏维度、大小写/外单原键及释放回执重放；保原用户计数不减少。
 SQL/DDL/Lua/批50/租约/GET/settle/API不改；claim后TOCTOU、CAS readback及完整tuple/CM18其余M1–M4保留。
+
+
+### CM-18 秒杀释放CAS读回证明（16T38）
+
+markReleased未命中时，只有读回exact RELEASED、同一行ID/原始tuple/操作键、非NULL原createdAt，
+且redisRevision匹配本次Lua回执，才能计为handled。大小写/重音/尾空格别名或错误原字段均不能借终态标签成功。
+缺证沿原CAS_UNKNOWN/retry原候选，读回坏终态不修补、不重复Lua；markReleased1仍直接成功。
+忽略updatedAt/lease/lastError等可变诊断字段，允许合法writer已完成同一释放的读回。
+SQL/DDL/Lua/租约/批50/GET/settle/API不变；扫描窗口、claim后TOCTOU及完整source/CM18其余M1–M4保留。

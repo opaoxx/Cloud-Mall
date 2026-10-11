@@ -41,6 +41,9 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   /** 仅owned事实准备/核验数据源。 */
   private static JdbcTemplate fixture;
 
+  /** 用于受控竞争writer的真实MyBatis代理，原查询和CAS均不模拟结果。 */
+  private static SeckillQuotaSettlementMapper realMapper;
+
   /** 调用真实MyBatis的可观测Mapper，不模拟SQL结果。 */
   private static SeckillQuotaSettlementMapper observedMapper;
 
@@ -93,11 +96,13 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     var factory = new MybatisSqlSessionFactoryBean();
     factory.setDataSource(owned);
     factory.setConfiguration(configuration);
-    var mapper =
+    realMapper =
         new SqlSessionTemplate(factory.getObject()).getMapper(SeckillQuotaSettlementMapper.class);
-    mapper.ensureTable();
+    realMapper.ensureTable();
     observedMapper =
-        mock(SeckillQuotaSettlementMapper.class, org.mockito.AdditionalAnswers.delegatesTo(mapper));
+        mock(
+            SeckillQuotaSettlementMapper.class,
+            org.mockito.AdditionalAnswers.delegatesTo(realMapper));
     var redisConfiguration =
         new RedisStandaloneConfiguration("127.0.0.1", Integer.parseInt(redisPort));
     redisConfiguration.setPassword("root");
@@ -268,8 +273,171 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     assertEquals(redisBefore, redisFacts(keys));
   }
 
+  @Test
+  void inconsistentReleasedReadbackCannotProveCurrentLuaReceipt() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String variant :
+        List.of(
+            "id",
+            "order-case",
+            "order-accent",
+            "order-space",
+            "activity",
+            "sku",
+            "user",
+            "idem-case",
+            "idem-space",
+            "quantity",
+            "revision",
+            "operation",
+            "created",
+            "receipt-null",
+            "receipt-other"))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            var snapshot = installReleasedWriter(original, variant);
+            clearInvocations(observedMapper, observedRedis);
+            int handled = recovery.recoverDue();
+            assertAll(
+                () -> assertEquals(0, handled, variant),
+                () ->
+                    verify(observedMapper)
+                        .retry(
+                            eq(original.orderNo),
+                            eq(original.operationKey),
+                            eq(2L),
+                            any(),
+                            eq("SECKILL_RELEASE_CAS_UNKNOWN"),
+                            any(),
+                            any()),
+                () -> assertEquals(snapshot.get(), facts(), "被测路径不得修补当前坏终态: " + variant),
+                () -> assertSingleReleaseProjection(original, keys));
+            verify(observedMapper).findDue(any(), eq(50));
+            verify(observedMapper)
+                .claim(
+                    eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
+            verify(observedMapper)
+                .markReleased(
+                    eq(original.orderNo), eq(original.operationKey), eq(2L), eq(4L), any());
+            verify(observedMapper).findSettlement(original.orderNo);
+            verifyNoMoreInteractions(observedMapper);
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void exactCompetingWriterAndLuaReceiptAreStillCountedComplete() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+      reset();
+      var original = row(state, "😺".repeat(128));
+      seed(original);
+      var keys = prepareRedis(original);
+      var snapshot = installReleasedWriter(original, "exact");
+      clearInvocations(observedMapper, observedRedis);
+      assertEquals(1, recovery.recoverDue());
+      verify(observedMapper).findSettlement(original.orderNo);
+      verify(observedMapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any());
+      assertEquals(snapshot.get(), facts());
+      assertReleased(original);
+      assertSingleReleaseProjection(original, keys);
+    }
+  }
+
+  /** 在被测CAS之前提交真实writer，再真实执行重复CAS0；仅owned注入当前行故障。 */
+  private static java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>
+      installReleasedWriter(SeckillQuotaSettlementPO original, String variant) {
+    var snapshot =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    doAnswer(
+            invocation -> {
+              String orderNo = invocation.getArgument(0);
+              String operationKey = invocation.getArgument(1);
+              long revision = invocation.getArgument(2);
+              long redisRevision = invocation.getArgument(3);
+              String owner = invocation.getArgument(4);
+              assertEquals(
+                  1,
+                  realMapper.markReleased(orderNo, operationKey, revision, redisRevision, owner));
+              switch (variant) {
+                case "id" -> fixture.update("UPDATE seckill_quota_settlement SET id=2");
+                case "order-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?",
+                        original.orderNo.toUpperCase(java.util.Locale.ROOT));
+                case "order-accent" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?",
+                        original.orderNo.replace("cm37", "cḿ37"));
+                case "order-space" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET order_no=?", original.orderNo + " ");
+                case "activity" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET activity_id=activity_id+1");
+                case "sku" -> fixture.update("UPDATE seckill_quota_settlement SET sku_id=sku_id+1");
+                case "user" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET user_id=user_id+1");
+                case "idem-case" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET idempotency_key='OWNED-IDEM'");
+                case "idem-space" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET idempotency_key='owned-idem '");
+                case "quantity" -> fixture.update("UPDATE seckill_quota_settlement SET quantity=2");
+                case "revision" -> fixture.update("UPDATE seckill_quota_settlement SET revision=3");
+                case "operation" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET operation_key=?",
+                        original.orderNo + ":CONFIRM");
+                case "created" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET created_at='2000-01-01 00:00:00.001'");
+                case "receipt-null" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET redis_revision=NULL");
+                case "receipt-other" ->
+                    fixture.update("UPDATE seckill_quota_settlement SET redis_revision=5");
+                case "exact" ->
+                    fixture.update(
+                        "UPDATE seckill_quota_settlement SET"
+                            + " updated_at='2026-10-12',last_error='diagnostic-only'");
+                default -> throw new AssertionError(variant);
+              }
+              snapshot.set(facts());
+              int changed =
+                  realMapper.markReleased(orderNo, operationKey, revision, redisRevision, owner);
+              assertEquals(0, changed, "必须触发真实已提交终态的CAS0");
+              return changed;
+            })
+        .when(observedMapper)
+        .markReleased(any(), any(), anyLong(), anyLong(), any());
+    return snapshot;
+  }
+
+  /** 保原Lua只调用一次且只回补一次；不修当前坏读回，不减用户计数。 */
+  private static void assertSingleReleaseProjection(
+      SeckillQuotaSettlementPO original, List<String> keys) {
+    verify(observedRedis, times(1))
+        .execute(
+            any(org.springframework.data.redis.core.script.RedisScript.class),
+            anyList(),
+            eq(original.orderNo),
+            eq(original.operationKey),
+            eq("2"),
+            eq("1"));
+    assertEquals("6", fixtureRedis.opsForValue().get(keys.get(0)));
+    assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
+    assertEquals(
+        "APPLIED|" + original.operationKey + "|2|4", fixtureRedis.opsForValue().get(keys.get(3)));
+    assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
+    assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+  }
+
   /** 测试间仅清自有库，不重启中间件/改其它键。 */
   private static void reset() {
+    org.mockito.Mockito.reset(observedMapper);
     for (String table : TABLES) fixture.update("DELETE FROM " + table);
     if (!ownedKeys.isEmpty()) fixtureRedis.delete(ownedKeys);
   }

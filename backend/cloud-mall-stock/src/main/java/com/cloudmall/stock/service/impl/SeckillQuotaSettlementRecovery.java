@@ -122,7 +122,7 @@ public class SeckillQuotaSettlementRecovery {
                 settlement.orderNo, settlement.operationKey, revision, redisRevision, owner)
             != 1) {
           SeckillQuotaSettlementPO current = settlementMapper.findSettlement(settlement.orderNo);
-          if (current != null && "RELEASED".equals(current.status)) return true;
+          if (releasedReadbackMatches(settlement, current, redisRevision)) return true;
           log.warn(
               "秒杀结算释放 CAS 未命中，orderNo={},operationKey={},revision={},分类=CAS_UNKNOWN",
               settlement.orderNo,
@@ -172,6 +172,26 @@ public class SeckillQuotaSettlementRecovery {
           failure);
       return false;
     }
+  }
+
+  /** CAS读回必须绑定同一不可变行及本次Lua回执；可变诊断不参与，缺证沿原重试。 */
+  private static boolean releasedReadbackMatches(
+      SeckillQuotaSettlementPO original, SeckillQuotaSettlementPO current, Long redisRevision) {
+    return current != null
+        && "RELEASED".equals(current.status)
+        && current.id != null
+        && Objects.equals(original.id, current.id)
+        && Objects.equals(original.orderNo, current.orderNo)
+        && Objects.equals(original.activityId, current.activityId)
+        && Objects.equals(original.skuId, current.skuId)
+        && Objects.equals(original.userId, current.userId)
+        && Objects.equals(original.idempotencyKey, current.idempotencyKey)
+        && Objects.equals(original.quantity, current.quantity)
+        && Objects.equals(original.revision, current.revision)
+        && Objects.equals(original.operationKey, current.operationKey)
+        && original.createdAt != null
+        && Objects.equals(original.createdAt, current.createdAt)
+        && Objects.equals(redisRevision, current.redisRevision);
   }
 
   /** 只接受原待释放方向及合法基础维度；非法/confirm候选跳过，不领取租约或规范化原字段。 */
