@@ -1485,3 +1485,14 @@ AuthContext隔离及双Pay RR本地变化优先；不依赖其它Pay诊断flag�
 `10.0000`等尾零数值等值及四状态（含CANCELLED+PayCOMMITTED）仍可基本匹配；合法字段矛盾仍冲突。
 非法字段对应指纹null、最高剩余缺证，scope仍`PAY_ORDER_BASIC_ONLY`；双Pay RR/身份隔离/唯一GET保持。
 不扩充SKU/库存动作或资金终态证明，不新增写/自动动作，CM18其它M1–M4仍保留。
+
+
+### CM-18 秒杀库存GET原订单归属保护（16T31）
+
+秒杀settlement及legacy受理查询仍沿原`WHERE order_no=?`返回CI候选；GET以原行orderNo精确核请求身份，
+不把大小写/重音/尾空格别名、错单或缺身份包装为当前单的RESERVED/CONFIRMED/ROLLED_BACK。
+三个只读分支（主settlement、主legacy ACCEPTED、Stock fallback legacy）身份失败均返回请求订单号、
+`UNKNOWN/items=[]`，不伪装missing、不落普通路径或使Order旧fallback误判SUCCEEDED。
+精确合法记录的原状态/数量保留，非ACCEPTED主legacy仍沿原null、fallback REJECTED/PENDING原映射保持。
+不新增SQL/BINARY过滤/事务，原GET仍非RR；不改settle/迁移/恢复/CAS/Redis/MQ/DDL或API。
+完整秒杀原tuple、余额、Order SKU/动作、TC/MQ/统一包及CM18其它M1–M4仍待完成。

@@ -319,6 +319,9 @@ public class StockServiceImpl implements StockService {
     }
     Map<String, Object> seckillFact = stockSqlMapper.findSeckillByOrderNo(orderNo);
     if (seckillFact != null && !seckillFact.isEmpty()) {
+      // 原CI候选必须属于请求原订单；错身份不能改为NOT_FOUND或落普通路径。
+      if (!Objects.equals(orderNo, seckillFact.get("order_no")))
+        return ApiResponse.ok(unknownReservationProof(orderNo));
       String acceptedStatus = String.valueOf(seckillFact.get("status"));
       String status =
           "ACCEPTED".equals(acceptedStatus)

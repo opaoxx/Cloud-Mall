@@ -24,7 +24,9 @@ class SeckillQuotaSettlementServiceTest {
     when(mapper.transitionOpenToConfirmed("order-1", "order-1:CONFIRM", 1L)).thenReturn(1);
 
     ApiResponse<?> response =
-        new SeckillQuotaSettlementService(mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class)).settle("order-1", "CONFIRM");
+        new SeckillQuotaSettlementService(
+                mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
+            .settle("order-1", "CONFIRM");
 
     assertEquals(true, ((java.util.Map<?, ?>) response.data).get("confirmed"));
     verify(mapper).transitionOpenToConfirmed("order-1", "order-1:CONFIRM", 1L);
@@ -37,7 +39,9 @@ class SeckillQuotaSettlementServiceTest {
     when(mapper.transitionToReleasePending("order-2", "order-2:ROLLBACK", 1L)).thenReturn(1);
 
     ApiResponse<?> response =
-        new SeckillQuotaSettlementService(mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class)).settle("order-2", "ROLLBACK");
+        new SeckillQuotaSettlementService(
+                mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
+            .settle("order-2", "ROLLBACK");
 
     java.util.Map<?, ?> result = (java.util.Map<?, ?>) response.data;
     assertEquals(false, result.get("rolledBack"));
@@ -53,7 +57,10 @@ class SeckillQuotaSettlementServiceTest {
 
     assertThrows(
         com.cloudmall.common.error.BizException.class,
-        () -> new SeckillQuotaSettlementService(mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class)).settle("order-3", "CONFIRM"));
+        () ->
+            new SeckillQuotaSettlementService(
+                    mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
+                .settle("order-3", "CONFIRM"));
   }
 
   @Test
@@ -62,16 +69,23 @@ class SeckillQuotaSettlementServiceTest {
     when(mapper.findSettlementForUpdate("normal-order")).thenReturn(null);
     when(mapper.findSettlement("normal-order")).thenReturn(null);
 
-    assertNull(new SeckillQuotaSettlementService(mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class)).settle("normal-order", "ROLLBACK"));
+    assertNull(
+        new SeckillQuotaSettlementService(
+                mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
+            .settle("normal-order", "ROLLBACK"));
   }
 
   @Test
   void queryMapsInternalPendingStateToUnknown() {
     SeckillQuotaSettlementMapper mapper = mock(SeckillQuotaSettlementMapper.class);
     SeckillQuotaSettlementPO row = settlement("PROJECTION_BLOCKED");
+    row.orderNo = "order-4";
     when(mapper.findSettlement("order-4")).thenReturn(row);
 
-    StockReservationVO response = new SeckillQuotaSettlementService(mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class)).reservation("order-4");
+    StockReservationVO response =
+        new SeckillQuotaSettlementService(
+                mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
+            .reservation("order-4");
 
     assertEquals("UNKNOWN", response.status);
   }

@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import javax.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -50,13 +51,18 @@ public class SeckillQuotaSettlementService {
       Map<String, Object> accepted = stockSqlMapper.findSeckillByOrderNo(orderNo);
       if (accepted == null || !"ACCEPTED".equals(String.valueOf(accepted.get("status"))))
         return null;
+      // CI查询仅返回候选；原身份缺失或错别名不能作为当前订单的保留事实。
+      if (!Objects.equals(orderNo, accepted.get("order_no"))) return unknownOrderIdentity(orderNo);
       long skuId = requiredPositive(accepted.get("sku_id"), "sku_id");
       return new StockReservationVO(
           orderNo,
           "RESERVED",
           List.of(new com.cloudmall.stock.domain.vo.StockReservationItemVO(skuId, 1, "RESERVED")));
     }
+    // 2. 先核原订单号再验维度；不能借别单终态或落入普通库存路径。
+    if (!Objects.equals(orderNo, settlement.orderNo)) return unknownOrderIdentity(orderNo);
     validateSettlement(settlement);
+    // 3. 原身份和维度完整后仅映射查询状态，不执行任何结算或库存动作。
     String status = externalStatus(settlement.status);
     return new StockReservationVO(
         orderNo,
@@ -64,6 +70,11 @@ public class SeckillQuotaSettlementService {
         List.of(
             new com.cloudmall.stock.domain.vo.StockReservationItemVO(
                 settlement.skuId, settlement.quantity, status)));
+  }
+
+  /** 错原身份仍是已观察候选，不伪装成缺行；空明细不回显别单SKU或允许fallback。 */
+  private static StockReservationVO unknownOrderIdentity(String orderNo) {
+    return new StockReservationVO(orderNo, "UNKNOWN", List.of());
   }
 
   /** 按既有库存动作协议确认或释放秒杀配额；rollback 只提交待投影事实。 */
