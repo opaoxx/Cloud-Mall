@@ -22,6 +22,7 @@ GET /api/internal/payments/{payNo}/tcc-reconciliation/delivery-evidence
 
 - 仅依赖 16T1 local flag 与本批 flag；共享 `validateForRead` 在任何连接前校验 callback token、caller=`cm18-reconciliation`、ASCII payNo、无 Spring active transaction、无 Seata XID。不得接受外部身份覆盖。
 - Gateway 继续禁止该 suffix；Controller 只委托，不直接持有 SQL。`Cache-Control: no-store` 保持。
+- New Controller must add a local `@ExceptionHandler(BizException.class)` for this endpoint, constructing the existing `ApiResponse` code/message/status shape and always setting `Cache-Control: no-store`; this local handler does not alter the global handler or old APIs. It covers 400/403/404/409 as well as the fixed 503 path.
 - 独立 `@Transactional(readOnly=true,isolation=REPEATABLE_READ)` ReadService 在同一 REQUIRED 只读事务中调用既有 `reader.capture(payNo)`、`PayTccDeliveryMapper.selectByPayNo(payNo)`、`PayTccCancelMapper.selectByPayNo(payNo)`；完整样本为 8 次 SELECT、1 个连接。禁止 `Store.read`、`ensureTable`、`FOR UPDATE`、写、RPC、TC、MQ。
 
 ## 3. 输出与脱敏
