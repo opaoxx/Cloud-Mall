@@ -164,7 +164,9 @@ public class SeckillQuotaSettlementRecovery {
                 settlement)
             != 1) {
           SeckillQuotaSettlementPO current = settlementMapper.findSettlement(settlement.orderNo);
-          if (releasedReadbackMatches(settlement, current, redisRevision)) return true;
+          // 读回终态/原回执成立后复核原受理来源；非锁两点观察不保证源冻结。
+          if (releasedReadbackMatches(settlement, current, redisRevision)
+              && settlementMapper.findMatchingAcceptanceId(settlement) != null) return true;
           log.warn(
               "秒杀结算释放 CAS 未命中，orderNo={},operationKey={},revision={},分类=CAS_UNKNOWN",
               settlement.orderNo,

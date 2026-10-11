@@ -361,6 +361,68 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   }
 
   @Test
+  void matchingCompetingReleaseCannotCompleteAfterAcceptanceSourceChanges() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String variant : badAcceptanceSources())
+        assertions.add(
+            () -> {
+              reset();
+              var original = row(state, "owned-idem");
+              seed(original);
+              var keys = prepareRedis(original);
+              var snapshot = installReleasedWriter(original, "source-" + variant);
+              clearInvocations(observedMapper, observedRedis);
+              assertEquals(0, recovery.recoverDue(), state + ":" + variant);
+              verify(observedMapper)
+                  .findMatchingAcceptanceId(
+                      argThat(
+                          candidate ->
+                              candidate == original
+                                  || (candidate.orderNo.equals(original.orderNo)
+                                      && candidate.id.equals(original.id)
+                                      && candidate.activityId.equals(original.activityId)
+                                      && candidate.skuId.equals(original.skuId)
+                                      && candidate.userId.equals(original.userId)
+                                      && candidate.idempotencyKey.equals(original.idempotencyKey)
+                                      && candidate.createdAt.equals(original.createdAt))));
+              verify(observedMapper)
+                  .retry(
+                      eq(original.orderNo),
+                      eq(original.operationKey),
+                      eq(2L),
+                      any(),
+                      eq("SECKILL_RELEASE_CAS_UNKNOWN"),
+                      any(),
+                      any(),
+                      any(SeckillQuotaSettlementPO.class));
+              assertEquals(snapshot.get(), facts(), "不得修补缺来源的已提交终态");
+              assertSingleReleaseProjection(original, keys);
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void matchingReleaseReadbackKeepsAllThreeAcceptedSourceStates() {
+    for (String sourceState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+        reset();
+        var original = row(state, "😺".repeat(128));
+        seed(original);
+        fixture.update("UPDATE seckill_reservation SET status=?", sourceState);
+        var keys = prepareRedis(original);
+        var snapshot = installReleasedWriter(original, "exact");
+        clearInvocations(observedMapper, observedRedis);
+        assertEquals(1, recovery.recoverDue());
+        verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+        verify(observedMapper, never())
+            .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+        assertEquals(snapshot.get(), facts());
+        assertSingleReleaseProjection(original, keys);
+      }
+  }
+
+  @Test
   void exactCompetingWriterAndLuaReceiptAreStillCountedComplete() {
     for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
       reset();
@@ -547,7 +609,10 @@ class SeckillRecoveryCandidateGuardMySqlIT {
                     fixture.update(
                         "UPDATE seckill_quota_settlement SET"
                             + " updated_at='2026-10-12',last_error='diagnostic-only'");
-                default -> throw new AssertionError(variant);
+                default -> {
+                  if (!variant.startsWith("source-")) throw new AssertionError(variant);
+                  corruptAcceptanceSource(original, variant.substring("source-".length()));
+                }
               }
               snapshot.set(facts());
               int changed =

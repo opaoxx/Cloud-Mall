@@ -104,6 +104,7 @@ class SeckillRecoveryClaimReadbackTest {
   void claimPointReadAndCasReadbackRemainSeparateProofs() {
     var mapper = mapper(current -> {});
     var original = row();
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
     var terminal = row();
     terminal.status = "RELEASED";
     terminal.redisRevision = 7L;
@@ -120,6 +121,7 @@ class SeckillRecoveryClaimReadbackTest {
     var redis = redis();
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
     verify(mapper, times(2)).findSettlement("order-24");
+    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
     verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
     verify(redis)
         .execute(

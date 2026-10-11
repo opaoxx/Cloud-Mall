@@ -1672,3 +1672,9 @@ RELEASE_PENDING/rollback方向PROJECTION_BLOCKED同向重试在原方向proof后
 markReleased/markProjectionBlocked/retry保原lease/不可变snapshot谓词及SET，追加同语句精确受理tuple/合法三态EXISTS。
 claim/Lua后source删/变时UPDATE0不清租约、不造完成或改诊断；Java恢复、参数/查询/API/DDL/Lua保持。
 若Redis已实际释放而后SQL拒绝，其效果保留，不伪回滚；关联读取锁足迹可能改变，跨存储原子/fencing及完整来源仍待处理。
+
+### CM-18 恢复CAS完成读回的受理来源观察（16T53）
+
+markReleased未命中后，先核同一不可变结算行和本次Lua回执，再复查原受理tuple的合法三态来源，来源存在才计为完成。
+来源缺失沿原未知重试，查询故障沿原异常路径；普通CAS成功不增加查询，坏读回先短路，SQL/Lua/协议保持。
+这是非锁两点观察，已发生Redis效果保留，不证明源冻结、完整受理因果或跨存储fencing。

@@ -77,6 +77,45 @@ class SeckillRecoveryCasReadbackTest {
   }
 
   @Test
+  void matchingReleasedReadbackWithMissingSourceKeepsUnknownRetry() {
+    var mapper = mapper();
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn((Long) null);
+    stubClaimThenCurrent(mapper, releasedRow());
+    assertEquals(0, new SeckillQuotaSettlementRecovery(mapper, redis()).recoverDue());
+    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryCasReadbackTest::isOriginal));
+    verify(mapper)
+        .retry(
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            any(),
+            eq("SECKILL_RELEASE_CAS_UNKNOWN"),
+            any(),
+            any(),
+            argThat(SeckillRecoveryCasReadbackTest::isOriginal));
+  }
+
+  @Test
+  void sourceReadFailureKeepsOriginalCatchAndRetry() {
+    var mapper = mapper();
+    when(mapper.findMatchingAcceptanceId(any()))
+        .thenThrow(new IllegalStateException("owned-source-read-failure"));
+    stubClaimThenCurrent(mapper, releasedRow());
+    assertEquals(0, new SeckillQuotaSettlementRecovery(mapper, redis()).recoverDue());
+    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryCasReadbackTest::isOriginal));
+    verify(mapper)
+        .retry(
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            any(),
+            contains("owned-source-read-failure"),
+            any(),
+            any(),
+            argThat(SeckillRecoveryCasReadbackTest::isOriginal));
+  }
+
+  @Test
   void exactAnotherWorkerReleasedFactIgnoresMutableDiagnosticFields() {
     var current = row();
     current.status = "RELEASED";
@@ -89,6 +128,7 @@ class SeckillRecoveryCasReadbackTest {
     var mapper = mapper();
     var redis = redis();
     stubClaimThenCurrent(mapper, current);
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
     verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
     verify(mapper, times(2)).findSettlement("order-24");
@@ -101,6 +141,7 @@ class SeckillRecoveryCasReadbackTest {
             eq("2"),
             eq("1"));
     verifyNoMoreInteractions(redis);
+    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryCasReadbackTest::isOriginal));
   }
 
   @Test
@@ -117,6 +158,7 @@ class SeckillRecoveryCasReadbackTest {
         .thenReturn(1);
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis()).recoverDue());
     verify(mapper).findSettlement("order-24");
+    verify(mapper, never()).findMatchingAcceptanceId(any());
     verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
   }
 
