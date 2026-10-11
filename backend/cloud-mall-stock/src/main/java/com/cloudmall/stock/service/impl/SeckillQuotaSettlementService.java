@@ -6,6 +6,7 @@ import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
@@ -161,10 +162,18 @@ public class SeckillQuotaSettlementService {
 
   /** 旧台账缺少合法 SKU 时保持错误，禁止默认成可结算事实。 */
   private static long requiredPositive(Object value, String name) {
-    if (!(value instanceof Number number) || number.longValue() <= 0) {
+    try {
+      // JDBC整数/DECIMAL保持无损；浮点可能已丢原精度，不能据此补造SKU。
+      if (!(value instanceof Number) || value instanceof Float || value instanceof Double)
+        throw new IllegalArgumentException();
+      BigDecimal original =
+          value instanceof BigDecimal decimal ? decimal : new BigDecimal(value.toString());
+      long skuId = original.longValueExact();
+      if (skuId <= 0) throw new IllegalArgumentException();
+      return skuId;
+    } catch (IllegalArgumentException | ArithmeticException invalidIdentity) {
       throw new BizException("SECKILL_SETTLEMENT_CORRUPT", "秒杀受理事实 " + name + " 无效", 500);
     }
-    return number.longValue();
   }
 
   /** 获取与 MySQL DATETIME(3) 一致的上海本地时间。 */

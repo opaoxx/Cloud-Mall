@@ -1506,3 +1506,13 @@ AuthContext隔离及双Pay RR本地变化优先；不依赖其它Pay诊断flag�
 错误身份不能走终态noop成功或普通库存路径。精确原订单的状态、revision、操作键及重试语义保持。
 不新增SQL/查询/BINARY过滤/锁/事务，不改GET16T31、迁移、Redis/MQ/恢复或API。
 完整settlement tuple/其它维度、Order SKU/动作、TC/MQ/统一包及CM18其它M1–M4仍待完成。
+
+
+### CM-18 旧秒杀SKU无损读取保护（16T33）
+
+旧受理台账GET只接受整数/DECIMAL数学整数且为正long，拒绝`longValue()`小数截断、大数回绕和不可信
+Float/Double、文本、缺失、零/负值。主legacy ACCEPTED保原`SECKILL_SETTLEMENT_CORRUPT`/500；
+fallback坏SKU返回`UNKNOWN/items=[]`，不把非法REJECTED明细映成Order冲突或落入普通路径。
+T31原订单身份仍先核，合法BigDecimal尾零、Long.MAX_VALUE及原状态/数量保持。
+正常生产列仍signed BIGINT；小数/大数/浮点仅owned遗留列验证，不修改生产DDL或猜恢复已丢精度。
+无新增SQL/事务/写，T32写门、settlement/迁移/恢复/Redis/MQ和普通流程保持，CM18其余M1–M4保留。

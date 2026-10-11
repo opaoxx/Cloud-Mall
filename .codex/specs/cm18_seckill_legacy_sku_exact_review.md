@@ -46,3 +46,7 @@ identity 失败仍优先返回 T31 的请求 orderNo echo、`UNKNOWN/items=[]`�
 - 保留 T31/T32、普通 flows/Order/Pay/Gateway 回归；owned 临时列/行和 HTTP/executor 资源 finally 清理，不启动业务 App、RM、TC 或固定端口。
 
 本切片只冻结 legacy SKU 精确读取，不宣称解决 Stock 全 tuple、库存余额、TC/MQ 或 CM18 M1–M4；CM20/CM21 仍等待 CM18 整体完成。
+
+## 6. 当前实现只读复核
+
+当前实现仅修改两个 private guard：主 legacy helper 使用无损 `BigDecimal.longValueExact()` 并拒绝 Float/Double、null、非 Number、非正数、分数和溢出；fallback 在 T31 原 order identity guard 后复用精确数值读取并以 `longValueExact()`/正值门失败闭合为 `UNKNOWN/items=[]`。普通 flows、SQL、GET、T32 settle、迁移、recovery 和其它业务路径未改。生产复核结论为 GO；专项测试最终状态仍以 backend/qa 绿证据为准。

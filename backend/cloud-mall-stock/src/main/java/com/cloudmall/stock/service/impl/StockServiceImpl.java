@@ -322,6 +322,14 @@ public class StockServiceImpl implements StockService {
       // 原CI候选必须属于请求原订单；错身份不能改为NOT_FOUND或落普通路径。
       if (!Objects.equals(orderNo, seckillFact.get("order_no")))
         return ApiResponse.ok(unknownReservationProof(orderNo));
+      // 原SKU必须无损正long；坏legacy字段只能缺证，不能保留REJECTED或伪造明细。
+      long legacySkuId;
+      try {
+        legacySkuId = exactReservationNumber(seckillFact.get("sku_id")).longValueExact();
+        if (legacySkuId <= 0) return ApiResponse.ok(unknownReservationProof(orderNo));
+      } catch (IllegalArgumentException | ArithmeticException invalidIdentity) {
+        return ApiResponse.ok(unknownReservationProof(orderNo));
+      }
       String acceptedStatus = String.valueOf(seckillFact.get("status"));
       String status =
           "ACCEPTED".equals(acceptedStatus)
@@ -330,11 +338,7 @@ public class StockServiceImpl implements StockService {
       // 只读兼容存量台账；GET 不补表、不造回执，也不猜测最终结算。
       return ApiResponse.ok(
           new StockReservationVO(
-              orderNo,
-              status,
-              List.of(
-                  new StockReservationItemVO(
-                      ((Number) seckillFact.get("sku_id")).longValue(), 1, status))));
+              orderNo, status, List.of(new StockReservationItemVO(legacySkuId, 1, status))));
     }
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequest(orderNo);
     List<Map<String, Object>> rows = stockSqlMapper.findReservationFlows(orderNo);
