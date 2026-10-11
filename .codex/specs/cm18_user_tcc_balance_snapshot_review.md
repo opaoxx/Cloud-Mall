@@ -24,8 +24,8 @@ writer 已冻结：Try 的 `balanceBefore=user.balance`、`balanceAfterTry=balan
 
 ## 4. 验收矩阵
 
-- Unit/HTTP：debit/ledger 四来源 NULL、zero、negative、excess scale/capacity、错误 delta、两组各自 delta 合法但 snapshot 不一致均 409，不 500、不输出终态。
-- 合法 `0.01`、`1.000`、最大 DECIMAL(18,2) 通过；旧 state/http、16T9–16T13 取证回归保持。
+- Unit/HTTP：debit/ledger 四来源 NULL、negative、excess scale/capacity、错误 delta、两组各自 delta 合法但 snapshot 不一致均 409，不 500、不输出终态；余额为 zero 本身合法，`before=amount、after=0` 时通过，只有 delta/tuple 不成立才冲突。
+- 合法 `0.01`、`1.000`、最大 DECIMAL(18,2) 及对应 zero-after 快照通过；旧 state/http、16T9–16T13 取证回归保持。
 - Owned MySQL 四来源/六表事实、原库 checksum、并发读无写和资源清理；不改变 writer、RM/Fence、DDL 或 API。
 
 ## 5. 交付边界

@@ -641,6 +641,17 @@ mvn -pl backend/cloud-mall-user -am test '-Dtest=UserFrozenOwnershipEvidenceMySq
 诊断GET继续no-store，原资金state GET缓存契约保持；本批不改变任何资金写入或历史记录，
 不证明历史余额增量、全账户因果、统一证据包或CM-18整体完成。
 
+### CM-18 User原冻结与扣款余额快照门（16T14）
+
+原User TCC状态查询进一步核验真实Try写入的`balanceBefore/balanceAfterTry`：两值必须存在、
+非负且符合DECIMAL(18,2)，并满足`before-afterTry=amount`。CONFIRMED的DEBIT账本也必须
+满足余额差额，且before/after分别数值等于原冻结快照；两组各自差额正确但快照不同仍冲突。
+NULL、非法余额或不一致快照沿原`USER_TCC_STATE_CONFLICT`/409拒绝，不输出已扣款证明。
+
+零余额合法（before=amount、after=0），无损尾零及终态Fence过期语义保留；空取消没有冻结行
+时不要求虚构快照。合法历史账本不必等于当前账户余额。原读取数量/RR/API、资金写入及历史
+数据保持；该校验只证明可见原冻结/扣款快照的一致性，不证明全账户资金因果或CM-18闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

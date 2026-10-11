@@ -194,8 +194,12 @@ class UserTccStateAmountValidationTest {
     attempt.amount = attemptAmount;
     BalanceTccDebitPO debit = debit(state, 12L);
     debit.amount = debitAmount;
+    debit.balanceBefore = debitAmount;
+    debit.balanceAfterTry = BigDecimal.ZERO;
     BalanceLedgerPO ledger = ledger();
     ledger.amount = ledgerAmount;
+    ledger.balanceBefore = ledgerAmount;
+    ledger.balanceAfter = BigDecimal.ZERO;
     when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
     when(attempts.selectByPayNo(receive.payNo))
         .thenReturn("UNKNOWN".equals(state) ? null : attempt);

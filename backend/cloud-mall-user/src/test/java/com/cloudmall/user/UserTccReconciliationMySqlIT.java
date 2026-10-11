@@ -598,6 +598,10 @@ class UserTccReconciliationMySqlIT {
           seed(state);
           for (String table : moneyTables)
             fixture.update("UPDATE " + table + " SET amount=? WHERE id=1", raw);
+          fixture.update(
+              "UPDATE balance_tcc_debit SET balance_before=?,balance_after_try=0 WHERE id=1", raw);
+          fixture.update(
+              "UPDATE balance_ledger SET balance_before=?,balance_after=0 WHERE id=1", raw);
           var before = facts();
           tracked.reset();
           tracked.checking = true;
@@ -614,6 +618,156 @@ class UserTccReconciliationMySqlIT {
       for (String table : moneyTables)
         fixture.execute("ALTER TABLE " + table + " MODIFY amount DECIMAL(18,2) NOT NULL");
       tracked.reset();
+    }
+  }
+
+  /** 冻结/账本四余额字段及差额、原快照来源通过实际HTTP校验且不写。 */
+  @Test
+  void originalBalanceSnapshotsRejectOwnedLegacyRowsAndKeepCurrentAccountIndependent()
+      throws Exception {
+    tracked.checking = false;
+    fixture.execute(
+        "ALTER TABLE balance_tcc_debit MODIFY balance_before DECIMAL(20,3) NULL,MODIFY"
+            + " balance_after_try DECIMAL(20,3) NULL");
+    fixture.execute(
+        "ALTER TABLE balance_ledger MODIFY balance_before DECIMAL(20,3) NULL,MODIFY balance_after"
+            + " DECIMAL(20,3) NULL");
+    var receives = session.getMapper(UserTccReceiveMapper.class);
+    var attempts = session.getMapper(BalanceDebitAttemptMapper.class);
+    var debits = session.getMapper(BalanceTccDebitMapper.class);
+    var ledgers = session.getMapper(BalanceLedgerMapper.class);
+    var fences = session.getMapper(TccFenceLogMapper.class);
+    var users = session.getMapper(UserMapper.class);
+    var queryTarget = new UserTccStateQuery(receives, attempts, debits, ledgers, fences);
+    var queryProxy = readProxy(queryTarget);
+    var query = (UserTccStateQuery) queryProxy.getProxy();
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var baseReader =
+        (UserTccReconciliationReadService)
+            readProxy(
+                    new UserTccReconciliationReadService(
+                        receives, attempts, debits, ledgers, fences, users))
+                .getProxy();
+    var baseService = new UserTccReconciliationService(baseReader, true, "ops-secret");
+    var linkedReader =
+        (UserLinkedRefundEvidenceReadService)
+            readProxy(new UserLinkedRefundEvidenceReadService(baseReader, ledgers)).getProxy();
+    var frozenReader =
+        (UserFrozenOwnershipEvidenceReadService)
+            readProxy(
+                    new UserFrozenOwnershipEvidenceReadService(
+                        baseReader, receives, attempts, debits, ledgers, fences))
+                .getProxy();
+    MockMvc mvc =
+        MockMvcBuilders.standaloneSetup(
+                new UserTccController(bridge),
+                new UserTccReconciliationController(baseService),
+                new UserLinkedRefundEvidenceController(
+                    new UserLinkedRefundEvidenceService(baseService, linkedReader, true)),
+                new UserFrozenOwnershipEvidenceController(
+                    new UserFrozenOwnershipEvidenceService(baseService, frozenReader, true)))
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    String stateRoute = "/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1";
+    String diagnosticRoute = "/api/internal/users/7/balance/tcc-reconciliation/pay1";
+    try {
+      for (String[] field :
+          new String[][] {
+            {"balance_tcc_debit", "balance_before"}, {"balance_tcc_debit", "balance_after_try"},
+            {"balance_ledger", "balance_before"}, {"balance_ledger", "balance_after"}
+          }) {
+        for (String raw : java.util.Arrays.asList(null, "-1", "100.001", "10000000000000000.00")) {
+          seed("CONFIRMED");
+          fixture.update("UPDATE " + field[0] + " SET " + field[1] + "=? WHERE id=1", raw);
+          assertBalanceConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute);
+        }
+      }
+      for (String mutation :
+          List.of(
+              "UPDATE balance_tcc_debit SET balance_after_try=91 WHERE id=1",
+              "UPDATE balance_ledger SET balance_after=91 WHERE id=1",
+              "UPDATE balance_ledger SET balance_before=200,balance_after=190 WHERE id=1")) {
+        seed("CONFIRMED");
+        fixture.update(mutation);
+        assertBalanceConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute);
+      }
+      seed("CONFIRMED");
+      fixture.update(
+          "UPDATE balance_tcc_debit SET balance_before=10,balance_after_try=0 WHERE id=1");
+      fixture.update("UPDATE balance_ledger SET balance_before=10,balance_after=0 WHERE id=1");
+      fixture.update("UPDATE mall_user SET balance=200");
+      var before = facts();
+      tracked.reset();
+      tracked.checking = true;
+      mvc.perform(
+              get(stateRoute)
+                  .header("X-User-Id", "7")
+                  .header("X-Internal-Service", "cloud-mall-pay")
+                  .header("X-Internal-Callback-Token", "ops-secret")
+                  .param("xid", "private-tc:8091:original"))
+          .andExpect(status().isOk())
+          .andExpect(jsonPath("$.data.state").value("CONFIRMED"))
+          .andExpect(jsonPath("$.data.ledgerApplied").value(true));
+      assertEquals(5, tracked.statements.size());
+      assertEquals(1, tracked.connections);
+      assertEquals(before, facts());
+      tracked.reset();
+      mvc.perform(
+              get(diagnosticRoute)
+                  .header("X-Internal-Service", "cm18-reconciliation")
+                  .header("X-Internal-Callback-Token", "ops-secret"))
+          .andExpect(status().isOk())
+          .andExpect(header().string("Cache-Control", "no-store"))
+          .andExpect(jsonPath("$.data.classification").value("BLOCKED_EXTERNAL_EVIDENCE"))
+          .andExpect(jsonPath("$.data.account.balance").value("200.00"));
+      assertEquals(9, tracked.statements.size());
+      assertEquals(1, tracked.connections);
+      assertEquals(before, facts());
+      verifyNoInteractions(resource, receiveStore);
+    } finally {
+      tracked.checking = false;
+      seed("CONFIRMED");
+      fixture.execute(
+          "ALTER TABLE balance_tcc_debit MODIFY balance_before DECIMAL(18,2) NOT NULL,MODIFY"
+              + " balance_after_try DECIMAL(18,2) NOT NULL");
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY balance_before DECIMAL(18,2) NOT NULL,MODIFY"
+              + " balance_after DECIMAL(18,2) NOT NULL");
+      tracked.reset();
+    }
+  }
+
+  /** 坏历史沿原409与诊断no-store传播，单只读RR且全部行/键/时间不变。 */
+  private static void assertBalanceConflictThroughFourRoutes(
+      MockMvc mvc, String stateRoute, String diagnosticRoute) throws Exception {
+    var before = facts();
+    tracked.reset();
+    tracked.checking = true;
+    mvc.perform(
+            get(stateRoute)
+                .header("X-User-Id", "7")
+                .header("X-Internal-Service", "cloud-mall-pay")
+                .header("X-Internal-Callback-Token", "ops-secret")
+                .param("xid", "private-tc:8091:original"))
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+    assertEquals(1, tracked.connections);
+    assertTrue(tracked.statements.size() <= 5);
+    assertEquals(before, facts());
+    for (String suffix : List.of("", "/refund-evidence", "/frozen-ownership-evidence")) {
+      tracked.reset();
+      mvc.perform(
+              get(diagnosticRoute + suffix)
+                  .header("X-Internal-Service", "cm18-reconciliation")
+                  .header("X-Internal-Callback-Token", "ops-secret"))
+          .andExpect(status().isConflict())
+          .andExpect(header().string("Cache-Control", "no-store"))
+          .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+      assertEquals(1, tracked.connections);
+      assertTrue(tracked.statements.size() <= 5);
+      assertEquals(before, facts());
     }
   }
 

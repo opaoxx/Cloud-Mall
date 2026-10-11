@@ -96,6 +96,7 @@ public class UserTccStateQuery {
     if (debit != null)
       require(
           validPositiveMoney(debit.amount)
+              && validDebitSnapshot(debit.balanceBefore, debit.balanceAfterTry, debit.amount)
               && Objects.equals(debit.userId, userId)
               && Objects.equals(debit.payNo, receive.payNo)
               && Objects.equals(debit.orderNo, receive.orderNo)
@@ -115,6 +116,9 @@ public class UserTccStateQuery {
           debit != null
               && ledger != null
               && validPositiveMoney(ledger.amount)
+              && validDebitSnapshot(ledger.balanceBefore, ledger.balanceAfter, ledger.amount)
+              && ledger.balanceBefore.compareTo(debit.balanceBefore) == 0
+              && ledger.balanceAfter.compareTo(debit.balanceAfterTry) == 0
               && "DEBIT".equals(ledger.operationType)
               && "APPLIED".equals(ledger.state)
               && Objects.equals(ledger.userId, userId)
@@ -144,6 +148,22 @@ public class UserTccStateQuery {
         && amount.signum() > 0
         && amount.stripTrailingZeros().scale() <= 2
         && amount.compareTo(MAX_MONEY) <= 0;
+  }
+
+  /** 调用方已证明正amount；余额快照必须存在且合法，差额证明实际冻结/扣款量纲。 */
+  private static boolean validDebitSnapshot(
+      BigDecimal balanceBefore, BigDecimal balanceAfter, BigDecimal amount) {
+    return validBalance(balanceBefore)
+        && validBalance(balanceAfter)
+        && balanceBefore.subtract(balanceAfter).compareTo(amount) == 0;
+  }
+
+  /** 零余额合法，不比较当前账户余额；原快照不能缺失、负数、截断或超容量。 */
+  private static boolean validBalance(BigDecimal balance) {
+    return balance != null
+        && balance.signum() >= 0
+        && balance.stripTrailingZeros().scale() <= 2
+        && balance.compareTo(MAX_MONEY) <= 0;
   }
 
   /** 不一致事实不能被输出为扣款成功或安全取消。 */

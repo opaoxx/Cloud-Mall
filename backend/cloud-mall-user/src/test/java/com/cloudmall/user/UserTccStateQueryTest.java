@@ -182,6 +182,8 @@ class UserTccStateQueryTest {
     debit.branchId = branchId;
     debit.operationKey = "tcc-debit:pay-query-1";
     debit.state = state;
+    debit.balanceBefore = new BigDecimal("100.00");
+    debit.balanceAfterTry = new BigDecimal("90.00");
     return debit;
   }
 
@@ -194,6 +196,8 @@ class UserTccStateQueryTest {
     ledger.operationKey = "pay-query-1";
     ledger.operationType = "DEBIT";
     ledger.state = "APPLIED";
+    ledger.balanceBefore = new BigDecimal("100.00");
+    ledger.balanceAfter = new BigDecimal("90.00");
     return ledger;
   }
 
