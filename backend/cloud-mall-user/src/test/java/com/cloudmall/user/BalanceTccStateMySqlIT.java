@@ -812,6 +812,78 @@ class BalanceTccStateMySqlIT {
     assertEquals(before, allFundsFacts());
   }
 
+  /** 单值合法但派生容量/可清算量非法，保持明确409且所有资金事实不变。 */
+  @Test
+  void derivedWalletBoundsAreCheckedBeforeSqlWrites() {
+    assertTrue(fixture.queryForObject("SELECT @@sql_mode", String.class).contains("STRICT"));
+    for (String scenario :
+        List.of("tryOverflow", "confirmUnderflow", "cancelUnderflow", "cancelOverflow")) {
+      resetOwnedWalletScenario();
+      BalanceTccDebitTryDTO original = request("derived-" + scenario, 7L, "10.00");
+      if (!"tryOverflow".equals(scenario)) service.tryDebit(original);
+      switch (scenario) {
+        case "tryOverflow" ->
+            fixture.update("UPDATE mall_user SET frozen_balance=9999999999999999.99 WHERE id=7");
+        case "confirmUnderflow", "cancelUnderflow" ->
+            fixture.update("UPDATE mall_user SET frozen_balance=9.99 WHERE id=7");
+        case "cancelOverflow" ->
+            fixture.update("UPDATE mall_user SET balance=9999999999999999.99 WHERE id=7");
+        default -> throw new AssertionError(scenario);
+      }
+      var before = allFundsFacts();
+      BizException failure =
+          assertThrows(
+              BizException.class,
+              () -> {
+                switch (scenario) {
+                  case "tryOverflow" -> service.tryDebit(original);
+                  case "confirmUnderflow" -> service.confirmDebit(finalizeRequest(original));
+                  case "cancelUnderflow", "cancelOverflow" ->
+                      service.cancelDebit(finalizeRequest(original));
+                  default -> throw new AssertionError(scenario);
+                }
+              });
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals("BALANCE_TCC_UNKNOWN", failure.getCode());
+      assertEquals(before, allFundsFacts());
+    }
+  }
+
+  /** 等于MAX或原冻结量必须可写，NoOp不计算未发生的加法容量。 */
+  @Test
+  void exactDerivedBoundsAndNoOpsRemainValid() {
+    resetOwnedWalletScenario();
+    fixture.update("UPDATE mall_user SET frozen_balance=9999999999999989.99 WHERE id=7");
+    BalanceTccDebitTryDTO maximumFreeze = request("derived-exact-freeze", 7L, "10.00");
+    assertEquals("TRYING", service.tryDebit(maximumFreeze).state);
+    assertFunds(7L, "90.00", "9999999999999999.99");
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+    assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(maximumFreeze)).state);
+    assertFunds(7L, "90.00", "9999999999999989.99");
+    fixture.update(
+        "UPDATE mall_user SET"
+            + " status=1,balance=9999999999999999.99,frozen_balance=9999999999999999.99 WHERE"
+            + " id=7");
+    var before = allFundsFacts();
+    assertEquals("CONFIRMED", service.tryDebit(maximumFreeze).state);
+    assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(maximumFreeze)).state);
+    assertEquals(before, allFundsFacts());
+    resetOwnedWalletScenario();
+    BalanceTccDebitTryDTO maximumReturn = request("derived-exact-release", 7L, "10.00");
+    service.tryDebit(maximumReturn);
+    fixture.update("UPDATE mall_user SET balance=9999999999999989.99,status=0 WHERE id=7");
+    assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(maximumReturn)).state);
+    assertFunds(7L, "9999999999999999.99", "0.00");
+    resetOwnedWalletScenario();
+    BalanceTccDebitTryDTO insufficient = request("derived-insufficient-first", 7L, "10.00");
+    fixture.update("UPDATE mall_user SET balance=5,frozen_balance=9999999999999999.99 WHERE id=7");
+    before = allFundsFacts();
+    assertEquals(
+        "PAYMENT_FAILED",
+        assertThrows(BizException.class, () -> service.tryDebit(insufficient)).getCode());
+    assertEquals(before, allFundsFacts());
+  }
+
   /** 只从owned库核完整资金四表，包含所有身份、金额、状态和时间。 */
   private List<List<Map<String, Object>>> allFundsFacts() {
     return List.of("mall_user", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger")

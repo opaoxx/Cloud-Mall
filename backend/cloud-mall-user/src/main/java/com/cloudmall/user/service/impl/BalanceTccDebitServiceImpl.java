@@ -83,6 +83,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     requireValidAccountFunds(user);
     if (user.balance.compareTo(request.amount) < 0)
       throw new BizException("PAYMENT_FAILED", "余额不足", 409);
+    if (user.frozenBalance.add(request.amount).compareTo(MAX_AMOUNT) > 0) throw unknown();
     // 2. 先认领唯一归属，再冻结；缺失归属不预先加间隙锁。
     LocalDateTime currentTime = now();
     claim(request, "TRYING", currentTime);
@@ -123,6 +124,7 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     if (!"TRYING".equals(debit.state)) throw conflict("已取消的冻结不能确认");
     requireNoLedger(request);
     requireValidAccountFunds(user);
+    if (user.frozenBalance.compareTo(request.amount) < 0) throw unknown();
     // 2. 清算冻结与账本同事务，账本失败必须恢复冻结。
     LocalDateTime currentTime = now();
     requireOne(userMapper.clearFrozenBalance(request.userId, request.amount, currentTime));
@@ -166,6 +168,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     if ("CANCELLED".equals(debit.state)) return BalanceTccDebitVO.from(debit);
     requireNoLedger(request);
     requireValidAccountFunds(user);
+    if (user.frozenBalance.compareTo(request.amount) < 0
+        || user.balance.add(request.amount).compareTo(MAX_AMOUNT) > 0) throw unknown();
     // 2. 仅按原冻结金额释放一次，任何条件更新失败均整笔回滚。
     LocalDateTime currentTime = now();
     requireOne(userMapper.releaseFrozenBalance(request.userId, request.amount, currentTime));

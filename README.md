@@ -723,6 +723,17 @@ balance/frozenBalance存在、非负且可无损表示为DECIMAL(18,2)。NULL、
 或生产DDL，不比较历史到当前余额、不修历史。owned事务验收四表完整不变及原回归保持，
 不代表全账户资金因果或CM-18闭环。
 
+### CM-18 User实际资金变更的派生金额边界（16T21）
+
+T19单值合法后，fresh Try在原余额不足判断之后、claim前要求`frozen+amount<=MAX`；
+首次Confirm要求`frozen>=amount`，已有冻结Cancel要求`frozen>=amount`与`balance+amount<=MAX`。
+越界或不足沿原`BALANCE_TCC_UNKNOWN`/409拒绝，避免SQL越界或条件更新0变成500。
+使用BigDecimal，不截断、不补0；等于MAX、frozen等于amount、零和无损尾零保持合法。
+
+NoOp/replay/空取消不计算未发生的加法；disabled用户实际清算仍经过相同派生门。
+原余额不足`PAYMENT_FAILED`优先、条件UPDATE/requireOne回滚、SQL/锁序/状态/RM/API/flags保持。
+仅本地TCC路径，不涵盖Legacy/refund整体金额边界，也不证明全账户因果或CM-18闭环。
+
 ### TCC 自动恢复扫描（CM-18 第 16 轮 B3）
 
 `cloudmall.pay.tcc-recovery.enabled=false` 默认关闭，启用时必须已启用 coordinator 及其依赖。第一阶段只调用原 `recover`，不创建 execution/XID，不执行 Try，不为 `decision=NONE` 新增决议。第一阶段在 SQL LIMIT 前排除 `BEGIN_UNKNOWN`、空 XID、终态、CONFLICT、模式或载荷不一致；16G 第二阶段单独处理符合条件的 ROLLEDBACK 支付投影。

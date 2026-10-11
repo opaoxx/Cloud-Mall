@@ -8,7 +8,7 @@ T19 只证明当前 balance/frozenBalance 单值合法；派生 `frozen+amount` 
 
 ## 2. 三个派生边界点
 
-- fresh Try：T19 valid wallet、NoLedger、原余额不足 `PAYMENT_FAILED`/409 门保持原顺序；在 compare/claim 前要求 `frozenBalance.add(request.amount)<=MAX_AMOUNT`。不通过返回 `BALANCE_TCC_UNKNOWN`/409；余额不足优先返回原 PAYMENT_FAILED。
+- fresh Try：T19 valid wallet、NoLedger、原余额不足 `PAYMENT_FAILED`/409 门保持原顺序；在原余额 compare 不足门之后、claim 前要求 `frozenBalance.add(request.amount)<=MAX_AMOUNT`。不通过返回 `BALANCE_TCC_UNKNOWN`/409；余额不足优先返回原 PAYMENT_FAILED。
 - Confirm：T19 valid wallet、TRYING、NoLedger 后、`clearFrozenBalance` 前要求 `frozenBalance>=request.amount`；不通过 `BALANCE_TCC_UNKNOWN`/409。
 - Cancel：T19 valid wallet、TRYING、NoLedger 后、`releaseFrozenBalance` 前要求 `frozenBalance>=request.amount` 且 `balance.add(request.amount)<=MAX_AMOUNT`；不通过 `BALANCE_TCC_UNKNOWN`/409。
 
@@ -16,7 +16,7 @@ T19 只证明当前 balance/frozenBalance 单值合法；派生 `frozen+amount` 
 
 ## 3. 不变边界
 
-- T19 当前字段合法性/scale 门保持；NoOp/replay/空取消和 disabled 清算不进入新的财务派生门。
+- T19 当前字段合法性/scale 门保持；实际 disabled 用户的 Confirm/Cancel 清算仍经过新的派生门并允许合法清算；NoOp/replay/空取消不进入新的财务派生门。
 - 原 conditional UPDATE、`requireOne`、事务回滚、锁序、状态/CAS、RM/Fence、API/flags/DDL 不变；SQL 错误仍沿原数据库异常，不统一映射为冲突。
 - 不比较历史快照、账户 aggregate、Legacy/refund，不修历史、不自动资金动作。
 

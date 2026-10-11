@@ -298,6 +298,56 @@ class BalanceTccDebitServiceTest {
     }
   }
 
+  /** 单值合法但冻结加法溢出，不能先claim或错误TRYING。 */
+  @Test
+  void freshFreezeResultCannotExceedMoneyCapacity() {
+    prepareTransition("try", new BigDecimal("100.00"), new BigDecimal("9999999999999999.99"));
+    when(attemptMapper.insert(any())).thenReturn(1);
+    when(userMapper.freezeBalance(any(), any(), any())).thenReturn(1);
+    when(tccMapper.insert(any())).thenReturn(1);
+    assertPersistedAmountConflict("try", "BALANCE_TCC_UNKNOWN");
+    when(userMapper.selectByIdForUpdate(7L))
+        .thenReturn(account(new BigDecimal("5.00"), new BigDecimal("9999999999999999.99")));
+    BizException insufficient = assertThrows(BizException.class, () -> service.tryDebit(request()));
+    assertEquals("PAYMENT_FAILED", insufficient.getCode());
+    verify(attemptMapper, never()).insert(any());
+  }
+
+  /** 冻结不足不能落到UPDATE0的运行时500。 */
+  @Test
+  void firstConfirmationRequiresEnoughCurrentFrozenFunds() {
+    prepareTransition("confirm", new BigDecimal("90.00"), new BigDecimal("9.99"));
+    assertPersistedAmountConflict("confirm", "BALANCE_TCC_UNKNOWN");
+  }
+
+  /** 取消释放前必须仍有原金额可释放，未知事实不得猜返还。 */
+  @Test
+  void releaseRequiresEnoughCurrentFrozenFunds() {
+    prepareTransition("cancel", new BigDecimal("90.00"), new BigDecimal("9.99"));
+    assertPersistedAmountConflict("cancel", "BALANCE_TCC_UNKNOWN");
+  }
+
+  /** 返还容量溢出不执行余额写或错误CANCELLED。 */
+  @Test
+  void releaseResultCannotExceedMoneyCapacity() {
+    prepareTransition("cancel", new BigDecimal("9999999999999999.99"), new BigDecimal("10.00"));
+    when(userMapper.releaseFrozenBalance(any(), any(), any())).thenReturn(1);
+    when(tccMapper.cancelTrying(any(), any())).thenReturn(1);
+    when(attemptMapper.transitionState(any(), any(), any(), any())).thenReturn(1);
+    assertPersistedAmountConflict("cancel", "BALANCE_TCC_UNKNOWN");
+  }
+
+  /** 合法原冻结10和当前钱包，fresh场景原归属/冻结不存在。 */
+  private void prepareTransition(String operation, BigDecimal balance, BigDecimal frozen) {
+    installFunds("TRYING", "none");
+    if ("try".equals(operation)) {
+      when(attemptMapper.selectByPayNo(request().payNo)).thenReturn(null);
+      when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
+    }
+    when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(null);
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(account(balance, frozen));
+  }
+
   /** 完整原元组仅将目标金额置NULL，不使用资金写替身掩盖错误。 */
   private void installFunds(String state, String missing) {
     ReflectionTestUtils.setField(service, "enabled", true);
