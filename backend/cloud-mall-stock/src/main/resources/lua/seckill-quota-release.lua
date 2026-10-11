@@ -11,6 +11,11 @@ if operationKey ~= orderNo .. ':ROLLBACK' then return 0 end
 local operationMarkerKey = KEYS[4]
 if redis.call('TYPE', operationMarkerKey).ok ~= 'string' then return 0 end
 local marker = redis.call('GET', operationMarkerKey)
+-- Even APPLIED replay must retain the original accepted order witness.
+local acceptedKey = KEYS[3]
+if redis.call('TYPE', acceptedKey).ok ~= 'string' then return 0 end
+local acceptedOrderNo = redis.call('GET', acceptedKey)
+if acceptedOrderNo ~= orderNo then return 0 end
 local appliedPrefix = 'APPLIED|' .. operationKey .. '|2|'
 if marker and string.sub(marker, 1, string.len(appliedPrefix)) == appliedPrefix then
   local savedRevisionText = string.sub(marker, string.len(appliedPrefix) + 1)
@@ -28,14 +33,10 @@ if not acceptanceRevision or acceptanceRevision <= 0 or acceptanceRevision > 100
 
 local stockKey = KEYS[1]
 local metaKey = KEYS[2]
-local acceptedKey = KEYS[3]
 local activityRevisionKey = KEYS[5]
 if redis.call('TYPE', stockKey).ok ~= 'string'
    or redis.call('TYPE', metaKey).ok ~= 'hash'
-   or redis.call('TYPE', acceptedKey).ok ~= 'string'
    or redis.call('TYPE', activityRevisionKey).ok ~= 'string' then return 0 end
-local acceptedOrderNo = redis.call('GET', acceptedKey)
-if acceptedOrderNo ~= orderNo then return 0 end
 local stockText = redis.call('GET', stockKey)
 local revisionText = redis.call('GET', activityRevisionKey)
 local stockLimitText = redis.call('HGET', metaKey, 'stockLimit')

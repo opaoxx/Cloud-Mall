@@ -706,6 +706,182 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     }
   }
 
+  @Test
+  void actualAppliedLuaCannotBypassMissingOrWrongOriginalAcceptanceMarker() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String variant : appliedAcceptanceFaults())
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            assertEquals(1, recovery.recoverDue());
+            assertReleased(original);
+            assertSingleReleaseProjection(original, keys);
+            corruptAcceptedMarker(original, keys.get(2), variant);
+            var before = redisDumpFacts(keys);
+            var databaseBefore = facts();
+            assertEquals(Long.valueOf(0), executeReleaseLua(original, keys), variant);
+            assertEquals(before, redisDumpFacts(keys), variant);
+            assertEquals(databaseBefore, facts());
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void appliedRecoveryBlocksWrongWitnessAndKnownOriginalWitnessRestoresOnlyReceipt() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String variant : appliedAcceptanceFaults())
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            seed(original);
+            var keys = prepareRedis(original);
+            assertEquals(1, recovery.recoverDue());
+            assertSingleReleaseProjection(original, keys);
+            // 受控模拟首次Lua成功后DB完成结果丢失，不再创造新order/operation/revision。
+            fixture.update(
+                "UPDATE seckill_quota_settlement SET"
+                    + " status='RELEASE_PENDING',redis_revision=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at='2000-01-01'");
+            corruptAcceptedMarker(original, keys.get(2), variant);
+            var before = facts();
+            var redisBefore = redisDumpFacts(keys);
+            clearInvocations(observedMapper, observedRedis);
+            int handled = recovery.recoverDue();
+            assertAll(
+                () -> assertEquals(0, handled, variant),
+                () ->
+                    assertEquals(
+                        "PROJECTION_BLOCKED",
+                        fixture.queryForObject(
+                            "SELECT status FROM seckill_quota_settlement", String.class)),
+                () ->
+                    assertNull(
+                        fixture
+                            .queryForMap("SELECT * FROM seckill_quota_settlement")
+                            .get("redis_revision")),
+                () ->
+                    verify(observedMapper, never())
+                        .markReleased(any(), any(), anyLong(), anyLong(), any(), any()),
+                () -> assertEquals(redisBefore, redisDumpFacts(keys), variant));
+            verify(observedRedis)
+                .execute(
+                    any(org.springframework.data.redis.core.script.RedisScript.class),
+                    anyList(),
+                    eq(original.orderNo),
+                    eq(original.operationKey),
+                    eq("2"),
+                    eq("1"));
+            var after = facts();
+            for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+              if (tableIndex != 3) assertEquals(before.get(tableIndex), after.get(tableIndex));
+            var originalStable = new java.util.HashMap<>(before.get(3).get(0));
+            var actualStable = new java.util.HashMap<>(after.get(3).get(0));
+            for (String changed :
+                List.of(
+                    "status",
+                    "last_error",
+                    "lease_owner",
+                    "lease_until",
+                    "next_retry_at",
+                    "updated_at")) {
+              originalStable.remove(changed);
+              actualStable.remove(changed);
+            }
+            assertEquals(originalStable, actualStable);
+            // 仅恢复本fixture已知原值；不是生产补证或对用户marker自动修复。
+            fixtureRedis.delete(keys.get(2));
+            fixtureRedis.opsForValue().set(keys.get(2), original.orderNo, Duration.ofMinutes(5));
+            fixture.update("UPDATE seckill_quota_settlement SET next_retry_at='2000-01-01'");
+            clearInvocations(observedRedis);
+            var restoredRedis = redisDumpFacts(keys);
+            assertEquals(1, recovery.recoverDue());
+            assertReleased(original);
+            assertSingleReleaseProjection(original, keys);
+            assertEquals(restoredRedis, redisDumpFacts(keys));
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void legitimateAppliedReceiptRemainsReadOnlyWhenOtherProjectionKeysAreAbsent() {
+    reset();
+    var original = row("RELEASE_PENDING", "owned-idem");
+    seed(original);
+    var keys = prepareRedis(original);
+    assertEquals(1, recovery.recoverDue());
+    assertSingleReleaseProjection(original, keys);
+    fixtureRedis.delete(List.of(keys.get(0), keys.get(1), keys.get(4)));
+    var before = redisDumpFacts(keys);
+    var databaseBefore = facts();
+    assertEquals(Long.valueOf(4), executeReleaseLua(original, keys));
+    assertEquals(before, redisDumpFacts(keys));
+    assertEquals(databaseBefore, facts());
+    assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
+    assertEquals(
+        "APPLIED|" + original.operationKey + "|2|4", fixtureRedis.opsForValue().get(keys.get(3)));
+    assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+  }
+
+  /** 八种真实可存的受理witness故障，不模拟脚本返回值。 */
+  private static List<String> appliedAcceptanceFaults() {
+    return List.of("missing", "hash", "list", "set", "foreign", "case", "accent", "space");
+  }
+
+  /** 仅改已拥有的原accepted键；wrong type也保留以核不被Lua改写。 */
+  private static void corruptAcceptedMarker(
+      SeckillQuotaSettlementPO original, String acceptedKey, String variant) {
+    fixtureRedis.delete(acceptedKey);
+    switch (variant) {
+      case "missing" -> {
+        return;
+      }
+      case "hash" -> fixtureRedis.opsForHash().put(acceptedKey, "owned-field", "owned-value");
+      case "list" -> fixtureRedis.opsForList().rightPush(acceptedKey, "owned-value");
+      case "set" -> fixtureRedis.opsForSet().add(acceptedKey, "owned-value");
+      case "foreign" -> fixtureRedis.opsForValue().set(acceptedKey, "other-owned-order");
+      case "case" ->
+          fixtureRedis
+              .opsForValue()
+              .set(acceptedKey, original.orderNo.toUpperCase(java.util.Locale.ROOT));
+      case "accent" ->
+          fixtureRedis.opsForValue().set(acceptedKey, original.orderNo.replace("cm37", "cḿ37"));
+      case "space" -> fixtureRedis.opsForValue().set(acceptedKey, original.orderNo + " ");
+      default -> throw new AssertionError(variant);
+    }
+    fixtureRedis.expire(acceptedKey, Duration.ofMinutes(5));
+  }
+
+  /** 原生产资源脚本在真实Redis直接执行；KEYS不含不应变更的user计数。 */
+  private static Long executeReleaseLua(SeckillQuotaSettlementPO original, List<String> keys) {
+    var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
+    script.setLocation(
+        new org.springframework.core.io.ClassPathResource("lua/seckill-quota-release.lua"));
+    script.setResultType(Long.class);
+    return fixtureRedis.execute(
+        script,
+        keys.subList(0, 5),
+        original.orderNo,
+        original.operationKey,
+        String.valueOf(original.revision),
+        String.valueOf(original.quantity));
+  }
+
+  /** Redis DUMP比较各原类型完整内容且允许缺键；不比较自然流逝的TTL。 */
+  private static List<String> redisDumpFacts(List<String> keys) {
+    var contents = new ArrayList<String>();
+    for (String key : keys) {
+      byte[] serialized = fixtureRedis.dump(key);
+      contents.add(
+          serialized == null
+              ? "<missing>"
+              : java.util.Base64.getEncoder().encodeToString(serialized));
+    }
+    return contents;
+  }
+
   /** 测试间仅清自有库，不重启中间件/改其它键。 */
   private static void reset() {
     org.mockito.Mockito.reset(observedMapper, observedRedis);

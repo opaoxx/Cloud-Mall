@@ -1651,3 +1651,10 @@ OPEN/RELEASE_PENDING/PROJECTION_BLOCKED也在原proof后复用受理来源只读
 legacy两条只读路径在原order/SKU核验后检查activity/user无损正long与原生合法幂等键，保整数DECIMAL/long上界与Unicode128边界。
 main ACCEPTED损坏上下文返回固定CORRUPT500，outer各状态损坏返回UNKNOWN/空明细；原SKU与身份错误优先级保持。
 共享纯字段validator不改Map/SQL/DDL/事务/Redis；此门只核基本上下文，不证明原请求/hash/订单完整因果。
+
+
+### CM-18 APPLIED释放重放的受理marker校验（16T50）
+
+释放Lua在APPLIED early return前核当前accepted marker为string且精确原order，缺失/错类型/别单/别名返回0，
+恢复沿原投影阻塞处理，不改Redis内容或造完成；合法witness保持正回执与无二次INCR，允许其它projection已丢失。
+当前受理marker无TTL保留至审计归档，witness丢失/过期/归档后保留缺证；不自动补marker，不证明完整APPLIED tuple或跨存储fencing。
