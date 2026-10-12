@@ -807,6 +807,71 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 真实caller本地事务不能被恢复器继承；拒绝后caller仍可自行提交owned写。 */
+  @Test
+  void actualCallerTransactionRemainsUsableWithoutRecoveryEffects() {
+    seedIntentAndPayment("PENDING", "INIT");
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    when(user.operation(7L, "pay-1", 7L)).thenThrow(new IllegalStateException("owned-read-fault"));
+    PayConsistencyService service = newService(user, orders);
+    var before = payFacts();
+    var caller =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(
+                fixture.getDataSource()));
+    caller.executeWithoutResult(
+        status -> {
+          assertTrue(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  IllegalStateException.class, () -> service.process("pay-1"));
+          assertEquals("Legacy支付恢复不能继承事务上下文", failure.getMessage());
+          assertEquals(before, payFacts());
+          org.mockito.Mockito.verifyNoInteractions(user, orders);
+          assertTrue(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          org.junit.jupiter.api.Assertions.assertFalse(status.isRollbackOnly());
+          assertEquals(
+              1,
+              fixture.update(
+                  "UPDATE pay_debit_intent SET last_error='caller-owned-write' WHERE"
+                      + " pay_no='pay-1'"));
+        });
+    org.junit.jupiter.api.Assertions.assertFalse(
+        org.springframework.transaction.support.TransactionSynchronizationManager
+            .isActualTransactionActive());
+    assertEquals(
+        "caller-owned-write",
+        fixture.queryForObject(
+            "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'", String.class));
+    assertEquals(before.get(0), payFacts().get(0));
+    assertEquals(0, intentAttempts());
+    assertNull(intentLeaseOwner());
+  }
+
+  /** 仅自建XID上下文也在真实Mapper读取之前拒绝，不启动TC。 */
+  @Test
+  void inheritedGlobalContextLeavesOwnedFactsUntouched() {
+    seedIntentAndPayment("PENDING", "INIT");
+    var before = payFacts();
+    org.junit.jupiter.api.Assertions.assertNull(io.seata.core.context.RootContext.getXID());
+    io.seata.core.context.RootContext.bind("owned-native-entry-context");
+    try {
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              IllegalStateException.class, () -> consistency.process("pay-1"));
+      assertEquals("Legacy支付恢复不能继承事务上下文", failure.getMessage());
+      assertEquals(before, payFacts());
+      assertEquals("owned-native-entry-context", io.seata.core.context.RootContext.getXID());
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");

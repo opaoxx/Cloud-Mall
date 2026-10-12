@@ -34,6 +34,9 @@ class PayConsistencyServiceTest {
   private OrderClient orderClient;
   private PayConsistencyService consistencyService;
 
+  /** 意图保存替身，用于核对入口拒绝无任何保存行为。 */
+  private PayDebitIntentService intentService;
+
   /** 单元事务管理器，仅核调用定义，不冒称实际SQL回滚。 */
   private org.springframework.transaction.PlatformTransactionManager transactionManager;
 
@@ -47,9 +50,10 @@ class PayConsistencyServiceTest {
     when(transactionManager.getTransaction(any()))
         .thenAnswer(
             invocation -> new org.springframework.transaction.support.SimpleTransactionStatus());
+    intentService = mock(PayDebitIntentService.class);
     consistencyService =
         new PayConsistencyService(
-            mock(PayDebitIntentService.class),
+            intentService,
             intentMapper,
             payRecordMapper,
             userClient,
@@ -549,7 +553,17 @@ class PayConsistencyServiceTest {
     prepareTerminalTest("SUCCESS");
     io.seata.core.context.RootContext.bind("owned-global-context-probe");
     try {
-      assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              IllegalStateException.class, () -> consistencyService.process("pay-1"));
+      assertEquals("Legacy支付恢复不能继承事务上下文", failure.getMessage());
+      org.mockito.Mockito.verifyNoInteractions(
+          intentService,
+          intentMapper,
+          payRecordMapper,
+          userClient,
+          orderClient,
+          transactionManager);
       verify(transactionManager, never()).getTransaction(any());
       verify(payRecordMapper, never())
           .markOwnedLegacySuccess(anyString(), anyString(), any(), any());
@@ -558,6 +572,85 @@ class PayConsistencyServiceTest {
     } finally {
       io.seata.core.context.RootContext.unbind();
     }
+  }
+
+  /** 三入口在local/global/两者同时存在时先拒绝，且保留调用者上下文。 */
+  @Test
+  void recoveryEntrancesRejectInheritedContextsBeforeAnyEffects() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entrance : java.util.List.of("process", "initiate", "recoverDue")) {
+      for (String context : java.util.List.of("local", "global", "both")) {
+        assertions.add(
+            () -> {
+              setUp();
+              org.junit.jupiter.api.Assertions.assertFalse(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive());
+              org.junit.jupiter.api.Assertions.assertNull(
+                  io.seata.core.context.RootContext.getXID());
+              boolean local = !"global".equals(context);
+              boolean global = !"local".equals(context);
+              var payment = new com.cloudmall.pay.domain.vo.PayVO();
+              payment.payNo = "pay-1";
+              when(intentService.ensureIntent(payment)).thenReturn(intent());
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .setActualTransactionActive(local);
+              if (global) io.seata.core.context.RootContext.bind("owned-entry-context-probe");
+              try {
+                var failure =
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalStateException.class,
+                        () -> {
+                          switch (entrance) {
+                            case "process" -> consistencyService.process("pay-1");
+                            case "initiate" -> consistencyService.initiate(payment);
+                            case "recoverDue" -> consistencyService.recoverDue();
+                            default -> throw new AssertionError(entrance);
+                          }
+                        },
+                        entrance + ":" + context);
+                assertEquals("Legacy支付恢复不能继承事务上下文", failure.getMessage());
+                org.mockito.Mockito.verifyNoInteractions(
+                    intentService,
+                    intentMapper,
+                    payRecordMapper,
+                    userClient,
+                    orderClient,
+                    transactionManager);
+                assertEquals(
+                    local,
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                assertEquals(
+                    global ? "owned-entry-context-probe" : null,
+                    io.seata.core.context.RootContext.getXID());
+              } finally {
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                    .setActualTransactionActive(false);
+                if (global) io.seata.core.context.RootContext.unbind();
+              }
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 无上下文时initiate照常保存后处理，扫描照常逐项处理。 */
+  @Test
+  void standaloneInitiationAndScanKeepNormalRecoveryFlow() {
+    prepareTerminalTest("SUCCESS");
+    var payment = new com.cloudmall.pay.domain.vo.PayVO();
+    payment.payNo = "pay-1";
+    when(intentService.ensureIntent(payment)).thenReturn(intent());
+    assertEquals("SUCCESS", consistencyService.initiate(payment));
+    verify(intentService).ensureIntent(payment);
+    verify(intentMapper).claim(eq("pay-1"), anyString(), any(), any());
+    prepareTerminalTest("SUCCESS");
+    when(intentMapper.findDue(any(), eq(50))).thenReturn(java.util.List.of(intent()));
+    consistencyService.recoverDue();
+    verify(intentMapper).findDue(any(), eq(50));
+    verify(intentMapper).claim(eq("pay-1"), anyString(), any(), any());
+    verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
   }
 
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */

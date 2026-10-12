@@ -1860,3 +1860,9 @@ User扣款、Order支付、User退款三个写RPC前再读取当前领取资格�
 Legacy支付记录终态与意图完成在同一Pay数据源的REQUIRES_NEW短事务内提交；任一owned更新非一行或异常均回滚两表终态写，避免先落支付终态却留下未完成意图。
 
 远端User/Order调用、claim、前置REFUND_PENDING、stage及retry保持在短事务之外。已有Seata XID时拒绝进入终态块，不解绑调用者上下文；本批只保证本地两表原子，不保证跨服务或完整租约fencing。
+
+### CM-18 Legacy恢复入口事务隔离（16T83）
+
+initiate、process、recoverDue在保存意图、读取或领取前拒绝已有Spring本地事务或Seata XID，抛出固定异常“Legacy支付恢复不能继承事务上下文”。拒绝不会结束调用者事务或解绑XID；正常无上下文恢复保持既有流程，终态短事务的后置XID保护继续保留。
+
+该边界避免恢复的claim、stage及RPC继承调用者事务；仍不保证跨服务原子性、source读后稳定或完整租约fencing。

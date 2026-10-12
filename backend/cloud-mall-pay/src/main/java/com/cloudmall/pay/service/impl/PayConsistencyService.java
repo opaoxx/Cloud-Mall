@@ -25,6 +25,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** 用持久支付意图、用户账本和订单事实收敛模拟余额支付。 */
@@ -76,20 +77,24 @@ public class PayConsistencyService {
         TransactionDefinition.PROPAGATION_REQUIRES_NEW);
   }
 
-  /** 在调用用户服务前保存意图，并尝试完成一次支付同步。 */
+  /** 在无调用者事务上下文时保存意图并尝试支付同步；已有事务则在保存前拒绝。 */
   public String initiate(PayVO payment) {
-    // 1. 独立提交 INIT，崩溃后恢复器仍能发现同一 payNo。
+    // 1. 先拒绝继承的事务上下文，避免将恢复写和RPC带入调用者事务。
+    requireStandaloneLegacyRecovery();
+    // 2. 独立提交 INIT，崩溃后恢复器仍能发现同一 payNo。
     PayDebitIntentPO intent = payDebitIntentService.ensureIntent(payment);
-    // 2. 按数据库租约处理一次；其他实例处理时返回其当前可见状态。
+    // 3. 按数据库租约处理一次；其他实例处理时返回其当前可见状态。
     return process(intent.payNo);
   }
 
-  /** 定时扫描未完成意图，处理远程响应丢失和进程中断。 */
+  /** 无调用者事务时扫描未完成意图；已有事务则在扫描前拒绝。 */
   @Scheduled(fixedDelayString = "${cloudmall.pay.recovery-interval-ms:5000}")
   public void recoverDue() {
-    // 1. 只读取达到重试时间的非终态意图。
+    // 1. 扫描前拒绝继承的事务，保持每条恢复的独立提交边界。
+    requireStandaloneLegacyRecovery();
+    // 2. 只读取达到重试时间的非终态意图。
     List<PayDebitIntentPO> due = payDebitIntentMapper.findDue(now(), 50);
-    // 2. 每条意图以 payNo 独立认领和恢复，不阻塞后续记录。
+    // 3. 每条意图以 payNo 独立认领和恢复，不阻塞后续记录。
     for (PayDebitIntentPO intent : due) {
       try {
         process(intent.payNo);
@@ -99,13 +104,15 @@ public class PayConsistencyService {
     }
   }
 
-  /** 返回支付意图的当前状态，必要时执行一次可恢复处理。 */
+  /** 无调用者事务时读取并恢复支付意图；已有事务则在读取或领取前拒绝。 */
   public String process(String payNo) {
-    // 1. 原意图与支付单模式先核对，再领取租约；拒绝路径不修改任何恢复字段。
+    // 1. 读取和领取前拒绝外部事务，不终止或解绑调用者上下文。
+    requireStandaloneLegacyRecovery();
+    // 2. 原意图与支付单模式先核对，再领取租约；拒绝路径不修改任何恢复字段。
     PayDebitIntentPO pending = payDebitIntentMapper.findByPayNo(payNo);
     if (pending != null) requireLegacyRoute(pending);
     LocalDateTime currentTime = now();
-    // 2. 每次领取使用独立身份，同实例迟到旧执行不得匹配重领后的owner。
+    // 3. 每次领取使用独立身份，同实例迟到旧执行不得匹配重领后的owner。
     String claimToken = UUID.randomUUID().toString();
     if (payDebitIntentMapper.claim(payNo, claimToken, currentTime.plusSeconds(30), currentTime)
         != 1) {
@@ -113,11 +120,19 @@ public class PayConsistencyService {
       if (existing != null) requireLegacyRoute(existing);
       return existing == null ? "INIT" : existing.status;
     }
-    // 3. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
+    // 4. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
     PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
     if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
     requireLegacyRoute(intent);
     return processClaimed(intent, claimToken);
+  }
+
+  /** 恢复入口必须独立于caller事务；拒绝发生在catch/retry外，保留原调用者上下文。 */
+  private void requireStandaloneLegacyRecovery() {
+    if (TransactionSynchronizationManager.isActualTransactionActive()
+        || RootContext.getXID() != null) {
+      throw new IllegalStateException("Legacy支付恢复不能继承事务上下文");
+    }
   }
 
   /** 已存模式不受当前开关影响，未知协议和孤立意图不得进入旧资金调用。 */
