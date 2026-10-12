@@ -379,12 +379,13 @@ public class UserServiceImpl implements UserService {
         || debitCandidates.size() != 1
         || !matchesRefundDebitScope(original, debitCandidates.get(0), request, userId))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
-    // active新退款观察原归属；已知TCC必须证明本地确认冻结，未知模式不能作为来源。
+    // active新退款观察原归属；Legacy须复制原扣款，TCC须确认冻结，未知模式不作来源。
     if (Objects.equals(user.status, 1)) {
       BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
       if (attempt != null
-          && !"LEGACY".equals(attempt.mode)
-          && !confirmedTccRefund(original, request, attempt))
+          && !("LEGACY".equals(attempt.mode)
+              ? isProvenLegacyRefundAttempt(original, attempt)
+              : confirmedTccRefund(original, request, attempt)))
         throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
     // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
@@ -420,6 +421,23 @@ public class UserServiceImpl implements UserService {
     if (balanceLedgerMapper.insert(refund) != 1) throw new IllegalStateException("退款账本写入未影响唯一记录");
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** 原DEBIT已证明；已观察Legacy归属须复制精确键/身份/金额且为无TCC分支的APPLIED。 */
+  private static boolean isProvenLegacyRefundAttempt(
+      BalanceLedgerPO original, BalanceDebitAttemptPO attempt) {
+    return "LEGACY".equals(attempt.mode)
+        && "APPLIED".equals(attempt.state)
+        && Objects.equals(attempt.userId, original.userId)
+        && Objects.equals(attempt.payNo, original.payNo)
+        && Objects.equals(attempt.orderNo, original.orderNo)
+        && Objects.equals(attempt.operationKey, original.operationKey)
+        && Objects.equals(attempt.ledgerKey, original.operationKey)
+        && attempt.xid == null
+        && attempt.branchId == null
+        && validBalanceMoney(attempt.amount)
+        && attempt.amount.signum() > 0
+        && attempt.amount.compareTo(original.amount) == 0;
   }
 
   /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */

@@ -1960,7 +1960,16 @@ class BalanceLedgerServiceTest {
       var request = installRefundProofMode("active-fresh");
       if ("missing".equals(mode))
         when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
-      else originalRefundAttempt.mode = mode;
+      else {
+        originalRefundAttempt.mode = mode;
+        if ("LEGACY".equals(mode)) {
+          originalRefundAttempt.state = "APPLIED";
+          originalRefundAttempt.operationKey = originalRefundDebit.operationKey;
+          originalRefundAttempt.ledgerKey = originalRefundDebit.operationKey;
+          originalRefundAttempt.xid = null;
+          originalRefundAttempt.branchId = null;
+        }
+      }
       userService.refundInternal(7L, 7L, request);
       verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
       if ("TCC".equals(mode)) verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
@@ -1976,6 +1985,101 @@ class BalanceLedgerServiceTest {
     userService.refundInternal(7L, 7L, request);
     org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
+  /** Legacy已观察归属各坏字段不能因mode正确而被忽略，新退款在累计前停止。 */
+  @Test
+  void activeFreshRefundRejectsMalformedObservedLegacyOwner() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mutation :
+        java.util.List.of(
+            "state-null",
+            "state-rejected",
+            "user",
+            "pay",
+            "order",
+            "operation",
+            "ledger",
+            "xid-empty",
+            "xid",
+            "branch",
+            "amount-null",
+            "amount-zero",
+            "amount-negative",
+            "amount-scale",
+            "amount-overflow",
+            "amount-other")) {
+      assertions.add(
+          () -> {
+            var request = installRefundProofMode("active-fresh");
+            originalRefundAttempt.mode = "LEGACY";
+            originalRefundAttempt.state = "APPLIED";
+            originalRefundAttempt.operationKey = originalRefundDebit.operationKey;
+            originalRefundAttempt.ledgerKey = originalRefundDebit.operationKey;
+            originalRefundAttempt.xid = null;
+            originalRefundAttempt.branchId = null;
+            switch (mutation) {
+              case "state-null" -> originalRefundAttempt.state = null;
+              case "state-rejected" -> originalRefundAttempt.state = "REJECTED";
+              case "user" -> originalRefundAttempt.userId = 8L;
+              case "pay" -> originalRefundAttempt.payNo = "PAY-1";
+              case "order" -> originalRefundAttempt.orderNo = "other-order";
+              case "operation" -> originalRefundAttempt.operationKey = "PAY-1";
+              case "ledger" -> originalRefundAttempt.ledgerKey = "other-ledger";
+              case "xid-empty" -> originalRefundAttempt.xid = "";
+              case "xid" -> originalRefundAttempt.xid = "unexpected-xid";
+              case "branch" -> originalRefundAttempt.branchId = 0L;
+              case "amount-null" -> originalRefundAttempt.amount = null;
+              case "amount-zero" -> originalRefundAttempt.amount = BigDecimal.ZERO;
+              case "amount-negative" -> originalRefundAttempt.amount = new BigDecimal("-1.00");
+              case "amount-scale" -> originalRefundAttempt.amount = new BigDecimal("10.001");
+              case "amount-overflow" ->
+                  originalRefundAttempt.amount = new BigDecimal("10000000000000000.00");
+              case "amount-other" -> originalRefundAttempt.amount = new BigDecimal("11.00");
+              default -> throw new AssertionError(mutation);
+            }
+            var failure =
+                assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> userService.refundInternal(7L, 7L, request));
+            assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+            assertEquals("原扣款不存在或未应用", failure.getMessage());
+            verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
+            org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, valueOperations);
+            verify(balanceLedgerMapper, org.mockito.Mockito.never())
+                .findLinkedRefundCandidates(any());
+            verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+            verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 金额尾零复制的Legacy正常退款不读freeze，active existingreplay不重新核坏owner。 */
+  @Test
+  void activeFreshLegacyRefundAcceptsValueCopyAndKeepsReplayIndependent() {
+    var request = installRefundProofMode("active-fresh");
+    originalRefundAttempt.mode = "LEGACY";
+    originalRefundAttempt.state = "APPLIED";
+    originalRefundAttempt.operationKey = originalRefundDebit.operationKey;
+    originalRefundAttempt.ledgerKey = originalRefundDebit.operationKey;
+    originalRefundAttempt.xid = null;
+    originalRefundAttempt.branchId = null;
+    originalRefundAttempt.amount = new BigDecimal("10.000");
+    userService.refundInternal(7L, 7L, request);
+    verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
+    org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
+    verify(userMapper).creditBalance(any(), any(), any());
+    org.mockito.Mockito.clearInvocations(
+        balanceDebitAttemptMapper, userMapper, balanceLedgerMapper);
+    when(balanceLedgerMapper.selectByOperationKey(request.refundOperationKey))
+        .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+    originalRefundAttempt.state = "REJECTED";
+    userService.refundInternal(7L, 7L, request);
+    org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
   }
 
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */

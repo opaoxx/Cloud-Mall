@@ -345,6 +345,70 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 已观察Legacy归属必须复制原扣款事实，矛盾元组不能触发真实新退款。 */
+  @Test
+  void activeFreshRefundRejectsUnprovenLegacyOwnerWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mutation :
+        List.of(
+            "state", "user", "pay", "order", "operation", "ledger", "amount", "xid", "branch")) {
+      assertions.add(
+          () -> {
+            for (String table :
+                List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+              fixture.update("DELETE FROM " + table);
+            fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+            setEnabled(true);
+            var original = request("active-refund-owner-" + mutation, 7L, "10.00");
+            debitLegacy(original.payNo, "legacy-owner-original-key", 7L, "10.00");
+            switch (mutation) {
+              case "state" -> fixture.update("UPDATE balance_debit_attempt SET state='REJECTED'");
+              case "user" -> fixture.update("UPDATE balance_debit_attempt SET user_id=8");
+              case "pay" -> fixture.update("UPDATE balance_debit_attempt SET pay_no=UPPER(pay_no)");
+              case "order" ->
+                  fixture.update("UPDATE balance_debit_attempt SET order_no='other-order'");
+              case "operation" ->
+                  fixture.update(
+                      "UPDATE balance_debit_attempt SET operation_key='other-operation'");
+              case "ledger" ->
+                  fixture.update("UPDATE balance_debit_attempt SET ledger_key='other-ledger'");
+              case "amount" -> fixture.update("UPDATE balance_debit_attempt SET amount=0");
+              case "xid" -> fixture.update("UPDATE balance_debit_attempt SET xid='unexpected-xid'");
+              case "branch" -> fixture.update("UPDATE balance_debit_attempt SET branch_id=99");
+              default -> throw new AssertionError(mutation);
+            }
+            var refund = refundRequest(original, "active-refund-owner-request", "1.00");
+            refund.originalOperationKey = "legacy-owner-original-key";
+            var before = allFundsFacts();
+            var response =
+                org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                        context.getBean(UserController.class))
+                    .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                    .build()
+                    .perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(
+                                new com.fasterxml.jackson.databind.ObjectMapper()
+                                    .writeValueAsString(refund)))
+                    .andReturn();
+            org.junit.jupiter.api.Assertions.assertAll(
+                () -> assertEquals(409, response.getResponse().getStatus(), mutation),
+                () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                () -> {
+                  var failure =
+                      assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                  assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                  assertEquals(409, failure.getHttpStatus());
+                },
+                () -> assertEquals(before, allFundsFacts()));
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 已观察TCC归属的active新退款必须证明确认冻结，坏事实不能触发真实credit。 */
   @Test
   void activeFreshRefundRejectsUnprovenTccOwnerWithoutWriting() {
