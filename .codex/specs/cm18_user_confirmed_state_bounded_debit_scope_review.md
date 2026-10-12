@@ -25,7 +25,7 @@ GO。UserTccStateQuery CONFIRMED 当前固定 ledger proof 后使用单 PO `sele
 ## 4. 验收
 
 - Unit：CONFIRMED missing/single bad/multiple、APPLIED/REJECTED/UNKNOWN extra DEBIT、CI type/pay alias、null row、DAO fault；missing/multiple/nullrow 409，DAO fault 原样。
-- Native RR/HTTP：真实 fixed CONFIRMED ledger 加 extra DEBIT 时 state GET 409、诊断入口固定 503/既有分类，no-write/同连接断言保持；三行 LIMIT2 仍 conflict。healthy CONFIRMED+REFUND 继续合法。
+- Native RR/HTTP：真实 fixed CONFIRMED ledger 加 extra DEBIT 时 state GET 与诊断入口均沿既有 state conflict 分类返回 409，no-write/同连接断言保持；三行 LIMIT2 仍 conflict。真实缺表/数据库不可用仍沿既有 503。healthy CONFIRMED+REFUND 继续合法。
 - 更新 CONFIRMED 查询计数一替一，未放宽 strict no-write；保留 T90/T91 与共享 Reader 回归、source checksum/owned 清理。
 - 不启动 RM/TC/App，不宣称完整历史/账户因果或 getter fencing。
 
