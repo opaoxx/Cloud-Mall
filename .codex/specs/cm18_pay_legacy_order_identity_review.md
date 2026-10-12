@@ -28,7 +28,7 @@ null、blank、别单、case/重音/尾空格别名均冲突；不 trim、casefo
 
 - Unit/native：上述 7 条路径覆盖 other/null/blank/case/alias orderNo，断言身份冲突；首次坏读无远端写 RPC，二次坏读保留已发生 paid/stage 但不继续终态。
 - 健康：原 orderNo、同金额尾零、三订单状态与 post-paid 稳定读保持原协议。
-- Owned Pay/Order：事实 checksum、lease/intent 及资源清理；测试不启动完整 App/RM/TC，不伪称跨服务全链路。
+- Owned Pay/真实两个 Mapper：核 Pay 两表及原 Pay 全表 checksum、lease/intent 与资源清理；User/Order 仅使用受控 Feign 响应替身，不访问 OrderDB，不宣称真实 Order 端身份修复或完整跨服务链路。测试不启动完整 App/RM/TC。
 - 保留 T79–T84 与 Legacy/TCC 回归；失败测试不得宣称闭环。
 
 ## 6. 交付边界
