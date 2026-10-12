@@ -487,6 +487,168 @@ class BalanceTccStateMySqlIT {
         fixture.queryForObject("SELECT amount FROM balance_ledger", BigDecimal.class));
   }
 
+  /** 原DEBIT正确但wallet损坏，不得由refund实际写资金；宽列只限owned并恢复。 */
+  @Test
+  void refundMalformedWalletAndOverflowLeaveRealFundsFactsUntouched() throws Exception {
+    fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (boolean disabled : List.of(false, true)) {
+        for (String balance :
+            new String[] {null, "-1.00", "90.001", "10000000000000000.00", "9999999999999999.99"}) {
+          assertions.add(
+              () -> {
+                closeContext();
+                createTransactionalServices();
+                var original = request("wallet-proof", 7L, "10.00");
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+                fixture.update(
+                    "UPDATE mall_user SET balance=?,status=? WHERE id=7",
+                    balance,
+                    disabled ? 0 : 1);
+                var before = allFundsFacts();
+                var refund = refundRequest(original, "refund-wallet-proof", "10.00");
+                var failure =
+                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                assertEquals("BALANCE_REFUND_FAILED", failure.getCode());
+                assertEquals(409, failure.getHttpStatus());
+                assertEquals(before, allFundsFacts());
+                var mvc =
+                    org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                            context.getBean(UserController.class))
+                        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                        .build();
+                String payload =
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(
+                            Map.of(
+                                "refundOperationKey",
+                                refund.refundOperationKey,
+                                "originalOperationKey",
+                                refund.originalOperationKey,
+                                "payNo",
+                                refund.payNo,
+                                "orderNo",
+                                refund.orderNo,
+                                "amount",
+                                "10.00"));
+                mvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(payload))
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                            .isConflict())
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                                "$.code")
+                            .value("BALANCE_REFUND_FAILED"));
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM mall_user");
+      fixture.execute(
+          "ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL DEFAULT 10000.00");
+    }
+  }
+
+  /** 实际credit已执行后故障代理使refund insert返回0/2，Runtime须回滚全部资金。 */
+  @Test
+  void refundLedgerRowCountFailureRollsBackRealCreditInSpringTransaction() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (boolean disabled : List.of(false, true)) {
+      for (int insertedRows : List.of(0, 2)) {
+        assertions.add(
+            () -> {
+              closeContext();
+              createTransactionalServices();
+              var original = request("ledger-atomic", 7L, "10.00");
+              service.tryDebit(original);
+              service.confirmDebit(finalizeRequest(original));
+              if (disabled) fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+              var before = allFundsFacts();
+              var actual = context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class);
+              java.util.concurrent.atomic.AtomicInteger intercepted =
+                  new java.util.concurrent.atomic.AtomicInteger();
+              var fault =
+                  (com.cloudmall.user.mapper.BalanceLedgerMapper)
+                      java.lang.reflect.Proxy.newProxyInstance(
+                          actual.getClass().getClassLoader(),
+                          new Class<?>[] {com.cloudmall.user.mapper.BalanceLedgerMapper.class},
+                          (proxy, method, arguments) -> {
+                            if ("insert".equals(method.getName())
+                                && arguments[0]
+                                    instanceof com.cloudmall.user.domain.po.BalanceLedgerPO ledger
+                                && "REFUND".equals(ledger.operationType)) {
+                              intercepted.incrementAndGet();
+                              // 同线程JdbcTemplate加入原事务，直接观察真实credit已发生。
+                              assertEquals(
+                                  new BigDecimal("100.00"),
+                                  fixture.queryForObject(
+                                      "SELECT balance FROM mall_user WHERE id=7",
+                                      BigDecimal.class));
+                              return insertedRows;
+                            }
+                            try {
+                              return method.invoke(actual, arguments);
+                            } catch (java.lang.reflect.InvocationTargetException failure) {
+                              throw failure.getCause();
+                            }
+                          });
+              Object target = AopTestUtils.getUltimateTargetObject(legacy);
+              ReflectionTestUtils.setField(target, "balanceLedgerMapper", fault);
+              try {
+                assertThrows(
+                    IllegalStateException.class,
+                    () ->
+                        legacy.refundInternal(
+                            7L, 7L, refundRequest(original, "refund-ledger-atomic", "10.00")));
+                assertEquals(1, intercepted.get());
+                assertEquals(before, allFundsFacts());
+                assertFunds(7L, "90.00", "0.00");
+                assertEquals(1, ledgerCount());
+              } finally {
+                ReflectionTestUtils.setField(target, "balanceLedgerMapper", actual);
+              }
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 余额0/尾零/MAX-after真实credit及ledger完全一致，之后重放不二次入账。 */
+  @Test
+  void refundHealthyWalletBoundsKeepExactSnapshotAndReplay() {
+    for (String balance : List.of("0.00", "90.00", "9999999999999989.99")) {
+      closeContext();
+      createTransactionalServices();
+      var original = request("wallet-valid", 7L, "10.000");
+      service.tryDebit(original);
+      service.confirmDebit(finalizeRequest(original));
+      fixture.update("UPDATE mall_user SET balance=? WHERE id=7", balance);
+      var refund = refundRequest(original, "refund-wallet-valid", "10.000");
+      legacy.refundInternal(7L, 7L, refund);
+      BigDecimal expected = new BigDecimal(balance).add(new BigDecimal("10.00"));
+      assertFunds(7L, expected.toPlainString(), "0.00");
+      var row =
+          fixture.queryForMap(
+              "SELECT balance_before,balance_after FROM balance_ledger WHERE"
+                  + " operation_type='REFUND'");
+      assertEquals(new BigDecimal(balance), row.get("balance_before"));
+      assertEquals(expected, row.get("balance_after"));
+      var before = allFundsFacts();
+      legacy.refundInternal(7L, 7L, refund);
+      assertEquals(before, allFundsFacts());
+      assertEquals(2, ledgerCount());
+    }
+  }
+
   @Test
   void confirmIsAtomicIdempotentAndStillWorksWhenDisabled() {
     BalanceTccDebitTryDTO request = request("confirmed", 7L, "10.00");

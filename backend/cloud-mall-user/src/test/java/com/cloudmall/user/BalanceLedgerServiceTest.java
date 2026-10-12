@@ -416,6 +416,124 @@ class BalanceLedgerServiceTest {
     }
   }
 
+  /** 当前wallet缺失/损坏/派生overflow不能写credit或refund snapshot。 */
+  @Test
+  void freshRefundRejectsMalformedWalletAndDerivedOverflowBeforeCredit() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      for (BigDecimal balance :
+          new BigDecimal[] {
+            null,
+            new BigDecimal("-1.00"),
+            new BigDecimal("90.001"),
+            new BigDecimal("10000000000000000.00"),
+            new BigDecimal("9999999999999999.99")
+          }) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              var user = activeUser(balance);
+              if (mode.startsWith("disabled")) user.status = 0;
+              when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> userService.refundInternal(7L, 7L, request));
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals("BALANCE_REFUND_FAILED", failure.getCode());
+              verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 已credit而ledger不唯一写入须抛可回滚Runtime，不返回APPLIED或补写。 */
+  @Test
+  void freshRefundLedgerWriteMustAffectExactlyOneRow() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      for (int insertedRows : java.util.List.of(0, 2)) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              when(balanceLedgerMapper.insert(any())).thenReturn(insertedRows);
+              assertThrows(
+                  IllegalStateException.class, () -> userService.refundInternal(7L, 7L, request));
+              verify(userMapper).creditBalance(any(), any(), any());
+              verify(balanceLedgerMapper).insert(any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    var request = installRefundProofMode("active-fresh");
+    when(userMapper.creditBalance(any(), any(), any())).thenReturn(0);
+    var failure =
+        assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> userService.refundInternal(7L, 7L, request));
+    assertEquals("BALANCE_REFUND_FAILED", failure.getCode());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+  }
+
+  /** zero/尾零/精确MAX保正确snapshot，原source/超额仍先于wallet。 */
+  @Test
+  void refundWalletBoundsKeepHealthyValuesAndEarlierFailurePriority() {
+    for (BigDecimal balance :
+        java.util.List.of(
+            BigDecimal.ZERO, new BigDecimal("90.000"), new BigDecimal("9999999999999989.99"))) {
+      var request = installRefundProofMode("active-fresh");
+      when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(balance));
+      var response = userService.refundInternal(7L, 7L, request);
+      var captor = org.mockito.ArgumentCaptor.forClass(BalanceLedgerPO.class);
+      verify(balanceLedgerMapper).insert(captor.capture());
+      assertEquals(balance, captor.getValue().balanceBefore);
+      assertEquals(balance.add(request.amount), captor.getValue().balanceAfter);
+      assertEquals(
+          balance.add(request.amount).toPlainString(),
+          ((com.cloudmall.user.domain.vo.BalanceRefundVO) response.data).balance);
+    }
+    var request = installRefundProofMode("active-fresh");
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(null));
+    when(balanceLedgerMapper.sumAppliedRefunds("pay-1")).thenReturn(new BigDecimal("10.00"));
+    var excessRequest = request;
+    assertEquals(
+        "BALANCE_REFUND_EXCEEDED",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, excessRequest))
+            .getCode());
+    request = installRefundProofMode("active-fresh");
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(null));
+    originalRefundDebit.originalOperationKey = "bad";
+    var sourceRequest = request;
+    assertEquals(
+        "BALANCE_REFUND_INVALID",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, sourceRequest))
+            .getCode());
+  }
+
+  /** 既有refund是历史结果，当前钱包非法不扩大原重放范围或二次credit。 */
+  @Test
+  void existingRefundReplayDoesNotEnterFreshWalletOrWriteGate() {
+    for (String mode : java.util.List.of("active-fresh", "disabled-replay")) {
+      var request = installRefundProofMode(mode);
+      var user = activeUser(null);
+      if (mode.startsWith("disabled")) user.status = 0;
+      when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+      when(balanceLedgerMapper.selectByOperationKey("refund-1"))
+          .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+      userService.refundInternal(7L, 7L, request);
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+  }
+
   /** 每组合重置替身，disabled仅模拟已确认TCC，避免把Legacy禁用拒绝当新源门复现。 */
   private BalanceRefundRequestDTO installRefundProofMode(String mode) {
     setUp();

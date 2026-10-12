@@ -278,6 +278,13 @@ public class UserServiceImpl implements UserService {
     }
     LocalDateTime currentTime = LocalDateTime.now();
     BigDecimal balanceBefore = user.balance;
+    if (!validBalanceMoney(balanceBefore)) {
+      throw new BizException("BALANCE_REFUND_FAILED", "余额退款失败", 409);
+    }
+    BigDecimal newBalance = balanceBefore.add(request.amount);
+    if (newBalance.compareTo(MAX_BALANCE_MONEY) > 0) {
+      throw new BizException("BALANCE_REFUND_FAILED", "余额退款失败", 409);
+    }
     if (userMapper.creditBalance(userId, request.amount, currentTime) != 1) {
       throw new BizException("BALANCE_REFUND_FAILED", "余额退款失败", 409);
     }
@@ -292,9 +299,9 @@ public class UserServiceImpl implements UserService {
     refund.amount = request.amount;
     refund.state = "APPLIED";
     refund.balanceBefore = balanceBefore;
-    refund.balanceAfter = balanceBefore.add(request.amount);
+    refund.balanceAfter = newBalance;
     refund.createdAt = currentTime;
-    balanceLedgerMapper.insert(refund);
+    if (balanceLedgerMapper.insert(refund) != 1) throw new IllegalStateException("退款账本写入未影响唯一记录");
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
   }
@@ -339,15 +346,15 @@ public class UserServiceImpl implements UserService {
         && Objects.equals(original.userId, userId)
         && Objects.equals(original.payNo, request.payNo)
         && Objects.equals(original.orderNo, request.orderNo)
-        && validRefundOriginalMoney(original.amount)
+        && validBalanceMoney(original.amount)
         && original.amount.signum() > 0
-        && validRefundOriginalMoney(original.balanceBefore)
-        && validRefundOriginalMoney(original.balanceAfter)
+        && validBalanceMoney(original.balanceBefore)
+        && validBalanceMoney(original.balanceAfter)
         && original.balanceBefore.subtract(original.balanceAfter).compareTo(original.amount) == 0;
   }
 
   /** 持久金额必须存在、非负且无损落在18.2域，允许零余额和数值等值尾零。 */
-  private static boolean validRefundOriginalMoney(BigDecimal value) {
+  private static boolean validBalanceMoney(BigDecimal value) {
     return value != null
         && value.signum() >= 0
         && value.stripTrailingZeros().scale() <= 2
