@@ -126,7 +126,8 @@ class SeckillReleasedReceiptEvidenceTest {
         assertEquals(
             "CONFIRMED".equals(state) ? "CONFIRMED" : "OPEN".equals(state) ? "RESERVED" : "UNKNOWN",
             result.status);
-        assertEquals(1, result.items.size());
+        assertEquals(
+            "CONFLICT".equals(state) || "unrecognized".equals(state) ? 0 : 1, result.items.size());
       }
     when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row("CONFIRMED", null));
     assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "CONFIRM").data).get("confirmed"));

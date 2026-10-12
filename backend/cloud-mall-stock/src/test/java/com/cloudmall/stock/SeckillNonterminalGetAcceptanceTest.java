@@ -98,8 +98,9 @@ class SeckillNonterminalGetAcceptanceTest {
     assertTrue(service.reservation(ORDER_NO).items.isEmpty());
     for (String state : List.of("CONFLICT", "unrecognized")) {
       when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state));
-      assertEquals("UNKNOWN", service.reservation(ORDER_NO).status);
-      assertEquals(1, service.reservation(ORDER_NO).items.size());
+      var observed = service.reservation(ORDER_NO);
+      assertEquals("UNKNOWN", observed.status);
+      assertTrue(observed.items.isEmpty());
     }
     when(mapper.findSettlement(ORDER_NO)).thenReturn(null);
     when(stocks.findSeckillByOrderNo(ORDER_NO))

@@ -131,7 +131,7 @@ class SeckillNonTerminalOperationKeyTest {
       when(mapper.findSettlement(ORDER_NO)).thenReturn(row(state, null));
       var observed = service.reservation(ORDER_NO);
       assertEquals("UNKNOWN", observed.status);
-      assertEquals(1, observed.items.size());
+      assertTrue(observed.items.isEmpty());
     }
   }
 

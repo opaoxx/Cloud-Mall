@@ -71,13 +71,13 @@ public class SeckillQuotaSettlementService {
     // 3. 五种结算状态核操作键，RELEASED 再核持久回执；缺证仍返回已观察候选，阻止普通库存fallback。
     if (!settlementOperationKeyMatches(settlement) || !releasedReceiptMatches(settlement))
       return unknownSettlementProof(orderNo);
-    // 4. 五个结算状态只读观察同tuple原受理来源；缺证不能输出库存明细或落普通库存。
-    if (("OPEN".equals(settlement.status)
+    // 4. 非五状态不输出未经证明的明细；已知状态再观察原来源，未知不能落普通库存。
+    if (!("OPEN".equals(settlement.status)
             || "RELEASE_PENDING".equals(settlement.status)
             || "PROJECTION_BLOCKED".equals(settlement.status)
             || "CONFIRMED".equals(settlement.status)
             || "RELEASED".equals(settlement.status))
-        && settlementMapper.findMatchingAcceptanceId(settlement) == null)
+        || settlementMapper.findMatchingAcceptanceId(settlement) == null)
       return unknownSettlementProof(orderNo);
     // 5. 通过本次观察后仅映射查询状态；两个点读不代表原子来源证明。
     String status = externalStatus(settlement.status);

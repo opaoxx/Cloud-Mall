@@ -144,7 +144,7 @@ class SeckillTerminalOperationKeyTest {
           new SeckillQuotaSettlementService(unknownMapper, mock(StockSqlMapper.class))
               .reservation(ORDER_NO);
       assertEquals("UNKNOWN", result.status);
-      assertEquals(1, result.items.size());
+      assertTrue(result.items.isEmpty());
       verify(unknownMapper, never()).findMatchingAcceptanceId(any());
     }
   }

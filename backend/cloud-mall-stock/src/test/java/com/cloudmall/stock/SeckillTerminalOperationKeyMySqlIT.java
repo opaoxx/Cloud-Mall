@@ -315,7 +315,8 @@ class SeckillTerminalOperationKeyMySqlIT {
       tracked.checking = true;
       var result = read();
       assertEquals("OPEN".equals(state) ? "RESERVED" : "UNKNOWN", result.status);
-      assertEquals(1, result.items.size());
+      assertEquals(
+          "CONFLICT".equals(state) || "other-state".equals(state) ? 0 : 1, result.items.size());
       assertOnlySelects();
       assertEquals(before, facts());
     }
@@ -1319,6 +1320,88 @@ class SeckillTerminalOperationKeyMySqlIT {
         }
         assertEquals(before, facts());
       }
+  }
+
+  @Test
+  void unsupportedStatusesStayEmptyForActualStockReadAndOrderFallback() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : unsupportedStoredStatuses())
+      for (String sourceCase : List.of("present", "missing", "sku"))
+        assertions.add(
+            () -> {
+              reset();
+              seedSettlement(state, ORDER_NO + ":ROLLBACK");
+              if (!"present".equals(sourceCase)) corruptTransitionSource(sourceCase);
+              var before = facts();
+              tracked.checking = true;
+              var result = read();
+              assertEquals(1, tracked.sql.size());
+              assertOnlySelects();
+              assertTrue(tracked.sql.get(0).contains("SECKILL_QUOTA_SETTLEMENT"));
+              for (String orderState : List.of("PAID", "CANCELLED")) {
+                tracked.sql.clear();
+                assertEquals("UNKNOWN", orderFallback(orderState));
+                assertEquals(1, tracked.sql.size());
+                assertOnlySelects();
+              }
+              assertAll(
+                  () -> assertNotNull(result),
+                  () -> assertEquals(ORDER_NO, result.orderNo),
+                  () -> assertEquals("UNKNOWN", result.status),
+                  () -> assertTrue(result.items.isEmpty(), state + ":" + sourceCase),
+                  () -> assertEquals(before, facts()));
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerKeepsUnknownEmptyForUnsupportedStatusesWithoutSourceQueries()
+      throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var mvc =
+        MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : unsupportedStoredStatuses())
+      assertions.add(
+          () -> {
+            reset();
+            seedSettlement(state, ORDER_NO + ":ROLLBACK");
+            corruptTransitionSource("missing");
+            var before = facts();
+            tracked.checking = true;
+            mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.orderNo").value(ORDER_NO))
+                .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+                .andExpect(jsonPath("$.data.items").isEmpty());
+            assertEquals(1, tracked.sql.size());
+            assertOnlySelects();
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  /** 原VARCHAR可存的越协议状态；NULL由unit覆盖，不ALTER生产约束。 */
+  private static List<String> unsupportedStoredStatuses() {
+    return List.of(
+        "CONFLICT",
+        "UNKNOWN",
+        "unrecognized",
+        "",
+        " ",
+        "open",
+        "Open",
+        "OPEN ",
+        " OPEN",
+        "confirmed",
+        "RELEASED ",
+        "release_pending",
+        "projection_blocked");
   }
 
   @Test

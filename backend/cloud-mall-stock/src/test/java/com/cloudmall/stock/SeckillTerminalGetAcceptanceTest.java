@@ -119,7 +119,7 @@ class SeckillTerminalGetAcceptanceTest {
           new SeckillQuotaSettlementService(unknownMapper, mock(StockSqlMapper.class))
               .reservation(ORDER_NO);
       assertEquals("UNKNOWN", unknownResult.status);
-      assertEquals(1, unknownResult.items.size());
+      assertTrue(unknownResult.items.isEmpty());
       verify(unknownMapper, never()).findMatchingAcceptanceId(any());
     }
     var legacyMapper = mock(SeckillQuotaSettlementMapper.class);
