@@ -220,7 +220,7 @@ class UserFrozenOwnershipEvidenceMySqlIT {
       assertFalse(report.automaticActionsAllowed);
       assertTrue(report.terminalFrozenRowsNotInspected);
       assertEquals(1, tracked.connections);
-      assertEquals(11 + 6 * peerCount, tracked.statements.size());
+      assertEquals(11 + 7 * peerCount, tracked.statements.size());
       assertEquals(before, facts());
     }
   }
@@ -344,7 +344,7 @@ class UserFrozenOwnershipEvidenceMySqlIT {
       if (candidateCount == 100) {
         assertTrue(report.candidatesComplete);
         assertEquals("1.00", report.validatedFrozenTotal);
-        assertEquals(611, tracked.statements.size());
+        assertEquals(711, tracked.statements.size());
       } else {
         assertFalse(report.candidatesComplete);
         assertTrue(report.reasonCodes.contains("FROZEN_CANDIDATE_LIMIT_EXCEEDED"));
@@ -403,13 +403,13 @@ class UserFrozenOwnershipEvidenceMySqlIT {
     var first = inspect();
     assertEquals(1, first.observedCount);
     assertEquals("10.00", first.validatedFrozenTotal);
-    assertEquals(17, tracked.statements.size());
+    assertEquals(18, tracked.statements.size());
     assertEquals(1, tracked.connections);
     tracked.reset();
     var next = inspect();
     assertEquals(2, next.observedCount);
     assertEquals("20.00", next.validatedFrozenTotal);
-    assertEquals(23, tracked.statements.size());
+    assertEquals(25, tracked.statements.size());
     assertEquals(1, tracked.connections);
   }
 
@@ -457,7 +457,7 @@ class UserFrozenOwnershipEvidenceMySqlIT {
             "ops-secret",
             "wrong-client-xid",
             "wrong-key")) assertFalse(body.contains(raw), raw);
-    assertEquals(17, tracked.statements.size());
+    assertEquals(18, tracked.statements.size());
     assertEquals(1, tracked.connections);
     assertEquals(before, facts());
     tracked.checking = false;

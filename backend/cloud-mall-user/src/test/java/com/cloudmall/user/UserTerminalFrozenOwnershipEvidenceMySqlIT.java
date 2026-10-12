@@ -218,7 +218,7 @@ class UserTerminalFrozenOwnershipEvidenceMySqlIT {
       assertTrue(report.accountCausalityNotProven);
       assertFalse(report.automaticActionsAllowed);
       assertEquals(1, tracked.connections);
-      assertEquals(11 + 7 * peers, tracked.statements.size());
+      assertEquals(12 + 7 * peers + (peers == 2 ? 1 : 0), tracked.statements.size());
       assertEquals(before, facts());
     }
   }
@@ -324,12 +324,12 @@ class UserTerminalFrozenOwnershipEvidenceMySqlIT {
       if (count == 100) {
         assertTrue(report.candidatesComplete);
         assertEquals(100, report.validatedCancelledCount);
-        assertEquals(711, tracked.statements.size());
+        assertEquals(812, tracked.statements.size());
       } else {
         assertFalse(report.candidatesComplete);
         assertNull(report.vectorSha256);
         assertNull(report.validatedCancelledCount);
-        assertEquals(11, tracked.statements.size());
+        assertEquals(12, tracked.statements.size());
       }
       assertEquals(before, facts());
     }
@@ -347,12 +347,12 @@ class UserTerminalFrozenOwnershipEvidenceMySqlIT {
     tracked.checking = true;
     var first = inspect();
     assertEquals(1, first.observedCount);
-    assertEquals(18, tracked.statements.size());
+    assertEquals(19, tracked.statements.size());
     assertEquals(1, tracked.connections);
     tracked.reset();
     var next = inspect();
     assertEquals(2, next.observedCount);
-    assertEquals(25, tracked.statements.size());
+    assertEquals(27, tracked.statements.size());
     assertEquals(1, tracked.connections);
     assertNotEquals(first.vectorSha256, next.vectorSha256);
   }

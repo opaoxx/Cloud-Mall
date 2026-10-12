@@ -612,6 +612,119 @@ class UserTccStateQueryTest {
     assertEquals("CONFIRMED", query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
   }
 
+  /** 三种未确认形态不能忽略同pay非DEBIT账本或非空nullrow，不继续读Fence。 */
+  @Test
+  void unconfirmedStatesRequireEmptyFullPaymentLedgerScope() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String state : List.of("TRYING", "CANCELLED", "empty-cancel")) {
+      for (String variant :
+          List.of(
+              "refund", "unknown-type", "unknown-state", "pay-alias", "other-user", "null-row")) {
+        assertions.add(
+            () -> {
+              setUp();
+              prepareUnconfirmedScope(state);
+              var row = ledger();
+              row.operationKey = "other-ledger-key";
+              row.operationType = "unknown-type".equals(variant) ? "UNKNOWN" : "REFUND";
+              if ("unknown-state".equals(variant)) row.state = "UNKNOWN";
+              if ("pay-alias".equals(variant))
+                row.payNo = row.payNo.toUpperCase(java.util.Locale.ROOT);
+              if ("other-user".equals(variant)) row.userId = 8L;
+              when(ledgers.findPaymentLedgerCandidates("pay-query-1"))
+                  .thenReturn(
+                      "null-row".equals(variant)
+                          ? java.util.Collections.singletonList(null)
+                          : List.of(row));
+              var failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+              assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+              assertEquals(409, failure.getHttpStatus());
+              verifyNoInteractions(fences);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** null缺证/DAO故障不当空；固定账本或DEBIT先命中时不覆盖其旧拒绝顺序。 */
+  @Test
+  void unconfirmedScopeMissingAndDaoFaultPreserveProofPriority() {
+    for (String state : List.of("TRYING", "CANCELLED", "empty-cancel")) {
+      setUp();
+      prepareUnconfirmedScope(state);
+      when(ledgers.findPaymentLedgerCandidates("pay-query-1")).thenReturn(null);
+      assertEquals(
+          "USER_TCC_STATE_CONFLICT",
+          assertThrows(
+                  BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"))
+              .getCode());
+      setUp();
+      prepareUnconfirmedScope(state);
+      var fault =
+          new org.springframework.dao.DataAccessResourceFailureException("owned-read-scope-fault");
+      org.mockito.Mockito.doThrow(fault).when(ledgers).findPaymentLedgerCandidates("pay-query-1");
+      org.junit.jupiter.api.Assertions.assertSame(
+          fault,
+          assertThrows(
+              org.springframework.dao.DataAccessResourceFailureException.class,
+              () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1")));
+      for (String oldGate : List.of("fixed", "debit")) {
+        setUp();
+        prepareUnconfirmedScope(state);
+        if ("fixed".equals(oldGate))
+          when(ledgers.selectByOperationKey("pay-query-1")).thenReturn(ledger());
+        else when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(ledger());
+        org.mockito.Mockito.doThrow(fault).when(ledgers).findPaymentLedgerCandidates("pay-query-1");
+        assertEquals(
+            "USER_TCC_STATE_CONFLICT",
+            assertThrows(
+                    BizException.class,
+                    () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"))
+                .getCode());
+        org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+            .findPaymentLedgerCandidates(org.mockito.ArgumentMatchers.any());
+      }
+    }
+  }
+
+  /** 健康empty保持状态，UNKNOWN并不提供无资金证明，CONFIRMED沿原DEBIT范围而非全type门。 */
+  @Test
+  void emptyScopeKeepsKnownStatesAndUncertainOrConfirmedReadBoundaries() {
+    for (String state : List.of("TRYING", "CANCELLED", "empty-cancel")) {
+      setUp();
+      prepareUnconfirmedScope(state);
+      when(ledgers.findPaymentLedgerCandidates("pay-query-1")).thenReturn(List.of());
+      assertEquals(
+          "TRYING".equals(state) ? "TRYING" : "CANCELLED",
+          query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+    }
+    setUp();
+    var receive = receive(null);
+    when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
+    when(ledgers.findPaymentLedgerCandidates(receive.payNo)).thenReturn(List.of(ledger()));
+    assertEquals("UNKNOWN", query.read(7L, receive.operationKey, receive.xid).state);
+    org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+        .findPaymentLedgerCandidates(org.mockito.ArgumentMatchers.any());
+    setUp();
+    installKnownState("CONFIRMED");
+    when(ledgers.findPaymentLedgerCandidates("pay-query-1")).thenReturn(List.of(ledger()));
+    assertEquals("CONFIRMED", query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+    org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+        .findPaymentLedgerCandidates(org.mockito.ArgumentMatchers.any());
+  }
+
+  /** 仅准备原状态/形态，不补空取消freeze；后续作用于独立的scope替身。 */
+  private void prepareUnconfirmedScope(String state) {
+    TccFenceLogPO observed = installKnownState("empty-cancel".equals(state) ? "CANCELLED" : state);
+    if ("empty-cancel".equals(state)) {
+      when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
+      observed.status = 4;
+    }
+  }
+
   /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
   private TccFenceLogPO installKnownState(String state) {
     UserTccReceivePO receive = receive(12L);

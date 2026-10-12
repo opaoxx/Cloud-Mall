@@ -398,7 +398,8 @@ class UserLinkedRefundEvidenceMySqlIT {
     var before = facts();
     tracked.reset();
     tracked.checking = true;
-    assertTrue(inspect().reasonCodes.contains("REFUND_ORIGINAL_STATE_CONFLICT"));
+    assertEquals(
+        "USER_TCC_STATE_CONFLICT", assertThrows(BizException.class, this::inspect).getCode());
     assertEquals(before, facts());
   }
 

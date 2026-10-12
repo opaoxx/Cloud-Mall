@@ -63,7 +63,7 @@ public class UserTccReconciliationReadService {
     this.stateQuery = new UserTccStateQuery(receives, attempts, debits, ledgers, fences);
   }
 
-  /** 原持久载荷提供查询锚点，完整样本九SELECT共享一个无锁只读RR连接。 */
+  /** 原持久载荷提供查询锚点，所有SELECT共享一个无锁只读RR连接。 */
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public UserTccReconciliationVO inspect(Long userId, String payNo) {
     // 1. 保留CI候选并精确核身份，原XID/键只取自数据库，不取HTTP覆盖值。

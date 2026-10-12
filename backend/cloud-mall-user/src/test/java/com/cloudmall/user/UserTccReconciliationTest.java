@@ -178,6 +178,9 @@ class UserTccReconciliationTest {
       verify(fixture.ledgers).selectByOperationKey("pay-query-1");
       verify(fixture.ledgers).selectByOperationKey("refund:pay-query-1");
       verify(fixture.ledgers).selectDebitByPayNo("pay-query-1");
+      if (!"CONFIRMED".equals(state)) {
+        verify(fixture.ledgers).findPaymentLedgerCandidates("pay-query-1");
+      }
       verify(fixture.fences).findByBranch(fixture.receive.xid, 11L);
       verifyNoMoreInteractions(
           fixture.receives,
