@@ -1229,6 +1229,166 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     }
   }
 
+  @Test
+  void malformedTimeArgumentsCannotMisclassifyOrAcceptReservation() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (int argumentIndex : List.of(2, 3, 4)) {
+      for (String invalidTime :
+          List.of(
+              "",
+              "bad",
+              " ",
+              "01",
+              "1.5",
+              "1e3",
+              "+1",
+              "-01",
+              "1000000000001",
+              "999999999999999999999999999999")) {
+        String[] arguments = {"unused", "10", "1000", "0", "2000", "60", "10"};
+        arguments[argumentIndex] = invalidTime;
+        assertions.add(() -> assertInvalidReserveArgumentsPreserveFacts(arguments));
+      }
+    }
+    for (String[] invalidWindow :
+        List.of(
+            new String[] {"1000", "-1", "2000"},
+            new String[] {"1000", "0", "-1"},
+            new String[] {"-1000000000001", "0", "2000"},
+            new String[] {"1000", "0", "0"},
+            new String[] {"1000", "2000", "2000"},
+            new String[] {"1000", "2001", "2000"})) {
+      assertions.add(
+          () ->
+              assertInvalidReserveArgumentsPreserveFacts(
+                  new String[] {
+                    "unused", "10", invalidWindow[0], invalidWindow[1], invalidWindow[2], "60", "10"
+                  }));
+    }
+    assertAll(assertions);
+  }
+
+  @Test
+  void malformedLimitArgumentsCannotGrantExtraPurchaseOrHideBadConfiguration() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (int argumentIndex : List.of(1, 6)) {
+      for (String invalidLimit :
+          List.of(
+              "",
+              "bad",
+              " ",
+              "0",
+              "-1",
+              "01",
+              "2.5",
+              "1e3",
+              "+1",
+              "2147483648",
+              "1000000000001",
+              "999999999999999999999999999999")) {
+        String[] arguments = {"unused", "10", "1000", "0", "2000", "60", "10"};
+        arguments[argumentIndex] = invalidLimit;
+        assertions.add(() -> assertInvalidReserveArgumentsPreserveFacts(arguments));
+      }
+    }
+    assertAll(assertions);
+  }
+
+  @Test
+  void canonicalNumericBoundariesAndReplayKeepOriginalReservationProtocol() {
+    for (String boundary :
+        List.of(
+            "minimum-limits",
+            "maximum-limits",
+            "maximum-time-active",
+            "maximum-time-ended",
+            "negative-now",
+            "zero-now",
+            "before-start-bad-limits",
+            "ended-bad-limits")) {
+      reset();
+      var original = row("RELEASE_PENDING", "owned-idem");
+      var keys = prepareFreshReserveRedis(original);
+      String[] arguments = {original.orderNo, "10", "1000", "0", "2000", "60", "10"};
+      long expected = 1L;
+      String expectedStock = "4", expectedUser = "3";
+      if ("minimum-limits".equals(boundary)) {
+        arguments[1] = arguments[6] = "1";
+        fixtureRedis.opsForValue().set(keys.get(0), "1");
+        fixtureRedis.opsForValue().set(keys.get(5), "0");
+        expectedStock = "0";
+        expectedUser = "1";
+      } else if ("maximum-limits".equals(boundary)) {
+        arguments[1] = arguments[6] = "2147483647";
+        fixtureRedis.opsForValue().set(keys.get(0), "2147483647");
+        fixtureRedis.opsForValue().set(keys.get(5), "2147483646");
+        expectedStock = "2147483646";
+        expectedUser = "2147483647";
+      } else if ("maximum-time-active".equals(boundary)) {
+        arguments[2] = "999999999999";
+        arguments[3] = "999999999998";
+        arguments[4] = "1000000000000";
+      } else if ("maximum-time-ended".equals(boundary)) {
+        arguments[2] = arguments[4] = "1000000000000";
+        expected = 5L;
+      } else if ("negative-now".equals(boundary)) {
+        arguments[2] = "-1000000000000";
+        expected = 4L;
+      } else if ("zero-now".equals(boundary)) {
+        arguments[2] = "0";
+      } else {
+        arguments[1] = arguments[6] = arguments[5] = "bad";
+        arguments[2] = "before-start-bad-limits".equals(boundary) ? "-1" : "2000";
+        expected = "before-start-bad-limits".equals(boundary) ? 4L : 5L;
+      }
+      var before = redisDumpFacts(keys);
+      var databaseBefore = facts();
+      assertEquals(Long.valueOf(expected), executeReserveWithArguments(keys, arguments), boundary);
+      if (expected == 1L) {
+        assertEquals(expectedStock, fixtureRedis.opsForValue().get(keys.get(0)), boundary);
+        assertEquals(expectedUser, fixtureRedis.opsForValue().get(keys.get(5)), boundary);
+        assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
+        assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
+        assertEquals(
+            "RESERVED|" + original.orderNo + "|4", fixtureRedis.opsForValue().get(keys.get(3)));
+        var replayBefore = redisDumpFacts(keys);
+        assertEquals(
+            Long.valueOf(3),
+            executeReserveWithArguments(
+                keys, new String[] {original.orderNo, "bad", "bad", "bad", "bad", "bad", "bad"}));
+        assertEquals(replayBefore, redisDumpFacts(keys));
+      } else {
+        assertEquals(before, redisDumpFacts(keys));
+      }
+      assertEquals(databaseBefore, facts());
+    }
+  }
+
+  /** 真实脚本须在缺证参数时返回-1，保留原六键字节和六张隔离事实表。 */
+  private void assertInvalidReserveArgumentsPreserveFacts(String[] arguments) {
+    reset();
+    var original = row("RELEASE_PENDING", "owned-idem");
+    var keys = prepareFreshReserveRedis(original);
+    arguments[0] = original.orderNo;
+    var before = redisDumpFacts(keys);
+    var databaseBefore = facts();
+    Long receipt = null;
+    RuntimeException scriptFailure = null;
+    try {
+      receipt = executeReserveWithArguments(keys, arguments);
+    } catch (RuntimeException failure) {
+      scriptFailure = failure;
+    }
+    Long observedReceipt = receipt;
+    RuntimeException observedFailure = scriptFailure;
+    assertAll(
+        java.util.Arrays.toString(arguments),
+        () -> assertNull(observedFailure),
+        () -> assertEquals(Long.valueOf(-1), observedReceipt),
+        () -> assertEquals(before, redisDumpFacts(keys)),
+        () -> assertEquals(databaseBefore, facts()));
+  }
+
   /** 只准备未受理Redis状态；原row仅供键/参数，不seed已ACCEPTED的SQL事实。 */
   private static List<String> prepareFreshReserveRedis(SeckillQuotaSettlementPO original) {
     var keys = prepareRedis(original);
@@ -1245,6 +1405,15 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   /** 只替换原ARGV6字符串以验证EXPIRE写前边界，不改变其它参数或模拟结果。 */
   private static Long executeReserveLua(
       SeckillQuotaSettlementPO original, List<String> keys, long now, long userLimit, String ttl) {
+    return executeReserveWithArguments(
+        keys,
+        new String[] {
+          original.orderNo, String.valueOf(userLimit), String.valueOf(now), "0", "2000", ttl, "10"
+        });
+  }
+
+  /** 原资源脚本与原KEYS顺序实际执行；仅调用参数可由测试替换，不模拟Redis返回值。 */
+  private static Long executeReserveWithArguments(List<String> keys, String[] arguments) {
     var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
     script.setLocation(
         new org.springframework.core.io.ClassPathResource("lua/seckill-reserve.lua"));
@@ -1252,13 +1421,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     return fixtureRedis.execute(
         script,
         List.of(keys.get(0), keys.get(5), keys.get(2), keys.get(3), keys.get(4)),
-        original.orderNo,
-        String.valueOf(userLimit),
-        String.valueOf(now),
-        "0",
-        "2000",
-        ttl,
-        "10");
+        (Object[]) arguments);
   }
 
   /** 三个待写计数的非规范前导零文本，数值仍落已有范围。 */
