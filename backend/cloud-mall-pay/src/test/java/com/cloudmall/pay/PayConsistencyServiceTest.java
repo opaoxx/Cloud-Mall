@@ -388,7 +388,8 @@ class PayConsistencyServiceTest {
             .thenReturn(0);
       else
         when(payRecordMapper.markOwnedLegacyFailed(anyString(), anyString(), any())).thenReturn(0);
-      var sameTerminal = new com.cloudmall.pay.domain.po.PayRecordPO();
+      var sameTerminal = payRecordMapper.selectByPayNo("pay-1").get(0);
+      org.mockito.Mockito.clearInvocations(payRecordMapper);
       sameTerminal.debitMode = "LEGACY";
       sameTerminal.status = terminal;
       when(payRecordMapper.selectByPayNo("pay-1")).thenReturn(java.util.List.of(sameTerminal));
@@ -651,6 +652,154 @@ class PayConsistencyServiceTest {
     verify(intentMapper).findDue(any(), eq(50));
     verify(intentMapper).claim(eq("pay-1"), anyString(), any(), any());
     verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
+  }
+
+  /** 单字段损坏及两表一致的非法域不能借模式检查进入恢复。 */
+  @Test
+  void originalPaymentTupleIsRequiredBeforeClaim() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String target : java.util.List.of("intent", "payment", "both")) {
+      for (String variant :
+          java.util.List.of(
+              "pay-alias",
+              "pay-missing",
+              "order-other",
+              "order-blank",
+              "order-missing",
+              "user-other",
+              "user-zero",
+              "user-missing",
+              "money-other",
+              "money-zero",
+              "money-negative",
+              "money-fraction",
+              "money-overflow",
+              "money-missing")) {
+        if ("both".equals(target)
+            && java.util.List.of("order-other", "user-other", "money-other").contains(variant))
+          continue;
+        assertions.add(
+            () -> {
+              setUp();
+              PayDebitIntentPO originalIntent = intent();
+              var payment = payRecordMapper.selectByPayNo("pay-1").get(0);
+              org.mockito.Mockito.clearInvocations(payRecordMapper);
+              if (!"payment".equals(target)) corruptRecoveryTuple(originalIntent, variant);
+              if (!"intent".equals(target)) {
+                PayDebitIntentPO changedPayment = intent();
+                corruptRecoveryTuple(changedPayment, variant);
+                payment.payNo = changedPayment.payNo;
+                payment.orderNo = changedPayment.orderNo;
+                payment.userId = changedPayment.userId;
+                payment.amount = changedPayment.amount;
+              }
+              when(intentMapper.findByPayNo("pay-1")).thenReturn(originalIntent);
+              // 旧实现若按坏intent键读取，仍给同一原payment，才能测出载荷缺证。
+              when(payRecordMapper.selectByPayNo(any())).thenReturn(java.util.List.of(payment));
+              var failure =
+                  org.junit.jupiter.api.Assertions.assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> consistencyService.process("pay-1"),
+                      target + ":" + variant);
+              assertEquals("COMMON_CONFLICT", failure.getCode());
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals("支付意图与原支付记录不一致", failure.getMessage());
+              verify(intentMapper, never()).claim(any(), any(), any(), any());
+              assertOnlyRecoveryReadsOrClaim();
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 请求key必须精确；后两次重读也不能绕过原payment校验。 */
+  @Test
+  void requestedKeyAndBothRereadBranchesRequireOriginalTuple() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String checkpoint : java.util.List.of("requested-alias", "claim-zero", "claimed")) {
+      assertions.add(
+          () -> {
+            setUp();
+            PayDebitIntentPO changed = intent();
+            changed.orderNo = "order-other";
+            String requestedKey = "requested-alias".equals(checkpoint) ? "PAY-1" : "pay-1";
+            if ("requested-alias".equals(checkpoint)) {
+              when(intentMapper.findByPayNo(requestedKey)).thenReturn(intent());
+              var originalPayments = payRecordMapper.selectByPayNo("pay-1");
+              when(payRecordMapper.selectByPayNo(requestedKey)).thenReturn(originalPayments);
+              org.mockito.Mockito.clearInvocations(payRecordMapper);
+            } else {
+              when(intentMapper.findByPayNo("pay-1")).thenReturn(intent(), changed);
+              when(intentMapper.claim(eq("pay-1"), anyString(), any(), any()))
+                  .thenReturn("claim-zero".equals(checkpoint) ? 0 : 1);
+            }
+            var failure =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> consistencyService.process(requestedKey));
+            assertEquals("COMMON_CONFLICT", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+            if ("requested-alias".equals(checkpoint))
+              verify(intentMapper, never()).claim(any(), any(), any(), any());
+            else verify(intentMapper).claim(eq("pay-1"), anyString(), any(), any());
+            assertOnlyRecoveryReadsOrClaim();
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 合法尾零、最小/最大金额及旧Java null-mode保持兼容，不按BigDecimal scale比较相等。 */
+  @Test
+  void healthyRecoveryTupleKeepsMoneyAndLegacyObjectCompatibility() {
+    for (String amount : java.util.List.of("10.000", "0.01", "9999999999999999.99")) {
+      setUp();
+      PayDebitIntentPO original = intent();
+      original.amount = new BigDecimal(amount);
+      original.debitMode = null;
+      var payment = payRecordMapper.selectByPayNo("pay-1").get(0);
+      payment.amount = original.amount.setScale(2);
+      payment.debitMode = null;
+      org.mockito.Mockito.clearInvocations(payRecordMapper);
+      when(intentMapper.findByPayNo("pay-1")).thenReturn(original);
+      when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(0);
+      assertEquals("INIT", consistencyService.process("pay-1"));
+      assertOnlyRecoveryReadsOrClaim();
+    }
+  }
+
+  /** 核对拒绝后仅发生查询/已发出的claim，没有stage/retry/终态或远端副作用。 */
+  private void assertOnlyRecoveryReadsOrClaim() {
+    org.mockito.Mockito.verifyNoInteractions(
+        userClient, orderClient, intentService, transactionManager);
+    for (var invocation : org.mockito.Mockito.mockingDetails(intentMapper).getInvocations()) {
+      org.junit.jupiter.api.Assertions.assertTrue(
+          java.util.List.of("findByPayNo", "claim").contains(invocation.getMethod().getName()),
+          invocation.toString());
+    }
+    for (var invocation : org.mockito.Mockito.mockingDetails(payRecordMapper).getInvocations()) {
+      assertEquals("selectByPayNo", invocation.getMethod().getName());
+    }
+  }
+
+  /** 只改变选定字段，不改变模式或状态，金额均为真实BigDecimal输入。 */
+  private static void corruptRecoveryTuple(PayDebitIntentPO tuple, String variant) {
+    switch (variant) {
+      case "pay-alias" -> tuple.payNo = "PAY-1";
+      case "pay-missing" -> tuple.payNo = null;
+      case "order-other" -> tuple.orderNo = "order-other";
+      case "order-blank" -> tuple.orderNo = " ";
+      case "order-missing" -> tuple.orderNo = null;
+      case "user-other" -> tuple.userId = 8L;
+      case "user-zero" -> tuple.userId = 0L;
+      case "user-missing" -> tuple.userId = null;
+      case "money-other" -> tuple.amount = new BigDecimal("11.00");
+      case "money-zero" -> tuple.amount = BigDecimal.ZERO;
+      case "money-negative" -> tuple.amount = new BigDecimal("-1.00");
+      case "money-fraction" -> tuple.amount = new BigDecimal("10.001");
+      case "money-overflow" -> tuple.amount = new BigDecimal("10000000000000000.00");
+      case "money-missing" -> tuple.amount = null;
+      default -> throw new AssertionError(variant);
+    }
   }
 
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */

@@ -872,6 +872,115 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两真实原表的单字段错配/共同非法域均在claim之前拒绝，完整事实保持。 */
+  @Test
+  void corruptOriginalPaymentFactsDoNotClaimOrCallRemoteServices() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String target : List.of("intent", "payment", "both")) {
+      for (String variant :
+          List.of(
+              "pay-alias",
+              "order-other",
+              "order-blank",
+              "user-other",
+              "user-zero",
+              "money-other",
+              "money-zero",
+              "money-negative")) {
+        if ("both".equals(target)
+            && List.of("order-other", "user-other", "money-other").contains(variant)) continue;
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              if (!"payment".equals(target)) changeOwnedRecoveryTuple("pay_debit_intent", variant);
+              if (!"intent".equals(target)) changeOwnedRecoveryTuple("pay_record", variant);
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              var failure =
+                  org.junit.jupiter.api.Assertions.assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> newService(user, orders).process("pay-1"),
+                      target + ":" + variant);
+              assertEquals("COMMON_CONFLICT", failure.getCode());
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals("支付意图与原支付记录不一致", failure.getMessage());
+              assertEquals(before, payFacts());
+              org.mockito.Mockito.verifyNoInteractions(user, orders);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 真实claim后受控改变源表，后置重读必须停止；不假称claim或fixture变更已回滚。 */
+  @Test
+  void changedOriginalFactsAfterClaimStopBeforeAnyRemoteOrStageWrite() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String table : List.of("pay_record", "pay_debit_intent")) {
+      for (String variant : List.of("order-other", "user-other", "money-other")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              var claimedMapper = org.mockito.Mockito.spy(intents);
+              var afterChange =
+                  new java.util.concurrent.atomic.AtomicReference<
+                      List<List<Map<String, Object>>>>();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        Object claimResult = invocation.callRealMethod();
+                        assertEquals(1, claimResult);
+                        changeOwnedRecoveryTuple(table, variant);
+                        afterChange.set(payFacts());
+                        return claimResult;
+                      })
+                  .when(claimedMapper)
+                  .claim(eq("pay-1"), anyString(), any(), any());
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              PayConsistencyService service =
+                  new PayConsistencyService(
+                      mock(PayDebitIntentService.class),
+                      claimedMapper,
+                      records,
+                      user,
+                      orders,
+                      new org.springframework.jdbc.datasource.DataSourceTransactionManager(
+                          fixture.getDataSource()));
+              var failure =
+                  org.junit.jupiter.api.Assertions.assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> service.process("pay-1"));
+              assertEquals("COMMON_CONFLICT", failure.getCode());
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals(afterChange.get(), payFacts());
+              assertEquals(1, intentAttempts());
+              assertNotNull(intentLeaseOwner());
+              org.mockito.Mockito.verifyNoInteractions(user, orders);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 仅两个明确owned表允许受控损坏；变更列/value全部由固定switch选择。 */
+  private void changeOwnedRecoveryTuple(String table, String variant) {
+    assertTrue(List.of("pay_record", "pay_debit_intent").contains(table));
+    String assignment =
+        switch (variant) {
+          case "pay-alias" -> "pay_no='PAY-1'";
+          case "order-other" -> "order_no='order-other'";
+          case "order-blank" -> "order_no=' '";
+          case "user-other" -> "user_id=8";
+          case "user-zero" -> "user_id=0";
+          case "money-other" -> "amount=11";
+          case "money-zero" -> "amount=0";
+          case "money-negative" -> "amount=-1";
+          default -> throw new AssertionError(variant);
+        };
+    assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");

@@ -37,8 +37,8 @@ public class PayConsistencyService {
   /** 与数据库 DATETIME(3) 语义一致的业务时区。 */
   private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
 
-  /** 单笔退款金额必须无损落在数据库DECIMAL(18,2)容量内。 */
-  private static final BigDecimal MAX_REFUND_MONEY = new BigDecimal("9999999999999999.99");
+  /** Legacy单笔支付/退款金额必须无损落在数据库DECIMAL(18,2)容量内。 */
+  private static final BigDecimal MAX_LEGACY_AMOUNT = new BigDecimal("9999999999999999.99");
 
   /** 独立提交远程扣款前的不可变支付意图。 */
   private final PayDebitIntentService payDebitIntentService;
@@ -110,20 +110,20 @@ public class PayConsistencyService {
     requireStandaloneLegacyRecovery();
     // 2. 原意图与支付单模式先核对，再领取租约；拒绝路径不修改任何恢复字段。
     PayDebitIntentPO pending = payDebitIntentMapper.findByPayNo(payNo);
-    if (pending != null) requireLegacyRoute(pending);
+    if (pending != null) requireLegacyRoute(payNo, pending);
     LocalDateTime currentTime = now();
     // 3. 每次领取使用独立身份，同实例迟到旧执行不得匹配重领后的owner。
     String claimToken = UUID.randomUUID().toString();
     if (payDebitIntentMapper.claim(payNo, claimToken, currentTime.plusSeconds(30), currentTime)
         != 1) {
       PayDebitIntentPO existing = payDebitIntentMapper.findByPayNo(payNo);
-      if (existing != null) requireLegacyRoute(existing);
+      if (existing != null) requireLegacyRoute(payNo, existing);
       return existing == null ? "INIT" : existing.status;
     }
     // 4. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
     PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
     if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
-    requireLegacyRoute(intent);
+    requireLegacyRoute(payNo, intent);
     return processClaimed(intent, claimToken);
   }
 
@@ -135,12 +135,38 @@ public class PayConsistencyService {
     }
   }
 
-  /** 已存模式不受当前开关影响，未知协议和孤立意图不得进入旧资金调用。 */
-  private void requireLegacyRoute(PayDebitIntentPO intent) {
+  /** 保留协议错误优先级，再核原请求键与两表载荷；查询后漂移不属于本校验的保证。 */
+  private void requireLegacyRoute(String requestedPayNo, PayDebitIntentPO intent) {
+    // 1. 原模式先核对，不用当前开关改写协议或把模式错误转换成载荷冲突。
     PayDebitModes.requireSupported(intent.debitMode);
-    List<PayRecordPO> records = payRecordMapper.selectByPayNo(intent.payNo);
+    List<PayRecordPO> records = payRecordMapper.selectByPayNo(requestedPayNo);
     if (records.size() != 1) throw PayDebitModes.unavailable();
-    PayDebitModes.requireSupported(records.get(0).debitMode);
+    PayRecordPO payment = records.get(0);
+    PayDebitModes.requireSupported(payment.debitMode);
+    // 2. 请求键和原订单/用户必须精确相等，两表共同非法也不能作为恢复来源。
+    if (requestedPayNo == null
+        || requestedPayNo.isBlank()
+        || !Objects.equals(requestedPayNo, intent.payNo)
+        || !Objects.equals(requestedPayNo, payment.payNo)
+        || intent.orderNo == null
+        || intent.orderNo.isBlank()
+        || !Objects.equals(intent.orderNo, payment.orderNo)
+        || intent.userId == null
+        || intent.userId <= 0
+        || !Objects.equals(intent.userId, payment.userId)
+        || !validRecoveryAmount(intent.amount)
+        || !validRecoveryAmount(payment.amount)
+        || intent.amount.compareTo(payment.amount) != 0) {
+      throw new BizException(ErrorCodes.CONFLICT, "支付意图与原支付记录不一致", 409);
+    }
+  }
+
+  /** 正金额须无损落在DECIMAL(18,2)，允许数值相等的额外尾零。 */
+  private static boolean validRecoveryAmount(BigDecimal amount) {
+    return amount != null
+        && amount.signum() > 0
+        && amount.stripTrailingZeros().scale() <= 2
+        && amount.compareTo(MAX_LEGACY_AMOUNT) <= 0;
   }
 
   /** 先核对用户账本，再按订单确定成功、等待或唯一退款。 */
@@ -356,7 +382,7 @@ public class PayConsistencyService {
     }
     if (refundAmount.signum() <= 0
         || refundAmount.stripTrailingZeros().scale() > 2
-        || refundAmount.compareTo(MAX_REFUND_MONEY) > 0
+        || refundAmount.compareTo(MAX_LEGACY_AMOUNT) > 0
         || refundAmount.compareTo(intent.amount) != 0) {
       throw new BizException(ErrorCodes.CONFLICT, "退款账本与支付记录不一致", 409);
     }
