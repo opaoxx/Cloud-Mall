@@ -32,6 +32,9 @@ public class PayConsistencyService {
   /** 与数据库 DATETIME(3) 语义一致的业务时区。 */
   private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
 
+  /** 单笔退款金额必须无损落在数据库DECIMAL(18,2)容量内。 */
+  private static final BigDecimal MAX_REFUND_MONEY = new BigDecimal("9999999999999999.99");
+
   /** 当前恢复器认领 MySQL 租约的实例标识。 */
   private final String owner = UUID.randomUUID().toString();
 
@@ -122,8 +125,7 @@ public class PayConsistencyService {
         validateDebitOperation(intent, operation);
         if ("REJECTED".equals(operation.state())) {
           OrderClient.OrderView rejectedOrder = readOrderState(intent);
-          if ("PAID".equals(rejectedOrder.status())
-              || "COMPLETED".equals(rejectedOrder.status()))
+          if ("PAID".equals(rejectedOrder.status()) || "COMPLETED".equals(rejectedOrder.status()))
             throw new IllegalStateException("订单已支付但用户余额扣款被拒绝");
           return failWithoutDebit(intent);
         }
@@ -135,12 +137,13 @@ public class PayConsistencyService {
       // 2. 下单支付状态未知时不得扣款或退款；明确取消且未扣款直接失败。
       OrderClient.OrderView order = readOrderState(intent);
       if (operation != null && operation.refundOperationKey() != null) {
-        if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
+        if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order)) {
+          confirmRefundLedger(intent, operation.refundOperationKey());
           return finishRefunded(intent);
+        }
         throw new IllegalStateException("余额已退款但订单不是已取消状态: " + order.status());
       }
-      if (operation == null && "CANCELLED".equals(order.status()))
-        return failWithoutDebit(intent);
+      if (operation == null && "CANCELLED".equals(order.status())) return failWithoutDebit(intent);
       if (operation == null) {
         ApiResponse<UserClient.BalanceView> debit =
             userClient.debit(
@@ -148,9 +151,10 @@ public class PayConsistencyService {
                 intent.userId,
                 new UserClient.DebitRequest(
                     intent.payNo, intent.payNo, intent.orderNo, intent.amount));
-        if (debit == null || !"0".equals(debit.code) || debit.data == null
-            || !"APPLIED".equals(debit.data.state()))
-          throw new IllegalStateException("用户余额扣款未确认");
+        if (debit == null
+            || !"0".equals(debit.code)
+            || debit.data == null
+            || !"APPLIED".equals(debit.data.state())) throw new IllegalStateException("用户余额扣款未确认");
         retryStatus = "ORDER_SYNC_UNKNOWN";
       }
 
@@ -160,17 +164,18 @@ public class PayConsistencyService {
       if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
         return refundCancelled(intent);
       if (("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
-          && stockActionSucceeded(order))
-        return finishSuccess(intent);
-      if ("CANCELLED".equals(order.status()) || "PAID".equals(order.status())
+          && stockActionSucceeded(order)) return finishSuccess(intent);
+      if ("CANCELLED".equals(order.status())
+          || "PAID".equals(order.status())
           || "COMPLETED".equals(order.status()))
         throw new IllegalStateException("订单库存动作尚未完成: " + order.stockActionStatus());
       if (!"PENDING_PAYMENT".equals(order.status()))
         throw new IllegalStateException("订单状态暂不可判定支付结果: " + order.status());
 
-      ApiResponse<OrderClient.OrderView> paid =
-          orderClient.paid(intent.orderNo, intent.userId);
-      if (paid != null && "0".equals(paid.code) && paid.data != null
+      ApiResponse<OrderClient.OrderView> paid = orderClient.paid(intent.orderNo, intent.userId);
+      if (paid != null
+          && "0".equals(paid.code)
+          && paid.data != null
           && ("PAID".equals(paid.data.status()) || "COMPLETED".equals(paid.data.status())))
         return resolveAfterUncertainOrderWrite(intent);
       // 4. 非明确成功时重新读订单；只有明确取消才退款。
@@ -201,8 +206,7 @@ public class PayConsistencyService {
   private String resolveAfterUncertainOrderWrite(PayDebitIntentPO intent) {
     OrderClient.OrderView current = readOrderState(intent);
     if (("PAID".equals(current.status()) || "COMPLETED".equals(current.status()))
-        && stockActionSucceeded(current))
-      return finishSuccess(intent);
+        && stockActionSucceeded(current)) return finishSuccess(intent);
     if ("CANCELLED".equals(current.status()) && stockActionSucceeded(current))
       return refundCancelled(intent);
     throw new IllegalStateException("订单支付写入尚未确认: " + current.status());
@@ -282,10 +286,47 @@ public class PayConsistencyService {
                 intent.payNo,
                 intent.orderNo,
                 intent.amount));
-    if (refund == null || !"0".equals(refund.code) || refund.data == null
-        || !"APPLIED".equals(refund.data.state()))
-      throw new IllegalStateException("用户余额退款未确认");
+    if (refund == null
+        || !"0".equals(refund.code)
+        || refund.data == null
+        || !Objects.equals("refund:" + intent.payNo, refund.data.operationKey())
+        || !"APPLIED".equals(refund.data.state())) throw new IllegalStateException("用户余额退款未确认");
+    confirmRefundLedger(intent, "refund:" + intent.payNo);
     return finishRefunded(intent);
+  }
+
+  /**
+   * 退款终态前复用User查询证明单笔完整金额；404和缺证沿原恢复链重试，不转换为无扣款。
+   * 只核Pay可见字段，不把POST响应、marker或部分金额当作全额退款，也不推断User完整资金来源。
+   */
+  private void confirmRefundLedger(PayDebitIntentPO intent, String refundKey) {
+    if (refundKey == null || refundKey.isBlank()) {
+      throw new IllegalStateException("退款账本操作键缺失");
+    }
+    ApiResponse<UserClient.BalanceOperationView> response =
+        userClient.operation(intent.userId, refundKey, intent.userId);
+    if (response == null || !"0".equals(response.code) || response.data == null) {
+      throw new IllegalStateException("退款账本查询结果未知");
+    }
+    UserClient.BalanceOperationView refund = response.data;
+    if (!Objects.equals(refundKey, refund.operationKey())
+        || !"REFUND".equals(refund.type())
+        || !"APPLIED".equals(refund.state())
+        || refund.amount() == null) {
+      throw new BizException(ErrorCodes.CONFLICT, "退款账本与支付记录不一致", 409);
+    }
+    BigDecimal refundAmount;
+    try {
+      refundAmount = new BigDecimal(refund.amount());
+    } catch (NumberFormatException invalidAmount) {
+      throw new BizException(ErrorCodes.CONFLICT, "退款账本金额不合法", 409);
+    }
+    if (refundAmount.signum() <= 0
+        || refundAmount.stripTrailingZeros().scale() > 2
+        || refundAmount.compareTo(MAX_REFUND_MONEY) > 0
+        || refundAmount.compareTo(intent.amount) != 0) {
+      throw new BizException(ErrorCodes.CONFLICT, "退款账本与支付记录不一致", 409);
+    }
   }
 
   /** 明确没有扣款且订单已取消或账本拒绝时标记失败。 */

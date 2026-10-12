@@ -1737,6 +1737,68 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 原User查询真实返回单笔退款金额和marker，部分退款不得被消费者推断为全额。 */
+  @Test
+  void partialAndFullRefundOperationViewsKeepTheirActualAmounts() throws Exception {
+    for (String amount : List.of("2.00", "10.00")) {
+      closeContext();
+      createTransactionalServices();
+      var original = request("operation-refund-proof", 7L, "10.00");
+      debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+      var refund = refundRequest(original, "actual-refund-proof", amount);
+      legacy.refundInternal(7L, 7L, refund);
+      var before = allFundsFacts();
+      var mvc =
+          org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                  context.getBean(UserController.class))
+              .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+              .build();
+      mvc.perform(
+              org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                      "/api/internal/users/7/balance/operations/{operationKey}", original.payNo)
+                  .header("X-User-Id", "7"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.type")
+                  .value("DEBIT"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.amount")
+                  .value("10.00"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.refundOperationKey")
+                  .value(refund.refundOperationKey));
+      mvc.perform(
+              org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                      "/api/internal/users/7/balance/operations/{operationKey}",
+                      refund.refundOperationKey)
+                  .header("X-User-Id", "7"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.operationKey")
+                  .value(refund.refundOperationKey))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.type")
+                  .value("REFUND"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.state")
+                  .value("APPLIED"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                      "$.data.amount")
+                  .value(amount));
+      assertEquals(before, allFundsFacts());
+      assertFunds(7L, new BigDecimal("90.00").add(new BigDecimal(amount)).toPlainString(), "0.00");
+    }
+  }
+
   /** Legacy fresh debit在余额来源非法时于认领前固定拒绝，真实Controller与Service均不写资金。 */
   @Test
   void legacyFreshDebitRejectsInvalidWalletBeforeAnyOwnership() throws Exception {
