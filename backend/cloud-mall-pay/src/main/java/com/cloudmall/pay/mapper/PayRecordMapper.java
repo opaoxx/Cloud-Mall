@@ -124,6 +124,34 @@ public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
       @Param("claimToken") String claimToken,
       @Param("updatedAt") java.time.LocalDateTime updatedAt);
 
+  /** LegacyORDER_SYNC_UNKNOWN中间状态仅由当前未过期owner原子推进，旧方法保留。 */
+  @Update(
+      "UPDATE pay_record payment JOIN pay_debit_intent intent ON BINARY payment.pay_no=BINARY"
+          + " intent.pay_no SET payment.status='ORDER_SYNC_UNKNOWN',payment.updated_at=#{updatedAt}"
+          + " WHERE BINARY payment.pay_no=BINARY #{payNo} AND BINARY intent.lease_owner=BINARY"
+          + " #{claimToken} AND intent.lease_until>#{updatedAt} AND BINARY"
+          + " payment.debit_mode='LEGACY' AND BINARY intent.debit_mode='LEGACY' AND intent.status"
+          + " IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND payment.status IN"
+          + " ('PENDING','ORDER_SYNC_UNKNOWN')")
+  int markOwnedLegacyOrderUnknown(
+      @Param("payNo") String payNo,
+      @Param("claimToken") String claimToken,
+      @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
+  /** LegacyREFUND_PENDING中间状态仅由当前未过期owner原子推进，旧方法保留。 */
+  @Update(
+      "UPDATE pay_record payment JOIN pay_debit_intent intent ON BINARY payment.pay_no=BINARY"
+          + " intent.pay_no SET payment.status='REFUND_PENDING',payment.updated_at=#{updatedAt}"
+          + " WHERE BINARY payment.pay_no=BINARY #{payNo} AND BINARY intent.lease_owner=BINARY"
+          + " #{claimToken} AND intent.lease_until>#{updatedAt} AND BINARY"
+          + " payment.debit_mode='LEGACY' AND BINARY intent.debit_mode='LEGACY' AND intent.status"
+          + " IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND payment.status IN"
+          + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')")
+  int markOwnedLegacyRefundPending(
+      @Param("payNo") String payNo,
+      @Param("claimToken") String claimToken,
+      @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
   /** 按回调结果更新支付状态。 */
   @Update(
       "update pay_record set status=#{status},paid_at=case when #{success}=true then #{paidAt} else"

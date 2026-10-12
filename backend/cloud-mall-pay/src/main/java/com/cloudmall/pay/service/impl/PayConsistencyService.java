@@ -147,6 +147,7 @@ public class PayConsistencyService {
       if (operation == null && "CANCELLED".equals(order.status()))
         return failWithoutDebit(intent, claimToken);
       if (operation == null) {
+        requireOwnedLegacyLease(intent.payNo, claimToken);
         ApiResponse<UserClient.BalanceView> debit =
             userClient.debit(
                 intent.userId,
@@ -161,8 +162,10 @@ public class PayConsistencyService {
       }
 
       // 3. 扣款后先持久化恢复状态，再触发远程订单支付迁移。
-      payRecordMapper.markOrderUnknown(intent.payNo, now());
-      payDebitIntentMapper.updateOwnedStatus(intent.payNo, claimToken, "DEBITED", now());
+      requireOwnedLegacyWrite(
+          payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now()));
+      requireOwnedLegacyWrite(
+          payDebitIntentMapper.updateOwnedLegacyStatus(intent.payNo, claimToken, "DEBITED", now()));
       if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
         return refundCancelled(intent, claimToken);
       if (("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
@@ -174,6 +177,7 @@ public class PayConsistencyService {
       if (!"PENDING_PAYMENT".equals(order.status()))
         throw new IllegalStateException("订单状态暂不可判定支付结果: " + order.status());
 
+      requireOwnedLegacyLease(intent.payNo, claimToken);
       ApiResponse<OrderClient.OrderView> paid = orderClient.paid(intent.orderNo, intent.userId);
       if (paid != null
           && "0".equals(paid.code)
@@ -191,8 +195,8 @@ public class PayConsistencyService {
       if (durableState != null && "REFUND_PENDING".equals(durableState.status))
         retryStatus = "REFUND_PENDING";
       if ("ORDER_SYNC_UNKNOWN".equals(retryStatus))
-        payRecordMapper.markOrderUnknown(intent.payNo, now());
-      payDebitIntentMapper.recordRetry(
+        payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now());
+      payDebitIntentMapper.recordRetryOwnedLegacy(
           intent.payNo,
           claimToken,
           retryStatus,
@@ -259,30 +263,34 @@ public class PayConsistencyService {
   /** 用户账本和订单都明确成功后才标记支付成功。 */
   private String finishSuccess(PayDebitIntentPO intent, String claimToken) {
     LocalDateTime terminalTime = now();
-    requireOwnedTerminalWrite(
+    requireOwnedLegacyWrite(
         payRecordMapper.markOwnedLegacySuccess(
             intent.payNo, claimToken, terminalTime, terminalTime));
-    requireOwnedTerminalWrite(
+    requireOwnedLegacyWrite(
         payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "SUCCESS", now()));
     return "SUCCESS";
   }
 
   /** 原扣款已退款时恢复支付记录终态，不再次增加余额。 */
   private String finishRefunded(PayDebitIntentPO intent, String claimToken) {
-    payRecordMapper.markRefundPending(intent.payNo, now());
+    requireOwnedLegacyWrite(
+        payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
     LocalDateTime terminalTime = now();
-    requireOwnedTerminalWrite(
+    requireOwnedLegacyWrite(
         payRecordMapper.markOwnedLegacyRefunded(intent.payNo, claimToken, terminalTime));
-    requireOwnedTerminalWrite(
+    requireOwnedLegacyWrite(
         payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "REFUNDED", now()));
     return "REFUNDED";
   }
 
   /** 确认订单取消后先持久化退款意图，再调用幂等用户退款接口。 */
   private String refundCancelled(PayDebitIntentPO intent, String claimToken) {
-    int changed = payRecordMapper.markRefundPending(intent.payNo, now());
-    requirePayRecordStatus(intent.payNo, "REFUND_PENDING", changed);
-    payDebitIntentMapper.updateOwnedStatus(intent.payNo, claimToken, "REFUND_PENDING", now());
+    requireOwnedLegacyWrite(
+        payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
+    requireOwnedLegacyWrite(
+        payDebitIntentMapper.updateOwnedLegacyStatus(
+            intent.payNo, claimToken, "REFUND_PENDING", now()));
+    requireOwnedLegacyLease(intent.payNo, claimToken);
     ApiResponse<UserClient.BalanceView> refund =
         userClient.refund(
             intent.userId,
@@ -339,24 +347,22 @@ public class PayConsistencyService {
   /** 明确没有扣款且订单已取消或账本拒绝时标记失败。 */
   private String failWithoutDebit(PayDebitIntentPO intent, String claimToken) {
     LocalDateTime terminalTime = now();
-    requireOwnedTerminalWrite(
+    requireOwnedLegacyWrite(
         payRecordMapper.markOwnedLegacyFailed(intent.payNo, claimToken, terminalTime));
-    requireOwnedTerminalWrite(
+    requireOwnedLegacyWrite(
         payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "FAILED", now()));
     return "FAILED";
   }
 
-  /** 终态必须恰好更新一行，不以同终态readback绕过owner或期限；异常沿原恢复链处理。 */
-  private static void requireOwnedTerminalWrite(int changedRows) {
+  /** 正常推进必须恰好更新一行，不以readback绕过owner或期限；异常沿原恢复链处理。 */
+  private static void requireOwnedLegacyWrite(int changedRows) {
     if (changedRows != 1) throw new IllegalStateException("支付终态写入未满足当前租约");
   }
 
-  /** CAS 未更新时只接受已经达到同一目标状态，拒绝覆盖其他支付终态。 */
-  private void requirePayRecordStatus(String payNo, String targetStatus, int changed) {
-    if (changed == 1) return;
-    List<PayRecordPO> records = payRecordMapper.selectByPayNo(payNo);
-    if (records.size() == 1 && targetStatus.equals(records.get(0).status)) return;
-    throw new BizException(ErrorCodes.CONFLICT, "支付状态已被其他操作更新", 409);
+  /** 写RPC前核当前资格；不承诺观察之后的源变化或远端执行原子性。 */
+  private void requireOwnedLegacyLease(String payNo, String claimToken) {
+    if (!payDebitIntentMapper.hasOwnedLegacyLease(payNo, claimToken, now()))
+      throw new IllegalStateException("支付恢复领取资格已失效");
   }
 
   /** 对重复故障执行有上限的简单退避，记录仍保留供持续对账。 */

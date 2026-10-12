@@ -177,6 +177,63 @@ public class PayDebitIntentMapper {
         owner);
   }
 
+  /** Legacy中间推进需当前owner、未过期租约及双方模式，调用者必须核一行。 */
+  public int updateOwnedLegacyStatus(
+      String payNo, String claimToken, String status, LocalDateTime now) {
+    return jdbcTemplate.update(
+        "UPDATE pay_debit_intent SET status=?,updated_at=? WHERE BINARY pay_no=BINARY ? AND BINARY"
+            + " lease_owner=BINARY ? AND lease_until>? AND BINARY debit_mode='LEGACY' AND status IN"
+            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND EXISTS (SELECT 1 FROM"
+            + " pay_record payment WHERE BINARY payment.pay_no=BINARY pay_debit_intent.pay_no AND"
+            + " BINARY payment.debit_mode='LEGACY')",
+        status,
+        now,
+        payNo,
+        claimToken,
+        now);
+  }
+
+  /** Legacy错误重试仅清当前未过期租约；失去资格时0行，不回写其他执行或协议。 */
+  public int recordRetryOwnedLegacy(
+      String payNo,
+      String claimToken,
+      String status,
+      String error,
+      LocalDateTime nextRetryAt,
+      LocalDateTime now) {
+    return jdbcTemplate.update(
+        "UPDATE pay_debit_intent SET"
+            + " status=?,last_error=?,next_retry_at=?,lease_owner=NULL,lease_until=NULL,updated_at=?"
+            + " WHERE BINARY pay_no=BINARY ? AND BINARY lease_owner=BINARY ? AND lease_until>? AND"
+            + " BINARY debit_mode='LEGACY' AND status IN"
+            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND EXISTS (SELECT 1 FROM"
+            + " pay_record payment WHERE BINARY payment.pay_no=BINARY pay_debit_intent.pay_no AND"
+            + " BINARY payment.debit_mode='LEGACY')",
+        status,
+        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        nextRetryAt,
+        now,
+        payNo,
+        claimToken,
+        now);
+  }
+
+  /** 远端写前只读核当前资格；该观察不保证检查之后到RPC发出之间的原子性。 */
+  public boolean hasOwnedLegacyLease(String payNo, String claimToken, LocalDateTime now) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent intent JOIN pay_record payment ON BINARY"
+                + " intent.pay_no=BINARY payment.pay_no WHERE BINARY intent.pay_no=BINARY ? AND"
+                + " BINARY intent.lease_owner=BINARY ? AND intent.lease_until>? AND BINARY"
+                + " intent.debit_mode='LEGACY' AND BINARY payment.debit_mode='LEGACY' AND"
+                + " intent.status IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')",
+            Integer.class,
+            payNo,
+            claimToken,
+            now);
+    return Integer.valueOf(1).equals(count);
+  }
+
   /** 将 JDBC 行映射为准确的支付意图持久化对象。 */
   private static final RowMapper<PayDebitIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {

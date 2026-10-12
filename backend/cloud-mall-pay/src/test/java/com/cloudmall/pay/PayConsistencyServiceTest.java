@@ -49,6 +49,16 @@ class PayConsistencyServiceTest {
             orderClient);
     when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(1);
     when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
+    when(intentMapper.hasOwnedLegacyLease(anyString(), anyString(), any())).thenReturn(true);
+    when(intentMapper.updateOwnedLegacyStatus(anyString(), anyString(), anyString(), any()))
+        .thenReturn(1);
+    when(intentMapper.recordRetryOwnedLegacy(
+            anyString(), anyString(), anyString(), anyString(), any(), any()))
+        .thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyOrderUnknown(anyString(), anyString(), any()))
+        .thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefundPending(anyString(), anyString(), any()))
+        .thenReturn(1);
     when(intentMapper.finishOwnedLegacy(anyString(), anyString(), anyString(), any()))
         .thenReturn(1);
     com.cloudmall.pay.domain.po.PayRecordPO payment = new com.cloudmall.pay.domain.po.PayRecordPO();
@@ -74,7 +84,7 @@ class PayConsistencyServiceTest {
 
     assertEquals("ORDER_SYNC_UNKNOWN", result);
     verify(intentMapper)
-        .recordRetry(
+        .recordRetryOwnedLegacy(
             eq("pay-1"),
             anyString(),
             eq("ORDER_SYNC_UNKNOWN"),
@@ -88,7 +98,8 @@ class PayConsistencyServiceTest {
   @Test
   void confirmedCancellationRefundsTheSameDebitOnlyByItsStableKey() {
     when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("CANCELLED")));
-    when(payRecordMapper.markRefundPending(eq("pay-1"), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefundPending(eq("pay-1"), anyString(), any()))
+        .thenReturn(1);
     when(payRecordMapper.markOwnedLegacyRefunded(eq("pay-1"), anyString(), any())).thenReturn(1);
     when(userClient.refund(eq(7L), eq(7L), any()))
         .thenReturn(
@@ -315,7 +326,7 @@ class PayConsistencyServiceTest {
     for (String token : tokens.getAllValues()) {
       assertEquals(token, java.util.UUID.fromString(token).toString());
       verify(intentMapper)
-          .recordRetry(eq("pay-1"), eq(token), eq("INIT"), anyString(), any(), any());
+          .recordRetryOwnedLegacy(eq("pay-1"), eq(token), eq("INIT"), anyString(), any(), any());
     }
     verify(userClient, never()).debit(any(), any(), any());
     verify(userClient, never()).refund(any(), any(), any());
@@ -343,7 +354,8 @@ class PayConsistencyServiceTest {
       var token = org.mockito.ArgumentCaptor.forClass(String.class);
       verify(intentMapper).claim(eq("pay-1"), token.capture(), any(), any());
       for (var invocation : org.mockito.Mockito.mockingDetails(intentMapper).getInvocations()) {
-        if (java.util.Set.of("updateOwnedStatus", "finishOwnedLegacy", "recordRetry")
+        if (java.util.Set.of(
+                "updateOwnedLegacyStatus", "finishOwnedLegacy", "recordRetryOwnedLegacy")
             .contains(invocation.getMethod().getName())) {
           assertEquals(token.getValue(), invocation.getArgument(1));
         }
@@ -406,11 +418,91 @@ class PayConsistencyServiceTest {
     when(payRecordMapper.markOwnedLegacyFailed(anyString(), anyString(), any())).thenReturn(1);
   }
 
+  /** 任何正常中间stage零行必须停止其后的远端写，不走普通方法fallback。 */
+  @Test
+  void intermediateStageZeroRowsStopWritingRpc() {
+    for (String stage :
+        java.util.List.of("order-record", "debit-stage", "refund-record", "refund-stage")) {
+      prepareRefundPath(false, "refund:pay-1");
+      if ("order-record".equals(stage) || "debit-stage".equals(stage)) {
+        when(orderClient.paymentState("order-1", 7L))
+            .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")));
+      }
+      switch (stage) {
+        case "order-record" ->
+            when(payRecordMapper.markOwnedLegacyOrderUnknown(anyString(), anyString(), any()))
+                .thenReturn(0);
+        case "debit-stage" ->
+            when(intentMapper.updateOwnedLegacyStatus(
+                    anyString(), anyString(), eq("DEBITED"), any()))
+                .thenReturn(0);
+        case "refund-record" ->
+            when(payRecordMapper.markOwnedLegacyRefundPending(anyString(), anyString(), any()))
+                .thenReturn(0);
+        case "refund-stage" ->
+            when(intentMapper.updateOwnedLegacyStatus(
+                    anyString(), anyString(), eq("REFUND_PENDING"), any()))
+                .thenReturn(0);
+        default -> throw new AssertionError(stage);
+      }
+      consistencyService.process("pay-1");
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+      verify(intentMapper, never()).updateOwnedStatus(anyString(), anyString(), anyString(), any());
+      verify(payRecordMapper, never()).markOrderUnknown(anyString(), any());
+      verify(payRecordMapper, never()).markRefundPending(anyString(), any());
+    }
+  }
+
+  /** 三个RPC资格门为false时不发出该写请求，read-only证据顺序保持。 */
+  @Test
+  void missingCurrentLeaseStopsEachWritingRpc() {
+    for (String path : java.util.List.of("debit", "paid", "refund")) {
+      prepareRefundPath(false, "refund:pay-1");
+      if (!"refund".equals(path))
+        when(orderClient.paymentState("order-1", 7L))
+            .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")));
+      if ("debit".equals(path))
+        when(userClient.operation(7L, "pay-1", 7L)).thenThrow(refundReadFault(404));
+      when(intentMapper.hasOwnedLegacyLease(anyString(), anyString(), any())).thenReturn(false);
+      consistencyService.process("pay-1");
+      verify(intentMapper).hasOwnedLegacyLease(eq("pay-1"), anyString(), any());
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+    }
+  }
+
+  /** 异常清理零行是失去资格，不得再调用无owner旧方法改写新执行。 */
+  @Test
+  void cleanupZeroRowsCannotFallBackToOrdinaryWrites() {
+    setUp();
+    when(orderClient.paymentState("order-1", 7L))
+        .thenThrow(new IllegalStateException("owned order unavailable"));
+    when(payRecordMapper.markOwnedLegacyOrderUnknown(anyString(), anyString(), any()))
+        .thenReturn(0);
+    when(intentMapper.recordRetryOwnedLegacy(
+            anyString(), anyString(), anyString(), anyString(), any(), any()))
+        .thenReturn(0);
+    assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+    verify(payRecordMapper).markOwnedLegacyOrderUnknown(eq("pay-1"), anyString(), any());
+    verify(intentMapper)
+        .recordRetryOwnedLegacy(
+            eq("pay-1"), anyString(), eq("ORDER_SYNC_UNKNOWN"), anyString(), any(), any());
+    verify(payRecordMapper, never()).markOrderUnknown(anyString(), any());
+    verify(intentMapper, never())
+        .recordRetry(anyString(), anyString(), anyString(), anyString(), any(), any());
+    verify(userClient, never()).debit(any(), any(), any());
+    verify(userClient, never()).refund(any(), any(), any());
+  }
+
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */
   private void prepareRefundPath(boolean marker, String refundKey) {
     setUp();
     when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("CANCELLED")));
-    when(payRecordMapper.markRefundPending(eq("pay-1"), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefundPending(eq("pay-1"), anyString(), any()))
+        .thenReturn(1);
     when(payRecordMapper.markOwnedLegacyRefunded(eq("pay-1"), anyString(), any())).thenReturn(1);
     when(userClient.operation(7L, "pay-1", 7L))
         .thenReturn(
@@ -435,7 +527,8 @@ class PayConsistencyServiceTest {
     verify(payRecordMapper, never()).markOwnedLegacyFailed(eq("pay-1"), anyString(), any());
     verify(intentMapper, never()).finishOwnedLegacy(eq("pay-1"), anyString(), anyString(), any());
     verify(intentMapper)
-        .recordRetry(eq("pay-1"), anyString(), eq(retryStatus), anyString(), any(), any());
+        .recordRetryOwnedLegacy(
+            eq("pay-1"), anyString(), eq(retryStatus), anyString(), any(), any());
     verify(userClient, never()).debit(any(), any(), any());
   }
 

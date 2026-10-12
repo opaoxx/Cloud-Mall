@@ -463,6 +463,148 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 订单读期间失去资格的旧执行不应改中间状态或发出三个远端写RPC。 */
+  @Test
+  void staleIntermediateActorMustNotMutateOrIssueWritingRpc() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : List.of("debit", "paid", "refund")) {
+      for (String mutation : List.of("reclaimed", "expired", "mode-drift")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              UserClient user = mock(UserClient.class);
+              if ("debit".equals(path)) stubRefundOperation(user, "not-found", "pay-1", "10.00");
+              else
+                when(user.operation(7L, "pay-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "pay-1", "DEBIT", "APPLIED", "10.00", null)));
+              when(user.debit(eq(7L), eq(7L), any()))
+                  .thenReturn(
+                      ApiResponse.ok(new UserClient.BalanceView("pay-1", "APPLIED", "90.00")));
+              when(user.refund(eq(7L), eq(7L), any()))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00")));
+              when(user.operation(7L, "refund:pay-1", 7L))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceOperationView(
+                              "refund:pay-1", "REFUND", "APPLIED", "10.00", null)));
+              OrderClient orders = mock(OrderClient.class);
+              var changed = new java.util.concurrent.atomic.AtomicBoolean();
+              var afterChange =
+                  new java.util.concurrent.atomic.AtomicReference<
+                      List<List<Map<String, Object>>>>();
+              when(orders.paymentState("order-1", 7L))
+                  .thenAnswer(
+                      invocation -> {
+                        if (changed.compareAndSet(false, true)) {
+                          if ("reclaimed".equals(mutation))
+                            fixture.update(
+                                "UPDATE pay_debit_intent SET"
+                                    + " lease_owner='replacement-owner',lease_until=NOW(3)+INTERVAL"
+                                    + " 30 SECOND WHERE pay_no='pay-1'");
+                          else if ("expired".equals(mutation))
+                            fixture.update(
+                                "UPDATE pay_debit_intent SET lease_until=NOW(3)-INTERVAL 1 SECOND"
+                                    + " WHERE pay_no='pay-1'");
+                          else
+                            fixture.update(
+                                "UPDATE pay_record SET debit_mode='TCC' WHERE pay_no='pay-1'");
+                          afterChange.set(payFacts());
+                        }
+                        return ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                "refund".equals(path) ? "CANCELLED" : "PENDING_PAYMENT",
+                                BigDecimal.TEN,
+                                7L,
+                                "SUCCEEDED"));
+                      });
+              newService(user, orders).process("pay-1");
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, never()).refund(any(), any(), any());
+              verify(orders, never()).paid(any(), any());
+              assertEquals(afterChange.get(), payFacts());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 五个生产中间写/资格方法直接验证owner、期限、模式及活动状态边界。 */
+  @Test
+  void intermediateOwnershipSqlRejectsInvalidEligibilityAndKeepsHealthyRetry() {
+    for (String operation : List.of("order", "refund", "stage", "retry", "lease")) {
+      for (String scenario :
+          List.of(
+              "valid",
+              "equal",
+              "expired",
+              "null-deadline",
+              "other-owner",
+              "owner-alias",
+              "record-mode",
+              "intent-mode",
+              "inactive")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        var now =
+            LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        String token = "intermediate-owner";
+        assertEquals(1, intents.claim("pay-1", token, now.plusSeconds(30), now));
+        String sentToken = token;
+        switch (scenario) {
+          case "equal" ->
+              fixture.update("UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'", now);
+          case "expired" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'",
+                  now.minusNanos(1000000));
+          case "null-deadline" ->
+              fixture.update("UPDATE pay_debit_intent SET lease_until=NULL WHERE pay_no='pay-1'");
+          case "other-owner" -> sentToken = "other";
+          case "owner-alias" -> sentToken = token.toUpperCase(java.util.Locale.ROOT);
+          case "record-mode" ->
+              fixture.update("UPDATE pay_record SET debit_mode='legacy' WHERE pay_no='pay-1'");
+          case "intent-mode" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET debit_mode='legacy' WHERE pay_no='pay-1'");
+          case "inactive" ->
+              fixture.update("UPDATE pay_debit_intent SET status='SUCCESS' WHERE pay_no='pay-1'");
+          default -> {}
+        }
+        var before = payFacts();
+        int changed =
+            switch (operation) {
+              case "order" -> records.markOwnedLegacyOrderUnknown("pay-1", sentToken, now);
+              case "refund" -> records.markOwnedLegacyRefundPending("pay-1", sentToken, now);
+              case "stage" -> intents.updateOwnedLegacyStatus("pay-1", sentToken, "DEBITED", now);
+              case "retry" ->
+                  intents.recordRetryOwnedLegacy(
+                      "pay-1",
+                      sentToken,
+                      "ORDER_SYNC_UNKNOWN",
+                      "owned error",
+                      now.plusSeconds(5),
+                      now);
+              default -> intents.hasOwnedLegacyLease("pay-1", sentToken, now) ? 1 : 0;
+            };
+        assertEquals("valid".equals(scenario) ? 1 : 0, changed, operation + ":" + scenario);
+        if (!"valid".equals(scenario) || "lease".equals(operation))
+          assertEquals(before, payFacts());
+        else if ("retry".equals(operation)) {
+          assertNull(intentLeaseOwner());
+          assertEquals("ORDER_SYNC_UNKNOWN", intentStatus());
+          assertTrue(retryErrorPresent());
+          assertEquals(now.plusSeconds(5), intentNextRetry());
+        }
+      }
+    }
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");
