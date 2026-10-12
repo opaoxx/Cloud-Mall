@@ -310,6 +310,159 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 原金融事实有效也不能让失去owner/deadline/mode资格的执行写支付终态。 */
+  @Test
+  void staleLegacyTerminalWriterCannotFinalizeAfterOwnershipChanges() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String terminal : List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      for (String mutation : List.of("reclaimed", "expired", "mode-drift")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              UserClient user = mock(UserClient.class);
+              String debitState = "FAILED".equals(terminal) ? "REJECTED" : "APPLIED";
+              when(user.operation(7L, "pay-1", 7L))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceOperationView(
+                              "pay-1",
+                              "DEBIT",
+                              debitState,
+                              "10.00",
+                              "REFUNDED".equals(terminal) ? "custom-refund" : null)));
+              when(user.operation(7L, "custom-refund", 7L))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceOperationView(
+                              "custom-refund", "REFUND", "APPLIED", "10.00", null)));
+              OrderClient orders = mock(OrderClient.class);
+              var changedIntent =
+                  new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+              when(orders.paymentState("order-1", 7L))
+                  .thenAnswer(
+                      invocation -> {
+                        if ("reclaimed".equals(mutation)) {
+                          fixture.update(
+                              "UPDATE pay_debit_intent SET"
+                                  + " lease_owner='replacement-owner',lease_until=NOW(3)+INTERVAL"
+                                  + " 30 SECOND WHERE pay_no='pay-1'");
+                        } else if ("expired".equals(mutation)) {
+                          fixture.update(
+                              "UPDATE pay_debit_intent SET lease_until=NOW(3)-INTERVAL 1 SECOND"
+                                  + " WHERE pay_no='pay-1'");
+                        } else {
+                          fixture.update(
+                              "UPDATE pay_record SET debit_mode='TCC' WHERE pay_no='pay-1'");
+                        }
+                        changedIntent.set(
+                            fixture.queryForMap(
+                                "SELECT * FROM pay_debit_intent WHERE pay_no='pay-1'"));
+                        return ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                "SUCCESS".equals(terminal) ? "PAID" : "CANCELLED",
+                                BigDecimal.TEN,
+                                7L,
+                                "SUCCEEDED"));
+                      });
+              String result = newService(user, orders).process("pay-1");
+              assertNotEquals(terminal, result, terminal + ":" + mutation);
+              assertNotEquals(terminal, paymentStatus());
+              assertNotEquals(terminal, intentStatus());
+              if ("reclaimed".equals(mutation)) {
+                assertEquals(
+                    changedIntent.get(),
+                    fixture.queryForMap("SELECT * FROM pay_debit_intent WHERE pay_no='pay-1'"));
+              }
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, never()).refund(any(), any(), any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** owner与deadline精确边界、模式和活动状态直接验生产终态SQL，三方向healthy SET保持。 */
+  @Test
+  void ownedTerminalSqlHonoursOwnerDeadlineModeAndActiveStatus() {
+    for (String terminal : List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      for (String scenario :
+          List.of(
+              "valid",
+              "equal",
+              "expired",
+              "null-deadline",
+              "other-owner",
+              "owner-alias",
+              "record-mode",
+              "intent-mode",
+              "inactive")) {
+        seedIntentAndPayment("REFUNDED".equals(terminal) ? "REFUND_PENDING" : "PENDING", "INIT");
+        var now =
+            LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        String token = "owned-terminal-token";
+        assertEquals(1, intents.claim("pay-1", token, now.plusSeconds(30), now));
+        String sentToken = token;
+        switch (scenario) {
+          case "equal" ->
+              fixture.update("UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'", now);
+          case "expired" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'",
+                  now.minusNanos(1000000));
+          case "null-deadline" ->
+              fixture.update("UPDATE pay_debit_intent SET lease_until=NULL WHERE pay_no='pay-1'");
+          case "other-owner" -> sentToken = "other";
+          case "owner-alias" -> sentToken = token.toUpperCase(java.util.Locale.ROOT);
+          case "record-mode" ->
+              fixture.update("UPDATE pay_record SET debit_mode='legacy' WHERE pay_no='pay-1'");
+          case "intent-mode" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET debit_mode='legacy' WHERE pay_no='pay-1'");
+          case "inactive" ->
+              fixture.update("UPDATE pay_debit_intent SET status='SUCCESS' WHERE pay_no='pay-1'");
+          default -> {}
+        }
+        var before = payFacts();
+        int changed =
+            switch (terminal) {
+              case "SUCCESS" -> records.markOwnedLegacySuccess("pay-1", sentToken, now, now);
+              case "REFUNDED" -> records.markOwnedLegacyRefunded("pay-1", sentToken, now);
+              default -> records.markOwnedLegacyFailed("pay-1", sentToken, now);
+            };
+        assertEquals("valid".equals(scenario) ? 1 : 0, changed, terminal + ":" + scenario);
+        if (!"valid".equals(scenario)) assertEquals(before, payFacts());
+        else {
+          assertEquals(terminal, paymentStatus());
+          assertEquals(1, intents.finishOwnedLegacy("pay-1", token, terminal, now));
+          assertEquals(terminal, intentStatus());
+          assertNull(intentLeaseOwner());
+        }
+      }
+    }
+    for (String scenario : List.of("equal", "expired", "other-owner", "mode", "inactive")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      var now =
+          LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+              .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      assertEquals(1, intents.claim("pay-1", "intent-terminal-token", now.plusSeconds(30), now));
+      String token = "intent-terminal-token";
+      if ("equal".equals(scenario) || "expired".equals(scenario))
+        fixture.update(
+            "UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'",
+            "equal".equals(scenario) ? now : now.minusNanos(1000000));
+      if ("other-owner".equals(scenario)) token = "other";
+      if ("mode".equals(scenario))
+        fixture.update("UPDATE pay_debit_intent SET debit_mode='TCC' WHERE pay_no='pay-1'");
+      if ("inactive".equals(scenario))
+        fixture.update("UPDATE pay_debit_intent SET status='SUCCESS' WHERE pay_no='pay-1'");
+      var before = payFacts();
+      assertEquals(0, intents.finishOwnedLegacy("pay-1", token, "SUCCESS", now));
+      assertEquals(before, payFacts());
+    }
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");

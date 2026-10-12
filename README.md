@@ -1842,3 +1842,9 @@ POST仍使用固定refund:<payNo>键并核对回执；历史marker允许合法�
 Pay Legacy恢复器每次领取任务生成新的UUID token，成功后沿全部私有更新、终态和重试路径传递。同一服务实例重领超时任务时，旧执行不能通过复用的owner覆盖新意图或清新租约。
 
 领取SQL、30秒租约、状态与远端调用顺序保持。该批只隔离每次执行身份，租约期限、PayRecord跨表更新的完整fencing及条件写影响行检查仍需后续处理。
+
+### CM-18 Legacy支付终态的领取资格（16T80）
+
+Legacy的SUCCESS、FAILED、REFUNDED支付记录通过单条关联UPDATE核对当前领取token、未过期租约、两表LEGACY模式与原允许状态。支付记录更新成功后，意图也须由当前未过期owner完成；两步都必须恰好影响一行，不能用旧终态readback绕过资格。
+
+旧Mapper方法继续用于其它调用者，TCC/API/RPC契约保持。这两个独立UPDATE尚不是跨表原子事务；中间状态、远端调用前检查和查询后来源变化仍保留后续处理。

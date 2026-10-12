@@ -258,18 +258,23 @@ public class PayConsistencyService {
 
   /** 用户账本和订单都明确成功后才标记支付成功。 */
   private String finishSuccess(PayDebitIntentPO intent, String claimToken) {
-    int changed = payRecordMapper.markSuccess(intent.payNo, now(), now());
-    requirePayRecordStatus(intent.payNo, "SUCCESS", changed);
-    payDebitIntentMapper.finish(intent.payNo, claimToken, "SUCCESS", now());
+    LocalDateTime terminalTime = now();
+    requireOwnedTerminalWrite(
+        payRecordMapper.markOwnedLegacySuccess(
+            intent.payNo, claimToken, terminalTime, terminalTime));
+    requireOwnedTerminalWrite(
+        payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "SUCCESS", now()));
     return "SUCCESS";
   }
 
   /** 原扣款已退款时恢复支付记录终态，不再次增加余额。 */
   private String finishRefunded(PayDebitIntentPO intent, String claimToken) {
     payRecordMapper.markRefundPending(intent.payNo, now());
-    int changed = payRecordMapper.markRefunded(intent.payNo, now());
-    requirePayRecordStatus(intent.payNo, "REFUNDED", changed);
-    payDebitIntentMapper.finish(intent.payNo, claimToken, "REFUNDED", now());
+    LocalDateTime terminalTime = now();
+    requireOwnedTerminalWrite(
+        payRecordMapper.markOwnedLegacyRefunded(intent.payNo, claimToken, terminalTime));
+    requireOwnedTerminalWrite(
+        payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "REFUNDED", now()));
     return "REFUNDED";
   }
 
@@ -333,10 +338,17 @@ public class PayConsistencyService {
 
   /** 明确没有扣款且订单已取消或账本拒绝时标记失败。 */
   private String failWithoutDebit(PayDebitIntentPO intent, String claimToken) {
-    int changed = payRecordMapper.markFailed(intent.payNo, now());
-    requirePayRecordStatus(intent.payNo, "FAILED", changed);
-    payDebitIntentMapper.finish(intent.payNo, claimToken, "FAILED", now());
+    LocalDateTime terminalTime = now();
+    requireOwnedTerminalWrite(
+        payRecordMapper.markOwnedLegacyFailed(intent.payNo, claimToken, terminalTime));
+    requireOwnedTerminalWrite(
+        payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "FAILED", now()));
     return "FAILED";
+  }
+
+  /** 终态必须恰好更新一行，不以同终态readback绕过owner或期限；异常沿原恢复链处理。 */
+  private static void requireOwnedTerminalWrite(int changedRows) {
+    if (changedRows != 1) throw new IllegalStateException("支付终态写入未满足当前租约");
   }
 
   /** CAS 未更新时只接受已经达到同一目标状态，拒绝覆盖其他支付终态。 */

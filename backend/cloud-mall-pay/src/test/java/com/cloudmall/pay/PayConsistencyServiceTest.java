@@ -49,6 +49,8 @@ class PayConsistencyServiceTest {
             orderClient);
     when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(1);
     when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
+    when(intentMapper.finishOwnedLegacy(anyString(), anyString(), anyString(), any()))
+        .thenReturn(1);
     com.cloudmall.pay.domain.po.PayRecordPO payment = new com.cloudmall.pay.domain.po.PayRecordPO();
     payment.payNo = "pay-1";
     payment.orderNo = "order-1";
@@ -87,7 +89,7 @@ class PayConsistencyServiceTest {
   void confirmedCancellationRefundsTheSameDebitOnlyByItsStableKey() {
     when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("CANCELLED")));
     when(payRecordMapper.markRefundPending(eq("pay-1"), any())).thenReturn(1);
-    when(payRecordMapper.markRefunded(eq("pay-1"), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefunded(eq("pay-1"), anyString(), any())).thenReturn(1);
     when(userClient.refund(eq(7L), eq(7L), any()))
         .thenReturn(
             ApiResponse.ok(new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00")));
@@ -100,20 +102,21 @@ class PayConsistencyServiceTest {
     verify(userClient).refund(eq(7L), eq(7L), refundRequest.capture());
     assertEquals("refund:pay-1", refundRequest.getValue().refundOperationKey());
     assertEquals("pay-1", refundRequest.getValue().originalOperationKey());
-    verify(intentMapper).finish(eq("pay-1"), anyString(), eq("REFUNDED"), any());
+    verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("REFUNDED"), any());
   }
 
   @Test
   void crashAfterDebitResumesFromLedgerWithoutDebitingAgain() {
     when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("PAID")));
-    when(payRecordMapper.markSuccess(eq("pay-1"), any(), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacySuccess(eq("pay-1"), anyString(), any(), any()))
+        .thenReturn(1);
 
     String result = consistencyService.process("pay-1");
 
     assertEquals("SUCCESS", result);
     verify(userClient, never()).debit(any(), any(), any());
     verify(userClient, never()).refund(any(), any(), any());
-    verify(intentMapper).finish(eq("pay-1"), anyString(), eq("SUCCESS"), any());
+    verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
   }
 
   @Test
@@ -127,7 +130,7 @@ class PayConsistencyServiceTest {
     String result = consistencyService.process("pay-1");
 
     assertEquals("ORDER_SYNC_UNKNOWN", result);
-    verify(payRecordMapper, never()).markSuccess(eq("pay-1"), any(), any());
+    verify(payRecordMapper, never()).markOwnedLegacySuccess(eq("pay-1"), anyString(), any(), any());
     verify(userClient, never()).refund(any(), any(), any());
   }
 
@@ -272,8 +275,8 @@ class PayConsistencyServiceTest {
         when(userClient.operation(7L, key, 7L)).thenReturn(ApiResponse.ok(refundFact(key, amount)));
         assertEquals("REFUNDED", consistencyService.process("pay-1"));
         verify(userClient).operation(7L, key, 7L);
-        verify(payRecordMapper).markRefunded(eq("pay-1"), any());
-        verify(intentMapper).finish(eq("pay-1"), anyString(), eq("REFUNDED"), any());
+        verify(payRecordMapper).markOwnedLegacyRefunded(eq("pay-1"), anyString(), any());
+        verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("REFUNDED"), any());
         verify(userClient, never()).debit(any(), any(), any());
         verify(userClient, org.mockito.Mockito.times(marker ? 0 : 1)).refund(any(), any(), any());
       }
@@ -326,7 +329,8 @@ class PayConsistencyServiceTest {
       prepareRefundPath(false, "refund:pay-1");
       if ("SUCCESS".equals(outcome)) {
         when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("PAID")));
-        when(payRecordMapper.markSuccess(eq("pay-1"), any(), any())).thenReturn(1);
+        when(payRecordMapper.markOwnedLegacySuccess(eq("pay-1"), anyString(), any(), any()))
+            .thenReturn(1);
       } else if ("ORDER_SYNC_UNKNOWN".equals(outcome)) {
         when(orderClient.paymentState("order-1", 7L))
             .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")));
@@ -339,7 +343,7 @@ class PayConsistencyServiceTest {
       var token = org.mockito.ArgumentCaptor.forClass(String.class);
       verify(intentMapper).claim(eq("pay-1"), token.capture(), any(), any());
       for (var invocation : org.mockito.Mockito.mockingDetails(intentMapper).getInvocations()) {
-        if (java.util.Set.of("updateOwnedStatus", "finish", "recordRetry")
+        if (java.util.Set.of("updateOwnedStatus", "finishOwnedLegacy", "recordRetry")
             .contains(invocation.getMethod().getName())) {
           assertEquals(token.getValue(), invocation.getArgument(1));
         }
@@ -347,12 +351,67 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** owned支付记录更新失败不能用已同终态readback或旧finish绕过资格。 */
+  @Test
+  void terminalRecordZeroRowsCannotUseOrdinaryFinishOrSameStatusFallback() {
+    for (String terminal : java.util.List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      prepareTerminalTest(terminal);
+      if ("SUCCESS".equals(terminal))
+        when(payRecordMapper.markOwnedLegacySuccess(anyString(), anyString(), any(), any()))
+            .thenReturn(0);
+      else if ("REFUNDED".equals(terminal))
+        when(payRecordMapper.markOwnedLegacyRefunded(anyString(), anyString(), any()))
+            .thenReturn(0);
+      else
+        when(payRecordMapper.markOwnedLegacyFailed(anyString(), anyString(), any())).thenReturn(0);
+      var sameTerminal = new com.cloudmall.pay.domain.po.PayRecordPO();
+      sameTerminal.debitMode = "LEGACY";
+      sameTerminal.status = terminal;
+      when(payRecordMapper.selectByPayNo("pay-1")).thenReturn(java.util.List.of(sameTerminal));
+      org.junit.jupiter.api.Assertions.assertNotEquals(
+          terminal, consistencyService.process("pay-1"));
+      verify(intentMapper, never()).finishOwnedLegacy(anyString(), anyString(), anyString(), any());
+      verify(intentMapper, never()).finish(anyString(), anyString(), anyString(), any());
+    }
+  }
+
+  /** 支付记录已推进但intent owned finish失败，不能报告完成或普通finish重试。 */
+  @Test
+  void terminalIntentFinishMustAffectExactlyOneOwnedRow() {
+    for (String terminal : java.util.List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      prepareTerminalTest(terminal);
+      when(intentMapper.finishOwnedLegacy(anyString(), anyString(), anyString(), any()))
+          .thenReturn(0);
+      org.junit.jupiter.api.Assertions.assertNotEquals(
+          terminal, consistencyService.process("pay-1"));
+      verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq(terminal), any());
+      verify(intentMapper, never()).finish(anyString(), anyString(), anyString(), any());
+    }
+  }
+
+  /** 三方向均由原资金与订单事实确定，owned写成功只由当前替身控制。 */
+  private void prepareTerminalTest(String terminal) {
+    prepareRefundPath("REFUNDED".equals(terminal), "custom-refund");
+    if ("SUCCESS".equals(terminal))
+      when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("PAID")));
+    if ("FAILED".equals(terminal))
+      when(userClient.operation(7L, "pay-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView(
+                      "pay-1", "DEBIT", "REJECTED", "10.00", null)));
+    when(payRecordMapper.markOwnedLegacySuccess(anyString(), anyString(), any(), any()))
+        .thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefunded(anyString(), anyString(), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyFailed(anyString(), anyString(), any())).thenReturn(1);
+  }
+
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */
   private void prepareRefundPath(boolean marker, String refundKey) {
     setUp();
     when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("CANCELLED")));
     when(payRecordMapper.markRefundPending(eq("pay-1"), any())).thenReturn(1);
-    when(payRecordMapper.markRefunded(eq("pay-1"), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefunded(eq("pay-1"), anyString(), any())).thenReturn(1);
     when(userClient.operation(7L, "pay-1", 7L))
         .thenReturn(
             ApiResponse.ok(
@@ -372,9 +431,9 @@ class PayConsistencyServiceTest {
 
   /** 未证实全额退款不得写终态或再次扣款；错误仍落原重试状态。 */
   private void verifyRefundNotFinished(String retryStatus) {
-    verify(payRecordMapper, never()).markRefunded(eq("pay-1"), any());
-    verify(payRecordMapper, never()).markFailed(eq("pay-1"), any());
-    verify(intentMapper, never()).finish(eq("pay-1"), anyString(), anyString(), any());
+    verify(payRecordMapper, never()).markOwnedLegacyRefunded(eq("pay-1"), anyString(), any());
+    verify(payRecordMapper, never()).markOwnedLegacyFailed(eq("pay-1"), anyString(), any());
+    verify(intentMapper, never()).finishOwnedLegacy(eq("pay-1"), anyString(), anyString(), any());
     verify(intentMapper)
         .recordRetry(eq("pay-1"), anyString(), eq(retryStatus), anyString(), any(), any());
     verify(userClient, never()).debit(any(), any(), any());

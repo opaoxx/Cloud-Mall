@@ -80,6 +80,50 @@ public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
   int markRefunded(
       @Param("payNo") String payNo, @Param("updatedAt") java.time.LocalDateTime updatedAt);
 
+  /** LegacySUCCESS终态仅由当前未过期owner原子推进，旧方法继续供其它调用者使用。 */
+  @Update(
+      "UPDATE pay_record payment JOIN pay_debit_intent intent ON BINARY payment.pay_no=BINARY"
+          + " intent.pay_no SET"
+          + " payment.status='SUCCESS',payment.paid_at=#{paidAt},payment.updated_at=#{updatedAt}"
+          + " WHERE BINARY payment.pay_no=BINARY #{payNo} AND BINARY intent.lease_owner=BINARY"
+          + " #{claimToken} AND intent.lease_until>#{updatedAt} AND BINARY"
+          + " payment.debit_mode='LEGACY' AND BINARY intent.debit_mode='LEGACY' AND intent.status"
+          + " IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND payment.status IN"
+          + " ('PENDING','ORDER_SYNC_UNKNOWN')")
+  int markOwnedLegacySuccess(
+      @Param("payNo") String payNo,
+      @Param("claimToken") String claimToken,
+      @Param("paidAt") java.time.LocalDateTime paidAt,
+      @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
+  /** LegacyFAILED终态仅由当前未过期owner原子推进，旧方法继续供其它调用者使用。 */
+  @Update(
+      "UPDATE pay_record payment JOIN pay_debit_intent intent ON BINARY payment.pay_no=BINARY"
+          + " intent.pay_no SET payment.status='FAILED',payment.updated_at=#{updatedAt} WHERE"
+          + " BINARY payment.pay_no=BINARY #{payNo} AND BINARY intent.lease_owner=BINARY"
+          + " #{claimToken} AND intent.lease_until>#{updatedAt} AND BINARY"
+          + " payment.debit_mode='LEGACY' AND BINARY intent.debit_mode='LEGACY' AND intent.status"
+          + " IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND payment.status IN"
+          + " ('PENDING','ORDER_SYNC_UNKNOWN')")
+  int markOwnedLegacyFailed(
+      @Param("payNo") String payNo,
+      @Param("claimToken") String claimToken,
+      @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
+  /** LegacyREFUNDED终态仅由当前未过期owner原子推进，旧方法继续供其它调用者使用。 */
+  @Update(
+      "UPDATE pay_record payment JOIN pay_debit_intent intent ON BINARY payment.pay_no=BINARY"
+          + " intent.pay_no SET payment.status='REFUNDED',payment.updated_at=#{updatedAt} WHERE"
+          + " BINARY payment.pay_no=BINARY #{payNo} AND BINARY intent.lease_owner=BINARY"
+          + " #{claimToken} AND intent.lease_until>#{updatedAt} AND BINARY"
+          + " payment.debit_mode='LEGACY' AND BINARY intent.debit_mode='LEGACY' AND intent.status"
+          + " IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND payment.status IN"
+          + " ('REFUND_PENDING','ORDER_SYNC_UNKNOWN')")
+  int markOwnedLegacyRefunded(
+      @Param("payNo") String payNo,
+      @Param("claimToken") String claimToken,
+      @Param("updatedAt") java.time.LocalDateTime updatedAt);
+
   /** 按回调结果更新支付状态。 */
   @Update(
       "update pay_record set status=#{status},paid_at=case when #{success}=true then #{paidAt} else"
