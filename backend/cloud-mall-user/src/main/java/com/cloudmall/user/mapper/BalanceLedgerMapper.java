@@ -60,6 +60,12 @@ public interface BalanceLedgerMapper extends BaseMapper<BalanceLedgerPO> {
           + " state='APPLIED'")
   BalanceLedgerPO selectAppliedDebitByPayNo(@Param("payNo") String payNo);
 
+  /** 已确认重放的同pay扣款范围；保留CI/全状态候选，两行足以证明不唯一，不锁不写。 */
+  @Select(
+      "SELECT * FROM balance_ledger WHERE pay_no=#{payNo} AND operation_type='DEBIT' ORDER BY id"
+          + " LIMIT 2")
+  java.util.List<BalanceLedgerPO> findDebitCandidatesByPayNo(@Param("payNo") String payNo);
+
   /** 按支付号读取任意状态的 Legacy 扣款事实。 */
   @Select("select * from balance_ledger where pay_no=#{payNo} and operation_type='DEBIT'")
   BalanceLedgerPO selectDebitByPayNo(@Param("payNo") String payNo);

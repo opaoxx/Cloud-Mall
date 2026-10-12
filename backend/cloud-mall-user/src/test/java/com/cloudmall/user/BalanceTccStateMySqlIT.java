@@ -175,6 +175,87 @@ class BalanceTccStateMySqlIT {
     if (context != null) context.close();
   }
 
+  /** 固定账本健康不等于同pay没有其它DEBIT；重放不得忽略真实重复原事实。 */
+  @Test
+  void confirmedReplaysRejectAdditionalDebitCandidatesWithoutFundsWrites() {
+    var original = request("scope-confirmed", 7L, "10.00");
+    service.tryDebit(original);
+    service.confirmDebit(finalizeRequest(original));
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String variant :
+        List.of(
+            "APPLIED",
+            "REJECTED",
+            "UNKNOWN",
+            "type-alias",
+            "pay-alias",
+            "other-user",
+            "other-order",
+            "refund-origin",
+            "multiple")) {
+      for (String operation : List.of("try", "confirm")) {
+        assertions.add(
+            () -> {
+              fixture.update("DELETE FROM balance_ledger WHERE id<0");
+              fixture.update(
+                  "INSERT INTO"
+                      + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                      + " VALUES(-1,?,'additional-debit',?,?,?, ?,10,?,100,90,NOW(3))",
+                  "other-user".equals(variant) ? 8L : 7L,
+                  "type-alias".equals(variant) ? "debit" : "DEBIT",
+                  "refund-origin".equals(variant) ? "other-origin" : null,
+                  "pay-alias".equals(variant)
+                      ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                      : original.payNo,
+                  "other-order".equals(variant) ? "order-other" : original.orderNo,
+                  List.of("REJECTED", "UNKNOWN").contains(variant) ? variant : "APPLIED");
+              if ("multiple".equals(variant))
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                        + " VALUES(-2,7,'another-debit','DEBIT',?,?,10,'APPLIED',100,90,NOW(3))",
+                    original.payNo,
+                    original.orderNo);
+              var before = allFundsFacts();
+              BizException failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> {
+                        if ("try".equals(operation)) service.tryDebit(original);
+                        else service.confirmDebit(finalizeRequest(original));
+                      },
+                      variant + ":" + operation);
+              assertEquals("BALANCE_TCC_UNKNOWN", failure.getCode());
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals(before, allFundsFacts());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 合法退款及后来钱包变化不改变历史原DEBIT唯一证明，也不阻断disabled确认重放。 */
+  @Test
+  void confirmedReplayScopeKeepsRefundHistoryAndWalletChanges() {
+    var original = request("scope-healthy", 7L, "10.000");
+    service.tryDebit(original);
+    service.confirmDebit(finalizeRequest(original));
+    legacy.refundInternal(7L, 7L, refundRequest(original, "scope-partial-refund", "2.00"));
+    fixture.update("UPDATE mall_user SET balance=123.45 WHERE id=7");
+    var before = allFundsFacts();
+    assertEquals("CONFIRMED", service.tryDebit(original).state);
+    assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(original)).state);
+    assertEquals(before, allFundsFacts());
+    setEnabled(false);
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+    var disabledBefore = allFundsFacts();
+    assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(original)).state);
+    assertEquals(disabledBefore, allFundsFacts());
+    assertEquals(
+        "PAY_DEBIT_MODE_UNAVAILABLE",
+        assertThrows(BizException.class, () -> service.tryDebit(original)).getCode());
+  }
+
   /** 首次原扣款实际写出NULL，损坏origin后两确认重放均拒绝且四表资金事实不变。 */
   @Test
   void confirmedReplayRejectsNonNullDebitOriginWithoutChangingAnyFundsFact() {

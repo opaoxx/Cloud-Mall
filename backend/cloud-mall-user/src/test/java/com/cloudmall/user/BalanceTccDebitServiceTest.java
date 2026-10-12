@@ -426,6 +426,140 @@ class BalanceTccDebitServiceTest {
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(account(balance, frozen));
   }
 
+  /** 固定原键合法但scope缺失/重复/字段损坏，两个已确认重放入口均UNKNOWN且不写资金。 */
+  @Test
+  void confirmedReplaysRequireExactlyOneMatchingDebitCandidate() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String operation : List.of("try", "confirm")) {
+      for (String variant :
+          List.of(
+              "missing",
+              "multiple",
+              "null-row",
+              "id-missing",
+              "id-other",
+              "user-other",
+              "pay-alias",
+              "order-other",
+              "operation-alias",
+              "type-alias",
+              "state-rejected",
+              "origin",
+              "amount-null",
+              "amount-other",
+              "before-null",
+              "before-other",
+              "after-null",
+              "after-other")) {
+        assertions.add(
+            () -> {
+              setUp();
+              installFunds("CONFIRMED", "none");
+              BalanceLedgerPO candidate = copyConfirmedLedger();
+              switch (variant) {
+                case "id-missing" -> candidate.id = null;
+                case "id-other" -> candidate.id = 6L;
+                case "user-other" -> candidate.userId = 8L;
+                case "pay-alias" ->
+                    candidate.payNo = candidate.payNo.toUpperCase(java.util.Locale.ROOT);
+                case "order-other" -> candidate.orderNo = "other-order";
+                case "operation-alias" ->
+                    candidate.operationKey =
+                        candidate.operationKey.toUpperCase(java.util.Locale.ROOT);
+                case "type-alias" -> candidate.operationType = "debit";
+                case "state-rejected" -> candidate.state = "REJECTED";
+                case "origin" -> candidate.originalOperationKey = "other";
+                case "amount-null" -> candidate.amount = null;
+                case "amount-other" -> candidate.amount = new BigDecimal("11.00");
+                case "before-null" -> candidate.balanceBefore = null;
+                case "before-other" -> candidate.balanceBefore = new BigDecimal("101.00");
+                case "after-null" -> candidate.balanceAfter = null;
+                case "after-other" -> candidate.balanceAfter = new BigDecimal("89.00");
+                default -> {}
+              }
+              List<BalanceLedgerPO> candidates =
+                  switch (variant) {
+                    case "missing" -> List.of();
+                    case "multiple" -> List.of(originalLedger, candidate);
+                    case "null-row" -> java.util.Collections.singletonList(null);
+                    default -> List.of(candidate);
+                  };
+              when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo)).thenReturn(candidates);
+              assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+              verify(ledgerMapper).findDebitCandidatesByPayNo(request().payNo);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** DAO故障原对象传播；原固定键已损坏时不会为了scope再读取或覆盖原错误优先级。 */
+  @Test
+  void debitScopeQueryFaultPropagatesOnlyAfterFixedLedgerProof() {
+    for (String operation : List.of("try", "confirm")) {
+      setUp();
+      installFunds("CONFIRMED", "none");
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException("owned-scope-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(ledgerMapper)
+          .findDebitCandidatesByPayNo(request().payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(
+              org.springframework.dao.DataAccessResourceFailureException.class,
+              () -> {
+                if ("try".equals(operation)) service.tryDebit(request());
+                else service.confirmDebit(completion());
+              }));
+      verify(ledgerMapper, never()).insert(any(BalanceLedgerPO.class));
+      verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+      setUp();
+      installFunds("CONFIRMED", "none");
+      originalLedger.originalOperationKey = "bad-origin";
+      org.mockito.Mockito.doThrow(failure)
+          .when(ledgerMapper)
+          .findDebitCandidatesByPayNo(request().payNo);
+      assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+      verify(ledgerMapper, never()).findDebitCandidatesByPayNo(any());
+    }
+  }
+
+  /** 唯一候选的数值尾零与原账本相等；钱包后来变化/禁用仍保持已有confirm协议。 */
+  @Test
+  void matchingDebitScopeKeepsNumericSnapshotAndDisabledReplayCompatibility() {
+    installFunds("CONFIRMED", "none");
+    BalanceLedgerPO candidate = copyConfirmedLedger();
+    candidate.amount = new BigDecimal("10.000");
+    candidate.balanceBefore = new BigDecimal("100.000");
+    candidate.balanceAfter = new BigDecimal("90.000");
+    when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo)).thenReturn(List.of(candidate));
+    assertEquals("CONFIRMED", service.tryDebit(request()).state);
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(account(null, null));
+    ReflectionTestUtils.setField(service, "enabled", false);
+    assertEquals("CONFIRMED", service.confirmDebit(completion()).state);
+    verify(userMapper, never()).freezeBalance(any(), any(), any());
+    verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+    verify(ledgerMapper, never()).insert(any(BalanceLedgerPO.class));
+  }
+
+  /** scope替身与固定原账本独立，以证明只破坏candidate字段而非前置固定proof。 */
+  private BalanceLedgerPO copyConfirmedLedger() {
+    BalanceLedgerPO candidate = new BalanceLedgerPO();
+    candidate.id = originalLedger.id;
+    candidate.userId = originalLedger.userId;
+    candidate.payNo = originalLedger.payNo;
+    candidate.orderNo = originalLedger.orderNo;
+    candidate.operationKey = originalLedger.operationKey;
+    candidate.operationType = originalLedger.operationType;
+    candidate.state = originalLedger.state;
+    candidate.originalOperationKey = originalLedger.originalOperationKey;
+    candidate.amount = originalLedger.amount;
+    candidate.balanceBefore = originalLedger.balanceBefore;
+    candidate.balanceAfter = originalLedger.balanceAfter;
+    return candidate;
+  }
+
   /** 完整原元组仅将目标金额置NULL，不使用资金写替身掩盖错误。 */
   private void installFunds(String state, String missing) {
     ReflectionTestUtils.setField(service, "enabled", true);
@@ -463,6 +597,7 @@ class BalanceTccDebitServiceTest {
     originalFrozen = frozen;
     when(tccMapper.selectByPayNo(original.payNo)).thenReturn(frozen);
     BalanceLedgerPO applied = new BalanceLedgerPO();
+    applied.id = 5L;
     applied.userId = original.userId;
     applied.payNo = original.payNo;
     applied.orderNo = original.orderNo;
@@ -475,6 +610,8 @@ class BalanceTccDebitServiceTest {
     originalLedger = applied;
     when(ledgerMapper.selectByOperationKey(original.ledgerKey))
         .thenReturn("CONFIRMED".equals(state) ? applied : null);
+    when(ledgerMapper.findDebitCandidatesByPayNo(original.payNo))
+        .thenReturn("CONFIRMED".equals(state) ? List.of(applied) : List.of());
   }
 
   /** 固定409及原code，所有金额/状态写Mapper都不得调用。 */

@@ -16,6 +16,7 @@ import com.cloudmall.user.service.BalanceTccDebitService;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -283,6 +284,34 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
         || !Objects.equals(ledger.orderNo, request.orderNo)
         || ledger.amount.compareTo(request.amount) != 0
         || ledger.originalOperationKey != null) throw unknown();
+    // 固定键已证明后，再核同支付号唯一DEBIT；不按状态过滤或把其它扣款忽略为正常退款。
+    List<BalanceLedgerPO> candidates = ledgerMapper.findDebitCandidatesByPayNo(request.payNo);
+    if (candidates == null
+        || candidates.size() != 1
+        || !matchesConfirmedDebitScope(ledger, candidates.get(0))) {
+      throw unknown();
+    }
+  }
+
+  /** 唯一候选须复制原已证明账本的id/元组/数值快照，额外REFUND不在本扣款范围。 */
+  private static boolean matchesConfirmedDebitScope(
+      BalanceLedgerPO original, BalanceLedgerPO candidate) {
+    return candidate != null
+        && candidate.id != null
+        && Objects.equals(candidate.id, original.id)
+        && Objects.equals(candidate.userId, original.userId)
+        && Objects.equals(candidate.payNo, original.payNo)
+        && Objects.equals(candidate.orderNo, original.orderNo)
+        && Objects.equals(candidate.operationKey, original.operationKey)
+        && "DEBIT".equals(candidate.operationType)
+        && "APPLIED".equals(candidate.state)
+        && candidate.originalOperationKey == null
+        && candidate.amount != null
+        && candidate.amount.compareTo(original.amount) == 0
+        && candidate.balanceBefore != null
+        && candidate.balanceBefore.compareTo(original.balanceBefore) == 0
+        && candidate.balanceAfter != null
+        && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
   }
 
   /** 调用处已判金额非NULL；原快照须合法且差额对应实际资金量，不修复原记录。 */
