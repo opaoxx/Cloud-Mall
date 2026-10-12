@@ -560,6 +560,121 @@ class BalanceTccDebitServiceTest {
     return candidate;
   }
 
+  /** 无账本的每条状态入口不能忽略原pay其它类型/state/user行或非空null行。 */
+  @Test
+  void noFundsEntrancesRequireAnActuallyEmptyPaymentLedgerScope() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String state : List.of("none", "TRYING", "CANCELLED", "empty-cancel")) {
+      for (String operation :
+          "TRYING".equals(state) ? List.of("try", "confirm", "cancel") : List.of("try", "cancel")) {
+        for (String variant :
+            List.of("refund", "unknown-type", "unknown-state", "other-user", "null-row")) {
+          assertions.add(
+              () -> {
+                prepareNoFundsScope(state);
+                BalanceLedgerPO candidate = new BalanceLedgerPO();
+                candidate.payNo = request().payNo;
+                candidate.userId = "other-user".equals(variant) ? 8L : 7L;
+                candidate.operationKey = "orphan-key";
+                candidate.operationType = "unknown-type".equals(variant) ? "UNKNOWN" : "REFUND";
+                candidate.state = "unknown-state".equals(variant) ? "UNKNOWN" : "APPLIED";
+                List<BalanceLedgerPO> rows =
+                    "null-row".equals(variant)
+                        ? java.util.Collections.singletonList(null)
+                        : List.of(candidate);
+                when(ledgerMapper.findPaymentLedgerCandidates(request().payNo)).thenReturn(rows);
+                assertPersistedAmountConflict(operation, "IDEMPOTENCY_CONFLICT");
+                verify(ledgerMapper).findPaymentLedgerCandidates(request().payNo);
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** null列表不能当空，DAO异常原对象传播，两个原门命中保持旧message且不再查scope。 */
+  @Test
+  void noFundsScopeMissingAndFaultKeepOldPriorityWithoutFundsWrites() {
+    for (String operation : List.of("try", "confirm", "cancel")) {
+      prepareNoFundsScope("TRYING");
+      when(ledgerMapper.findPaymentLedgerCandidates(request().payNo)).thenReturn(null);
+      assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+      prepareNoFundsScope("TRYING");
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "owned-nofunds-scope-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(ledgerMapper)
+          .findPaymentLedgerCandidates(request().payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(
+              org.springframework.dao.DataAccessResourceFailureException.class,
+              () -> invokeNoFundsEntry(operation)));
+      verify(userMapper, never()).freezeBalance(any(), any(), any());
+      verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+      verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+      for (String oldGate : List.of("pay-debit", "fixed-key")) {
+        prepareNoFundsScope("TRYING");
+        if ("pay-debit".equals(oldGate))
+          when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(originalLedger);
+        else
+          when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(originalLedger);
+        org.mockito.Mockito.doThrow(failure)
+            .when(ledgerMapper)
+            .findPaymentLedgerCandidates(request().payNo);
+        BizException conflict =
+            assertThrows(BizException.class, () -> invokeNoFundsEntry(operation));
+        assertEquals("IDEMPOTENCY_CONFLICT", conflict.getCode());
+        assertEquals("支付或账本键已有扣款事实", conflict.getMessage());
+        verify(ledgerMapper, never()).findPaymentLedgerCandidates(any());
+      }
+    }
+  }
+
+  /** 无资金候选的合法空取消重放不核坏钱包，已确认仍独立走T88扣款proof并容许退款。 */
+  @Test
+  void emptyNoFundsScopeKeepsCancelledAndConfirmedNoOpSemantics() {
+    for (String state : List.of("CANCELLED", "empty-cancel")) {
+      prepareNoFundsScope(state);
+      when(ledgerMapper.findPaymentLedgerCandidates(request().payNo)).thenReturn(List.of());
+      when(userMapper.selectByIdForUpdate(7L)).thenReturn(account(null, null));
+      assertEquals("CANCELLED", service.tryDebit(request()).state);
+      assertEquals("CANCELLED", service.cancelDebit(completion()).state);
+      verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+    }
+    setUp();
+    installFunds("CONFIRMED", "none");
+    when(ledgerMapper.findPaymentLedgerCandidates(request().payNo))
+        .thenReturn(List.of(new BalanceLedgerPO()));
+    assertEquals("CONFIRMED", service.tryDebit(request()).state);
+    assertEquals("CONFIRMED", service.confirmDebit(completion()).state);
+    verify(ledgerMapper, never()).findPaymentLedgerCandidates(any());
+  }
+
+  /** 独立替身核同pay存在性，none/仅attempt空取消不补造freeze或账本。 */
+  private void prepareNoFundsScope(String state) {
+    setUp();
+    installFunds(
+        "empty-cancel".equals(state) ? "CANCELLED" : "none".equals(state) ? "TRYING" : state,
+        "none");
+    when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(null);
+    when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(null);
+    if (List.of("none", "empty-cancel").contains(state))
+      when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
+    if ("none".equals(state)) when(attemptMapper.selectByPayNo(request().payNo)).thenReturn(null);
+  }
+
+  /** 仅测试统一调用三个真实入口，不模拟返回值或改写业务字段。 */
+  private void invokeNoFundsEntry(String operation) {
+    switch (operation) {
+      case "try" -> service.tryDebit(request());
+      case "confirm" -> service.confirmDebit(completion());
+      case "cancel" -> service.cancelDebit(completion());
+      default -> throw new AssertionError(operation);
+    }
+  }
+
   /** 完整原元组仅将目标金额置NULL，不使用资金写替身掩盖错误。 */
   private void installFunds(String state, String missing) {
     ReflectionTestUtils.setField(service, "enabled", true);

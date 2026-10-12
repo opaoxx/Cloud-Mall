@@ -175,6 +175,82 @@ class BalanceTccStateMySqlIT {
     if (context != null) context.close();
   }
 
+  /** 同pay非DEBIT原行不能作为无账本证明，含仅attempt空取消的历史重放。 */
+  @Test
+  void noFundsEntrancesRejectOrphanPaymentLedgerRowsWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String state : List.of("none", "trying", "cancelled-frozen", "cancelled-empty")) {
+      for (String operation :
+          "trying".equals(state) ? List.of("try", "confirm", "cancel") : List.of("try", "cancel")) {
+        for (String variant :
+            List.of(
+                "refund-applied", "refund-unknown", "type-unknown", "pay-alias", "other-user")) {
+          assertions.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var original =
+                    request("nofunds-" + state + "-" + operation + "-" + variant, 7L, "10.00");
+                if (List.of("trying", "cancelled-frozen").contains(state))
+                  service.tryDebit(original);
+                if (state.startsWith("cancelled")) service.cancelDebit(finalizeRequest(original));
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                        + " VALUES(-1,?,'orphan-candidate',?,'absent-source',?,?,2,?,100,102,NOW(3))",
+                    "other-user".equals(variant) ? 8L : 7L,
+                    "type-unknown".equals(variant) ? "UNKNOWN" : "REFUND",
+                    "pay-alias".equals(variant)
+                        ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                        : original.payNo,
+                    original.orderNo,
+                    "refund-unknown".equals(variant) ? "UNKNOWN" : "APPLIED");
+                var before = allFundsFacts();
+                BizException failure =
+                    assertThrows(
+                        BizException.class,
+                        () -> {
+                          switch (operation) {
+                            case "try" -> service.tryDebit(original);
+                            case "confirm" -> service.confirmDebit(finalizeRequest(original));
+                            case "cancel" -> service.cancelDebit(finalizeRequest(original));
+                            default -> throw new AssertionError(operation);
+                          }
+                        },
+                        state + ":" + operation + ":" + variant);
+                assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                assertEquals(409, failure.getHttpStatus());
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 空取消只核同pay范围，其他pay历史行不扩成全账户门；disabled仍可重放已取消。 */
+  @Test
+  void emptyCancellationKeepsOtherPaymentsAndDisabledNoOpCompatibility() {
+    var original = request("nofunds-healthy", 7L, "10.00");
+    fixture.update(
+        "INSERT INTO"
+            + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+            + " VALUES(-1,7,'other-payment-history','REFUND','other-source','other-pay','other-order',2,'APPLIED',100,102,NOW(3))");
+    assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(original)).state);
+    var before = allFundsFacts();
+    assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(original)).state);
+    assertEquals("CANCELLED", service.tryDebit(original).state);
+    assertEquals(before, allFundsFacts());
+    setEnabled(false);
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+    var disabledBefore = allFundsFacts();
+    assertEquals("CANCELLED", service.cancelDebit(finalizeRequest(original)).state);
+    assertEquals(disabledBefore, allFundsFacts());
+  }
+
   /** 固定账本健康不等于同pay没有其它DEBIT；重放不得忽略真实重复原事实。 */
   @Test
   void confirmedReplaysRejectAdditionalDebitCandidatesWithoutFundsWrites() {

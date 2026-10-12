@@ -260,11 +260,14 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
         || attempt.amount.compareTo(request.amount) != 0) throw conflict("扣款归属载荷不一致");
   }
 
-  /** 新资金事实不能覆盖历史扣款或占用历史账本键。 */
+  /** 保留原扣款/固定键优先，再核同pay全类型账本为空；缺证不能作为无资金证明。 */
   private void requireNoLedger(BalanceTccDebitTryDTO request) {
     if (ledgerMapper.selectDebitByPayNo(request.payNo) != null
         || ledgerMapper.selectByOperationKey(request.ledgerKey) != null)
       throw conflict("支付或账本键已有扣款事实");
+    List<BalanceLedgerPO> candidates = ledgerMapper.findPaymentLedgerCandidates(request.payNo);
+    if (candidates == null) throw unknown();
+    if (!candidates.isEmpty()) throw conflict("支付号已有资金账本事实");
   }
 
   /** 已确认必须同时具备真实 APPLIED 账本，不能只凭状态返回成功。 */
