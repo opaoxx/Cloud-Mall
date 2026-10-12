@@ -1136,6 +1136,99 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     }
   }
 
+  @Test
+  void reserveInvalidTtlCannotDeleteUserCountOrLeavePartialDebit() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String ttl :
+        List.of(
+            "",
+            " ",
+            "0",
+            "-1",
+            "1.5",
+            "60.0",
+            " 60",
+            "060",
+            "00",
+            "bad",
+            "1e3",
+            "+60",
+            "1000000000001",
+            "9223372036854775807",
+            "999999999999999999999999999999999999"))
+      assertions.add(
+          () -> {
+            reset();
+            var original = row("RELEASE_PENDING", "owned-idem");
+            var keys = prepareFreshReserveRedis(original);
+            var before = redisDumpFacts(keys);
+            var databaseBefore = facts();
+            Long receipt = null;
+            RuntimeException scriptFailure = null;
+            try {
+              receipt = executeReserveLua(original, keys, 1000L, 10L, ttl);
+            } catch (RuntimeException failure) {
+              scriptFailure = failure;
+            }
+            Long observedReceipt = receipt;
+            RuntimeException observedFailure = scriptFailure;
+            assertAll(
+                () -> assertNull(observedFailure, "坏TTL不能在库存/用户写后异常"),
+                () -> assertEquals(Long.valueOf(-1), observedReceipt, ttl),
+                () -> assertEquals(before, redisDumpFacts(keys), "原用户累计数不可删除或改写"),
+                () -> assertEquals(databaseBefore, facts()));
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void validTtlBoundariesKeepOriginalExpiryCountersAndAcceptedReplay() {
+    for (long ttl : List.of(1L, 60L, 1000000000000L)) {
+      reset();
+      var original = row("RELEASE_PENDING", "owned-idem");
+      var keys = prepareFreshReserveRedis(original);
+      var databaseBefore = facts();
+      assertEquals(
+          Long.valueOf(1), executeReserveLua(original, keys, 1000L, 10L, String.valueOf(ttl)));
+      Long remainingMillis =
+          fixtureRedis.getExpire(keys.get(5), java.util.concurrent.TimeUnit.MILLISECONDS);
+      assertNotNull(remainingMillis);
+      assertTrue(remainingMillis > 0 && remainingMillis <= ttl * 1000L, "原TTL不能删计数或溢出");
+      assertEquals("4", fixtureRedis.opsForValue().get(keys.get(0)));
+      assertEquals("3", fixtureRedis.opsForValue().get(keys.get(5)));
+      assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
+      assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
+      assertEquals(
+          "RESERVED|" + original.orderNo + "|4", fixtureRedis.opsForValue().get(keys.get(3)));
+      var replayBefore = redisDumpFacts(keys);
+      assertEquals(Long.valueOf(3), executeReserveLua(original, keys, 3000L, 10L, "bad"));
+      assertEquals(replayBefore, redisDumpFacts(keys));
+      assertEquals(databaseBefore, facts());
+    }
+  }
+
+  @Test
+  void businessTimeAndLimitRefusalsKeepPriorityOverIrrelevantBadTtl() {
+    for (String outcome : List.of("stock-zero", "user-limit", "before-start", "ended")) {
+      reset();
+      var original = row("RELEASE_PENDING", "owned-idem");
+      var keys = prepareFreshReserveRedis(original);
+      if ("stock-zero".equals(outcome)) fixtureRedis.opsForValue().set(keys.get(0), "0");
+      long now = "before-start".equals(outcome) ? -1L : "ended".equals(outcome) ? 2000L : 1000L;
+      long userLimit = "user-limit".equals(outcome) ? 2L : 10L;
+      long expected =
+          "stock-zero".equals(outcome)
+              ? 0L
+              : "user-limit".equals(outcome) ? 2L : "before-start".equals(outcome) ? 4L : 5L;
+      var before = redisDumpFacts(keys);
+      var databaseBefore = facts();
+      assertEquals(
+          Long.valueOf(expected), executeReserveLua(original, keys, now, userLimit, "bad"));
+      assertEquals(before, redisDumpFacts(keys));
+      assertEquals(databaseBefore, facts());
+    }
+  }
+
   /** 只准备未受理Redis状态；原row仅供键/参数，不seed已ACCEPTED的SQL事实。 */
   private static List<String> prepareFreshReserveRedis(SeckillQuotaSettlementPO original) {
     var keys = prepareRedis(original);
@@ -1146,6 +1239,12 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   /** 生产reserve资源脚本真实执行，meta仅纳入不变快照，KEYS以原顺序stock/user/accepted/op/revision。 */
   private static Long executeReserveLua(
       SeckillQuotaSettlementPO original, List<String> keys, long now, long userLimit) {
+    return executeReserveLua(original, keys, now, userLimit, "60");
+  }
+
+  /** 只替换原ARGV6字符串以验证EXPIRE写前边界，不改变其它参数或模拟结果。 */
+  private static Long executeReserveLua(
+      SeckillQuotaSettlementPO original, List<String> keys, long now, long userLimit, String ttl) {
     var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
     script.setLocation(
         new org.springframework.core.io.ClassPathResource("lua/seckill-reserve.lua"));
@@ -1158,7 +1257,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         String.valueOf(now),
         "0",
         "2000",
-        "60",
+        ttl,
         "10");
   }
 

@@ -30,6 +30,11 @@ if not stockLimit or stockLimit < 1 or available > stockLimit
     or revision >= 1000000000000 or used > 1000000000000 then return -1 end
 if used >= tonumber(ARGV[2]) then return 2 end
 if available < 1 then return 0 end
+-- EXPIRE must receive safe positive integer seconds before any debit is written.
+local ttlText = ARGV[6]
+if not ttlText or not string.match(ttlText, '^[1-9]%d*$') then return -1 end
+local ttl = tonumber(ttlText)
+if not ttl or ttl <= 0 or ttl > 1000000000000 then return -1 end
 -- All checks precede writes: Redis does not roll back a Lua script on runtime error.
 redis.call('DECR', KEYS[1])
 redis.call('INCRBY', KEYS[2], 1)
