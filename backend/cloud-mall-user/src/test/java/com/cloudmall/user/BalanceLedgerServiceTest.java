@@ -88,6 +88,8 @@ class BalanceLedgerServiceTest {
         .thenReturn(1);
 
     BalanceDebitRequestDTO request = debitRequest();
+    when(balanceLedgerMapper.findPaymentLedgerCandidates(request.payNo))
+        .thenReturn(java.util.List.of());
     ApiResponse<?> first = userService.debitInternal(7L, 7L, request);
     ApiResponse<?> replay = userService.debitInternal(7L, 7L, request);
 
@@ -95,6 +97,7 @@ class BalanceLedgerServiceTest {
     assertEquals("90.00", ((com.cloudmall.user.domain.vo.BalanceDebitVO) replay.data).balance);
     verify(userMapper, times(1))
         .debitBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
+    verify(balanceLedgerMapper, times(1)).findPaymentLedgerCandidates(request.payNo);
   }
 
   @Test
@@ -1537,6 +1540,132 @@ class BalanceLedgerServiceTest {
                   () -> invokeLegacyDebit(entry, invalidRequest))
               .getCode());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).findDebitCandidatesByPayNo(any());
+      assertLegacyNoMoneyOrCacheWrite();
+    }
+  }
+
+  /** fresh不能过滤掉原pay任意资金行，包含坏元数据、null行或101候选，均不claim或扣款。 */
+  @Test
+  void legacyFreshDebitRequiresEmptyAllTypePaymentLedgerScope() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String variant :
+          java.util.List.of(
+              "refund",
+              "unknown-type",
+              "unknown-state",
+              "other-user",
+              "pay-alias",
+              "null-row",
+              "limit101")) {
+        assertions.add(
+            () -> {
+              var request = installLegacyDebit(entry, null);
+              var candidate = new BalanceLedgerPO();
+              candidate.operationType = "unknown-type".equals(variant) ? "UNKNOWN" : "REFUND";
+              candidate.state = "unknown-state".equals(variant) ? "UNKNOWN" : "APPLIED";
+              candidate.payNo =
+                  "pay-alias".equals(variant)
+                      ? request.payNo.toUpperCase(java.util.Locale.ROOT)
+                      : request.payNo;
+              candidate.userId = "other-user".equals(variant) ? 8L : 7L;
+              java.util.List<BalanceLedgerPO> candidates =
+                  "null-row".equals(variant)
+                      ? java.util.Collections.singletonList(null)
+                      : "limit101".equals(variant)
+                          ? java.util.Collections.nCopies(101, candidate)
+                          : java.util.List.of(candidate);
+              when(balanceLedgerMapper.findPaymentLedgerCandidates(request.payNo))
+                  .thenReturn(candidates);
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request));
+              assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+              assertEquals("支付号已有资金账本事实", failure.getMessage());
+              assertEquals(409, failure.getHttpStatus());
+              verify(balanceLedgerMapper).findPaymentLedgerCandidates(request.payNo);
+              assertLegacyNoMoneyOrCacheWrite();
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 缺列表不是空，真实DAO异常原对象传播；新scope先于钱包校验、认领和资金写。 */
+  @Test
+  void legacyFreshPaymentScopeMissingAndFaultStopBeforeWalletWrites() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      var request = installLegacyDebit(entry, null);
+      when(balanceLedgerMapper.findPaymentLedgerCandidates(request.payNo)).thenReturn(null);
+      var missing =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> invokeLegacyDebit(entry, request));
+      assertEquals("BALANCE_DEBIT_UNKNOWN", missing.getCode());
+      assertEquals("扣款归属缺少对应账本事实", missing.getMessage());
+      assertEquals(409, missing.getHttpStatus());
+      assertLegacyNoMoneyOrCacheWrite();
+      var faultRequest = installLegacyDebit(entry, null);
+      when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(null));
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "owned-legacy-fresh-payment-scope-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceLedgerMapper)
+          .findPaymentLedgerCandidates(faultRequest.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(RuntimeException.class, () -> invokeLegacyDebit(entry, faultRequest)));
+      assertLegacyNoMoneyOrCacheWrite();
+    }
+  }
+
+  /** 已有APPLIED/REJECTED及无attempt历史继续独立重放，错误归属仍早于fresh scope。 */
+  @Test
+  void legacyReplayAndExistingAttemptKeepPriorityBeforeFreshPaymentScope() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String state : java.util.List.of("APPLIED", "REJECTED", "history-no-attempt")) {
+        var request =
+            installLegacyDebit(entry, "history-no-attempt".equals(state) ? "APPLIED" : state);
+        if ("history-no-attempt".equals(state))
+          when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+        when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(null));
+        when(balanceLedgerMapper.findPaymentLedgerCandidates(request.payNo))
+            .thenReturn(java.util.List.of(new BalanceLedgerPO()));
+        if ("REJECTED".equals(state)) {
+          assertEquals(
+              "PAYMENT_FAILED",
+              assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request))
+                  .getCode());
+          assertLegacyNoMoneyOrCacheWrite();
+        } else {
+          assertEquals(
+              "90.00",
+              ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, request).data)
+                  .balance);
+          verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).insert(any());
+          verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        }
+        verify(balanceLedgerMapper, org.mockito.Mockito.never()).findPaymentLedgerCandidates(any());
+      }
+      var invalidRequest = installLegacyDebit(entry, "APPLIED");
+      legacyDebitAttempt.mode = "TCC";
+      org.mockito.Mockito.doThrow(
+              new org.springframework.dao.DataAccessResourceFailureException(
+                  "owned-should-not-read-fresh-scope"))
+          .when(balanceLedgerMapper)
+          .findPaymentLedgerCandidates(invalidRequest.payNo);
+      assertEquals(
+          "IDEMPOTENCY_CONFLICT",
+          assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> invokeLegacyDebit(entry, invalidRequest))
+              .getCode());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findPaymentLedgerCandidates(any());
       assertLegacyNoMoneyOrCacheWrite();
     }
   }

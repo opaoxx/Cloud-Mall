@@ -570,6 +570,14 @@ public class UserServiceImpl implements UserService {
     if (attempt != null || historical != null)
       throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属缺少对应账本事实", 409);
 
+    // 首次扣款须同pay全类型账本可靠为空；已有历史重放已在上方独立返回。
+    List<BalanceLedgerPO> paymentLedgerCandidates =
+        balanceLedgerMapper.findPaymentLedgerCandidates(request.payNo);
+    if (paymentLedgerCandidates == null)
+      throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属缺少对应账本事实", 409);
+    if (!paymentLedgerCandidates.isEmpty())
+      throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有资金账本事实", 409);
+
     // 3. 先核当前钱包域，再用唯一键认领最终账本键，避免坏余额或跨协议并发双扣。
     if (!validBalanceMoney(user.balance))
       throw new BizException("BALANCE_DEBIT_UNKNOWN", "用户余额资金事实待核对", 409);

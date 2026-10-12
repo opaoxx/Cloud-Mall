@@ -345,6 +345,163 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** fresh Legacy不能忽略同pay非DEBIT/坏状态账本而扣款或写REJECTED，双入口四表无写。 */
+  @Test
+  void legacyFreshDebitRejectsOrphanPaymentLedgerWithoutWrites() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : List.of("debits", "compat")) {
+      for (boolean insufficient : List.of(false, true)) {
+        for (String variant :
+            List.of(
+                "refund-applied",
+                "refund-unknown",
+                "type-unknown",
+                "pay-alias",
+                "other-user",
+                "three",
+                "limit101")) {
+          assertions.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var request = new BalanceDebitRequestDTO();
+                request.payNo = "legacy-orphan-" + entry + "-" + variant;
+                request.operationKey =
+                    "compat".equals(entry) ? request.payNo : "custom-" + request.payNo;
+                request.orderNo = "compat".equals(entry) ? request.payNo : "order-" + request.payNo;
+                request.amount = new BigDecimal(insufficient ? "101.00" : "10.00");
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = request.payNo;
+                compatible.amount = request.amount;
+                int candidateCount =
+                    "limit101".equals(variant) ? 101 : "three".equals(variant) ? 3 : 1;
+                for (int index = 1; index <= candidateCount; index++) {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                          + " VALUES(?,?,?,?,'absent-source',?,?,2,?,100,102,NOW(3))",
+                      -index,
+                      "other-user".equals(variant) ? 8L : 7L,
+                      "orphan-fresh-" + index,
+                      "type-unknown".equals(variant) ? "UNKNOWN" : "REFUND",
+                      "pay-alias".equals(variant)
+                          ? request.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : request.payNo,
+                      request.orderNo,
+                      "refund-unknown".equals(variant) ? "UNKNOWN" : "APPLIED");
+                }
+                var before = allFundsFacts();
+                var cache = context.getBean(StringRedisTemplate.class);
+                org.mockito.Mockito.clearInvocations(cache);
+                var response =
+                    "compat".equals(entry)
+                        ? postCompatibleLegacyDebit(compatible)
+                        : postLegacyDebit(request);
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () ->
+                        assertEquals(
+                            409,
+                            response.getResponse().getStatus(),
+                            entry + ":" + insufficient + ":" + variant),
+                    () -> assertHttpCode(response, "IDEMPOTENCY_CONFLICT"),
+                    () -> {
+                      BizException failure =
+                          assertThrows(
+                              BizException.class,
+                              () -> {
+                                if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                                else legacy.debitInternal(7L, 7L, request);
+                              });
+                      assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                      assertEquals(409, failure.getHttpStatus());
+                      assertEquals("支付号已有资金账本事实", failure.getMessage());
+                    },
+                    () -> assertEquals(before, allFundsFacts()),
+                    () -> org.mockito.Mockito.verifyNoInteractions(cache));
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 其它pay坏历史不阻断fresh；真实退款及无attempt历史不触发新fresh门，保原重放。 */
+  @Test
+  void legacyFreshScopeKeepsOtherPaymentsAndRefundedHistoricalReplay() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : List.of("debits", "compat")) {
+      for (String state : List.of("APPLIED", "REJECTED", "history-no-attempt")) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              fixture.update(
+                  "INSERT INTO"
+                      + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                      + " VALUES(-1,7,'other-pay-bad-history','UNKNOWN','other-pay','other-order',2,'UNKNOWN',100,102,NOW(3))");
+              var request = new BalanceDebitRequestDTO();
+              request.payNo = "legacy-fresh-healthy-" + entry + "-" + state;
+              request.operationKey =
+                  "compat".equals(entry) ? request.payNo : "custom-" + request.payNo;
+              request.orderNo = "compat".equals(entry) ? request.payNo : "order-" + request.payNo;
+              request.amount = new BigDecimal("REJECTED".equals(state) ? "101.00" : "10.00");
+              var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+              compatible.paymentKey = request.payNo;
+              compatible.amount = request.amount;
+              org.junit.jupiter.api.function.Executable debit =
+                  () -> {
+                    if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                    else legacy.debitInternal(7L, 7L, request);
+                  };
+              if ("REJECTED".equals(state)) {
+                assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
+                assertFunds(7L, "100.00", "0.00");
+                fixture.update("UPDATE mall_user SET balance=200 WHERE id=7");
+              } else {
+                debit.execute();
+                assertFunds(7L, "90.00", "0.00");
+                var refund = new BalanceRefundRequestDTO();
+                refund.refundOperationKey = "refund-" + request.payNo;
+                refund.originalOperationKey = request.operationKey;
+                refund.payNo = request.payNo;
+                refund.orderNo = request.orderNo;
+                refund.amount = new BigDecimal("2.00");
+                legacy.refundInternal(7L, 7L, refund);
+                assertFunds(7L, "92.00", "0.00");
+                if ("history-no-attempt".equals(state))
+                  fixture.update("DELETE FROM balance_debit_attempt");
+              }
+              var before = allFundsFacts();
+              var response =
+                  "compat".equals(entry)
+                      ? postCompatibleLegacyDebit(compatible)
+                      : postLegacyDebit(request);
+              if ("REJECTED".equals(state)) {
+                assertEquals(409, response.getResponse().getStatus());
+                assertHttpCode(response, "PAYMENT_FAILED");
+                assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
+              } else {
+                assertEquals(200, response.getResponse().getStatus());
+                var body =
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(response.getResponse().getContentAsString());
+                assertEquals("APPLIED", body.path("data").path("state").asText());
+                assertEquals("90.00", body.path("data").path("balance").asText());
+                debit.execute();
+              }
+              assertEquals(before, allFundsFacts());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** Legacy双入口的真实重复扣款必须稳定409，且不修改四表或触碰余额缓存。 */
   @Test
   void legacyDuplicateDebitHistoryReturnsConflictWithoutWrites() {
