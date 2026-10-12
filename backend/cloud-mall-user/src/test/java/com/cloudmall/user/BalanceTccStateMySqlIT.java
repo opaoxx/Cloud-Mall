@@ -1,6 +1,7 @@
 package com.cloudmall.user;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -173,6 +174,175 @@ class BalanceTccStateMySqlIT {
   @AfterEach
   void closeContext() {
     if (context != null) context.close();
+  }
+
+  /** CI Fence别名不得触发真实官方更新和本地资金确认/释放，拒绝保留五表事实。 */
+  @Test
+  void foreignFenceAliasesCannotDriveRealLocalCommitOrRollback() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (boolean committing : List.of(false, true)) {
+      for (String variant : List.of("case", "accent", "space")) {
+        assertions.add(
+            () -> {
+              resetFenceIdentityFacts();
+              var original = request("fence-identity", 7L, "10.00");
+              service.tryDebit(original);
+              String alias =
+                  switch (variant) {
+                    case "case" -> original.xid.toUpperCase(java.util.Locale.ROOT);
+                    case "accent" -> original.xid.replace("test", "tést");
+                    case "space" -> original.xid + " ";
+                    default -> throw new AssertionError(variant);
+                  };
+              insertOwnedFence(alias, original.branchId, 1);
+              var before = fundsAndFenceFacts();
+              withOwnedOfficialFence(
+                  () -> {
+                    var resource = localFenceResource();
+                    var incoming = localFenceContext(original);
+                    org.junit.jupiter.api.Assertions.assertFalse(
+                        committing ? resource.commit(incoming) : resource.rollback(incoming),
+                        variant);
+                    assertEquals(before, fundsAndFenceFacts());
+                  });
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 原exact Fence仍走实际资金和官方状态，缺Fence终态重放/空回滚不制造新资金。 */
+  @Test
+  void exactFenceAndMissingFenceReplayKeepLocalLifecycle() throws Exception {
+    for (boolean committing : List.of(false, true)) {
+      resetFenceIdentityFacts();
+      var original = request("fence-healthy", 7L, "10.00");
+      service.tryDebit(original);
+      insertOwnedFence(original.xid, original.branchId, 1);
+      withOwnedOfficialFence(
+          () -> {
+            var resource = localFenceResource();
+            var incoming = localFenceContext(original);
+            assertTrue(committing ? resource.commit(incoming) : resource.rollback(incoming));
+            assertEquals(
+                committing ? "CONFIRMED" : "CANCELLED",
+                fixture.queryForObject(
+                    "SELECT state FROM balance_debit_attempt WHERE pay_no=?",
+                    String.class,
+                    original.payNo));
+            assertFunds(7L, committing ? "90.00" : "100.00", "0.00");
+            assertEquals(committing ? 1 : 0, ledgerCount());
+            var beforeReplay = fundsAndFenceFacts();
+            assertTrue(committing ? resource.commit(incoming) : resource.rollback(incoming));
+            assertEquals(beforeReplay, fundsAndFenceFacts());
+            fixture.update("DELETE FROM tcc_fence_log");
+            var afterFixtureDelete = fundsAndFenceFacts();
+            assertTrue(committing ? resource.commit(incoming) : resource.rollback(incoming));
+            assertEquals(afterFixtureDelete, fundsAndFenceFacts());
+          });
+    }
+    resetFenceIdentityFacts();
+    var empty = request("fence-empty", 7L, "10.00");
+    withOwnedOfficialFence(
+        () -> {
+          var resource = localFenceResource();
+          var incoming = localFenceContext(empty);
+          assertTrue(resource.rollback(incoming));
+          assertEquals(
+              "CANCELLED",
+              fixture.queryForObject("SELECT state FROM balance_debit_attempt", String.class));
+          assertEquals(
+              4, fixture.queryForObject("SELECT status FROM tcc_fence_log", Integer.class));
+          assertFunds(7L, "100.00", "0.00");
+          assertEquals(0, ledgerCount());
+        });
+  }
+
+  /** 仅测试owned行重置；Fence使用PAD SPACE CI以实际复现三种SQL别名。 */
+  private void resetFenceIdentityFacts() {
+    context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
+    fixture.update("DELETE FROM tcc_fence_log");
+    fixture.execute(
+        "ALTER TABLE tcc_fence_log MODIFY xid VARCHAR(128) CHARACTER SET utf8mb4 COLLATE"
+            + " utf8mb4_unicode_ci NOT NULL");
+    for (String table : List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+      fixture.update("DELETE FROM " + table);
+    fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+  }
+
+  /** 原生产Mapper与真实资金事务代理，不注册RM或绑定全局XID。 */
+  private com.cloudmall.user.service.impl.BalanceTccDebitLocalResourceImpl localFenceResource() {
+    return new com.cloudmall.user.service.impl.BalanceTccDebitLocalResourceImpl(
+        context.getBean(PlatformTransactionManager.class),
+        new com.cloudmall.user.service.impl.BalanceTccDebitBusinessCallback(service),
+        context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class),
+        context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
+        context.getBean(com.cloudmall.user.mapper.BalanceTccResourceEvidenceMapper.class));
+  }
+
+  /** 受信任本地分支载荷，context完整identity与原资金请求一致。 */
+  private io.seata.rm.tcc.api.BusinessActionContext localFenceContext(
+      BalanceTccDebitTryDTO original) {
+    var branch = new com.cloudmall.user.domain.dto.BalanceTccBranchDTO();
+    branch.userId = original.userId;
+    branch.payNo = original.payNo;
+    branch.orderNo = original.orderNo;
+    branch.amount = original.amount;
+    var incoming = new io.seata.rm.tcc.api.BusinessActionContext();
+    incoming.setXid(original.xid);
+    incoming.setBranchId(original.branchId);
+    incoming.setActionName(com.cloudmall.user.service.BalanceTccDebitLocalResource.ACTION_NAME);
+    incoming.setActionContext(Map.of("request", branch));
+    return incoming;
+  }
+
+  /** Fence夹具写仅owned固定表，不混入原业务数据。 */
+  private void insertOwnedFence(String xid, Long branchId, int status) {
+    fixture.update(
+        "INSERT INTO tcc_fence_log(xid,branch_id,action_name,status,gmt_create,gmt_modified)"
+            + " VALUES(?,?,?,?,NOW(3),NOW(3))",
+        xid,
+        branchId,
+        com.cloudmall.user.service.BalanceTccDebitLocalResource.ACTION_NAME,
+        status);
+  }
+
+  /** Fence与原四资金表同快照核验，含原XID/状态/时间及用户余额。 */
+  private List<List<Map<String, Object>>> fundsAndFenceFacts() {
+    var values = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+    values.add(fixture.queryForList("SELECT * FROM tcc_fence_log ORDER BY xid,branch_id"));
+    return values;
+  }
+
+  /** 绑定官方静态依赖只到owned数据源，finally恢复原值；不调用prepare或启动清理调度。 */
+  private void withOwnedOfficialFence(org.junit.jupiter.api.function.Executable action)
+      throws Exception {
+    Class<?> handler = io.seata.rm.tcc.TCCFenceHandler.class;
+    DataSource previousDataSource =
+        (DataSource) ReflectionTestUtils.getField(handler, "dataSource");
+    var previousTemplate =
+        (org.springframework.transaction.support.TransactionTemplate)
+            ReflectionTestUtils.getField(handler, "transactionTemplate");
+    var manager = new DataSourceTransactionManager(testDataSource);
+    var ownedTemplate = new org.springframework.transaction.support.TransactionTemplate(manager);
+    io.seata.rm.tcc.TCCFenceHandler.setDataSource(testDataSource);
+    io.seata.rm.tcc.TCCFenceHandler.setTransactionTemplate(ownedTemplate);
+    try {
+      action.execute();
+    } catch (Exception failure) {
+      throw failure;
+    } catch (Throwable failure) {
+      throw new AssertionError(failure);
+    } finally {
+      io.seata.rm.tcc.TCCFenceHandler.setDataSource(previousDataSource);
+      io.seata.rm.tcc.TCCFenceHandler.setTransactionTemplate(previousTemplate);
+      assertSame(previousDataSource, ReflectionTestUtils.getField(handler, "dataSource"));
+      assertSame(previousTemplate, ReflectionTestUtils.getField(handler, "transactionTemplate"));
+      var queue =
+          (java.util.concurrent.BlockingQueue<?>)
+              ReflectionTestUtils.getField(handler, "LOG_QUEUE");
+      assertTrue(queue.isEmpty(), "本测试不调用prepare，不产生官方异步清理任务");
+    }
   }
 
   /** 同pay非DEBIT原行不能作为无账本证明，含仅attempt空取消的历史重放。 */

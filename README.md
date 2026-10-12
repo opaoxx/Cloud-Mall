@@ -1908,3 +1908,9 @@ TCC已CONFIRMED的Try/Confirm重放在原固定账本证明通过后，再读取
 TRYING/CANCELLED状态读取在原固定键和DEBIT门通过后，再读取同支付号全类型/全状态账本候选。只有可靠empty才返回该无账本状态；孤立退款、未知类型、缺证及CI别名都不能被忽略，仍返回原state冲突409。读取保持同一只读RR，数据库故障不转换为空。
 
 UNKNOWN（未观察到attempt）仍只是不确定，不提升为无资金证明；CONFIRMED及已扣款的合法退款仍用原独立范围。复用Query的诊断入口继承保护，不修改任何资金、API或SQL写。
+
+### CM-18 User TCC回调的Fence精确来源（16T91）
+
+本地TCC commit/rollback在读取到Fence候选后，先精确核对XID、branchId和actionName，再进入官方Fence处理器和资金回调。别名或错分支返回false并标记回滚；被拒分支的二次Fence读取也复用该来源检查。
+
+没有Fence时的原终态证明、空回滚、官方处理器、资金规则和Seata上下文保持。测试在owned数据库中调用实际官方Fence JDBC及本地资金事务，不代表网络TC或完整跨服务fencing验收。

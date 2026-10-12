@@ -98,7 +98,10 @@ public class BalanceTccDebitLocalResourceImpl implements BalanceTccDebitLocalRes
               status -> {
                 // 1. Fence 清理后仅接受相同分支的已决业务事实，不推进未知状态。
                 TccFenceLogPO fence = fences.findByBranch(context.getXid(), context.getBranchId());
-                if (fence != null && !ACTION_NAME.equals(fence.actionName)) return false;
+                if (fence != null && !matchesIncomingFence(fence, request)) {
+                  status.setRollbackOnly();
+                  return false;
+                }
                 if (fence == null && hasTerminalProof(request, committing))
                   return verifyBusiness(context, committing);
                 // 2. 显式调用一次官方 Fence，保留官方乱序和防悬挂语义。
@@ -133,6 +136,14 @@ public class BalanceTccDebitLocalResourceImpl implements BalanceTccDebitLocalRes
     }
   }
 
+  /** CI查询只提供候选；Fence必须精确属于原分支/资源，不能借别名调用官方处理器。 */
+  private static boolean matchesIncomingFence(TccFenceLogPO fence, BalanceTccDebitTryDTO request) {
+    return fence != null
+        && Objects.equals(fence.xid, request.xid)
+        && Objects.equals(fence.branchId, request.branchId)
+        && ACTION_NAME.equals(fence.actionName);
+  }
+
   /** 只按本分支已决状态选择幂等核验；完整载荷及账本仍由原资金服务验证。 */
   private boolean hasTerminalProof(BalanceTccDebitTryDTO request, boolean committing) {
     BalanceDebitAttemptPO attempt = attempts.selectByPayNo(request.payNo);
@@ -146,7 +157,7 @@ public class BalanceTccDebitLocalResourceImpl implements BalanceTccDebitLocalRes
   /** 只有 SUSPENDED 且本分支没有任何资金归属时，才可核对另一个永久所有者。 */
   private boolean rejectedBranchHasNoFunds(BalanceTccDebitTryDTO request) {
     TccFenceLogPO fence = fences.findByBranch(request.xid, request.branchId);
-    if (fence == null
+    if (!matchesIncomingFence(fence, request)
         || !Integer.valueOf(4).equals(fence.status)
         || evidence.countIncomingAttempts(request.xid, request.branchId) != 0
         || evidence.countIncomingTccDebits(request.xid, request.branchId) != 0) return false;
