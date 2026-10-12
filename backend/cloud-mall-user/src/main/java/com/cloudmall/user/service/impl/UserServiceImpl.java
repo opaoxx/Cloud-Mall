@@ -541,7 +541,16 @@ public class UserServiceImpl implements UserService {
     // 2. 先核对共享归属和历史账本；历史自定义 operationKey 也按 payNo 互斥。
     BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
     if (attempt != null) ensureLegacyAttemptMatches(attempt, userId, request);
-    BalanceLedgerPO historical = balanceLedgerMapper.selectDebitByPayNo(request.payNo);
+    // 有界候选保留全状态/CI历史；缺证不能作空，重复在单结果Mapper抛异常前按业务拒绝。
+    List<BalanceLedgerPO> historicalCandidates =
+        balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo);
+    if (historicalCandidates == null
+        || (historicalCandidates.size() == 1 && historicalCandidates.get(0) == null))
+      throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属缺少对应账本事实", 409);
+    if (historicalCandidates.size() > 1)
+      throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已绑定其他扣款操作", 409);
+    BalanceLedgerPO historical =
+        historicalCandidates.isEmpty() ? null : historicalCandidates.get(0);
     if (historical != null && !Objects.equals(historical.operationKey, request.operationKey))
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已绑定其他扣款操作", 409);
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.operationKey);

@@ -1422,11 +1422,123 @@ class BalanceLedgerServiceTest {
     var unavailable =
         new org.springframework.dao.DataRetrievalFailureException(
             "owned-legacy-history-read-failure");
-    when(balanceLedgerMapper.selectDebitByPayNo("pay-1")).thenThrow(unavailable);
+    when(balanceLedgerMapper.findDebitCandidatesByPayNo("pay-1")).thenThrow(unavailable);
     org.junit.jupiter.api.Assertions.assertSame(
         unavailable,
         assertThrows(RuntimeException.class, () -> invokeLegacyDebit("debits", failureRequest)));
     assertLegacyNoMoneyOrCacheWrite();
+  }
+
+  /** 缺列表或空行不能证无历史，多行固定冲突；任何情况不查fixed key或写资金/cache。 */
+  @Test
+  void legacyBoundedHistoryRejectsMissingAndMultipleCandidates() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String state : java.util.List.of("fresh", "APPLIED", "REJECTED", "history-no-attempt")) {
+        for (String variant : java.util.List.of("null-list", "null-row", "two", "three")) {
+          assertions.add(
+              () -> {
+                var request =
+                    installLegacyDebit(
+                        entry,
+                        "fresh".equals(state)
+                            ? null
+                            : "history-no-attempt".equals(state) ? "APPLIED" : state);
+                if ("history-no-attempt".equals(state))
+                  when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+                var candidate =
+                    legacyDebitLedger == null
+                        ? appliedDebit(request.operationKey, new BigDecimal("90.00"))
+                        : legacyDebitLedger;
+                java.util.List<BalanceLedgerPO> candidates =
+                    switch (variant) {
+                      case "null-list" -> null;
+                      case "null-row" -> java.util.Collections.singletonList(null);
+                      case "two" -> java.util.List.of(candidate, new BalanceLedgerPO());
+                      case "three" ->
+                          java.util.List.of(
+                              candidate, new BalanceLedgerPO(), new BalanceLedgerPO());
+                      default -> throw new AssertionError(variant);
+                    };
+                when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
+                    .thenReturn(candidates);
+                var failure =
+                    assertThrows(
+                        com.cloudmall.common.error.BizException.class,
+                        () -> invokeLegacyDebit(entry, request));
+                boolean missing = variant.startsWith("null");
+                assertEquals(
+                    missing ? "BALANCE_DEBIT_UNKNOWN" : "IDEMPOTENCY_CONFLICT", failure.getCode());
+                assertEquals(missing ? "扣款归属缺少对应账本事实" : "支付号已绑定其他扣款操作", failure.getMessage());
+                assertEquals(409, failure.getHttpStatus());
+                verify(balanceLedgerMapper, org.mockito.Mockito.never())
+                    .selectByOperationKey(any());
+                verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitByPayNo(any());
+                assertLegacyNoMoneyOrCacheWrite();
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 单候选仍按原精确操作键拒绝，与坏状态/缺快照/钱包无关，不伪造新归属。 */
+  @Test
+  void legacySingleHistoryKeepsExactOperationKeyConflict() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String variant : java.util.List.of("different", "case", "missing")) {
+        var request = installLegacyDebit(entry, null);
+        var candidate = new BalanceLedgerPO();
+        candidate.operationKey =
+            switch (variant) {
+              case "different" -> "other-operation";
+              case "case" -> request.operationKey.toUpperCase(java.util.Locale.ROOT);
+              case "missing" -> null;
+              default -> throw new AssertionError(variant);
+            };
+        when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
+            .thenReturn(java.util.List.of(candidate));
+        var failure =
+            assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> invokeLegacyDebit(entry, request));
+        assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+        assertEquals("支付号已绑定其他扣款操作", failure.getMessage());
+        assertEquals(409, failure.getHttpStatus());
+        verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectByOperationKey(any());
+        assertLegacyNoMoneyOrCacheWrite();
+      }
+    }
+  }
+
+  /** 数据库故障原对象传播，错误attempt仍先拒绝；所有失败均不产生资金或缓存写。 */
+  @Test
+  void legacyBoundedHistoryFaultKeepsAttemptPriority() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      var request = installLegacyDebit(entry, null);
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "owned-legacy-bounded-history-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceLedgerMapper)
+          .findDebitCandidatesByPayNo(request.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure, assertThrows(RuntimeException.class, () -> invokeLegacyDebit(entry, request)));
+      assertLegacyNoMoneyOrCacheWrite();
+      var invalidRequest = installLegacyDebit(entry, "APPLIED");
+      legacyDebitAttempt.mode = "TCC";
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceLedgerMapper)
+          .findDebitCandidatesByPayNo(invalidRequest.payNo);
+      assertEquals(
+          "IDEMPOTENCY_CONFLICT",
+          assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> invokeLegacyDebit(entry, invalidRequest))
+              .getCode());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findDebitCandidatesByPayNo(any());
+      assertLegacyNoMoneyOrCacheWrite();
+    }
   }
 
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
@@ -1457,7 +1569,8 @@ class BalanceLedgerServiceTest {
       legacyDebitAttempt.state = state;
       when(balanceLedgerMapper.selectByOperationKey(request.operationKey))
           .thenReturn(legacyDebitLedger);
-      when(balanceLedgerMapper.selectDebitByPayNo(request.payNo)).thenReturn(legacyDebitLedger);
+      when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
+          .thenReturn(java.util.List.of(legacyDebitLedger));
       when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(legacyDebitAttempt);
     }
     return request;
