@@ -214,13 +214,14 @@ public class PayConsistencyService {
         retryStatus = "ORDER_SYNC_UNKNOWN";
       }
 
-      // 3. 扣款后先持久化恢复状态，再触发远程订单支付迁移。
+      // 3. 已扣款且明确取消时直接恢复退款，不能先将REFUND_PENDING回写为订单等待。
+      if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
+        return refundCancelled(intent, claimToken);
+      // 4. 其它扣款路径先持久化恢复状态，再触发远程订单支付迁移。
       requireOwnedLegacyWrite(
           payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now()));
       requireOwnedLegacyWrite(
           payDebitIntentMapper.updateOwnedLegacyStatus(intent.payNo, claimToken, "DEBITED", now()));
-      if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
-        return refundCancelled(intent, claimToken);
       if (("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
           && stockActionSucceeded(order)) return finishSuccess(intent, claimToken);
       if ("CANCELLED".equals(order.status())
@@ -237,10 +238,10 @@ public class PayConsistencyService {
           && paid.data != null
           && ("PAID".equals(paid.data.status()) || "COMPLETED".equals(paid.data.status())))
         return resolveAfterUncertainOrderWrite(intent, claimToken);
-      // 4. 非明确成功时重新读订单；只有明确取消才退款。
+      // 5. 非明确成功时重新读订单；只有明确取消才退款。
       return resolveAfterUncertainOrderWrite(intent, claimToken);
     } catch (RuntimeException remoteOrPersistenceFailure) {
-      // 5. 任何查询或远程结果未知都保留原 payNo 并定时重试，禁止猜测退款。
+      // 6. 任何查询或远程结果未知都保留原 payNo 并定时重试，禁止猜测退款。
       if ("DEBITED".equals(intent.status) || "ORDER_SYNC_UNKNOWN".equals(intent.status))
         retryStatus = "ORDER_SYNC_UNKNOWN";
       if ("REFUND_PENDING".equals(intent.status)) retryStatus = "REFUND_PENDING";

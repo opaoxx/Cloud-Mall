@@ -949,6 +949,32 @@ class PayConsistencyServiceTest {
     };
   }
 
+  /** 已等待退款的支付单无需经过不允许该状态的订单同步stage。 */
+  @Test
+  void cancelledDebitResumesRefundWithoutRegressingThroughGenericOrderStage() {
+    for (String status :
+        java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      prepareRefundPath(false, "refund:pay-1");
+      PayDebitIntentPO pending = intent();
+      pending.status = status;
+      when(intentMapper.findByPayNo("pay-1")).thenReturn(pending);
+      var payment = payRecordMapper.selectByPayNo("pay-1").get(0);
+      payment.status = "REFUND_PENDING";
+      org.mockito.Mockito.clearInvocations(payRecordMapper);
+      when(payRecordMapper.markOwnedLegacyOrderUnknown(any(), any(), any())).thenReturn(0);
+      assertEquals("REFUNDED", consistencyService.process("pay-1"), status);
+      verify(payRecordMapper, never()).markOwnedLegacyOrderUnknown(any(), any(), any());
+      verify(intentMapper, never()).updateOwnedLegacyStatus(any(), any(), eq("DEBITED"), any());
+      verify(intentMapper)
+          .updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq("REFUND_PENDING"), any());
+      verify(intentMapper).hasOwnedLegacyLease(eq("pay-1"), anyString(), any());
+      verify(userClient).refund(eq(7L), eq(7L), any());
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+      verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("REFUNDED"), any());
+    }
+  }
+
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */
   private void prepareRefundPath(boolean marker, String refundKey) {
     setUp();

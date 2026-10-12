@@ -1170,6 +1170,103 @@ class PayLegacyRefundLedgerMySqlIT {
     };
   }
 
+  /** 真实REFUND_PENDING原支付与四种活动intent可继续owned退款并原子结清。 */
+  @Test
+  void durableRefundPendingPaymentResumesFromEveryActiveIntentStage() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String status : List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("REFUND_PENDING", status);
+            UserClient user = mock(UserClient.class);
+            OrderClient orders = mock(OrderClient.class);
+            configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+            assertEquals("REFUNDED", newService(user, orders).process("pay-1"), status);
+            assertEquals("REFUNDED", paymentStatus());
+            assertEquals("REFUNDED", intentStatus());
+            assertEquals(1, intentAttempts());
+            assertNull(intentLeaseOwner());
+            assertTrue(
+                fixture.queryForObject(
+                    "SELECT last_error IS NULL FROM pay_debit_intent WHERE pay_no='pay-1'",
+                    Boolean.class));
+            verify(user).refund(eq(7L), eq(7L), any());
+            verify(user, never()).debit(any(), any(), any());
+            verify(orders, never()).paid(any(), any());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** RPC/退款proof故障实际落pending后，第二次领取必须沿同key恢复而非永久stage0。 */
+  @Test
+  void retryAfterRefundFaultReclaimsAndCompletesTheSamePayment() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String fault : List.of("rpc-fault", "proof-missing", "proof-partial")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            UserClient user = mock(UserClient.class);
+            OrderClient orders = mock(OrderClient.class);
+            configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+            if ("rpc-fault".equals(fault))
+              when(user.refund(eq(7L), eq(7L), any()))
+                  .thenThrow(new IllegalStateException("owned-refund-rpc-fault"));
+            else
+              stubRefundOperation(
+                  user,
+                  "proof-missing".equals(fault) ? "not-found" : "partial",
+                  "refund:pay-1",
+                  "5.00");
+            PayConsistencyService service = newService(user, orders);
+            assertEquals("REFUND_PENDING", service.process("pay-1"));
+            assertEquals("REFUND_PENDING", paymentStatus());
+            assertEquals("REFUND_PENDING", intentStatus());
+            assertEquals(1, intentAttempts());
+            assertNull(intentLeaseOwner());
+            assertTrue(retryErrorPresent());
+            // 1. 仅使本测试owned行到期，不等待系统时钟或修改源库。
+            assertEquals(
+                1,
+                fixture.update(
+                    "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 SECOND WHERE"
+                        + " pay_no='pay-1'"));
+            // 2. 先用doReturn替换故障stub，避免when调用旧thenThrow或404响应。
+            org.mockito.Mockito.doReturn(
+                    ApiResponse.ok(new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00")))
+                .when(user)
+                .refund(eq(7L), eq(7L), any());
+            org.mockito.Mockito.doReturn(
+                    ApiResponse.ok(
+                        new UserClient.BalanceOperationView(
+                            "refund:pay-1", "REFUND", "APPLIED", "10.00", null)))
+                .when(user)
+                .operation(7L, "refund:pay-1", 7L);
+            assertEquals("REFUNDED", service.process("pay-1"), fault);
+            assertEquals("REFUNDED", paymentStatus());
+            assertEquals("REFUNDED", intentStatus());
+            assertEquals(2, intentAttempts());
+            assertNull(intentLeaseOwner());
+            assertTrue(
+                fixture.queryForObject(
+                    "SELECT last_error IS NULL FROM pay_debit_intent WHERE pay_no='pay-1'",
+                    Boolean.class));
+            var requests = org.mockito.ArgumentCaptor.forClass(UserClient.RefundRequest.class);
+            verify(user, times(2)).refund(eq(7L), eq(7L), requests.capture());
+            for (UserClient.RefundRequest request : requests.getAllValues()) {
+              assertEquals("refund:pay-1", request.refundOperationKey());
+              assertEquals("pay-1", request.originalOperationKey());
+              assertEquals("pay-1", request.payNo());
+              assertEquals("order-1", request.orderNo());
+              assertEquals(0, BigDecimal.TEN.compareTo(request.amount()));
+            }
+            verify(user, never()).debit(any(), any(), any());
+            verify(orders, never()).paid(any(), any());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");
