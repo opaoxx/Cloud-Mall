@@ -345,6 +345,68 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 真实重复DEBIT必须是原业务409；各资金入口保持四表完整facts。 */
+  @Test
+  void noFundsEntrancesRejectDuplicateDebitsWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String state : List.of("none", "trying", "cancelled-frozen", "cancelled-empty")) {
+      for (String operation :
+          "trying".equals(state) ? List.of("try", "confirm", "cancel") : List.of("try", "cancel")) {
+        for (String variant :
+            List.of("APPLIED", "REJECTED", "UNKNOWN", "type-alias", "pay-alias", "three")) {
+          assertions.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var original =
+                    request("bound-" + state + "-" + operation + "-" + variant, 7L, "10.00");
+                if (List.of("trying", "cancelled-frozen").contains(state))
+                  service.tryDebit(original);
+                if (state.startsWith("cancelled")) service.cancelDebit(finalizeRequest(original));
+                int duplicateCount = "three".equals(variant) ? 3 : 2;
+                for (int index = 1; index <= duplicateCount; index++) {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                          + " VALUES(?,7,?,?,?,?,2,?,100,98,NOW(3))",
+                      -index,
+                      "duplicate-debit-" + index,
+                      "type-alias".equals(variant) ? "debit" : "DEBIT",
+                      "pay-alias".equals(variant)
+                          ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : original.payNo,
+                      original.orderNo,
+                      List.of("APPLIED", "REJECTED", "UNKNOWN").contains(variant)
+                          ? variant
+                          : "APPLIED");
+                }
+                var before = allFundsFacts();
+                BizException failure =
+                    assertThrows(
+                        BizException.class,
+                        () -> {
+                          switch (operation) {
+                            case "try" -> service.tryDebit(original);
+                            case "confirm" -> service.confirmDebit(finalizeRequest(original));
+                            case "cancel" -> service.cancelDebit(finalizeRequest(original));
+                            default -> throw new AssertionError(operation);
+                          }
+                        },
+                        state + ":" + operation + ":" + variant);
+                assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                assertEquals(409, failure.getHttpStatus());
+                assertEquals("支付或账本键已有扣款事实", failure.getMessage());
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 同pay非DEBIT原行不能作为无账本证明，含仅attempt空取消的历史重放。 */
   @Test
   void noFundsEntrancesRejectOrphanPaymentLedgerRowsWithoutWriting() {

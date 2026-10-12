@@ -192,7 +192,8 @@ class BalanceTccDebitServiceTest {
       installFunds("CANCELLED", "none");
       if (emptyCancellation) when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
       if ("payDebit".equals(source))
-        when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(originalLedger);
+        when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo))
+            .thenReturn(List.of(originalLedger));
       else when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(originalLedger);
       assertPersistedAmountConflict(operation, "IDEMPOTENCY_CONFLICT");
       verify(attemptMapper, never()).insert(any());
@@ -206,7 +207,8 @@ class BalanceTccDebitServiceTest {
       setUp();
       installFunds("TRYING", "none");
       if ("payDebit".equals(source))
-        when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(originalLedger);
+        when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo))
+            .thenReturn(List.of(originalLedger));
       else when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(originalLedger);
       assertPersistedAmountConflict("try", "IDEMPOTENCY_CONFLICT");
       verify(attemptMapper, never()).insert(any());
@@ -560,6 +562,75 @@ class BalanceTccDebitServiceTest {
     return candidate;
   }
 
+  /** 无账本入口仅接受可靠空DEBIT范围，所有候选在固定key/全type查询前拒绝。 */
+  @Test
+  void noFundsEntrancesRejectBoundedDebitCandidatesBeforeOtherLedgerReads() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String state : List.of("none", "TRYING", "CANCELLED", "empty-cancel")) {
+      for (String operation :
+          "TRYING".equals(state) ? List.of("try", "confirm", "cancel") : List.of("try", "cancel")) {
+        for (String variant : List.of("single", "two", "three", "null-row", "null-list")) {
+          assertions.add(
+              () -> {
+                prepareNoFundsScope(state);
+                List<BalanceLedgerPO> candidates =
+                    switch (variant) {
+                      case "single" -> List.of(originalLedger);
+                      case "two" -> List.of(originalLedger, new BalanceLedgerPO());
+                      case "three" ->
+                          List.of(originalLedger, new BalanceLedgerPO(), new BalanceLedgerPO());
+                      case "null-row" -> java.util.Collections.singletonList(null);
+                      case "null-list" -> null;
+                      default -> throw new AssertionError(variant);
+                    };
+                when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo))
+                    .thenReturn(candidates);
+                assertPersistedAmountConflict(
+                    operation,
+                    "null-list".equals(variant) ? "BALANCE_TCC_UNKNOWN" : "IDEMPOTENCY_CONFLICT");
+                verify(ledgerMapper).findDebitCandidatesByPayNo(request().payNo);
+                verify(ledgerMapper, never()).selectDebitByPayNo(any());
+                verify(ledgerMapper, never()).selectByOperationKey(any());
+                verify(ledgerMapper, never()).findPaymentLedgerCandidates(any());
+                verify(attemptMapper, never()).insert(any());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 有界DAO故障保持原异常对象和无写语义，不降为业务冲突或空集合。 */
+  @Test
+  void noFundsBoundedDebitFaultPropagatesWithoutWriting() {
+    for (String operation : List.of("try", "confirm", "cancel")) {
+      prepareNoFundsScope("TRYING");
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "owned-bounded-debit-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(ledgerMapper)
+          .findDebitCandidatesByPayNo(request().payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(
+              org.springframework.dao.DataAccessResourceFailureException.class,
+              () -> invokeNoFundsEntry(operation)));
+      verify(ledgerMapper, never()).selectDebitByPayNo(any());
+      verify(ledgerMapper, never()).selectByOperationKey(any());
+      verify(ledgerMapper, never()).findPaymentLedgerCandidates(any());
+      verify(userMapper, never()).freezeBalance(any(), any(), any());
+      verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+      verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+      verify(ledgerMapper, never()).insert(any());
+      verify(attemptMapper, never()).insert(any());
+      verify(attemptMapper, never()).transitionState(any(), any(), any(), any());
+      verify(tccMapper, never()).insert(any());
+      verify(tccMapper, never()).confirmTrying(any(), any());
+      verify(tccMapper, never()).cancelTrying(any(), any());
+    }
+  }
+
   /** 无账本的每条状态入口不能忽略原pay其它类型/state/user行或非空null行。 */
   @Test
   void noFundsEntrancesRequireAnActuallyEmptyPaymentLedgerScope() {
@@ -617,7 +688,8 @@ class BalanceTccDebitServiceTest {
       for (String oldGate : List.of("pay-debit", "fixed-key")) {
         prepareNoFundsScope("TRYING");
         if ("pay-debit".equals(oldGate))
-          when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(originalLedger);
+          when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo))
+              .thenReturn(List.of(originalLedger));
         else
           when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(originalLedger);
         org.mockito.Mockito.doThrow(failure)
@@ -658,7 +730,7 @@ class BalanceTccDebitServiceTest {
     installFunds(
         "empty-cancel".equals(state) ? "CANCELLED" : "none".equals(state) ? "TRYING" : state,
         "none");
-    when(ledgerMapper.selectDebitByPayNo(request().payNo)).thenReturn(null);
+    when(ledgerMapper.findDebitCandidatesByPayNo(request().payNo)).thenReturn(List.of());
     when(ledgerMapper.selectByOperationKey(request().ledgerKey)).thenReturn(null);
     if (List.of("none", "empty-cancel").contains(state))
       when(tccMapper.selectByPayNo(request().payNo)).thenReturn(null);
