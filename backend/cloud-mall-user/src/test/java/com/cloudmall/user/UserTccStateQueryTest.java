@@ -91,6 +91,7 @@ class UserTccStateQueryTest {
     when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt);
     when(debits.selectByPayNo(receive.payNo)).thenReturn(debit);
     when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(ledger);
+    when(ledgers.selectDebitByPayNo(receive.payNo)).thenReturn(ledger);
     when(fences.findByBranch(receive.xid, 12L)).thenReturn(fence(2, 12L));
 
     UserTccStateVO state = query.read(7L, receive.operationKey, receive.xid);
@@ -307,13 +308,14 @@ class UserTccStateQueryTest {
           .thenReturn("UNKNOWN".equals(state) ? null : debit(state, 12L));
       when(ledgers.selectByOperationKey(original.ledgerKey))
           .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
+      when(ledgers.selectDebitByPayNo(original.payNo))
+          .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
       when(fences.findByBranch(original.xid, 12L))
           .thenReturn(fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L));
       assertEquals(state, query.read(7L, original.operationKey, original.xid).state);
     }
   }
 
-  /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
   /** 任意状态/键的同pay DEBIT都与取消证明矛盾，坏金额/外单不应使矛盾消失。 */
   @Test
   void cancelledStateCannotIgnoreAlternateDebitKeysOrStates() {
@@ -397,9 +399,9 @@ class UserTccStateQueryTest {
     }
   }
 
-  /** 固定键冲突仍先短路，未取消三态不得额外查询全pay DEBIT或扩大原范围。 */
+  /** 固定键冲突与UNKNOWN仍先短路，其他已知状态按当前scope协议读取。 */
   @Test
-  void fixedLedgerConflictAndOtherStatesKeepDebitScopeQueryPriority() {
+  void fixedLedgerConflictAndUnknownStateKeepScopeQueryPriority() {
     setUp();
     installKnownState("CANCELLED");
     when(ledgers.selectByOperationKey("pay-query-1")).thenReturn(ledger());
@@ -413,17 +415,159 @@ class UserTccStateQueryTest {
         when(receives.findByOperationKey("tcc-debit:pay-query-1")).thenReturn(receive(null));
       else installKnownState(state);
       assertEquals(state, query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
-      org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-          .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+      if ("UNKNOWN".equals(state))
+        org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+            .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+      else org.mockito.Mockito.verify(ledgers).selectDebitByPayNo("pay-query-1");
     }
   }
 
+  /** TRYING不能用固定键缺行隐藏同支付号别键扣款。 */
+  @Test
+  void tryingStateRejectsOtherDebitKeysRegardlessOfCandidateState() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (String ledgerState : List.of("APPLIED", "PENDING", "UNKNOWN")) {
+      for (boolean corruptIdentity : List.of(false, true)) {
+        assertions.add(
+            () -> {
+              setUp();
+              installKnownState("TRYING");
+              var observed = ledger();
+              observed.operationKey = "alternate-debit-key";
+              observed.state = ledgerState;
+              if (corruptIdentity) {
+                observed.userId = 42L;
+                observed.amount = null;
+              }
+              when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(observed);
+              var conflict =
+                  assertThrows(
+                      BizException.class,
+                      () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+              assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
+              assertEquals(409, conflict.getHttpStatus());
+              verifyNoInteractions(fences);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 确认固定键成功还必须有同pay唯一且同原载荷的扣款范围证据。 */
+  @Test
+  void confirmedStateRejectsMissingOrDifferentDebitScopeEvidence() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (String variant :
+        List.of(
+            "missing",
+            "user",
+            "pay",
+            "order",
+            "key",
+            "type",
+            "state",
+            "amount-null",
+            "amount",
+            "before-null",
+            "before",
+            "after-null",
+            "after")) {
+      assertions.add(
+          () -> {
+            setUp();
+            installKnownState("CONFIRMED");
+            var observed = ledger();
+            switch (variant) {
+              case "user" -> observed.userId = 42L;
+              case "pay" -> observed.payNo = "PAY-query-1";
+              case "order" -> observed.orderNo = "other-order";
+              case "key" -> observed.operationKey = "another-key";
+              case "type" -> observed.operationType = "debit";
+              case "state" -> observed.state = "REJECTED";
+              case "amount-null" -> observed.amount = null;
+              case "amount" -> observed.amount = new BigDecimal("11.00");
+              case "before-null" -> observed.balanceBefore = null;
+              case "before" -> observed.balanceBefore = new BigDecimal("101.00");
+              case "after-null" -> observed.balanceAfter = null;
+              case "after" -> observed.balanceAfter = new BigDecimal("89.00");
+              default -> {}
+            }
+            when(ledgers.selectDebitByPayNo("pay-query-1"))
+                .thenReturn("missing".equals(variant) ? null : observed);
+            var conflict =
+                assertThrows(
+                    BizException.class,
+                    () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+            assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
+            assertEquals(409, conflict.getHttpStatus());
+            verifyNoInteractions(fences);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 范围查询DB故障或非唯一结果不得由固定键已核验掩盖。 */
+  @Test
+  void knownFundsScopeFailuresPropagateWithoutReportingSuccess() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (String state : List.of("TRYING", "CONFIRMED")) {
+      for (RuntimeException unavailable :
+          List.of(
+              new org.springframework.dao.DataRetrievalFailureException("owned-db-error"),
+              new org.apache.ibatis.exceptions.TooManyResultsException("owned-multiple-debits"))) {
+        assertions.add(
+            () -> {
+              setUp();
+              installKnownState(state);
+              when(ledgers.selectDebitByPayNo("pay-query-1")).thenThrow(unavailable);
+              RuntimeException observed =
+                  assertThrows(
+                      RuntimeException.class,
+                      () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+              org.junit.jupiter.api.Assertions.assertSame(unavailable, observed);
+              verifyNoInteractions(fences);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 健康scope保数值尾零，fixed键原矛盾仍早停，UNKNOWN与取消原语义保持。 */
+  @Test
+  void knownFundsScopeKeepsHealthyAmountsAndOriginalGatePriority() {
+    for (String state : List.of("TRYING", "CONFIRMED")) {
+      setUp();
+      installKnownState(state);
+      var candidate = ledger();
+      candidate.amount = new BigDecimal("10.000");
+      candidate.balanceBefore = new BigDecimal("100.000");
+      candidate.balanceAfter = new BigDecimal("90.000");
+      when(ledgers.selectDebitByPayNo("pay-query-1"))
+          .thenReturn("CONFIRMED".equals(state) ? candidate : null);
+      var view = query.read(7L, "tcc-debit:pay-query-1", "xid-query-1");
+      assertEquals(state, view.state);
+      assertEquals("CONFIRMED".equals(state), view.ledgerApplied);
+      setUp();
+      installKnownState(state);
+      when(ledgers.selectByOperationKey("pay-query-1"))
+          .thenReturn("TRYING".equals(state) ? ledger() : null);
+      assertThrows(
+          BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+      org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+          .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+      verifyNoInteractions(fences);
+    }
+  }
+
+  /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
   private TccFenceLogPO installKnownState(String state) {
     UserTccReceivePO receive = receive(12L);
     when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
     when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt(state, 12L));
     when(debits.selectByPayNo(receive.payNo)).thenReturn(debit(state, 12L));
     when(ledgers.selectByOperationKey(receive.ledgerKey))
+        .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
+    when(ledgers.selectDebitByPayNo(receive.payNo))
         .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
     TccFenceLogPO observed =
         fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L);

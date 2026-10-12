@@ -111,6 +111,7 @@ public class UserTccStateQuery {
     Integer expectedFence;
     if ("TRYING".equals(attempt.state)) {
       require(debit != null && ledger == null);
+      require(ledgers.selectDebitByPayNo(receive.payNo) == null);
       expectedFence = 1;
     } else if ("CONFIRMED".equals(attempt.state)) {
       require(
@@ -127,6 +128,7 @@ public class UserTccStateQuery {
               && Objects.equals(ledger.orderNo, receive.orderNo)
               && Objects.equals(ledger.operationKey, receive.ledgerKey)
               && ledger.amount.compareTo(receive.amount) == 0);
+      require(matchesDebitScope(ledgers.selectDebitByPayNo(receive.payNo), ledger));
       view.ledgerApplied = true;
       expectedFence = 2;
     } else if ("CANCELLED".equals(attempt.state)) {
@@ -145,6 +147,23 @@ public class UserTccStateQuery {
     else require(!"TRYING".equals(attempt.state));
     view.state = attempt.state;
     return view;
+  }
+
+  /** 原固定账本已通过证明；全pay唯一候选须复制原载荷与金额，缺失或别键不能证明确认。 */
+  private static boolean matchesDebitScope(BalanceLedgerPO candidate, BalanceLedgerPO original) {
+    return candidate != null
+        && Objects.equals(candidate.userId, original.userId)
+        && Objects.equals(candidate.payNo, original.payNo)
+        && Objects.equals(candidate.orderNo, original.orderNo)
+        && Objects.equals(candidate.operationKey, original.operationKey)
+        && "DEBIT".equals(candidate.operationType)
+        && "APPLIED".equals(candidate.state)
+        && validPositiveMoney(candidate.amount)
+        && validBalance(candidate.balanceBefore)
+        && validBalance(candidate.balanceAfter)
+        && candidate.amount.compareTo(original.amount) == 0
+        && candidate.balanceBefore.compareTo(original.balanceBefore) == 0
+        && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
   }
 
   /** 原claim载荷先于任何资金查询核验，null分支是尚未bind的合法状态，不补造接收事实。 */

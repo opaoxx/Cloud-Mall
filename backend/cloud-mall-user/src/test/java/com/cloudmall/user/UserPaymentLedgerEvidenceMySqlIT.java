@@ -222,7 +222,7 @@ class UserPaymentLedgerEvidenceMySqlIT {
       assertEquals(
           "5.00".equals(amount) ? "BLOCKED_LOCAL_EVIDENCE" : "BLOCKED_EXTERNAL_EVIDENCE",
           report.classification);
-      assertEquals(amount == null ? 12 : 14, tracked.statements.size());
+      assertEquals(amount == null ? 13 : 15, tracked.statements.size());
       assertEquals(1, tracked.connections);
       assertFalse(report.automaticActionsAllowed);
       assertEquals(before, facts());
@@ -244,7 +244,7 @@ class UserPaymentLedgerEvidenceMySqlIT {
       assertTrue(report.reasonCodes.contains("PAYMENT_REFUND_ORIGIN_UNPROVEN"));
       assertNull(report.validatedRefundTotalAmount);
       assertNull(report.vectorSha256);
-      assertEquals(12, tracked.statements.size());
+      assertEquals(13, tracked.statements.size());
       assertEquals(before, facts());
     }
   }
@@ -273,6 +273,11 @@ class UserPaymentLedgerEvidenceMySqlIT {
       var before = facts();
       tracked.reset();
       tracked.checking = true;
+      if (mutation.startsWith("operation_type='DEBIT'")) {
+        assertEquals(503, assertThrows(BizException.class, this::inspect).getHttpStatus());
+        assertEquals(before, facts());
+        continue;
+      }
       var report = inspect();
       assertEquals("LOCAL_CONFLICT", report.classification, mutation);
       assertNull(report.vectorSha256);
@@ -314,12 +319,12 @@ class UserPaymentLedgerEvidenceMySqlIT {
         assertTrue(report.candidatesComplete);
         assertEquals(99, report.validatedRefundCount);
         assertEquals("0.99", report.validatedRefundTotalAmount);
-        assertEquals(210, tracked.statements.size());
+        assertEquals(211, tracked.statements.size());
       } else {
         assertFalse(report.candidatesComplete);
         assertNull(report.vectorSha256);
         assertNull(report.validatedRefundTotalAmount);
-        assertEquals(111, tracked.statements.size());
+        assertEquals(112, tracked.statements.size());
       }
       assertEquals(before, facts());
     }
@@ -342,7 +347,7 @@ class UserPaymentLedgerEvidenceMySqlIT {
     var first = inspect();
     assertTrue(first.candidatesComplete);
     assertEquals(1, first.observedCount);
-    assertEquals(12, tracked.statements.size());
+    assertEquals(13, tracked.statements.size());
     assertEquals(1, tracked.connections);
     tracked.reset();
     var next = inspect();

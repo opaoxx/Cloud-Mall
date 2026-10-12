@@ -210,7 +210,7 @@ class UserLinkedRefundEvidenceMySqlIT {
       assertTrue(report.candidatesComplete);
       assertEquals(0, report.observedCount);
       assertEquals("0.00", report.validatedTotalAmount);
-      assertEquals(10, tracked.statements.size());
+      assertEquals(11, tracked.statements.size());
       assertEquals(before, facts());
     }
   }
@@ -248,7 +248,7 @@ class UserLinkedRefundEvidenceMySqlIT {
       int expectedCandidates = "empty".equals(variant) ? 0 : "partial".equals(variant) ? 1 : 2;
       assertEquals(expectedCandidates, report.observedCount);
       assertEquals(1, tracked.connections);
-      assertEquals(10 + expectedCandidates, tracked.statements.size());
+      assertEquals(11 + expectedCandidates, tracked.statements.size());
       assertEquals(before, facts());
     }
   }
@@ -276,6 +276,11 @@ class UserLinkedRefundEvidenceMySqlIT {
       var before = facts();
       tracked.reset();
       tracked.checking = true;
+      if ("operation_type='DEBIT'".equals(mutation)) {
+        assertEquals(503, assertThrows(BizException.class, this::inspect).getHttpStatus());
+        assertEquals(before, facts());
+        continue;
+      }
       var report = inspect();
       assertEquals("LOCAL_CONFLICT", report.classification, mutation);
       assertEquals(1, report.observedCount);
@@ -325,13 +330,13 @@ class UserLinkedRefundEvidenceMySqlIT {
       if (candidateCount == 100) {
         assertTrue(report.candidatesComplete);
         assertEquals("1.00", report.validatedTotalAmount);
-        assertEquals(110, tracked.statements.size());
+        assertEquals(111, tracked.statements.size());
       } else {
         assertFalse(report.candidatesComplete);
         assertTrue(report.reasonCodes.contains("REFUND_CANDIDATE_LIMIT_EXCEEDED"));
         assertNull(report.validatedTotalAmount);
         assertNull(report.vectorSha256);
-        assertEquals(10, tracked.statements.size());
+        assertEquals(11, tracked.statements.size());
       }
       assertEquals(before, facts());
     }
@@ -418,7 +423,7 @@ class UserLinkedRefundEvidenceMySqlIT {
     var conflict = inspect();
     assertEquals("LOCAL_CONFLICT", conflict.classification);
     assertFalse(conflict.queryAttempted);
-    assertEquals(9, tracked.statements.size());
+    assertEquals(10, tracked.statements.size());
     assertEquals(before, facts());
   }
 
@@ -436,14 +441,14 @@ class UserLinkedRefundEvidenceMySqlIT {
     assertEquals(1, first.observedCount);
     assertEquals("4.00", first.validatedTotalAmount);
     assertTrue(first.reasonCodes.contains("REFUND_TOTAL_PARTIAL"));
-    assertEquals(11, tracked.statements.size());
+    assertEquals(12, tracked.statements.size());
     assertEquals(1, tracked.connections);
     tracked.reset();
     var next = inspect();
     assertEquals(2, next.observedCount);
     assertEquals("10.00", next.validatedTotalAmount);
     assertEquals("BLOCKED_EXTERNAL_EVIDENCE", next.classification);
-    assertEquals(12, tracked.statements.size());
+    assertEquals(13, tracked.statements.size());
     assertEquals(1, tracked.connections);
   }
 
@@ -489,7 +494,7 @@ class UserLinkedRefundEvidenceMySqlIT {
             "wrong-client-key",
             "wrong-client-xid")) assertFalse(response.contains(raw), raw);
     assertEquals(1, tracked.connections);
-    assertEquals(11, tracked.statements.size());
+    assertEquals(12, tracked.statements.size());
     assertEquals(before, facts());
     tracked.checking = false;
     fixture.execute("DROP TABLE user_tcc_receive");

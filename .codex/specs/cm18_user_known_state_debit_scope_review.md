@@ -18,7 +18,7 @@ require(ledgers.selectDebitByPayNo(receive.payNo) == null)
 
 ## 3. CONFIRMED scope proof
 
-在 CONFIRMED 原 fixed ledger、amount、snapshot、identity/type/state/Fence 全部门通过后、设置 `ledgerApplied=true` 前，复用 `selectDebitByPayNo(receive.payNo)`：
+在 CONFIRMED 原 fixed ledger、amount、snapshot、identity/type/state 门通过后、Fence 查询及设置 `ledgerApplied=true` 之前，复用 `selectDebitByPayNo(receive.payNo)`；原 Fence 查询/校验位置不移动：
 
 - candidate 必须非 null，exact userId/payNo/orderNo/operationKey=`receive.ledgerKey`、operationType=`DEBIT`、state=`APPLIED`；
 - amount、balanceBefore/After 合法并与原 debit/receive 数值精确相等（保留 BigDecimal 尾零数值等值）；
@@ -26,6 +26,8 @@ require(ledgers.selectDebitByPayNo(receive.payNo) == null)
 - null、错 tuple/key/type/state/amount/snapshot、非唯一多行导致既有 selectOne/DataAccess 异常，沿原 `USER_TCC_STATE_CONFLICT` 或数据库异常渠道，不输出 CONFIRMED/ledgerApplied=true。
 
 合法唯一 candidate 才保留 CONFIRMED/ledgerApplied=true。固定 key 缺失/坏、原 debit/fixed ledger 门失败仍先短路，不新增全 pay 查询。
+
+若同 payNo 存在第二条 DEBIT，既有 `selectDebitByPayNo` 的 selectOne 先抛 DataAccess/TooManyResults：原 state GET 保持 generic 500，诊断 wrapper 按原固定 evidence-unavailable 503；下游 linked/payment/terminal candidate reader 不再执行，旧 LOCAL_CONFLICT 报告不适用，facts/no-write 保持。Terminal peer 在 fixed ledger 已存在但全 pay DEBIT scope 返回 null 时，原 Query 先抛 `USER_TCC_STATE_CONFLICT`/409，再由 Terminal reader 既有 catch 分类为报告 `LOCAL_CONFLICT` + reason `TERMINAL_PEER_PERSISTED_CONFLICT`；诊断报告 HTTP 仍保持原 200，不把报告 reason 当作 Controller HTTP 409，也不降级为 `BLOCKED_LOCAL_EVIDENCE` 或继续后续 peer 分类。
 
 ## 4. 不变边界与验收
 

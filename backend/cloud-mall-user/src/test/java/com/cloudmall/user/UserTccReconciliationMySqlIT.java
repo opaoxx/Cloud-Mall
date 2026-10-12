@@ -312,6 +312,148 @@ class UserTccReconciliationMySqlIT {
     assertEquals(afterWriter, facts());
   }
 
+  /** 固定键缺行的TRYING仍须拒绝同pay其它键/状态/CI候选扣款。 */
+  @Test
+  void tryingOtherDebitKeysAreRejectedByRealReadRoutes() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String ledgerState : List.of("APPLIED", "PENDING", "UNKNOWN")) {
+      for (String payNo : List.of("pay1", "PAY1")) {
+        assertions.add(
+            () -> {
+              seed("TRYING");
+              seedAlternateLedger(payNo, "DEBIT", ledgerState);
+              var before = facts();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> {
+                    tracked.reset();
+                    tracked.checking = true;
+                    mvc.perform(
+                            get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                                .header("X-User-Id", "7")
+                                .header("X-Internal-Service", "cloud-mall-pay")
+                                .header("X-Internal-Callback-Token", "ops-secret")
+                                .param("xid", "private-tc:8091:original"))
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+                    assertEquals(1, tracked.connections);
+                    assertEquals(before, facts());
+                  },
+                  () -> {
+                    tracked.reset();
+                    tracked.checking = true;
+                    mvc.perform(
+                            get("/api/internal/users/7/balance/tcc-reconciliation/pay1")
+                                .header("X-Internal-Service", "cm18-reconciliation")
+                                .header("X-Internal-Callback-Token", "ops-secret"))
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"))
+                        .andExpect(header().string("Cache-Control", "no-store"));
+                    assertEquals(1, tracked.connections);
+                    assertEquals(before, facts());
+                  });
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    verifyNoInteractions(resource, receiveStore);
+  }
+
+  /** 原固定账本正确加第二DEBIT真实触发非唯一；旧异常渠道必须阻止确认成功。 */
+  @Test
+  void confirmedMultipleDebitRowsCannotBeHiddenByCorrectFixedLedger() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String ledgerState : List.of("APPLIED", "PENDING", "UNKNOWN")) {
+      for (String payNo : List.of("pay1", "PAY1")) {
+        assertions.add(
+            () -> {
+              seed("CONFIRMED");
+              seedAlternateLedger(payNo, "DEBIT", ledgerState);
+              var before = facts();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> {
+                    tracked.reset();
+                    tracked.checking = true;
+                    mvc.perform(
+                            get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                                .header("X-User-Id", "7")
+                                .header("X-Internal-Service", "cloud-mall-pay")
+                                .header("X-Internal-Callback-Token", "ops-secret")
+                                .param("xid", "private-tc:8091:original"))
+                        .andExpect(status().isInternalServerError())
+                        .andExpect(jsonPath("$.code").value("COMMON_INTERNAL_ERROR"))
+                        .andExpect(jsonPath("$.data").doesNotExist());
+                    assertEquals(1, tracked.connections);
+                    assertEquals(before, facts());
+                  },
+                  () -> {
+                    tracked.reset();
+                    tracked.checking = true;
+                    mvc.perform(
+                            get("/api/internal/users/7/balance/tcc-reconciliation/pay1")
+                                .header("X-Internal-Service", "cm18-reconciliation")
+                                .header("X-Internal-Callback-Token", "ops-secret"))
+                        .andExpect(status().isServiceUnavailable())
+                        .andExpect(jsonPath("$.code").value("USER_TCC_RECONCILIATION_UNAVAILABLE"))
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andExpect(jsonPath("$.data").doesNotExist());
+                    assertEquals(1, tracked.connections);
+                    assertEquals(before, facts());
+                  });
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    verifyNoInteractions(resource, receiveStore);
+  }
+
+  /** 唯一原扣款、退款及其它pay对照不扩大scope；确认历史Fence过期兼容保持。 */
+  @Test
+  void healthyTryingAndConfirmedScopesIgnoreRefundAndOtherPayments() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    for (String state : List.of("TRYING", "CONFIRMED")) {
+      for (boolean expiredFence : "TRYING".equals(state) ? List.of(false) : List.of(false, true)) {
+        for (String control : List.of("none", "refund", "other-payment-debit")) {
+          seed(state);
+          if (expiredFence) fixture.update("DELETE FROM tcc_fence_log");
+          if (!"none".equals(control))
+            seedAlternateLedger(
+                "refund".equals(control) ? "pay1" : "pay2",
+                "refund".equals(control) ? "REFUND" : "DEBIT",
+                "APPLIED");
+          var before = facts();
+          tracked.reset();
+          tracked.checking = true;
+          mvc.perform(
+                  get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                      .header("X-User-Id", "7")
+                      .header("X-Internal-Service", "cloud-mall-pay")
+                      .header("X-Internal-Callback-Token", "ops-secret")
+                      .param("xid", "private-tc:8091:original"))
+              .andExpect(status().isOk())
+              .andExpect(jsonPath("$.data.state").value(state))
+              .andExpect(jsonPath("$.data.ledgerApplied").value("CONFIRMED".equals(state)));
+          assertEquals(1, tracked.connections);
+          assertEquals(before, facts());
+          tracked.reset();
+          var report = inspect();
+          assertEquals(state, report.tccState);
+          assertEquals("BLOCKED_EXTERNAL_EVIDENCE", report.classification);
+          assertEquals(1, tracked.connections);
+          assertEquals(before, facts());
+        }
+      }
+    }
+    verifyNoInteractions(resource, receiveStore);
+  }
+
   /** 构造原User state及诊断Controller，真实RR与Mapper，不启动端口或资金写资源。 */
   private static MockMvc cancelledEvidenceRoutes(
       BalanceTccDebitLocalResource resource, UserTccReceiveStore receiveStore) {
@@ -369,7 +511,7 @@ class UserTccReconciliationMySqlIT {
       assertFalse(report.automaticActionsAllowed);
       assertEquals("TRYING".equals(state) ? "30.00" : "20.00", report.account.tryingFrozenTotal());
       assertEquals(1, tracked.connections);
-      assertEquals("CANCELLED".equals(state) ? 10 : 9, tracked.statements.size());
+      assertEquals(10, tracked.statements.size());
       assertEquals(before, facts());
       String accountSql =
           tracked.statements.stream()
@@ -599,7 +741,7 @@ class UserTccReconciliationMySqlIT {
     assertEquals("0.00", report.account.tryingFrozenTotal());
     assertFalse(report.refund.present());
     assertEquals(1, tracked.connections);
-    assertEquals(9, tracked.statements.size());
+    assertEquals(10, tracked.statements.size());
     assertEquals(
         "200.00",
         fixture.queryForObject("SELECT CAST(balance AS CHAR) FROM mall_user", String.class));
@@ -646,7 +788,7 @@ class UserTccReconciliationMySqlIT {
             "wrong-client-key",
             "ops-secret")) assertFalse(response.contains(secret), secret);
     assertEquals(before, facts());
-    assertEquals(9, tracked.statements.size());
+    assertEquals(10, tracked.statements.size());
     assertEquals(1, tracked.connections);
   }
 
@@ -767,9 +909,7 @@ class UserTccReconciliationMySqlIT {
           tracked.checking = true;
           assertEquals(state, query.read(7L, "tcc-debit:pay1", "private-tc:8091:original").state);
           assertEquals(1, tracked.connections);
-          assertEquals(
-              "UNKNOWN".equals(state) ? 4 : "CANCELLED".equals(state) ? 6 : 5,
-              tracked.statements.size());
+          assertEquals("UNKNOWN".equals(state) ? 4 : 6, tracked.statements.size());
           assertEquals(before, facts());
         }
       }
@@ -872,7 +1012,7 @@ class UserTccReconciliationMySqlIT {
           .andExpect(status().isOk())
           .andExpect(jsonPath("$.data.state").value("CONFIRMED"))
           .andExpect(jsonPath("$.data.ledgerApplied").value(true));
-      assertEquals(5, tracked.statements.size());
+      assertEquals(6, tracked.statements.size());
       assertEquals(1, tracked.connections);
       assertEquals(before, facts());
       tracked.reset();
@@ -884,7 +1024,7 @@ class UserTccReconciliationMySqlIT {
           .andExpect(header().string("Cache-Control", "no-store"))
           .andExpect(jsonPath("$.data.classification").value("BLOCKED_EXTERNAL_EVIDENCE"))
           .andExpect(jsonPath("$.data.account.balance").value("200.00"));
-      assertEquals(9, tracked.statements.size());
+      assertEquals(10, tracked.statements.size());
       assertEquals(1, tracked.connections);
       assertEquals(before, facts());
       verifyNoInteractions(resource, receiveStore);
@@ -961,12 +1101,7 @@ class UserTccReconciliationMySqlIT {
                   "SELECT COUNT(*) FROM tcc_fence_log WHERE xid=? AND branch_id=11",
                   Integer.class,
                   "private-tc:8091:original"));
-          assertPersistedConflictThroughFourRoutes(
-              mvc,
-              stateRoute,
-              diagnosticRoute,
-              "CANCELLED".equals(state) ? 6 : 5,
-              "CANCELLED".equals(state) ? 7 : 6);
+          assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 6, 7);
         }
       }
       tracked.checking = false;
@@ -982,12 +1117,7 @@ class UserTccReconciliationMySqlIT {
                 "SELECT COUNT(*) FROM tcc_fence_log WHERE xid=? AND branch_id=11",
                 Integer.class,
                 "private-tc:8091:original"));
-        assertPersistedConflictThroughFourRoutes(
-            mvc,
-            stateRoute,
-            diagnosticRoute,
-            "CANCELLED".equals(state) ? 6 : 5,
-            "CANCELLED".equals(state) ? 7 : 6);
+        assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 6, 7);
       }
       tracked.checking = false;
       fixture.execute(
@@ -1014,7 +1144,7 @@ class UserTccReconciliationMySqlIT {
               .andExpect(status().isOk())
               .andExpect(jsonPath("$.data.state").value(state));
         assertEquals(1, tracked.connections);
-        assertEquals("CANCELLED".equals(state) ? 6 : 5, tracked.statements.size());
+        assertEquals(6, tracked.statements.size());
         assertEquals(before, facts());
       }
       verifyNoInteractions(resource, receiveStore);
@@ -1125,9 +1255,7 @@ class UserTccReconciliationMySqlIT {
                     .param("xid", "private-tc:8091:original"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data.state").value(state));
-        assertEquals(
-            "UNKNOWN".equals(state) ? 4 : "CANCELLED".equals(state) ? 6 : 5,
-            tracked.statements.size());
+        assertEquals("UNKNOWN".equals(state) ? 4 : 6, tracked.statements.size());
         assertEquals(1, tracked.connections);
         assertEquals(before, facts());
         tracked.reset();
@@ -1143,9 +1271,7 @@ class UserTccReconciliationMySqlIT {
                         "UNKNOWN".equals(state)
                             ? "BLOCKED_LOCAL_EVIDENCE"
                             : "BLOCKED_EXTERNAL_EVIDENCE"));
-        assertEquals(
-            "UNKNOWN".equals(state) ? 8 : "CANCELLED".equals(state) ? 10 : 9,
-            tracked.statements.size());
+        assertEquals("UNKNOWN".equals(state) ? 8 : 10, tracked.statements.size());
         assertEquals(1, tracked.connections);
         assertEquals(before, facts());
       }

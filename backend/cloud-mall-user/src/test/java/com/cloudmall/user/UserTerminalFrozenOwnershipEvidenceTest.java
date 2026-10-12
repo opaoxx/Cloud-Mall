@@ -269,7 +269,9 @@ class UserTerminalFrozenOwnershipEvidenceTest {
     Fixture cancelled = new Fixture();
     cancelled.addPeer("pay2", 12L, "CANCELLED");
     when(cancelled.ledgers.selectDebitByPayNo("pay2")).thenReturn(new BalanceLedgerPO());
-    assertEquals("LOCAL_CONFLICT", cancelled.inspect().classification);
+    var cancelledReport = cancelled.inspect();
+    assertEquals("LOCAL_CONFLICT", cancelledReport.classification);
+    assertTrue(cancelledReport.reasonCodes.contains("TERMINAL_PEER_PERSISTED_CONFLICT"));
     Fixture confirmed = new Fixture();
     confirmed.addPeer("pay2", 12L, "CONFIRMED");
     BalanceLedgerPO wrong = new BalanceLedgerPO();
@@ -285,7 +287,9 @@ class UserTerminalFrozenOwnershipEvidenceTest {
     when(confirmed.ledgers.selectDebitByPayNo("pay2")).thenReturn(wrong);
     assertEquals("LOCAL_CONFLICT", confirmed.inspect().classification);
     when(confirmed.ledgers.selectDebitByPayNo("pay2")).thenReturn(null);
-    assertEquals("BLOCKED_LOCAL_EVIDENCE", confirmed.inspect().classification);
+    var missingScopeReport = confirmed.inspect();
+    assertEquals("LOCAL_CONFLICT", missingScopeReport.classification);
+    assertTrue(missingScopeReport.reasonCodes.contains("TERMINAL_PEER_PERSISTED_CONFLICT"));
   }
 
   @Test

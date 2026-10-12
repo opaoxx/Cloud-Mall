@@ -177,7 +177,7 @@ class UserTccReconciliationTest {
       verify(fixture.debits).selectByPayNo("pay-query-1");
       verify(fixture.ledgers).selectByOperationKey("pay-query-1");
       verify(fixture.ledgers).selectByOperationKey("refund:pay-query-1");
-      if ("CANCELLED".equals(state)) verify(fixture.ledgers).selectDebitByPayNo("pay-query-1");
+      verify(fixture.ledgers).selectDebitByPayNo("pay-query-1");
       verify(fixture.fences).findByBranch(fixture.receive.xid, 11L);
       verifyNoMoreInteractions(
           fixture.receives,
@@ -421,8 +421,11 @@ class UserTccReconciliationTest {
         when(fences.findByBranch(receive.xid, 11L))
             .thenReturn(fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3));
       }
-      if ("CONFIRMED".equals(state))
-        when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(ledger());
+      if ("CONFIRMED".equals(state)) {
+        BalanceLedgerPO originalLedger = ledger();
+        when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(originalLedger);
+        when(ledgers.selectDebitByPayNo(receive.payNo)).thenReturn(originalLedger);
+      }
       account.id = 7L;
       account.balance = new BigDecimal("100.00");
       account.frozenBalance = new BigDecimal("TRYING".equals(state) ? "10.00" : "0.00");
