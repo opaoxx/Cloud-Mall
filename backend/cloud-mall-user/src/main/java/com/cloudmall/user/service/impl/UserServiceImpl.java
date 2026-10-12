@@ -46,6 +46,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
@@ -230,22 +231,112 @@ public class UserServiceImpl implements UserService {
     return debitFromLedger(userId, callerId, request);
   }
 
-  /** 查询持久化余额操作，供支付恢复任务判断扣款事实。 */
+  /** 在同一只读快照证明主账本、原扣款与有界关联退款，供支付恢复判断事实。 */
   @GetMapping("/internal/users/{userId}/balance/operations/{operationKey}")
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public ApiResponse<?> balanceOperation(
       @PathVariable Long userId,
       @PathVariable String operationKey,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId) {
+    // 1. 保持调用者、主行缺失和foreign的原优先级，再证明主行字段。
     assertInternalCaller(userId, callerId);
     BalanceLedgerPO ledger = balanceLedgerMapper.selectByOperationKey(operationKey);
     if (ledger == null || !Objects.equals(userId, ledger.userId)) {
       throw new BizException(ErrorCodes.NOT_FOUND, "余额操作不存在", 404);
     }
-    String refundOperationKey =
-        "DEBIT".equals(ledger.operationType)
-            ? balanceLedgerMapper.selectFirstRefundOperationKey(ledger.operationKey)
-            : null;
+    requireBalanceOperationEvidence(isProvenBalanceOperationRow(ledger, userId, operationKey));
+    // 2. REFUND必须观察实际原DEBIT；缺原来源不能伪装成主操作404。
+    BalanceLedgerPO original = ledger;
+    if ("REFUND".equals(ledger.operationType)) {
+      original = balanceLedgerMapper.selectByOperationKey(ledger.originalOperationKey);
+      requireBalanceOperationEvidence(
+          original != null
+              && isProvenBalanceOperationRow(original, userId, ledger.originalOperationKey)
+              && "DEBIT".equals(original.operationType)
+              && "APPLIED".equals(original.state)
+              && Objects.equals(original.payNo, ledger.payNo)
+              && Objects.equals(original.orderNo, ledger.orderNo));
+    }
+    // 3. 复用T75原逐行kernel，并在该快照内核累计及当前退款membership。
+    List<BalanceLedgerPO> candidates =
+        balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
+    BigDecimal refundedAmount;
+    try {
+      refundedAmount = provenRefundedAmount(original, candidates);
+    } catch (BizException invalidRefundEvidence) {
+      if ("BALANCE_REFUND_INVALID".equals(invalidRefundEvidence.getCode())) {
+        throw new BizException(ErrorCodes.CONFLICT, "余额账本事实待核对", 409);
+      }
+      throw invalidRefundEvidence;
+    }
+    requireBalanceOperationEvidence(refundedAmount.compareTo(original.amount) <= 0);
+    requireBalanceOperationEvidence(
+        !"REJECTED".equals(original.state) || refundedAmount.signum() == 0);
+    // 4. DEBIT保留原selector；REFUND返回的marker仍NULL，不读当前钱包或修旧行。
+    String refundOperationKey = null;
+    if ("DEBIT".equals(ledger.operationType)) {
+      refundOperationKey = balanceLedgerMapper.selectFirstRefundOperationKey(ledger.operationKey);
+      requireBalanceOperationEvidence(
+          refundedAmount.signum() == 0
+              ? refundOperationKey == null
+              : refundOperationKey != null
+                  && !refundOperationKey.isBlank()
+                  && containsRefundOperationKey(candidates, refundOperationKey));
+    } else {
+      requireBalanceOperationEvidence(containsRefundSnapshot(candidates, ledger));
+    }
     return ApiResponse.ok(BalanceOperationVO.from(ledger, refundOperationKey));
+  }
+
+  /** 主行只证明不可变键/金额和已知终态快照；不推断当前钱包、全账户或TCC外部事实。 */
+  private static boolean isProvenBalanceOperationRow(
+      BalanceLedgerPO ledger, Long userId, String operationKey) {
+    if (!Objects.equals(ledger.operationKey, operationKey)
+        || !Objects.equals(ledger.userId, userId)
+        || ledger.payNo == null
+        || ledger.payNo.isBlank()
+        || ledger.orderNo == null
+        || ledger.orderNo.isBlank()
+        || !validBalanceMoney(ledger.amount)
+        || ledger.amount.signum() <= 0
+        || !validBalanceMoney(ledger.balanceBefore)
+        || !validBalanceMoney(ledger.balanceAfter)) {
+      return false;
+    }
+    if ("DEBIT".equals(ledger.operationType)) {
+      return ledger.originalOperationKey == null && isProvenDebitSnapshot(ledger);
+    }
+    return "REFUND".equals(ledger.operationType)
+        && "APPLIED".equals(ledger.state)
+        && ledger.originalOperationKey != null
+        && !ledger.originalOperationKey.isBlank()
+        && !Objects.equals(ledger.originalOperationKey, ledger.operationKey)
+        && ledger.balanceAfter.subtract(ledger.balanceBefore).compareTo(ledger.amount) == 0;
+  }
+
+  /** selector必须指向同一已证集合，保留原SQL选择策略而不以CI别名替代实际键。 */
+  private static boolean containsRefundOperationKey(List<BalanceLedgerPO> candidates, String key) {
+    for (BalanceLedgerPO candidate : candidates) {
+      if (Objects.equals(candidate.operationKey, key)) return true;
+    }
+    return false;
+  }
+
+  /** 当前退款与同一已证集合的金额/快照需匹配，身份字段已由共同原source保证。 */
+  private static boolean containsRefundSnapshot(
+      List<BalanceLedgerPO> candidates, BalanceLedgerPO ledger) {
+    for (BalanceLedgerPO candidate : candidates) {
+      if (Objects.equals(candidate.operationKey, ledger.operationKey)
+          && candidate.amount.compareTo(ledger.amount) == 0
+          && candidate.balanceBefore.compareTo(ledger.balanceBefore) == 0
+          && candidate.balanceAfter.compareTo(ledger.balanceAfter) == 0) return true;
+    }
+    return false;
+  }
+
+  /** 坏查询证据保持固定409，不暴露值或被支付恢复器误认成missing。 */
+  private static void requireBalanceOperationEvidence(boolean proven) {
+    if (!proven) throw new BizException(ErrorCodes.CONFLICT, "余额账本事实待核对", 409);
   }
 
   /** 按唯一退款键恢复已应用扣款。 */
@@ -382,10 +473,15 @@ public class UserServiceImpl implements UserService {
         && original.balanceBefore.subtract(original.balanceAfter).compareTo(original.amount) == 0;
   }
 
-  /** 复用未过滤的CI关联候选并精确证明每行；超限、缺证或坏行直接拒绝，DAO异常原样传播。 仅全部行合法后由调用方检查累计额度，不用负数抵消或提前超额隐藏坏行，不证明全账户因果。 */
+  /** 新退款保留原单次候选读取与错误协议，随后复用纯字段逐行kernel。 */
   private BigDecimal provenRefundedAmount(BalanceLedgerPO original) {
-    List<BalanceLedgerPO> candidates =
-        balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
+    return provenRefundedAmount(
+        original, balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey));
+  }
+
+  /** 已读取候选必须完整逐行证明后累计；不提前超额隐藏坏行，不推断全账户因果。 */
+  private static BigDecimal provenRefundedAmount(
+      BalanceLedgerPO original, List<BalanceLedgerPO> candidates) {
     if (candidates == null || candidates.size() > MAX_REFUND_CANDIDATES) {
       throw new BizException("BALANCE_REFUND_INVALID", "退款累计证据不完整或不一致", 409);
     }
@@ -455,7 +551,7 @@ public class UserServiceImpl implements UserService {
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属与账本状态待核对", 409);
       if (!"APPLIED".equals(existing.state) && !"REJECTED".equals(existing.state))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款账本状态待核对", 409);
-      if (!isProvenLegacyDebitSnapshot(existing))
+      if (!isProvenDebitSnapshot(existing))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款账本资金快照待核对", 409);
       if ("REJECTED".equals(existing.state)) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
       cacheDebitResult(userId, existing);
@@ -563,10 +659,10 @@ public class UserServiceImpl implements UserService {
   }
 
   /**
-   * 已知Legacy终态必须由原合法余额快照证明；已核金额由调用方保证，不能用当前钱包改写历史决策。
+   * 已知DEBIT终态必须由原合法余额快照证明；已核金额由调用方保证，不能用当前钱包改写历史决策。
    * APPLIED证明差额，REJECTED证明未扣款且原余额不足；状态冲突及未知态先由原调用方拒绝。
    */
-  private static boolean isProvenLegacyDebitSnapshot(BalanceLedgerPO existing) {
+  private static boolean isProvenDebitSnapshot(BalanceLedgerPO existing) {
     if (!validBalanceMoney(existing.balanceBefore) || !validBalanceMoney(existing.balanceAfter)) {
       return false;
     }

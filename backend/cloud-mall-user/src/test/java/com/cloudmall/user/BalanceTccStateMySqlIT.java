@@ -1737,6 +1737,318 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 真实Legacy/TCC/REFUND主行坏字段不能经GET输出成功；宽金额列仅限owned并恢复。 */
+  @Test
+  void operationHttpRejectsMalformedOwnedLedgerRows() throws Exception {
+    fixture.execute(
+        "ALTER TABLE balance_ledger MODIFY amount DECIMAL(20,3) NULL, MODIFY balance_before"
+            + " DECIMAL(20,3) NULL, MODIFY balance_after DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (String mode : List.of("legacy-debit", "tcc-debit", "refund")) {
+        for (String mutation :
+            List.of(
+                "operation_key=UPPER(operation_key)",
+                "state='UNKNOWN'",
+                "amount=NULL",
+                "balance_before=NULL",
+                "balance_after=NULL",
+                "balance_after=95")) {
+          assertions.add(
+              () -> {
+                resetOperationFixture(mode);
+                String key = "refund".equals(mode) ? "query-refund" : "query-debit";
+                fixture.update(
+                    "UPDATE balance_ledger SET " + mutation + " WHERE operation_key=?", key);
+                var before = allFundsFacts();
+                assertOperationHttpConflict(key);
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY amount DECIMAL(18,2) NOT NULL, MODIFY balance_before"
+              + " DECIMAL(18,2) NOT NULL, MODIFY balance_after DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 缺/错原source、被旧selector过滤的坏集合、负数抵消均不得成为查询证据。 */
+  @Test
+  void operationHttpRejectsBrokenSourceAndLinkedRefundFacts() throws Exception {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String query : List.of("query-debit", "query-refund")) {
+      for (String mutation :
+          List.of(
+              "negative", "wrong-type", "wrong-state", "alias-origin", "other-user", "other-pay")) {
+        assertions.add(
+            () -> {
+              resetOperationFixture("refund");
+              String change =
+                  switch (mutation) {
+                    case "negative" -> "amount=-2";
+                    case "wrong-type" -> "operation_type='DEBIT'";
+                    case "wrong-state" -> "state='UNKNOWN'";
+                    case "alias-origin" -> "original_operation_key=UPPER(original_operation_key)";
+                    case "other-user" -> "user_id=8";
+                    case "other-pay" -> "pay_no='other-pay'";
+                    default -> throw new AssertionError(mutation);
+                  };
+              fixture.update(
+                  "UPDATE balance_ledger SET " + change + " WHERE operation_key='query-refund'");
+              var before = allFundsFacts();
+              // foreign主行保持404；DEBIT读取到foreign关联则是坏集合409。
+              if ("query-refund".equals(query) && "other-user".equals(mutation)) {
+                assertEquals(404, operationHttp(query).getResponse().getStatus());
+              } else {
+                assertOperationHttpConflict(query);
+              }
+              assertEquals(before, allFundsFacts());
+            });
+      }
+    }
+    for (String mutation : List.of("missing", "source-origin", "source-order", "source-user")) {
+      assertions.add(
+          () -> {
+            resetOperationFixture("refund");
+            if ("missing".equals(mutation))
+              fixture.update("DELETE FROM balance_ledger WHERE operation_key='query-debit'");
+            else {
+              String change =
+                  switch (mutation) {
+                    case "source-origin" -> "original_operation_key='other'";
+                    case "source-order" -> "order_no='other-order'";
+                    case "source-user" -> "user_id=8";
+                    default -> throw new AssertionError(mutation);
+                  };
+              fixture.update(
+                  "UPDATE balance_ledger SET " + change + " WHERE operation_key='query-debit'");
+            }
+            var before = allFundsFacts();
+            assertOperationHttpConflict("query-refund");
+            assertEquals(before, allFundsFacts());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 100条raw候选保持查询，101哨兵和合法行的超额合计均拒绝，两类主行同样校验。 */
+  @Test
+  void operationQueryCandidateLimitAndTotalUseRealMysqlFacts() throws Exception {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (int count : List.of(100, 101)) {
+      assertions.add(
+          () -> {
+            closeContext();
+            createTransactionalServices();
+            var original = request("query-limit", 7L, "2.00");
+            debitLegacy(original.payNo, original.payNo, 7L, "2.00");
+            for (int index = 0; index < count; index++) {
+              fixture.update(
+                  "INSERT INTO"
+                      + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                      + " VALUES(?,7,?,'REFUND',?,?,?,0.01,'APPLIED',98,98.01,NOW(3))",
+                  index + 2L,
+                  "query-limit-refund-" + index,
+                  original.payNo,
+                  original.payNo,
+                  original.orderNo);
+            }
+            var before = allFundsFacts();
+            for (String key : List.of(original.payNo, "query-limit-refund-0")) {
+              if (count == 100) assertEquals(200, operationHttp(key).getResponse().getStatus());
+              else assertOperationHttpConflict(key);
+            }
+            assertEquals(before, allFundsFacts());
+          });
+    }
+    assertions.add(
+        () -> {
+          resetOperationFixture("refund");
+          // 实际已退2，再插入一条自身合法但合计超过原扣款10的owned记录。
+          fixture.update(
+              "INSERT INTO"
+                  + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                  + " VALUES(2,7,'query-extra','REFUND','query-debit','query-debit','order-query-debit',9,'APPLIED',0,9,NOW(3))");
+          var before = allFundsFacts();
+          assertOperationHttpConflict("query-debit");
+          assertOperationHttpConflict("query-refund");
+          assertEquals(before, allFundsFacts());
+        });
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 同连接只读RR观察旧快照，外部owned写入不使后续集合读混用新事实；正常历史仍可查询。 */
+  @Test
+  void operationQueryUsesOneReadOnlySnapshotAndKeepsHealthyHistory() throws Exception {
+    resetOperationFixture("refund");
+    Object target = AopTestUtils.getUltimateTargetObject(legacy);
+    var actualMapper =
+        (com.cloudmall.user.mapper.BalanceLedgerMapper)
+            ReflectionTestUtils.getField(target, "balanceLedgerMapper");
+    var observations = new ArrayList<String>();
+    var connectionIds = new java.util.HashSet<Integer>();
+    var observedAmounts = new ArrayList<String>();
+    var writerRan = new java.util.concurrent.atomic.AtomicBoolean();
+    var before = allFundsFacts();
+    var instrumented =
+        (com.cloudmall.user.mapper.BalanceLedgerMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                actualMapper.getClass().getClassLoader(),
+                new Class<?>[] {com.cloudmall.user.mapper.BalanceLedgerMapper.class},
+                (proxy, method, arguments) -> {
+                  String name = method.getName();
+                  if (List.of(
+                          "selectByOperationKey",
+                          "findLinkedRefundCandidates",
+                          "selectFirstRefundOperationKey")
+                      .contains(name)) {
+                    observations.add(
+                        name
+                            + ":"
+                            + org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive()
+                            + ":"
+                            + org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+                            + ":"
+                            + org.springframework.transaction.support
+                                .TransactionSynchronizationManager
+                                .getCurrentTransactionIsolationLevel());
+                    java.sql.Connection observedConnection =
+                        org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                            testDataSource);
+                    try {
+                      connectionIds.add(System.identityHashCode(observedConnection));
+                    } finally {
+                      org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                          observedConnection, testDataSource);
+                    }
+                  }
+                  Object result;
+                  try {
+                    result = method.invoke(actualMapper, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException failure) {
+                    throw failure.getCause();
+                  }
+                  if ("selectByOperationKey".equals(name) && writerRan.compareAndSet(false, true)) {
+                    // 直接新物理连接，避免JdbcTemplate加入当前只读事务；只写owned测试库。
+                    try (java.sql.Connection writer = testDataSource.getConnection();
+                        java.sql.PreparedStatement statement =
+                            writer.prepareStatement(
+                                "UPDATE balance_ledger SET amount=3 WHERE"
+                                    + " operation_key='query-refund'")) {
+                      assertEquals(1, statement.executeUpdate());
+                    }
+                  }
+                  if ("findLinkedRefundCandidates".equals(name)) {
+                    for (Object candidate : (List<?>) result)
+                      observedAmounts.add(
+                          ((com.cloudmall.user.domain.po.BalanceLedgerPO) candidate)
+                              .amount.toPlainString());
+                  }
+                  return result;
+                });
+    ReflectionTestUtils.setField(target, "balanceLedgerMapper", instrumented);
+    try {
+      assertEquals(200, operationHttp("query-debit").getResponse().getStatus());
+      assertEquals(
+          List.of(
+              "selectByOperationKey:true:true:4",
+              "findLinkedRefundCandidates:true:true:4",
+              "selectFirstRefundOperationKey:true:true:4"),
+          observations);
+      assertEquals(1, connectionIds.size());
+      assertEquals(List.of("2.00"), observedAmounts);
+      assertEquals(
+          new BigDecimal("3.00"),
+          fixture.queryForObject(
+              "SELECT amount FROM balance_ledger WHERE operation_key='query-refund'",
+              BigDecimal.class));
+      var expected =
+          before.stream()
+              .map(rows -> rows.stream().map(row -> new java.util.LinkedHashMap<>(row)).toList())
+              .toList();
+      for (var row : expected.get(3))
+        if ("query-refund".equals(row.get("operation_key")))
+          row.put("amount", new BigDecimal("3.00"));
+      assertEquals(expected, allFundsFacts());
+    } finally {
+      ReflectionTestUtils.setField(target, "balanceLedgerMapper", actualMapper);
+    }
+    for (String scenario : List.of("rejected", "no-attempt", "wallet-null")) {
+      closeContext();
+      createTransactionalServices();
+      if ("rejected".equals(scenario))
+        assertThrows(
+            BizException.class, () -> debitLegacy("query-history", "query-history", 7L, "101.00"));
+      else debitLegacy("query-history", "query-history", 7L, "10.00");
+      if ("no-attempt".equals(scenario))
+        fixture.update("DELETE FROM balance_debit_attempt WHERE pay_no='query-history'");
+      if ("wallet-null".equals(scenario)) {
+        fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NULL");
+        fixture.update("UPDATE mall_user SET balance=NULL WHERE id=7");
+      }
+      try {
+        var historyBefore = allFundsFacts();
+        var response = operationHttp("query-history");
+        assertEquals(200, response.getResponse().getStatus());
+        assertEquals(
+            "rejected".equals(scenario) ? "REJECTED" : "APPLIED",
+            new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(response.getResponse().getContentAsString())
+                .path("data")
+                .path("state")
+                .asText());
+        assertEquals(historyBefore, allFundsFacts());
+      } finally {
+        if ("wallet-null".equals(scenario)) {
+          fixture.update("DELETE FROM mall_user");
+          fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL");
+        }
+      }
+    }
+  }
+
+  /** 新场景重置owned上下文，真实资金动作完成后才人为损坏查询事实。 */
+  private void resetOperationFixture(String mode) {
+    closeContext();
+    createTransactionalServices();
+    var original = request("query-debit", 7L, "10.00");
+    if ("tcc-debit".equals(mode)) {
+      service.tryDebit(original);
+      service.confirmDebit(finalizeRequest(original));
+    } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+    legacy.refundInternal(7L, 7L, refundRequest(original, "query-refund", "2.00"));
+  }
+
+  /** 使用原GET协议调用真实Controller，不启动HTTP监听或绕开Spring事务代理。 */
+  private org.springframework.test.web.servlet.MvcResult operationHttp(String operationKey)
+      throws Exception {
+    return org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+            context.getBean(UserController.class))
+        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+        .build()
+        .perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/api/internal/users/7/balance/operations/{operationKey}", operationKey)
+                .header("X-User-Id", "7"))
+        .andReturn();
+  }
+
+  /** 坏证据必须是固定409与code/message，查询不产生补写或修账。 */
+  private void assertOperationHttpConflict(String operationKey) throws Exception {
+    var response = operationHttp(operationKey);
+    assertEquals(409, response.getResponse().getStatus());
+    var body =
+        new com.fasterxml.jackson.databind.ObjectMapper()
+            .readTree(response.getResponse().getContentAsByteArray());
+    assertEquals("COMMON_CONFLICT", body.path("code").asText());
+    assertEquals("余额账本事实待核对", body.path("message").asText());
+  }
+
   /** 原User查询真实返回单笔退款金额和marker，部分退款不得被消费者推断为全额。 */
   @Test
   void partialAndFullRefundOperationViewsKeepTheirActualAmounts() throws Exception {

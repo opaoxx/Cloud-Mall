@@ -42,6 +42,12 @@ class BalanceLedgerServiceTest {
 
   private ValueOperations<String, String> valueOperations;
 
+  /** 当前余额操作查询的主行，修改字段用于验证只读拒绝。 */
+  private BalanceLedgerPO operationLedger;
+
+  /** 当前查询的原DEBIT来源，REFUND查询不能忽略这一事实。 */
+  private BalanceLedgerPO operationSource;
+
   /** Legacy当前用例的已存账本，用于改变历史字段并验证重放拒绝。 */
   private BalanceLedgerPO legacyDebitLedger;
 
@@ -810,6 +816,355 @@ class BalanceLedgerServiceTest {
         assertThrows(
             RuntimeException.class, () -> userService.refundInternal(7L, 7L, failureRequest)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
+  /** 查询主行字段与已知状态快照必须完整；NULL金额不能在VO映射时抛空指针。 */
+  @Test
+  void balanceOperationRejectsMalformedPrimaryRows() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : java.util.List.of("DEBIT", "REJECTED", "REFUND")) {
+      for (String mutation :
+          java.util.List.of(
+              "key-null",
+              "key-alias",
+              "key-other",
+              "pay-null",
+              "pay-blank",
+              "order-null",
+              "order-blank",
+              "amount-null",
+              "amount-zero",
+              "amount-negative",
+              "amount-fraction",
+              "amount-overflow",
+              "before-null",
+              "before-negative",
+              "before-fraction",
+              "before-overflow",
+              "after-null",
+              "after-negative",
+              "after-fraction",
+              "after-overflow",
+              "type-null",
+              "type-unknown",
+              "state-null",
+              "state-unknown",
+              "state-alias",
+              "wrong-delta",
+              "bad-origin",
+              "zero-delta")) {
+        assertions.add(
+            () -> {
+              String key = installOperationQuery(mode);
+              switch (mutation) {
+                case "key-null" -> operationLedger.operationKey = null;
+                case "key-alias" ->
+                    operationLedger.operationKey = key.toUpperCase(java.util.Locale.ROOT);
+                case "key-other" -> operationLedger.operationKey = "other";
+                case "pay-null" -> operationLedger.payNo = null;
+                case "pay-blank" -> operationLedger.payNo = " ";
+                case "order-null" -> operationLedger.orderNo = null;
+                case "order-blank" -> operationLedger.orderNo = " ";
+                case "amount-null" -> operationLedger.amount = null;
+                case "amount-zero" -> operationLedger.amount = BigDecimal.ZERO;
+                case "amount-negative" -> operationLedger.amount = BigDecimal.ONE.negate();
+                case "amount-fraction" -> operationLedger.amount = new BigDecimal("10.001");
+                case "amount-overflow" ->
+                    operationLedger.amount = new BigDecimal("10000000000000000");
+                case "before-null" -> operationLedger.balanceBefore = null;
+                case "before-negative" -> operationLedger.balanceBefore = BigDecimal.ONE.negate();
+                case "before-fraction" -> operationLedger.balanceBefore = new BigDecimal("90.001");
+                case "before-overflow" ->
+                    operationLedger.balanceBefore = new BigDecimal("10000000000000000");
+                case "after-null" -> operationLedger.balanceAfter = null;
+                case "after-negative" -> operationLedger.balanceAfter = BigDecimal.ONE.negate();
+                case "after-fraction" -> operationLedger.balanceAfter = new BigDecimal("90.001");
+                case "after-overflow" ->
+                    operationLedger.balanceAfter = new BigDecimal("10000000000000000");
+                case "type-null" -> operationLedger.operationType = null;
+                case "type-unknown" -> operationLedger.operationType = "OTHER";
+                case "state-null" -> operationLedger.state = null;
+                case "state-unknown" -> operationLedger.state = "UNKNOWN";
+                case "state-alias" ->
+                    operationLedger.state =
+                        operationLedger.state.toLowerCase(java.util.Locale.ROOT);
+                case "wrong-delta" -> operationLedger.balanceAfter = new BigDecimal("3.00");
+                case "bad-origin" ->
+                    operationLedger.originalOperationKey = "REFUND".equals(mode) ? " " : "other";
+                case "zero-delta" -> {
+                  operationLedger.balanceBefore = new BigDecimal("10.00");
+                  operationLedger.balanceAfter = new BigDecimal("10.00");
+                }
+                default -> throw new AssertionError(mutation);
+              }
+              assertOperationConflict(key);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 退款查询须证明原实际扣款，源缺失也属于缺证409而不是主操作不存在404。 */
+  @Test
+  void refundOperationRejectsMissingOrMismatchedOriginalDebit() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mutation :
+        java.util.List.of(
+            "missing",
+            "alias-key",
+            "wrong-type",
+            "rejected",
+            "other-user",
+            "other-pay",
+            "other-order",
+            "origin",
+            "null-amount",
+            "null-before",
+            "wrong-delta",
+            "smaller-debit")) {
+      assertions.add(
+          () -> {
+            String key = installOperationQuery("REFUND");
+            switch (mutation) {
+              case "missing" ->
+                  when(balanceLedgerMapper.selectByOperationKey("pay-1")).thenReturn(null);
+              case "alias-key" -> operationSource.operationKey = "PAY-1";
+              case "wrong-type" -> operationSource.operationType = "REFUND";
+              case "rejected" -> operationSource.state = "REJECTED";
+              case "other-user" -> operationSource.userId = 8L;
+              case "other-pay" -> operationSource.payNo = "other";
+              case "other-order" -> operationSource.orderNo = "other";
+              case "origin" -> operationSource.originalOperationKey = "other";
+              case "null-amount" -> operationSource.amount = null;
+              case "null-before" -> operationSource.balanceBefore = null;
+              case "wrong-delta" -> operationSource.balanceAfter = new BigDecimal("89.00");
+              case "smaller-debit" -> {
+                operationSource.amount = new BigDecimal("5.00");
+                operationSource.balanceBefore = new BigDecimal("95.00");
+              }
+              default -> throw new AssertionError(mutation);
+            }
+            assertOperationConflict(key);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** Raw关联集合不能为空证据、负数抵消或截断，REFUND自身也须在已证集合中。 */
+  @Test
+  void balanceOperationRejectsInvalidRefundCollectionsAndRowMembership() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : java.util.List.of("DEBIT", "REFUND")) {
+      for (String scenario :
+          java.util.List.of(
+              "null-list",
+              "null-row",
+              "101",
+              "negative",
+              "wrong-user",
+              "alias-origin",
+              "wrong-state",
+              "duplicate",
+              "excess",
+              "missing-member",
+              "wrong-member-money")) {
+        assertions.add(
+            () -> {
+              String key = installOperationQuery(mode);
+              var candidate = linkedRefund("prior-refund", "2.00");
+              java.util.List<BalanceLedgerPO> candidates = java.util.List.of(candidate);
+              switch (scenario) {
+                case "null-list" -> candidates = null;
+                case "null-row" -> candidates = java.util.Arrays.asList((BalanceLedgerPO) null);
+                case "101" -> {
+                  candidates = new java.util.ArrayList<>();
+                  for (int index = 0; index < 101; index++)
+                    candidates.add(linkedRefund("prior-" + index, "0.01"));
+                }
+                case "negative" -> candidate.amount = new BigDecimal("-2.00");
+                case "wrong-user" -> candidate.userId = 8L;
+                case "alias-origin" -> candidate.originalOperationKey = "PAY-1";
+                case "wrong-state" -> candidate.state = "REJECTED";
+                case "duplicate" -> candidates = java.util.List.of(candidate, candidate);
+                case "excess" -> candidates = java.util.List.of(linkedRefund("excess", "11.00"));
+                case "missing-member" -> {
+                  if ("DEBIT".equals(mode)) candidates = java.util.List.of();
+                }
+                case "wrong-member-money" -> candidate.operationKey = "refund-1";
+                default -> throw new AssertionError(scenario);
+              }
+              when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(candidates);
+              when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1"))
+                  .thenReturn("outside-refund");
+              assertOperationConflict(key);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** marker需精确属于已证集合；REJECTED不允许任何退款关联。 */
+  @Test
+  void debitOperationMarkerCannotHideInconsistentOrRejectedRefundEvidence() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String scenario :
+        java.util.List.of(
+            "null-marker", "blank-marker", "alias-marker", "other-marker", "rejected-refund")) {
+      assertions.add(
+          () -> {
+            String key =
+                installOperationQuery("rejected-refund".equals(scenario) ? "REJECTED" : "DEBIT");
+            when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
+                .thenReturn(java.util.List.of(linkedRefund("prior-refund", "2.00")));
+            String markerKey =
+                switch (scenario) {
+                  case "null-marker" -> null;
+                  case "blank-marker" -> " ";
+                  case "alias-marker" -> "PRIOR-REFUND";
+                  case "other-marker" -> "other";
+                  default -> "prior-refund";
+                };
+            when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1")).thenReturn(markerKey);
+            assertOperationConflict(key);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 调用者/主行不存在/foreign仍保原优先，不读关联、原来源或钱包。 */
+  @Test
+  void operationQueryKeepsCallerMissingAndForeignPriorities() {
+    String key = installOperationQuery("REFUND");
+    assertEquals(
+        403,
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, key, 8L))
+            .getHttpStatus());
+    org.mockito.Mockito.verifyNoInteractions(balanceLedgerMapper);
+    when(balanceLedgerMapper.selectByOperationKey(key)).thenReturn(null);
+    assertEquals(
+        404,
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, key, 7L))
+            .getHttpStatus());
+    String foreignKey = installOperationQuery("REFUND");
+    operationLedger.userId = 8L;
+    operationLedger.amount = null;
+    assertEquals(
+        404,
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, foreignKey, 7L))
+            .getHttpStatus());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
+    assertOperationReadOnly();
+  }
+
+  /** SQL读取故障保持同对象异常，不能映射为无账本或补空集合。 */
+  @Test
+  void operationQueryDatabaseFaultsKeepTheOriginalExceptionChannel() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String stage : java.util.List.of("primary", "source", "candidates", "marker")) {
+      assertions.add(
+          () -> {
+            String key = installOperationQuery("source".equals(stage) ? "REFUND" : "DEBIT");
+            var unavailable =
+                new org.springframework.dao.DataRetrievalFailureException(
+                    "owned-operation-read-" + stage);
+            switch (stage) {
+              case "primary" ->
+                  when(balanceLedgerMapper.selectByOperationKey(key)).thenThrow(unavailable);
+              case "source" ->
+                  when(balanceLedgerMapper.selectByOperationKey("pay-1")).thenThrow(unavailable);
+              case "candidates" ->
+                  when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
+                      .thenThrow(unavailable);
+              case "marker" ->
+                  when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1"))
+                      .thenThrow(unavailable);
+              default -> throw new AssertionError(stage);
+            }
+            org.junit.jupiter.api.Assertions.assertSame(
+                unavailable,
+                assertThrows(
+                    RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+            assertOperationReadOnly();
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 合法单行和部分/100集合保持原字段与selector，查询不扩当前wallet/归属。 */
+  @Test
+  void operationQueryHealthyHistoryKeepsFieldsAndBoundedRefunds() {
+    for (String mode : java.util.List.of("DEBIT", "REJECTED", "REFUND")) {
+      String key = installOperationQuery(mode);
+      var response =
+          (com.cloudmall.user.domain.vo.BalanceOperationVO)
+              userService.balanceOperation(7L, key, 7L).data;
+      assertEquals(key, response.operationKey);
+      assertEquals("REJECTED".equals(mode) ? "DEBIT" : mode, response.type);
+      assertEquals("REJECTED".equals(mode) ? "REJECTED" : "APPLIED", response.state);
+      assertEquals("10.00", response.amount);
+      assertEquals(null, response.refundOperationKey);
+      assertOperationReadOnly();
+    }
+    for (int count : java.util.List.of(1, 100)) {
+      String key = installOperationQuery("DEBIT");
+      var candidates = new java.util.ArrayList<BalanceLedgerPO>();
+      for (int index = 0; index < count; index++)
+        candidates.add(linkedRefund("prior-" + index, "0.010"));
+      when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(candidates);
+      when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1")).thenReturn("prior-0");
+      var response =
+          (com.cloudmall.user.domain.vo.BalanceOperationVO)
+              userService.balanceOperation(7L, key, 7L).data;
+      assertEquals("prior-0", response.refundOperationKey);
+      assertOperationReadOnly();
+    }
+  }
+
+  /** 按查询类型准备完整原行；REFUND默认可观察到同一原DEBIT与自身集合。 */
+  private String installOperationQuery(String mode) {
+    setUp();
+    operationSource = appliedDebit("pay-1", new BigDecimal("90.00"));
+    operationLedger =
+        "REFUND".equals(mode)
+            ? appliedRefund("refund-1", new BigDecimal("100.00"))
+            : operationSource;
+    if ("REJECTED".equals(mode)) {
+      operationLedger.state = "REJECTED";
+      operationLedger.balanceBefore = new BigDecimal("5.00");
+      operationLedger.balanceAfter = new BigDecimal("5.00");
+    }
+    String key = operationLedger.operationKey;
+    when(balanceLedgerMapper.selectByOperationKey("pay-1")).thenReturn(operationSource);
+    when(balanceLedgerMapper.selectByOperationKey(key)).thenReturn(operationLedger);
+    when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
+        .thenReturn(
+            "REFUND".equals(mode) ? java.util.List.of(operationLedger) : java.util.List.of());
+    return key;
+  }
+
+  /** 所有坏证据固定409，不写资金或缓存；不把源缺失误作主操作404。 */
+  private void assertOperationConflict(String key) {
+    var failure =
+        assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> userService.balanceOperation(7L, key, 7L));
+    assertEquals(409, failure.getHttpStatus());
+    assertEquals("COMMON_CONFLICT", failure.getCode());
+    assertEquals("余额账本事实待核对", failure.getMessage());
+    assertOperationReadOnly();
+  }
+
+  /** 查询不得写入账本、钱包、归属/冻结或Redis，亦不得读取当前钱包。 */
+  private void assertOperationReadOnly() {
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    org.mockito.Mockito.verifyNoInteractions(
+        userMapper, balanceDebitAttemptMapper, balanceTccDebitMapper, valueOperations);
   }
 
   /** 新扣款钱包损坏必须在claim前拒绝，兼容入口同样不能记录假不足。 */
