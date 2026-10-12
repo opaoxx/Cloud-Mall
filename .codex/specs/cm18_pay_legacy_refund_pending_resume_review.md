@@ -19,7 +19,7 @@ GO。退款 prestage 已将 PayRecord 置为 REFUND_PENDING 后，若进程在 U
 
 ## 3. 失败与保持项
 
-退款 RPC 故障、缺证、owner/expiry/mode 失效仍沿原 retry/REFUND_PENDING；已完成 marker 不重复退款。订单非 CANCELLED、库存未成功、User DEBIT REJECTED/404 或退款证据不完整不得新发 refund。owner/lease 失效的已 owned stage 不使用普通 fallback。
+退款 RPC 故障、缺证、owner/expiry/mode 失效仍沿原 retry/REFUND_PENDING。已有 refund marker 时先做原 marker ledger GET proof，缺证不补发退款；无 marker 时原流程可先 POST 固定 refund key，再做退款 ledger GET proof，若 POST 后 proof 缺失只不结清并保持 pending，不回滚或声称从未发出 POST。订单非 CANCELLED、库存未成功、User DEBIT REJECTED/404 不进入新 refund 分支；owner/lease 失效的已 owned stage 不使用普通 fallback。
 
 不改 SQL、状态字段、token/30 秒 lease、DTO/API、User/Order RPC、T77 proof、T80–T85、TCC/RM、分笔退款或全服务 fencing；不宣称跨服务原子性。
 
