@@ -3,6 +3,7 @@ package com.cloudmall.stock.service.impl;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.util.StockDependencyGuard;
+import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -29,6 +30,9 @@ public class SeckillQuotaSettlementRecovery {
 
   /** 恢复租约秒数。 */
   private static final int LEASE_SECONDS = 30;
+
+  /** 恢复各阶段独立采样的瞬时时钟，统一转换为上海时间；不修改数据库时钟。 */
+  private Clock recoveryClock = Clock.systemUTC();
 
   /** 进程内环形扫描位置，不是完成证据；重启首段，同实例并发以CAS保护进度。 */
   private final AtomicReference<Long> scanAfterId = new AtomicReference<>();
@@ -125,6 +129,8 @@ public class SeckillQuotaSettlementRecovery {
       if (!claimReadbackMatches(settlement, claimed, owner, now())) return false;
       // 来源在claim后仍可能变化；已观察缺证时保留租约，不执行Lua或补偿写。
       if (settlementMapper.findMatchingAcceptanceId(settlement) == null) return false;
+      // 来源查询可能耗尽本租约；等于或超过原到期时间时不再释放投影。
+      if (claimed.leaseUntil == null || !claimed.leaseUntil.isAfter(now())) return false;
       // 3. 仅用通过原行/租约证明的字段调用既有Lua投影，不重写动作方向。
       List<String> keys =
           List.of(
@@ -289,8 +295,8 @@ public class SeckillQuotaSettlementRecovery {
   }
 
   /** 生成恢复任务统一使用的上海本地时间。 */
-  private static LocalDateTime now() {
-    return LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+  private LocalDateTime now() {
+    return LocalDateTime.ofInstant(recoveryClock.instant(), ZoneId.of("Asia/Shanghai"));
   }
 
   /** 错误摘要只保留类型和短消息，避免把连接凭据写入台账。 */

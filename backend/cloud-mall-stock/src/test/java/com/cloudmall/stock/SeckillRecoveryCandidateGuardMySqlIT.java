@@ -9,7 +9,10 @@ import com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -26,6 +29,7 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /** 实际MyBatis与原Redis Lua的恢复候选验证；只拥有随机库及精确检查不存在的Redis键。 */
 class SeckillRecoveryCandidateGuardMySqlIT {
@@ -1192,6 +1196,96 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         assertReleased(original);
         assertSingleReleaseProjection(original, keys);
       }
+  }
+
+  @Test
+  void sourceSelectReturningAtOrAfterOriginalLeaseDeadlineCannotReleaseQuota() {
+    for (String sourceState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+        for (long elapsedNanos : List.of(0L, 1000000L)) {
+          reset();
+          var original = row(state, "owned-idem");
+          seed(original);
+          fixture.update("UPDATE seckill_reservation SET status=?", sourceState);
+          var keys = prepareRedis(original);
+          var redisBefore = redisDumpFacts(keys);
+          var instant = installRecoveryClock();
+          var snapshot = advanceClockAfterRealSourceSelect(instant, elapsedNanos);
+          clearInvocations(observedMapper, observedRedis);
+          int handled = recovery.recoverDue();
+          assertAll(
+              () -> assertEquals(0, handled, sourceState + ":" + state + ":" + elapsedNanos),
+              () -> verifyNoInteractions(observedRedis),
+              () ->
+                  verify(observedMapper, never())
+                      .markReleased(any(), any(), anyLong(), anyLong(), any(), any()),
+              () ->
+                  verify(observedMapper, never())
+                      .markProjectionBlocked(any(), any(), anyLong(), any(), any(), any(), any()),
+              () ->
+                  verify(observedMapper, never())
+                      .retry(any(), any(), anyLong(), any(), any(), any(), any(), any()),
+              () -> assertEquals(snapshot.get(), facts(), "只推进app Clock不改DB/原租约/source"),
+              () -> assertEquals(redisBefore, redisDumpFacts(keys), "到期worker不得改变Redis"));
+          verify(observedMapper).findSettlement(original.orderNo);
+          verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+        }
+  }
+
+  @Test
+  void realSourceSelectBeforeLeaseDeadlineKeepsSingleReleaseForAllAcceptedStates() {
+    for (String sourceState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+        reset();
+        var original = row(state, "😺".repeat(128));
+        seed(original);
+        fixture.update("UPDATE seckill_reservation SET status=?", sourceState);
+        var keys = prepareRedis(original);
+        var instant = installRecoveryClock();
+        advanceClockAfterRealSourceSelect(instant, -1000000L);
+        clearInvocations(observedMapper, observedRedis);
+        assertEquals(1, recovery.recoverDue());
+        verify(observedMapper).findSettlement(original.orderNo);
+        verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+        verify(observedMapper, never())
+            .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+        assertReleased(original);
+        assertSingleReleaseProjection(original, keys);
+      }
+  }
+
+  /** 用真实当前瞬时领取DB租约，再只推进应用采样时间，不改变SQL NOW或系统时钟。 */
+  private static java.util.concurrent.atomic.AtomicReference<Instant> installRecoveryClock() {
+    var instant =
+        new java.util.concurrent.atomic.AtomicReference<>(
+            Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS));
+    var clock = mock(Clock.class);
+    when(clock.instant()).thenAnswer(invocation -> instant.get());
+    ReflectionTestUtils.setField(recovery, "recoveryClock", clock);
+    return instant;
+  }
+
+  /** 原source SELECT真正匹配后，以实际持久claim deadline推进Clock；无受控数据库写。 */
+  private static java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>
+      advanceClockAfterRealSourceSelect(
+          java.util.concurrent.atomic.AtomicReference<Instant> instant, long elapsedNanos) {
+    var snapshot =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    doAnswer(
+            invocation -> {
+              SeckillQuotaSettlementPO original = invocation.getArgument(0);
+              Long acceptedId = realMapper.findMatchingAcceptanceId(original);
+              assertNotNull(acceptedId, "先执行合法真实source SQL");
+              var current = realMapper.findSettlement(original.orderNo);
+              assertNotNull(current.leaseUntil);
+              instant.set(
+                  current.leaseUntil.toInstant(ZoneOffset.ofHours(8)).plusNanos(elapsedNanos));
+              snapshot.set(facts());
+              return acceptedId;
+            })
+        .when(observedMapper)
+        .findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+    return snapshot;
   }
 
   @Test

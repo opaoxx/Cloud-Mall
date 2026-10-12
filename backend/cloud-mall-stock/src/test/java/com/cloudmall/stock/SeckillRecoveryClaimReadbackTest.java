@@ -7,15 +7,20 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /** claim成功不等于原tuple和租约仍有效；投影之前必须读回证明。 */
 class SeckillRecoveryClaimReadbackTest {
@@ -80,6 +85,103 @@ class SeckillRecoveryClaimReadbackTest {
             any(),
             argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
     verifyNoInteractions(redis);
+  }
+
+  @Test
+  void sourceLookupReachingLeaseDeadlineCannotExecuteLuaOrCompensation() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (long elapsedNanos : List.of(0L, 1000000L)) {
+        var claimed = new AtomicReference<SeckillQuotaSettlementPO>();
+        var mapper =
+            mapper(
+                current -> {
+                  current.status = state;
+                  claimed.set(current);
+                });
+        var redis = redis();
+        var recovery = new SeckillQuotaSettlementRecovery(mapper, redis);
+        var instant = useRecoveryClock(recovery);
+        when(mapper.findMatchingAcceptanceId(any()))
+            .thenAnswer(
+                invocation -> {
+                  instant.set(
+                      claimed
+                          .get()
+                          .leaseUntil
+                          .toInstant(ZoneOffset.ofHours(8))
+                          .plusNanos(elapsedNanos));
+                  return 1L;
+                });
+        when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any(), any())).thenReturn(1);
+        int handled = recovery.recoverDue();
+        assertAll(
+            () -> assertEquals(0, handled, state + ":" + elapsedNanos),
+            () -> verifyNoInteractions(redis),
+            () ->
+                verify(mapper, never())
+                    .markReleased(any(), any(), anyLong(), anyLong(), any(), any()),
+            () ->
+                verify(mapper, never())
+                    .markProjectionBlocked(any(), any(), anyLong(), any(), any(), any(), any()),
+            () ->
+                verify(mapper, never())
+                    .retry(any(), any(), anyLong(), any(), any(), any(), any(), any()));
+        verify(mapper).findSettlement("order-24");
+        verify(mapper)
+            .findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
+      }
+  }
+
+  @Test
+  void sourceLookupCompletingBeforeDeadlineKeepsOriginalRelease() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (long remainingNanos : List.of(1L, 1000000L)) {
+        var claimed = new AtomicReference<SeckillQuotaSettlementPO>();
+        var mapper =
+            mapper(
+                current -> {
+                  current.status = state;
+                  claimed.set(current);
+                });
+        var redis = redis();
+        var recovery = new SeckillQuotaSettlementRecovery(mapper, redis);
+        var instant = useRecoveryClock(recovery);
+        when(mapper.findMatchingAcceptanceId(any()))
+            .thenAnswer(
+                invocation -> {
+                  instant.set(
+                      claimed
+                          .get()
+                          .leaseUntil
+                          .toInstant(ZoneOffset.ofHours(8))
+                          .minusNanos(remainingNanos));
+                  return 1L;
+                });
+        when(mapper.markReleased(any(), any(), anyLong(), anyLong(), any(), any())).thenReturn(1);
+        assertEquals(1, recovery.recoverDue());
+        verify(mapper).findSettlement("order-24");
+        verify(mapper)
+            .findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
+        verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+        verify(redis)
+            .execute(
+                any(RedisScript.class),
+                anyList(),
+                eq("order-24"),
+                eq("order-24:ROLLBACK"),
+                eq("2"),
+                eq("1"));
+      }
+  }
+
+  /** 仅推进恢复器应用观察时钟；不等待、不修改系统或数据库时间。 */
+  private static AtomicReference<Instant> useRecoveryClock(
+      SeckillQuotaSettlementRecovery recovery) {
+    var instant = new AtomicReference<>(Instant.parse("2026-10-12T00:00:00Z"));
+    var clock = mock(Clock.class);
+    when(clock.instant()).thenAnswer(invocation -> instant.get());
+    ReflectionTestUtils.setField(recovery, "recoveryClock", clock);
+    return instant;
   }
 
   @Test
