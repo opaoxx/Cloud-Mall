@@ -91,7 +91,7 @@ class UserTccStateQueryTest {
     when(attempts.selectByPayNo(receive.payNo)).thenReturn(attempt);
     when(debits.selectByPayNo(receive.payNo)).thenReturn(debit);
     when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(ledger);
-    when(ledgers.selectDebitByPayNo(receive.payNo)).thenReturn(ledger);
+    when(ledgers.findDebitCandidatesByPayNo(receive.payNo)).thenReturn(List.of(ledger));
     when(fences.findByBranch(receive.xid, 12L)).thenReturn(fence(2, 12L));
 
     UserTccStateVO state = query.read(7L, receive.operationKey, receive.xid);
@@ -310,6 +310,8 @@ class UserTccStateQueryTest {
           .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
       when(ledgers.selectDebitByPayNo(original.payNo))
           .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
+      when(ledgers.findDebitCandidatesByPayNo(original.payNo))
+          .thenReturn("CONFIRMED".equals(state) ? List.of(ledger()) : List.of());
       when(fences.findByBranch(original.xid, 12L))
           .thenReturn(fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L));
       assertEquals(state, query.read(7L, original.operationKey, original.xid).state);
@@ -418,6 +420,8 @@ class UserTccStateQueryTest {
       if ("UNKNOWN".equals(state))
         org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
             .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+      else if ("CONFIRMED".equals(state))
+        org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo("pay-query-1");
       else org.mockito.Mockito.verify(ledgers).selectDebitByPayNo("pay-query-1");
     }
   }
@@ -492,8 +496,8 @@ class UserTccStateQueryTest {
               case "after" -> observed.balanceAfter = new BigDecimal("89.00");
               default -> {}
             }
-            when(ledgers.selectDebitByPayNo("pay-query-1"))
-                .thenReturn("missing".equals(variant) ? null : observed);
+            when(ledgers.findDebitCandidatesByPayNo("pay-query-1"))
+                .thenReturn("missing".equals(variant) ? List.of() : List.of(observed));
             var conflict =
                 assertThrows(
                     BizException.class,
@@ -519,7 +523,9 @@ class UserTccStateQueryTest {
             () -> {
               setUp();
               installKnownState(state);
-              when(ledgers.selectDebitByPayNo("pay-query-1")).thenThrow(unavailable);
+              if ("CONFIRMED".equals(state))
+                when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenThrow(unavailable);
+              else when(ledgers.selectDebitByPayNo("pay-query-1")).thenThrow(unavailable);
               RuntimeException observed =
                   assertThrows(
                       RuntimeException.class,
@@ -542,8 +548,9 @@ class UserTccStateQueryTest {
       candidate.amount = new BigDecimal("10.000");
       candidate.balanceBefore = new BigDecimal("100.000");
       candidate.balanceAfter = new BigDecimal("90.000");
-      when(ledgers.selectDebitByPayNo("pay-query-1"))
-          .thenReturn("CONFIRMED".equals(state) ? candidate : null);
+      when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(null);
+      when(ledgers.findDebitCandidatesByPayNo("pay-query-1"))
+          .thenReturn("CONFIRMED".equals(state) ? List.of(candidate) : List.of());
       var view = query.read(7L, "tcc-debit:pay-query-1", "xid-query-1");
       assertEquals(state, view.state);
       assertEquals("CONFIRMED".equals(state), view.ledgerApplied);
@@ -596,7 +603,7 @@ class UserTccStateQueryTest {
             installKnownState("CONFIRMED");
             var candidate = ledger();
             candidate.originalOperationKey = origin;
-            when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(candidate);
+            when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenReturn(List.of(candidate));
             var conflict =
                 assertThrows(
                     BizException.class,
@@ -725,6 +732,32 @@ class UserTccStateQueryTest {
     }
   }
 
+  /** LIMIT2范围缺证/重复/nullrow明确冲突，不将重复事实模拟成底层DAO故障。 */
+  @Test
+  void confirmedBoundedCandidatesRejectMissingAndDuplicateFactsBeforeFence() {
+    for (String variant : List.of("null-list", "empty", "null-row", "two", "three")) {
+      setUp();
+      installKnownState("CONFIRMED");
+      List<BalanceLedgerPO> candidates =
+          switch (variant) {
+            case "null-list" -> null;
+            case "empty" -> List.of();
+            case "null-row" -> java.util.Collections.singletonList(null);
+            case "two" -> List.of(ledger(), ledger());
+            default -> List.of(ledger(), ledger(), ledger());
+          };
+      when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenReturn(candidates);
+      var conflict =
+          assertThrows(
+              BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+      assertEquals(409, conflict.getHttpStatus());
+      assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
+      verifyNoInteractions(fences);
+      org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+          .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+    }
+  }
+
   /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
   private TccFenceLogPO installKnownState(String state) {
     UserTccReceivePO receive = receive(12L);
@@ -735,6 +768,8 @@ class UserTccStateQueryTest {
         .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
     when(ledgers.selectDebitByPayNo(receive.payNo))
         .thenReturn("CONFIRMED".equals(state) ? ledger() : null);
+    when(ledgers.findDebitCandidatesByPayNo(receive.payNo))
+        .thenReturn("CONFIRMED".equals(state) ? List.of(ledger()) : List.of());
     TccFenceLogPO observed =
         fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L);
     when(fences.findByBranch(receive.xid, 12L)).thenReturn(observed);

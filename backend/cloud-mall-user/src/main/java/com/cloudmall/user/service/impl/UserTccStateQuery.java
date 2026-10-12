@@ -131,7 +131,11 @@ public class UserTccStateQuery {
               && Objects.equals(ledger.operationKey, receive.ledgerKey)
               && ledger.amount.compareTo(receive.amount) == 0
               && ledger.originalOperationKey == null);
-      require(matchesDebitScope(ledgers.selectDebitByPayNo(receive.payNo), ledger));
+      List<BalanceLedgerPO> candidates = ledgers.findDebitCandidatesByPayNo(receive.payNo);
+      require(
+          candidates != null
+              && candidates.size() == 1
+              && matchesDebitScope(candidates.get(0), ledger));
       view.ledgerApplied = true;
       expectedFence = 2;
     } else if ("CANCELLED".equals(attempt.state)) {

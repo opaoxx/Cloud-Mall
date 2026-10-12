@@ -277,7 +277,8 @@ class UserLinkedRefundEvidenceMySqlIT {
       tracked.reset();
       tracked.checking = true;
       if ("operation_type='DEBIT'".equals(mutation)) {
-        assertEquals(503, assertThrows(BizException.class, this::inspect).getHttpStatus());
+        assertEquals(
+            "USER_TCC_STATE_CONFLICT", assertThrows(BizException.class, this::inspect).getCode());
         assertEquals(before, facts());
         continue;
       }

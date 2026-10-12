@@ -198,6 +198,8 @@ class UserTccStateBalanceSnapshotTest {
         .thenReturn("CONFIRMED".equals(state) ? ledger : null);
     when(ledgers.selectDebitByPayNo(receive.payNo))
         .thenReturn("CONFIRMED".equals(state) ? ledger : null);
+    when(ledgers.findDebitCandidatesByPayNo(receive.payNo))
+        .thenReturn("CONFIRMED".equals(state) ? java.util.List.of(ledger) : java.util.List.of());
     when(fences.findByBranch(receive.xid, 12L))
         .thenReturn(fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3));
   }

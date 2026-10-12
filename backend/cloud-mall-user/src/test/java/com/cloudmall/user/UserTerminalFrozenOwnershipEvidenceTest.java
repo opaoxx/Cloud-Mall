@@ -285,8 +285,10 @@ class UserTerminalFrozenOwnershipEvidenceTest {
     wrong.operationType = "DEBIT";
     wrong.state = "APPLIED";
     when(confirmed.ledgers.selectDebitByPayNo("pay2")).thenReturn(wrong);
+    when(confirmed.ledgers.findDebitCandidatesByPayNo("pay2")).thenReturn(List.of(wrong));
     assertEquals("LOCAL_CONFLICT", confirmed.inspect().classification);
     when(confirmed.ledgers.selectDebitByPayNo("pay2")).thenReturn(null);
+    when(confirmed.ledgers.findDebitCandidatesByPayNo("pay2")).thenReturn(List.of());
     var missingScopeReport = confirmed.inspect();
     assertEquals("LOCAL_CONFLICT", missingScopeReport.classification);
     assertTrue(missingScopeReport.reasonCodes.contains("TERMINAL_PEER_PERSISTED_CONFLICT"));
@@ -456,6 +458,7 @@ class UserTerminalFrozenOwnershipEvidenceTest {
         ledgerRows.add(ledger);
         when(ledgers.selectByOperationKey(payNo)).thenReturn(ledger);
         when(ledgers.selectDebitByPayNo(payNo)).thenReturn(ledger);
+        when(ledgers.findDebitCandidatesByPayNo(payNo)).thenReturn(List.of(ledger));
       }
     }
   }
