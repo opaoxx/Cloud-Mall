@@ -28,7 +28,11 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " idx_seckill_settlement_activity(activity_id,sku_id,status))")
   int ensureTable();
 
-  /** 启动仅补建精确 ACCEPTED 且原活动/SKU/用户身份为正的事实，仍不猜测 Redis 释放结果。 */
+  /**
+   * 启动仅补建精确 ACCEPTED、原正身份及合法幂等键的事实，不猜测 Redis 释放结果。
+   *
+   * <p>原键的 UTF8 HEX 空白集合与 Java17 Character.isWhitespace 对齐；仅检查，不裁剪或改写原键。
+   */
   @Insert(
       "INSERT IGNORE INTO seckill_quota_settlement"
           + " (id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,created_at,updated_at)"
@@ -36,7 +40,10 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " UUID_SHORT(),r.order_no,r.activity_id,r.sku_id,r.user_id,r.idempotency_key,1,'OPEN',1,#{occurredAt},#{occurredAt}"
           + " FROM seckill_reservation r LEFT JOIN seckill_quota_settlement s ON"
           + " s.order_no=r.order_no WHERE r.status='ACCEPTED' AND s.order_no IS NULL AND BINARY"
-          + " r.status=BINARY 'ACCEPTED' AND r.activity_id>0 AND r.sku_id>0 AND r.user_id>0")
+          + " r.status=BINARY 'ACCEPTED' AND r.activity_id>0 AND r.sku_id>0 AND r.user_id>0 AND"
+          + " CHAR_LENGTH(r.idempotency_key) BETWEEN 1 AND 128 AND BINARY r.idempotency_key<>BINARY"
+          + " 'null' AND HEX(CONVERT(r.idempotency_key USING utf8mb4)) NOT REGEXP"
+          + " '^(09|0[A-D]|1[C-F]|20|E19A80|E2808[0-68-9A]|E280A[89]|E2819F|E38080)*$'")
   int insertMissingAcceptedOpen(LocalDateTime occurredAt);
 
   /** 查询并锁定指定订单的结算事实。 */

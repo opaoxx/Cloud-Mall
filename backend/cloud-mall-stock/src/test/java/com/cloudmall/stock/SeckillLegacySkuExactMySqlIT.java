@@ -723,6 +723,148 @@ class SeckillLegacySkuExactMySqlIT {
         }
   }
 
+  @Test
+  void invalidStartupIdempotencyCannotCreateOpenViaSqlOrPrimaryHook() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String key : invalidStartupIdempotencyKeys())
+      for (String entry : List.of("sql", "primary"))
+        assertions.add(
+            () -> {
+              reset();
+              seedLegacy("ACCEPTED", 7L);
+              fixture.update("UPDATE seckill_reservation SET idempotency_key=?", key);
+              var before = facts();
+              if ("sql".equals(entry)) {
+                int inserted =
+                    settlementMapper.insertMissingAcceptedOpen(
+                        java.time.LocalDateTime.of(2026, 10, 12, 11, 0));
+                assertAll(
+                    () ->
+                        assertEquals(
+                            0,
+                            inserted,
+                            "bad key HEX="
+                                + java.util.HexFormat.of()
+                                    .formatHex(
+                                        key.getBytes(java.nio.charset.StandardCharsets.UTF_8))),
+                    () -> assertNull(settlementMapper.findSettlement(ORDER_NO)),
+                    () -> assertEquals(before, facts()));
+              } else {
+                settlementService.ensureTable();
+                assertAll(
+                    () -> assertNull(settlementMapper.findSettlement(ORDER_NO)),
+                    () -> assertEquals(before, facts()));
+              }
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void validStartupKeyKeepsOriginalBytesUnicodeBoundariesAndIdempotency() {
+    List<String> keys =
+        new ArrayList<>(
+            List.of(
+                "private-idem",
+                " private-idem ",
+                "NULL",
+                "null ",
+                "x".repeat(128),
+                "😺".repeat(128)));
+    for (int codePoint : List.of(0x00A0, 0x2007, 0x202F, 0x0085, 0x0000, 0x180E, 0x200B))
+      keys.add(new String(Character.toChars(codePoint)));
+    keys.add(new String(Character.toChars(0x2003)) + "x" + new String(Character.toChars(0x3000)));
+    for (String key : keys)
+      for (String entry : List.of("sql", "primary")) {
+        assertFalse(key.isBlank(), "正例不能把Java空白当作合法键");
+        reset();
+        seedLegacy("ACCEPTED", 7L);
+        fixture.update("UPDATE seckill_reservation SET idempotency_key=?", key);
+        var before = facts();
+        var occurredAt = java.time.LocalDateTime.of(2026, 10, 12, 11, 0, 0, 123000000);
+        if ("sql".equals(entry))
+          assertEquals(1, settlementMapper.insertMissingAcceptedOpen(occurredAt));
+        else settlementService.ensureTable();
+        var current = settlementMapper.findSettlement(ORDER_NO);
+        assertEquals(key, current.idempotencyKey);
+        assertEquals(ORDER_NO, current.orderNo);
+        assertEquals(10L, current.activityId);
+        assertEquals(7L, current.skuId);
+        assertEquals(8L, current.userId);
+        assertEquals("OPEN", current.status);
+        assertEquals(1L, current.revision);
+        assertEquals(1, current.quantity);
+        assertNull(current.operationKey);
+        assertNull(current.redisRevision);
+        if ("sql".equals(entry)) {
+          assertEquals(occurredAt, current.createdAt);
+          assertEquals(occurredAt, current.updatedAt);
+        }
+        var after = facts();
+        for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+          if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+            assertEquals(before.get(tableIndex), after.get(tableIndex));
+        assertEquals(0, settlementMapper.insertMissingAcceptedOpen(occurredAt.plusHours(1)));
+        settlementService.ensureTable();
+        assertEquals(after, facts());
+      }
+  }
+
+  @Test
+  void oversizedOwnedLegacyKeyCannotBeTruncatedIntoAStartupSettlement() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String key : List.of("x".repeat(129), "😺".repeat(129)))
+      for (String entry : List.of("sql", "primary"))
+        assertions.add(
+            () -> {
+              reset();
+              fixture.execute(
+                  "ALTER TABLE seckill_reservation MODIFY idempotency_key VARCHAR(256) NOT NULL");
+              try {
+                seedLegacy("ACCEPTED", 7L);
+                fixture.update("UPDATE seckill_reservation SET idempotency_key=?", key);
+                var before = facts();
+                if ("sql".equals(entry)) {
+                  int inserted =
+                      settlementMapper.insertMissingAcceptedOpen(
+                          java.time.LocalDateTime.of(2026, 10, 12, 11, 0));
+                  assertAll(
+                      () -> assertEquals(0, inserted),
+                      () -> assertNull(settlementMapper.findSettlement(ORDER_NO)),
+                      () -> assertEquals(before, facts()));
+                } else {
+                  settlementService.ensureTable();
+                  assertAll(
+                      () -> assertNull(settlementMapper.findSettlement(ORDER_NO)),
+                      () -> assertEquals(before, facts()));
+                }
+              } finally {
+                tracked.checking = false;
+                fixture.update("DELETE FROM seckill_reservation");
+                fixture.execute(
+                    "ALTER TABLE seckill_reservation MODIFY idempotency_key VARCHAR(128) NOT NULL");
+              }
+            });
+    assertAll(assertions);
+  }
+
+  /** 穷举当前Java17 whitespace，不镜像生产SQL正则；每个字符及混合blank都是真实原key。 */
+  private static List<String> invalidStartupIdempotencyKeys() {
+    List<String> keys = new ArrayList<>(List.of("", "null"));
+    StringBuilder combined = new StringBuilder();
+    int whitespaceCount = 0;
+    for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++)
+      if (Character.isWhitespace(codePoint)) {
+        String key = new String(Character.toChars(codePoint));
+        assertTrue(key.isBlank());
+        keys.add(key);
+        combined.append(key);
+        whitespaceCount++;
+      }
+    assertEquals(25, whitespaceCount, "Java语义升级时必须重新评审SQL空白集合");
+    keys.add(combined.toString());
+    return keys;
+  }
+
   /** 原VARCHAR内的别名和其它受理态；不在夹具中规范化原status。 */
   private static List<String> unprovenStartupStates() {
     return List.of(
