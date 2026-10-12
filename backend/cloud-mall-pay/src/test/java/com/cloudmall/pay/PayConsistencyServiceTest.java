@@ -297,6 +297,56 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** 同一个service每次处理领取都需新token，旧执行不能命中新一轮的owner条件。 */
+  @Test
+  void repeatedClaimsUseDistinctAttemptTokensOnTheSameService() {
+    when(userClient.operation(7L, "pay-1", 7L))
+        .thenThrow(new IllegalStateException("owned read failure"));
+    assertEquals("INIT", consistencyService.process("pay-1"));
+    assertEquals("INIT", consistencyService.process("pay-1"));
+    var tokens = org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(intentMapper, org.mockito.Mockito.times(2))
+        .claim(eq("pay-1"), tokens.capture(), any(), any());
+    org.junit.jupiter.api.Assertions.assertNotEquals(
+        tokens.getAllValues().get(0), tokens.getAllValues().get(1));
+    for (String token : tokens.getAllValues()) {
+      assertEquals(token, java.util.UUID.fromString(token).toString());
+      verify(intentMapper)
+          .recordRetry(eq("pay-1"), eq(token), eq("INIT"), anyString(), any(), any());
+    }
+    verify(userClient, never()).debit(any(), any(), any());
+    verify(userClient, never()).refund(any(), any(), any());
+  }
+
+  /** 每条成功/退款/重试私有链只传自己的claim token，正常状态与旧协议保持。 */
+  @Test
+  void eachOutcomePropagatesItsClaimTokenThroughOwnedWrites() {
+    for (String outcome :
+        java.util.List.of("SUCCESS", "REFUNDED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      prepareRefundPath(false, "refund:pay-1");
+      if ("SUCCESS".equals(outcome)) {
+        when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("PAID")));
+        when(payRecordMapper.markSuccess(eq("pay-1"), any(), any())).thenReturn(1);
+      } else if ("ORDER_SYNC_UNKNOWN".equals(outcome)) {
+        when(orderClient.paymentState("order-1", 7L))
+            .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")));
+        when(orderClient.paid("order-1", 7L)).thenThrow(timeout());
+        when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
+      } else if ("REFUND_PENDING".equals(outcome)) {
+        when(userClient.operation(7L, "refund:pay-1", 7L)).thenReturn(ApiResponse.ok(null));
+      }
+      assertEquals(outcome, consistencyService.process("pay-1"));
+      var token = org.mockito.ArgumentCaptor.forClass(String.class);
+      verify(intentMapper).claim(eq("pay-1"), token.capture(), any(), any());
+      for (var invocation : org.mockito.Mockito.mockingDetails(intentMapper).getInvocations()) {
+        if (java.util.Set.of("updateOwnedStatus", "finish", "recordRetry")
+            .contains(invocation.getMethod().getName())) {
+          assertEquals(token.getValue(), invocation.getArgument(1));
+        }
+      }
+    }
+  }
+
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */
   private void prepareRefundPath(boolean marker, String refundKey) {
     setUp();

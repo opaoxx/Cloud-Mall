@@ -35,9 +35,6 @@ public class PayConsistencyService {
   /** 单笔退款金额必须无损落在数据库DECIMAL(18,2)容量内。 */
   private static final BigDecimal MAX_REFUND_MONEY = new BigDecimal("9999999999999999.99");
 
-  /** 当前恢复器认领 MySQL 租约的实例标识。 */
-  private final String owner = UUID.randomUUID().toString();
-
   /** 独立提交远程扣款前的不可变支付意图。 */
   private final PayDebitIntentService payDebitIntentService;
 
@@ -96,15 +93,19 @@ public class PayConsistencyService {
     PayDebitIntentPO pending = payDebitIntentMapper.findByPayNo(payNo);
     if (pending != null) requireLegacyRoute(pending);
     LocalDateTime currentTime = now();
-    if (payDebitIntentMapper.claim(payNo, owner, currentTime.plusSeconds(30), currentTime) != 1) {
+    // 2. 每次领取使用独立身份，同实例迟到旧执行不得匹配重领后的owner。
+    String claimToken = UUID.randomUUID().toString();
+    if (payDebitIntentMapper.claim(payNo, claimToken, currentTime.plusSeconds(30), currentTime)
+        != 1) {
       PayDebitIntentPO existing = payDebitIntentMapper.findByPayNo(payNo);
       if (existing != null) requireLegacyRoute(existing);
       return existing == null ? "INIT" : existing.status;
     }
+    // 3. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
     PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
     if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
     requireLegacyRoute(intent);
-    return processClaimed(intent);
+    return processClaimed(intent, claimToken);
   }
 
   /** 已存模式不受当前开关影响，未知协议和孤立意图不得进入旧资金调用。 */
@@ -116,7 +117,7 @@ public class PayConsistencyService {
   }
 
   /** 先核对用户账本，再按订单确定成功、等待或唯一退款。 */
-  private String processClaimed(PayDebitIntentPO intent) {
+  private String processClaimed(PayDebitIntentPO intent, String claimToken) {
     String retryStatus = "INIT";
     try {
       // 1. 用户账本是扣款事实；404 表示该操作键尚未落账。
@@ -127,7 +128,7 @@ public class PayConsistencyService {
           OrderClient.OrderView rejectedOrder = readOrderState(intent);
           if ("PAID".equals(rejectedOrder.status()) || "COMPLETED".equals(rejectedOrder.status()))
             throw new IllegalStateException("订单已支付但用户余额扣款被拒绝");
-          return failWithoutDebit(intent);
+          return failWithoutDebit(intent, claimToken);
         }
         if (!"APPLIED".equals(operation.state()))
           throw new IllegalStateException("用户余额操作尚无最终结果: " + operation.state());
@@ -139,11 +140,12 @@ public class PayConsistencyService {
       if (operation != null && operation.refundOperationKey() != null) {
         if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order)) {
           confirmRefundLedger(intent, operation.refundOperationKey());
-          return finishRefunded(intent);
+          return finishRefunded(intent, claimToken);
         }
         throw new IllegalStateException("余额已退款但订单不是已取消状态: " + order.status());
       }
-      if (operation == null && "CANCELLED".equals(order.status())) return failWithoutDebit(intent);
+      if (operation == null && "CANCELLED".equals(order.status()))
+        return failWithoutDebit(intent, claimToken);
       if (operation == null) {
         ApiResponse<UserClient.BalanceView> debit =
             userClient.debit(
@@ -160,11 +162,11 @@ public class PayConsistencyService {
 
       // 3. 扣款后先持久化恢复状态，再触发远程订单支付迁移。
       payRecordMapper.markOrderUnknown(intent.payNo, now());
-      payDebitIntentMapper.updateOwnedStatus(intent.payNo, owner, "DEBITED", now());
+      payDebitIntentMapper.updateOwnedStatus(intent.payNo, claimToken, "DEBITED", now());
       if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
-        return refundCancelled(intent);
+        return refundCancelled(intent, claimToken);
       if (("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
-          && stockActionSucceeded(order)) return finishSuccess(intent);
+          && stockActionSucceeded(order)) return finishSuccess(intent, claimToken);
       if ("CANCELLED".equals(order.status())
           || "PAID".equals(order.status())
           || "COMPLETED".equals(order.status()))
@@ -177,9 +179,9 @@ public class PayConsistencyService {
           && "0".equals(paid.code)
           && paid.data != null
           && ("PAID".equals(paid.data.status()) || "COMPLETED".equals(paid.data.status())))
-        return resolveAfterUncertainOrderWrite(intent);
+        return resolveAfterUncertainOrderWrite(intent, claimToken);
       // 4. 非明确成功时重新读订单；只有明确取消才退款。
-      return resolveAfterUncertainOrderWrite(intent);
+      return resolveAfterUncertainOrderWrite(intent, claimToken);
     } catch (RuntimeException remoteOrPersistenceFailure) {
       // 5. 任何查询或远程结果未知都保留原 payNo 并定时重试，禁止猜测退款。
       if ("DEBITED".equals(intent.status) || "ORDER_SYNC_UNKNOWN".equals(intent.status))
@@ -192,7 +194,7 @@ public class PayConsistencyService {
         payRecordMapper.markOrderUnknown(intent.payNo, now());
       payDebitIntentMapper.recordRetry(
           intent.payNo,
-          owner,
+          claimToken,
           retryStatus,
           remoteOrPersistenceFailure.toString(),
           now().plusSeconds(retryDelaySeconds(intent.attempts)),
@@ -203,12 +205,12 @@ public class PayConsistencyService {
   }
 
   /** 远程支付写入未确认时，只依据新的订单事实决定后续动作。 */
-  private String resolveAfterUncertainOrderWrite(PayDebitIntentPO intent) {
+  private String resolveAfterUncertainOrderWrite(PayDebitIntentPO intent, String claimToken) {
     OrderClient.OrderView current = readOrderState(intent);
     if (("PAID".equals(current.status()) || "COMPLETED".equals(current.status()))
-        && stockActionSucceeded(current)) return finishSuccess(intent);
+        && stockActionSucceeded(current)) return finishSuccess(intent, claimToken);
     if ("CANCELLED".equals(current.status()) && stockActionSucceeded(current))
-      return refundCancelled(intent);
+      return refundCancelled(intent, claimToken);
     throw new IllegalStateException("订单支付写入尚未确认: " + current.status());
   }
 
@@ -255,27 +257,27 @@ public class PayConsistencyService {
   }
 
   /** 用户账本和订单都明确成功后才标记支付成功。 */
-  private String finishSuccess(PayDebitIntentPO intent) {
+  private String finishSuccess(PayDebitIntentPO intent, String claimToken) {
     int changed = payRecordMapper.markSuccess(intent.payNo, now(), now());
     requirePayRecordStatus(intent.payNo, "SUCCESS", changed);
-    payDebitIntentMapper.finish(intent.payNo, owner, "SUCCESS", now());
+    payDebitIntentMapper.finish(intent.payNo, claimToken, "SUCCESS", now());
     return "SUCCESS";
   }
 
   /** 原扣款已退款时恢复支付记录终态，不再次增加余额。 */
-  private String finishRefunded(PayDebitIntentPO intent) {
+  private String finishRefunded(PayDebitIntentPO intent, String claimToken) {
     payRecordMapper.markRefundPending(intent.payNo, now());
     int changed = payRecordMapper.markRefunded(intent.payNo, now());
     requirePayRecordStatus(intent.payNo, "REFUNDED", changed);
-    payDebitIntentMapper.finish(intent.payNo, owner, "REFUNDED", now());
+    payDebitIntentMapper.finish(intent.payNo, claimToken, "REFUNDED", now());
     return "REFUNDED";
   }
 
   /** 确认订单取消后先持久化退款意图，再调用幂等用户退款接口。 */
-  private String refundCancelled(PayDebitIntentPO intent) {
+  private String refundCancelled(PayDebitIntentPO intent, String claimToken) {
     int changed = payRecordMapper.markRefundPending(intent.payNo, now());
     requirePayRecordStatus(intent.payNo, "REFUND_PENDING", changed);
-    payDebitIntentMapper.updateOwnedStatus(intent.payNo, owner, "REFUND_PENDING", now());
+    payDebitIntentMapper.updateOwnedStatus(intent.payNo, claimToken, "REFUND_PENDING", now());
     ApiResponse<UserClient.BalanceView> refund =
         userClient.refund(
             intent.userId,
@@ -292,7 +294,7 @@ public class PayConsistencyService {
         || !Objects.equals("refund:" + intent.payNo, refund.data.operationKey())
         || !"APPLIED".equals(refund.data.state())) throw new IllegalStateException("用户余额退款未确认");
     confirmRefundLedger(intent, "refund:" + intent.payNo);
-    return finishRefunded(intent);
+    return finishRefunded(intent, claimToken);
   }
 
   /**
@@ -330,10 +332,10 @@ public class PayConsistencyService {
   }
 
   /** 明确没有扣款且订单已取消或账本拒绝时标记失败。 */
-  private String failWithoutDebit(PayDebitIntentPO intent) {
+  private String failWithoutDebit(PayDebitIntentPO intent, String claimToken) {
     int changed = payRecordMapper.markFailed(intent.payNo, now());
     requirePayRecordStatus(intent.payNo, "FAILED", changed);
-    payDebitIntentMapper.finish(intent.payNo, owner, "FAILED", now());
+    payDebitIntentMapper.finish(intent.payNo, claimToken, "FAILED", now());
     return "FAILED";
   }
 

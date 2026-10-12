@@ -252,6 +252,64 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(markerFacts.get(0).size(), payFacts().get(0).size());
   }
 
+  /** 同一service重领后，迟到旧retry不能改新owner的完整意图或清新租约。 */
+  @Test
+  void expiredSameInstanceAttemptCannotReleaseTheReclaimedLease() throws Exception {
+    seedIntentAndPayment("PENDING", "INIT");
+    UserClient user = mock(UserClient.class);
+    var firstReading = new java.util.concurrent.CountDownLatch(1);
+    var secondReading = new java.util.concurrent.CountDownLatch(1);
+    var releaseFirst = new java.util.concurrent.CountDownLatch(1);
+    var releaseSecond = new java.util.concurrent.CountDownLatch(1);
+    var readers = new java.util.concurrent.atomic.AtomicInteger();
+    when(user.operation(7L, "pay-1", 7L))
+        .thenAnswer(
+            invocation -> {
+              int attempt = readers.incrementAndGet();
+              if (attempt == 1) {
+                firstReading.countDown();
+                assertTrue(releaseFirst.await(15, java.util.concurrent.TimeUnit.SECONDS));
+              } else {
+                secondReading.countDown();
+                assertTrue(releaseSecond.await(15, java.util.concurrent.TimeUnit.SECONDS));
+              }
+              throw new IllegalStateException("owned-attempt-read-failure-" + attempt);
+            });
+    PayConsistencyService sameInstance = newService(user, cancellingOrders());
+    var workers = java.util.concurrent.Executors.newFixedThreadPool(2);
+    try {
+      var first = workers.submit(() -> sameInstance.process("pay-1"));
+      assertTrue(firstReading.await(10, java.util.concurrent.TimeUnit.SECONDS));
+      String firstToken = intentLeaseOwner();
+      fixture.update(
+          "UPDATE pay_debit_intent SET lease_until=NOW(3)-INTERVAL 1"
+              + " SECOND,next_retry_at=NOW(3)-INTERVAL 1 SECOND WHERE pay_no='pay-1'");
+      var second = workers.submit(() -> sameInstance.process("pay-1"));
+      assertTrue(secondReading.await(10, java.util.concurrent.TimeUnit.SECONDS));
+      var reclaimed = fixture.queryForMap("SELECT * FROM pay_debit_intent WHERE pay_no='pay-1'");
+      var paymentBefore = fixture.queryForMap("SELECT * FROM pay_record WHERE pay_no='pay-1'");
+      releaseFirst.countDown();
+      assertEquals("INIT", first.get(10, java.util.concurrent.TimeUnit.SECONDS));
+      assertEquals(
+          reclaimed, fixture.queryForMap("SELECT * FROM pay_debit_intent WHERE pay_no='pay-1'"));
+      assertNotEquals(firstToken, reclaimed.get("lease_owner"));
+      assertEquals(
+          paymentBefore, fixture.queryForMap("SELECT * FROM pay_record WHERE pay_no='pay-1'"));
+      releaseSecond.countDown();
+      assertEquals("INIT", second.get(10, java.util.concurrent.TimeUnit.SECONDS));
+      assertNull(intentLeaseOwner());
+      assertEquals(2, intentAttempts());
+      assertTrue(retryErrorPresent());
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, never()).refund(any(), any(), any());
+    } finally {
+      releaseFirst.countDown();
+      releaseSecond.countDown();
+      workers.shutdownNow();
+      assertTrue(workers.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS));
+    }
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");
