@@ -1702,3 +1702,9 @@ SQL/Lua/接口协议保持；查询后变化、查询耗时后的租约窗口和
 无结算行的历史兼容查询仅保留ACCEPTED/REJECTED原状态与明细；PENDING等其它状态返回UNKNOWN和空明细。
 原身份、SKU和上下文校验优先，未知结果不落普通库存；主查询、SQL及写状态保持，不扩展PUBLISHED/ORDER_CREATED映射。
 此门只收窄未证明的明细输出，不证明原请求/hash/订单完整因果，Order fallback继续保持UNKNOWN。
+
+### CM-18 启动补建结算行的精确受理状态（16T58）
+
+启动恢复补建OPEN时，在原ACCEPTED候选条件后核字节级原状态，大小写、重音和尾空格别名不再创建结算行。
+精确ACCEPTED的字段、时间、默认值及幂等行为保持；PUBLISHED/ORDER_CREATED不扩展补建，既有错误行不自动删除。
+两个启动入口复用同一Mapper条件；不证明原完整tuple/请求/hash因果，也不改变其它读写或Redis流程。

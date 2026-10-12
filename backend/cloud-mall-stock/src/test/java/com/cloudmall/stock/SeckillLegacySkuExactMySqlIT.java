@@ -557,6 +557,118 @@ class SeckillLegacySkuExactMySqlIT {
         "REJECTED ");
   }
 
+  @Test
+  void startupBackfillCannotBorrowAcceptedStatusAliasesOrUnsupportedSources() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : unprovenStartupStates())
+      assertions.add(
+          () -> {
+            reset();
+            seedLegacy(state, 7L);
+            var before = facts();
+            var occurredAt = java.time.LocalDateTime.of(2026, 10, 12, 11, 0, 0, 123000000);
+            int inserted = settlementMapper.insertMissingAcceptedOpen(occurredAt);
+            assertAll(
+                () -> assertEquals(0, inserted, state),
+                () -> assertNull(settlementMapper.findSettlement(ORDER_NO), state),
+                () -> assertEquals(before, facts(), state));
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void primaryStartupHookCannotCreateOpenFromWrongAcceptanceStatus() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : unprovenStartupStates())
+      assertions.add(
+          () -> {
+            reset();
+            seedLegacy(state, 7L);
+            var before = facts();
+            settlementService.ensureTable();
+            assertAll(
+                () -> assertNull(settlementMapper.findSettlement(ORDER_NO), state),
+                () -> assertEquals(before, facts(), state));
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void exactAcceptedStartupBackfillKeepsOriginalTupleDefaultsAndIdempotency() {
+    reset();
+    seedLegacy("ACCEPTED", 7L);
+    var before = facts();
+    var occurredAt = java.time.LocalDateTime.of(2026, 10, 12, 11, 0, 0, 123000000);
+    assertEquals(1, settlementMapper.insertMissingAcceptedOpen(occurredAt));
+    var original = settlementMapper.findSettlement(ORDER_NO);
+    assertNotNull(original.id);
+    assertTrue(original.id > 0);
+    assertEquals(ORDER_NO, original.orderNo);
+    assertEquals(10L, original.activityId);
+    assertEquals(7L, original.skuId);
+    assertEquals(8L, original.userId);
+    assertEquals("private-idem", original.idempotencyKey);
+    assertEquals(1, original.quantity);
+    assertEquals(1L, original.revision);
+    assertEquals("OPEN", original.status);
+    assertNull(original.operationKey);
+    assertNull(original.redisRevision);
+    assertNull(original.leaseOwner);
+    assertNull(original.leaseUntil);
+    assertNull(original.lastError);
+    assertNull(original.nextRetryAt);
+    assertEquals(occurredAt, original.createdAt);
+    assertEquals(occurredAt, original.updatedAt);
+    var after = facts();
+    for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+      if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+        assertEquals(before.get(tableIndex), after.get(tableIndex));
+    assertEquals(0, settlementMapper.insertMissingAcceptedOpen(occurredAt.plusHours(1)));
+    assertEquals(after, facts());
+    // 已有合法原结算行无论状态/诊断如何变化，启动回填不得覆盖。
+    fixture.update(
+        "UPDATE seckill_quota_settlement SET"
+            + " status='CONFIRMED',operation_key=?,revision=2,last_error='owned-existing',lease_owner='owned-existing',lease_until='2099-01-01'",
+        ORDER_NO + ":CONFIRM");
+    var existing = facts();
+    settlementService.ensureTable();
+    assertEquals(existing, facts());
+    reset();
+    seedLegacy("ACCEPTED", 7L);
+    var sourceBefore = facts();
+    settlementService.ensureTable();
+    var created = settlementMapper.findSettlement(ORDER_NO);
+    assertEquals("OPEN", created.status);
+    assertEquals(ORDER_NO, created.orderNo);
+    assertEquals(7L, created.skuId);
+    assertEquals(1L, created.revision);
+    var createdFacts = facts();
+    for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+      if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+        assertEquals(sourceBefore.get(tableIndex), createdFacts.get(tableIndex));
+    settlementService.ensureTable();
+    assertEquals(createdFacts, facts());
+  }
+
+  /** 原VARCHAR内的别名和其它受理态；不在夹具中规范化原status。 */
+  private static List<String> unprovenStartupStates() {
+    return List.of(
+        "accepted",
+        "Accepted",
+        "ÁCCEPTED",
+        "ACCÉPTED",
+        "ACCEPTED ",
+        "ACCEPTED  ",
+        " ACCEPTED",
+        "PENDING",
+        "PUBLISHED",
+        "ORDER_CREATED",
+        "UNKNOWN",
+        "REJECTED",
+        "",
+        " ");
+  }
+
   /** 不伪造正SKU，不让无效REJECTED变成Order冲突/成功依据。 */
   private static void assertUnknownSku(StockReservationVO result) {
     assertEquals(ORDER_NO, result.orderNo);

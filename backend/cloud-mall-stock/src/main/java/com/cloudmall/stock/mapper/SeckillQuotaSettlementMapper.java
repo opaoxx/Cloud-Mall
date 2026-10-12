@@ -28,14 +28,15 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " idx_seckill_settlement_activity(activity_id,sku_id,status))")
   int ensureTable();
 
-  /** 启动恢复已有 ACCEPTED 受理事实，仍不猜测 Redis 释放结果。 */
+  /** 启动仅补建状态精确为 ACCEPTED 的受理事实，仍不猜测 Redis 释放结果。 */
   @Insert(
       "INSERT IGNORE INTO seckill_quota_settlement"
           + " (id,order_no,activity_id,sku_id,user_id,idempotency_key,quantity,status,revision,created_at,updated_at)"
           + " SELECT"
           + " UUID_SHORT(),r.order_no,r.activity_id,r.sku_id,r.user_id,r.idempotency_key,1,'OPEN',1,#{occurredAt},#{occurredAt}"
           + " FROM seckill_reservation r LEFT JOIN seckill_quota_settlement s ON"
-          + " s.order_no=r.order_no WHERE r.status='ACCEPTED' AND s.order_no IS NULL")
+          + " s.order_no=r.order_no WHERE r.status='ACCEPTED' AND s.order_no IS NULL AND BINARY"
+          + " r.status=BINARY 'ACCEPTED'")
   int insertMissingAcceptedOpen(LocalDateTime occurredAt);
 
   /** 查询并锁定指定订单的结算事实。 */
