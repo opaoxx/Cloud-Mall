@@ -379,6 +379,14 @@ public class UserServiceImpl implements UserService {
         || debitCandidates.size() != 1
         || !matchesRefundDebitScope(original, debitCandidates.get(0), request, userId))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+    // active新退款观察原归属；已知TCC必须证明本地确认冻结，未知模式不能作为来源。
+    if (Objects.equals(user.status, 1)) {
+      BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+      if (attempt != null
+          && !"LEGACY".equals(attempt.mode)
+          && !confirmedTccRefund(original, request, attempt))
+        throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+    }
     // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
     BigDecimal refundedAmount = provenRefundedAmount(original);
     if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
@@ -414,9 +422,15 @@ public class UserServiceImpl implements UserService {
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
   }
 
-  /** 禁用用户先核归属，再复核原确认冻结及账本快照；只读本地事实，不扩展Legacy退款。 */
+  /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */
   private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceRefundRequestDTO request) {
-    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+    return confirmedTccRefund(
+        original, request, balanceDebitAttemptMapper.selectByPayNo(request.payNo));
+  }
+
+  /** 调用方已观察归属；复核原TCC元组和确认冻结，不重复读取attempt或扩展Legacy。 */
+  private boolean confirmedTccRefund(
+      BalanceLedgerPO original, BalanceRefundRequestDTO request, BalanceDebitAttemptPO attempt) {
     if (attempt == null
         || !"TCC".equals(attempt.mode)
         || !"CONFIRMED".equals(attempt.state)
