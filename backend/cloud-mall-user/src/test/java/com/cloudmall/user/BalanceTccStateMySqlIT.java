@@ -1737,7 +1737,388 @@ class BalanceTccStateMySqlIT {
     }
   }
 
-  /** 新退款集合逐行门在Legacy/TCC/disabled三条真实路径上拒绝坏候选，不credit或insert。 */
+  /** Legacy fresh debit在余额来源非法时于认领前固定拒绝，真实Controller与Service均不写资金。 */
+  @Test
+  void legacyFreshDebitRejectsInvalidWalletBeforeAnyOwnership() throws Exception {
+    fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (String raw : List.of("NULL", "-1", "10.001", "10000000000000000.00"))
+        assertions.add(
+            () -> {
+              closeContext();
+              createTransactionalServices();
+              fixture.update(
+                  "UPDATE mall_user SET balance=? WHERE id=7", "NULL".equals(raw) ? null : raw);
+              var request = new BalanceDebitRequestDTO();
+              request.operationKey = "wallet-invalid";
+              request.payNo = "wallet-invalid";
+              request.orderNo = "order-wallet-invalid";
+              request.amount = new BigDecimal("10.00");
+              var before = allFundsFacts();
+              var failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> debitLegacy("wallet-invalid", "wallet-invalid", 7L, "10.00"));
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+              assertEquals(before, allFundsFacts());
+              var response = postLegacyDebit(request);
+              assertEquals(409, response.getResponse().getStatus());
+              assertHttpCode(response, "BALANCE_DEBIT_UNKNOWN");
+              assertEquals(before, allFundsFacts());
+            });
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt");
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.update("DELETE FROM mall_user");
+      fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** Legacy metadata与snapshot坏值按冻结错误码区分，Controller与Service均不写。 */
+  @Test
+  void legacyExistingTupleAndAttemptMoneyRejectBeforeReplay() throws Exception {
+    fixture.execute("ALTER TABLE balance_debit_attempt MODIFY amount DECIMAL(20,3) NULL");
+    fixture.execute(
+        "ALTER TABLE balance_ledger MODIFY amount DECIMAL(20,3) NULL, MODIFY balance_before"
+            + " DECIMAL(20,3) NULL, MODIFY balance_after DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (String mutation :
+          List.of(
+              "ledger-origin",
+              "ledger-amount",
+              "ledger-before",
+              "ledger-after",
+              "ledger-delta",
+              "attempt-amount"))
+        assertions.add(
+            () -> {
+              closeContext();
+              createTransactionalServices();
+              debitLegacy("legacy-tuple", "legacy-tuple-key", 7L, "10.00");
+              if ("ledger-origin".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET original_operation_key='other' WHERE"
+                        + " operation_key=?",
+                    "legacy-tuple-key");
+              if ("ledger-amount".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET amount=NULL WHERE operation_key=?",
+                    "legacy-tuple-key");
+              if ("ledger-before".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_before=NULL WHERE operation_key=?",
+                    "legacy-tuple-key");
+              if ("ledger-after".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_after=NULL WHERE operation_key=?",
+                    "legacy-tuple-key");
+              if ("ledger-delta".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_after=95 WHERE operation_key=?",
+                    "legacy-tuple-key");
+              if ("attempt-amount".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_debit_attempt SET amount=NULL WHERE operation_key=?",
+                    "legacy-tuple-key");
+              String expectedCode =
+                  List.of("ledger-before", "ledger-after", "ledger-delta").contains(mutation)
+                      ? "BALANCE_DEBIT_UNKNOWN"
+                      : "IDEMPOTENCY_CONFLICT";
+              var before = allFundsFacts();
+              var failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> debitLegacy("legacy-tuple", "legacy-tuple-key", 7L, "10.00"));
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals(expectedCode, failure.getCode());
+              assertEquals(before, allFundsFacts());
+              var request = new BalanceDebitRequestDTO();
+              request.operationKey = "legacy-tuple-key";
+              request.payNo = "legacy-tuple";
+              request.orderNo = "order-legacy-tuple";
+              request.amount = new BigDecimal("10.00");
+              var response = postLegacyDebit(request);
+              assertEquals(409, response.getResponse().getStatus());
+              assertHttpCode(response, expectedCode);
+              assertEquals(before, allFundsFacts());
+            });
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt");
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.execute("ALTER TABLE balance_debit_attempt MODIFY amount DECIMAL(18,2) NOT NULL");
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY amount DECIMAL(18,2) NOT NULL, MODIFY balance_before"
+              + " DECIMAL(18,2) NOT NULL, MODIFY balance_after DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** REJECTED历史快照必须完整；合法PAYMENT_FAILED与APPLIED replay继续保持原语义。 */
+  @Test
+  void legacyRejectedAndAppliedSnapshotsPreserveHistoricalReplayRules() throws Exception {
+    fixture.execute(
+        "ALTER TABLE balance_ledger MODIFY balance_before DECIMAL(20,3) NULL, MODIFY balance_after"
+            + " DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (String mutation :
+          List.of("before", "after", "null-before", "null-after", "delta", "enough"))
+        assertions.add(
+            () -> {
+              closeContext();
+              createTransactionalServices();
+              assertThrows(
+                  BizException.class,
+                  () -> debitLegacy("rejected-proof", "rejected-proof-key", 7L, "101.00"));
+              if ("before".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_before=99 WHERE operation_key=?",
+                    "rejected-proof-key");
+              if ("after".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_after=99 WHERE operation_key=?",
+                    "rejected-proof-key");
+              if ("null-before".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_before=NULL WHERE operation_key=?",
+                    "rejected-proof-key");
+              if ("null-after".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_after=NULL WHERE operation_key=?",
+                    "rejected-proof-key");
+              if ("delta".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_after=99 WHERE operation_key=?",
+                    "rejected-proof-key");
+              if ("enough".equals(mutation))
+                fixture.update(
+                    "UPDATE balance_ledger SET balance_before=200,balance_after=200 WHERE"
+                        + " operation_key=?",
+                    "rejected-proof-key");
+              fixture.update("UPDATE mall_user SET balance=200 WHERE id=7");
+              var before = allFundsFacts();
+              var failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> debitLegacy("rejected-proof", "rejected-proof-key", 7L, "101.00"));
+              assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+              BalanceDebitRequestDTO request = new BalanceDebitRequestDTO();
+              request.operationKey = "rejected-proof-key";
+              request.payNo = "rejected-proof";
+              request.orderNo = "order-rejected-proof";
+              request.amount = new BigDecimal("101.00");
+              var response = postLegacyDebit(request);
+              assertEquals(409, response.getResponse().getStatus());
+              assertHttpCode(response, "BALANCE_DEBIT_UNKNOWN");
+              assertEquals(before, allFundsFacts());
+            });
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt");
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY balance_before DECIMAL(18,2) NOT NULL, MODIFY"
+              + " balance_after DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 实际拒款与扣款历史重放保持决策；owned钱包NULL不影响合法已存快照。 */
+  @Test
+  void legacyHealthyRejectedAndAppliedReplayUseHistoricalDecisions() throws Exception {
+    closeContext();
+    createTransactionalServices();
+    assertThrows(
+        BizException.class,
+        () -> debitLegacy("rejected-replay", "rejected-replay-key", 7L, "101.00"));
+    fixture.update("UPDATE mall_user SET balance=200 WHERE id=7");
+    var rejectedBefore = allFundsFacts();
+    var rejectedFailure =
+        assertThrows(
+            BizException.class,
+            () -> debitLegacy("rejected-replay", "rejected-replay-key", 7L, "101.00"));
+    assertEquals("PAYMENT_FAILED", rejectedFailure.getCode());
+    var rejectedRequest = new BalanceDebitRequestDTO();
+    rejectedRequest.operationKey = "rejected-replay-key";
+    rejectedRequest.payNo = "rejected-replay";
+    rejectedRequest.orderNo = "order-rejected-replay";
+    rejectedRequest.amount = new BigDecimal("101.00");
+    var rejectedResponse = postLegacyDebit(rejectedRequest);
+    assertEquals(409, rejectedResponse.getResponse().getStatus());
+    assertHttpCode(rejectedResponse, "PAYMENT_FAILED");
+    assertEquals(rejectedBefore, allFundsFacts());
+
+    closeContext();
+    createTransactionalServices();
+    BalanceTccDebitTryDTO applied = request("applied-replay", 7L, "10.00");
+    debitLegacy(applied.payNo, applied.ledgerKey, 7L, "10.00");
+    fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NULL");
+    try {
+      fixture.update("UPDATE mall_user SET balance=NULL WHERE id=7");
+      var before = allFundsFacts();
+      debitLegacy(applied.payNo, applied.ledgerKey, 7L, "10.00");
+      assertEquals(before, allFundsFacts());
+      var appliedRequest = new BalanceDebitRequestDTO();
+      appliedRequest.operationKey = applied.ledgerKey;
+      appliedRequest.payNo = applied.payNo;
+      appliedRequest.orderNo = applied.orderNo;
+      appliedRequest.amount = applied.amount;
+      var appliedResponse = postLegacyDebit(appliedRequest);
+      assertEquals(200, appliedResponse.getResponse().getStatus());
+      assertEquals(
+          "APPLIED",
+          new com.fasterxml.jackson.databind.ObjectMapper()
+              .readTree(appliedResponse.getResponse().getContentAsString())
+              .path("data")
+              .path("state")
+              .asText());
+      assertEquals(
+          "90.00",
+          new com.fasterxml.jackson.databind.ObjectMapper()
+              .readTree(appliedResponse.getResponse().getContentAsString())
+              .path("data")
+              .path("balance")
+              .asText());
+      assertEquals(before, allFundsFacts());
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt");
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.update("DELETE FROM mall_user");
+      fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL");
+    }
+    // 兼容入口实际进入相同事务和资金门，独立验证其支付键转为三元组的传递。
+    fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NULL");
+    fixture.execute("ALTER TABLE balance_debit_attempt MODIFY amount DECIMAL(18,2) NULL");
+    List<org.junit.jupiter.api.function.Executable> compatibleAssertions = new ArrayList<>();
+    try {
+      for (String scenario :
+          List.of(
+              "wallet-null",
+              "attempt-null",
+              "snapshot-delta",
+              "applied-replay",
+              "rejected-replay")) {
+        compatibleAssertions.add(
+            () -> {
+              closeContext();
+              createTransactionalServices();
+              var compatibleRequest = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+              compatibleRequest.paymentKey = "compatible-proof";
+              compatibleRequest.amount = new BigDecimal("10.00");
+              String expectedCode = "BALANCE_DEBIT_UNKNOWN";
+              if ("wallet-null".equals(scenario)) {
+                fixture.update("UPDATE mall_user SET balance=NULL WHERE id=7");
+              } else if ("rejected-replay".equals(scenario)) {
+                compatibleRequest.amount = new BigDecimal("101.00");
+                assertEquals(
+                    "PAYMENT_FAILED",
+                    assertThrows(BizException.class, () -> legacy.debit(7L, 7L, compatibleRequest))
+                        .getCode());
+                expectedCode = "PAYMENT_FAILED";
+              } else {
+                legacy.debit(7L, 7L, compatibleRequest);
+                if ("attempt-null".equals(scenario)) {
+                  fixture.update(
+                      "UPDATE balance_debit_attempt SET amount=NULL WHERE pay_no=?",
+                      compatibleRequest.paymentKey);
+                  expectedCode = "IDEMPOTENCY_CONFLICT";
+                } else if ("snapshot-delta".equals(scenario)) {
+                  fixture.update(
+                      "UPDATE balance_ledger SET balance_after=95 WHERE operation_key=?",
+                      compatibleRequest.paymentKey);
+                }
+              }
+              var beforeCompatibleReplay = allFundsFacts();
+              if ("applied-replay".equals(scenario)) {
+                legacy.debit(7L, 7L, compatibleRequest);
+                var response = postCompatibleLegacyDebit(compatibleRequest);
+                assertEquals(200, response.getResponse().getStatus());
+                var body =
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(response.getResponse().getContentAsString());
+                assertEquals("APPLIED", body.path("data").path("state").asText());
+                assertEquals("90.00", body.path("data").path("balance").asText());
+              } else {
+                assertEquals(
+                    expectedCode,
+                    assertThrows(BizException.class, () -> legacy.debit(7L, 7L, compatibleRequest))
+                        .getCode());
+                var response = postCompatibleLegacyDebit(compatibleRequest);
+                assertEquals(409, response.getResponse().getStatus());
+                assertHttpCode(response, expectedCode);
+              }
+              assertEquals(beforeCompatibleReplay, allFundsFacts());
+            });
+      }
+      org.junit.jupiter.api.Assertions.assertAll(compatibleAssertions);
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt");
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.update("DELETE FROM mall_user");
+      fixture.execute("ALTER TABLE mall_user MODIFY balance DECIMAL(18,2) NOT NULL");
+      fixture.execute("ALTER TABLE balance_debit_attempt MODIFY amount DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 兼容接口使用原paymentKey载荷，经真实Controller进入本地事务。 */
+  private org.springframework.test.web.servlet.MvcResult postCompatibleLegacyDebit(
+      com.cloudmall.user.domain.dto.DebitRequestDTO request) throws Exception {
+    String payload =
+        new com.fasterxml.jackson.databind.ObjectMapper()
+            .writeValueAsString(
+                Map.of("paymentKey", request.paymentKey, "amount", request.amount.toPlainString()));
+    return org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+            context.getBean(UserController.class))
+        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+        .build()
+        .perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/api/internal/users/7/balance/debit")
+                .header("X-User-Id", "7")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(payload))
+        .andReturn();
+  }
+
+  /** 真实Controller legacy debit入口，返回原始HTTP结果供错误码断言。 */
+  private org.springframework.test.web.servlet.MvcResult postLegacyDebit(
+      BalanceDebitRequestDTO request) throws Exception {
+    String payload =
+        new com.fasterxml.jackson.databind.ObjectMapper()
+            .writeValueAsString(
+                Map.of(
+                    "operationKey", request.operationKey,
+                    "payNo", request.payNo,
+                    "orderNo", request.orderNo,
+                    "amount", request.amount.toPlainString()));
+    return org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+            context.getBean(UserController.class))
+        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+        .build()
+        .perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/api/internal/users/7/balance/debits")
+                .header("X-User-Id", "7")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(payload))
+        .andReturn();
+  }
+
+  /** 读取真实Controller统一响应码，避免只以HTTP状态代替业务错误码证据。 */
+  private static void assertHttpCode(
+      org.springframework.test.web.servlet.MvcResult response, String expectedCode)
+      throws Exception {
+    assertEquals(
+        expectedCode,
+        new com.fasterxml.jackson.databind.ObjectMapper()
+            .readTree(response.getResponse().getContentAsString())
+            .path("code")
+            .asText());
+  }
+
   @Test
   void refundCandidateRowsRejectMalformedTuplesBeforeAnyFundsMutation() {
     fixture.execute("ALTER TABLE balance_ledger MODIFY amount DECIMAL(20,3) NULL");

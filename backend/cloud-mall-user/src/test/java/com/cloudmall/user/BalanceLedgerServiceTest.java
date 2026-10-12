@@ -42,6 +42,12 @@ class BalanceLedgerServiceTest {
 
   private ValueOperations<String, String> valueOperations;
 
+  /** Legacy当前用例的已存账本，用于改变历史字段并验证重放拒绝。 */
+  private BalanceLedgerPO legacyDebitLedger;
+
+  /** Legacy当前用例的不可变尝试归属，金额缺证不得跳入资金写。 */
+  private BalanceDebitAttemptPO legacyDebitAttempt;
+
   /** 当前退款用例可改变的原扣款证明，正常字段完整且不连接真实库。 */
   private BalanceLedgerPO originalRefundDebit;
 
@@ -804,6 +810,321 @@ class BalanceLedgerServiceTest {
         assertThrows(
             RuntimeException.class, () -> userService.refundInternal(7L, 7L, failureRequest)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
+  /** 新扣款钱包损坏必须在claim前拒绝，兼容入口同样不能记录假不足。 */
+  @Test
+  void legacyFreshMalformedWalletStopsBeforeClaimOrMoneyWrite() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (BigDecimal balance :
+          java.util.Arrays.asList(
+              null,
+              new BigDecimal("-1"),
+              new BigDecimal("0.001"),
+              new BigDecimal("100.001"),
+              new BigDecimal("10000000000000000"))) {
+        assertions.add(
+            () -> {
+              var request = installLegacyDebit(entry, null);
+              when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(balance));
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request));
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+              assertLegacyNoMoneyOrCacheWrite();
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 归属金额NULL和非法域沿原幂等错误，不在compareTo抛空指针。 */
+  @Test
+  void legacyAttemptMoneyRequiresSafePositiveDomain() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (BigDecimal amount :
+          java.util.Arrays.asList(
+              null,
+              BigDecimal.ZERO,
+              new BigDecimal("-1"),
+              new BigDecimal("10.001"),
+              new BigDecimal("10000000000000000"))) {
+        assertions.add(
+            () -> {
+              var request = installLegacyDebit(entry, "APPLIED");
+              legacyDebitAttempt.amount = amount;
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request));
+              assertEquals(409, failure.getHttpStatus());
+              assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitByPayNo(any());
+              assertLegacyNoMoneyOrCacheWrite();
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 账本实际key/origin及金额要精确证明，坏tuple不得缓存或200重放。 */
+  @Test
+  void legacyReplayRejectsMalformedLedgerMetadataBeforeSnapshot() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String mutation :
+          java.util.List.of(
+              "key-null",
+              "key-alias",
+              "key-other",
+              "origin-empty",
+              "origin-other",
+              "origin-literal-null",
+              "amount-null",
+              "amount-zero",
+              "amount-negative",
+              "amount-fraction",
+              "amount-overflow",
+              "wrong-user")) {
+        assertions.add(
+            () -> {
+              var request = installLegacyDebit(entry, "APPLIED");
+              switch (mutation) {
+                case "key-null" -> legacyDebitLedger.operationKey = null;
+                case "key-alias" -> legacyDebitLedger.operationKey = "PAY-1";
+                case "key-other" -> legacyDebitLedger.operationKey = "other";
+                case "origin-empty" -> legacyDebitLedger.originalOperationKey = "";
+                case "origin-other" -> legacyDebitLedger.originalOperationKey = "other";
+                case "origin-literal-null" -> legacyDebitLedger.originalOperationKey = "null";
+                case "amount-null" -> legacyDebitLedger.amount = null;
+                case "amount-zero" -> legacyDebitLedger.amount = BigDecimal.ZERO;
+                case "amount-negative" -> legacyDebitLedger.amount = BigDecimal.ONE.negate();
+                case "amount-fraction" -> legacyDebitLedger.amount = new BigDecimal("10.001");
+                case "amount-overflow" ->
+                    legacyDebitLedger.amount = new BigDecimal("10000000000000000");
+                case "wrong-user" -> legacyDebitLedger.userId = 8L;
+                default -> throw new AssertionError(mutation);
+              }
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request),
+                      entry + ":" + mutation);
+              assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+              assertLegacyNoMoneyOrCacheWrite();
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 两个已知终态的快照须证明扣款或原不足，坏snapshot不能借标签返回结果。 */
+  @Test
+  void legacyAppliedAndRejectedSnapshotsMustProveTheirMoneyDecision() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String state : java.util.List.of("APPLIED", "REJECTED")) {
+        for (String mutation :
+            java.util.List.of(
+                "before-null",
+                "after-null",
+                "before-negative",
+                "after-negative",
+                "before-fraction",
+                "after-fraction",
+                "before-overflow",
+                "after-overflow",
+                "wrong-delta",
+                "enough-rejected")) {
+          assertions.add(
+              () -> {
+                var request = installLegacyDebit(entry, state);
+                switch (mutation) {
+                  case "before-null" -> legacyDebitLedger.balanceBefore = null;
+                  case "after-null" -> legacyDebitLedger.balanceAfter = null;
+                  case "before-negative" ->
+                      legacyDebitLedger.balanceBefore = BigDecimal.ONE.negate();
+                  case "after-negative" -> legacyDebitLedger.balanceAfter = BigDecimal.ONE.negate();
+                  case "before-fraction" ->
+                      legacyDebitLedger.balanceBefore = new BigDecimal("100.001");
+                  case "after-fraction" ->
+                      legacyDebitLedger.balanceAfter = new BigDecimal("90.001");
+                  case "before-overflow" ->
+                      legacyDebitLedger.balanceBefore = new BigDecimal("10000000000000000");
+                  case "after-overflow" ->
+                      legacyDebitLedger.balanceAfter = new BigDecimal("10000000000000000");
+                  case "wrong-delta" -> legacyDebitLedger.balanceAfter = new BigDecimal("3.00");
+                  case "enough-rejected" -> {
+                    legacyDebitLedger.balanceBefore = new BigDecimal("10.00");
+                    legacyDebitLedger.balanceAfter = new BigDecimal("10.00");
+                  }
+                  default -> throw new AssertionError(mutation);
+                }
+                var failure =
+                    assertThrows(
+                        com.cloudmall.common.error.BizException.class,
+                        () -> invokeLegacyDebit(entry, request),
+                        entry + ":" + state + ":" + mutation);
+                assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+                assertLegacyNoMoneyOrCacheWrite();
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 健康钱包边界及历史快照重放保持，不以当前wallet或资金回补改变原拒款决策。 */
+  @Test
+  void legacyHealthyWalletAndHistoricalSnapshotDecisionsRemainStable() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (BigDecimal balance :
+          java.util.List.of(
+              BigDecimal.ZERO,
+              new BigDecimal("0.01"),
+              new BigDecimal("100.000"),
+              new BigDecimal("9999999999999999.99"))) {
+        var request = installLegacyDebit(entry, null);
+        request.amount = new BigDecimal("0.010");
+        when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(balance));
+        if (balance.signum() == 0) {
+          assertEquals(
+              "PAYMENT_FAILED",
+              assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request))
+                  .getCode());
+          verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+        } else {
+          var response = invokeLegacyDebit(entry, request);
+          assertEquals(
+              balance.subtract(request.amount).toPlainString(),
+              ((com.cloudmall.user.domain.vo.BalanceDebitVO) response.data).balance);
+          verify(userMapper).debitBalance(eq(7L), eq(request.amount), any());
+        }
+        verify(balanceDebitAttemptMapper).insert(any());
+        verify(balanceLedgerMapper).insert(any());
+      }
+      for (String state : java.util.List.of("APPLIED", "REJECTED")) {
+        var request = installLegacyDebit(entry, state);
+        when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(null));
+        legacyDebitLedger.amount = new BigDecimal("10.000");
+        legacyDebitAttempt.amount = new BigDecimal("10.000");
+        if ("APPLIED".equals(state)) {
+          legacyDebitLedger.balanceBefore = new BigDecimal("10.000");
+          legacyDebitLedger.balanceAfter = new BigDecimal("0.000");
+          when(balanceDebitAttemptMapper.selectByPayNo("pay-1")).thenReturn(null);
+          var response = invokeLegacyDebit(entry, request);
+          assertEquals(
+              "0.000", ((com.cloudmall.user.domain.vo.BalanceDebitVO) response.data).balance);
+          verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        } else {
+          assertEquals(
+              "PAYMENT_FAILED",
+              assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, request))
+                  .getCode());
+          assertLegacyNoMoneyOrCacheWrite();
+        }
+      }
+    }
+  }
+
+  /** 原状态优先于坏snapshot；DAO错误不转成钱包未知；参数仍先于资金读取。 */
+  @Test
+  void legacyExistingStateAndDatabaseFailureKeepOriginalPriority() {
+    var request = installLegacyDebit("debits", "APPLIED");
+    legacyDebitAttempt.state = "REJECTED";
+    legacyDebitLedger.balanceBefore = null;
+    var mismatchRequest = request;
+    assertEquals(
+        "BALANCE_DEBIT_UNKNOWN",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> invokeLegacyDebit("debits", mismatchRequest))
+            .getCode());
+    assertLegacyNoMoneyOrCacheWrite();
+    request = installLegacyDebit("debits", "APPLIED");
+    legacyDebitLedger.state = "UNKNOWN";
+    legacyDebitAttempt.state = "UNKNOWN";
+    legacyDebitLedger.balanceAfter = null;
+    var unknownRequest = request;
+    assertEquals(
+        "BALANCE_DEBIT_UNKNOWN",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> invokeLegacyDebit("debits", unknownRequest))
+            .getCode());
+    assertLegacyNoMoneyOrCacheWrite();
+    var failureRequest = installLegacyDebit("debits", null);
+    when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(null));
+    var unavailable =
+        new org.springframework.dao.DataRetrievalFailureException(
+            "owned-legacy-history-read-failure");
+    when(balanceLedgerMapper.selectDebitByPayNo("pay-1")).thenThrow(unavailable);
+    org.junit.jupiter.api.Assertions.assertSame(
+        unavailable,
+        assertThrows(RuntimeException.class, () -> invokeLegacyDebit("debits", failureRequest)));
+    assertLegacyNoMoneyOrCacheWrite();
+  }
+
+  /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
+  private BalanceDebitRequestDTO installLegacyDebit(String entry, String state) {
+    setUp();
+    var request = debitRequest();
+    if ("compat".equals(entry)) request.orderNo = request.payNo;
+    when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(new BigDecimal("100.00")));
+    when(userMapper.debitBalance(any(), any(), any())).thenReturn(1);
+    legacyDebitLedger = null;
+    legacyDebitAttempt = null;
+    if (state != null) {
+      legacyDebitLedger = appliedDebit(request.operationKey, new BigDecimal("90.00"));
+      legacyDebitLedger.orderNo = request.orderNo;
+      legacyDebitLedger.state = state;
+      if ("REJECTED".equals(state)) {
+        legacyDebitLedger.balanceBefore = new BigDecimal("5.00");
+        legacyDebitLedger.balanceAfter = new BigDecimal("5.00");
+      }
+      legacyDebitAttempt = new BalanceDebitAttemptPO();
+      legacyDebitAttempt.mode = "LEGACY";
+      legacyDebitAttempt.userId = 7L;
+      legacyDebitAttempt.payNo = request.payNo;
+      legacyDebitAttempt.orderNo = request.orderNo;
+      legacyDebitAttempt.operationKey = request.operationKey;
+      legacyDebitAttempt.ledgerKey = request.operationKey;
+      legacyDebitAttempt.amount = request.amount;
+      legacyDebitAttempt.state = state;
+      when(balanceLedgerMapper.selectByOperationKey(request.operationKey))
+          .thenReturn(legacyDebitLedger);
+      when(balanceLedgerMapper.selectDebitByPayNo(request.payNo)).thenReturn(legacyDebitLedger);
+      when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(legacyDebitAttempt);
+    }
+    return request;
+  }
+
+  /** 两个Legacy入口共用生产扣款路径，不连接真实Redis或数据库。 */
+  private ApiResponse<?> invokeLegacyDebit(String entry, BalanceDebitRequestDTO request) {
+    if ("compat".equals(entry)) {
+      var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+      compatible.paymentKey = request.operationKey;
+      compatible.amount = request.amount;
+      return userService.debit(7L, 7L, compatible);
+    }
+    return userService.debitInternal(7L, 7L, request);
+  }
+
+  /** 缺证停止时不得认领归属、改变金额、增账本或更新缓存。 */
+  private void assertLegacyNoMoneyOrCacheWrite() {
+    verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).insert(any());
+    verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    org.mockito.Mockito.verifyNoInteractions(valueOperations);
   }
 
   /** 每个坏关联字段都必须拒绝，负数与过滤掉的状态不能掩盖已退款事实。 */

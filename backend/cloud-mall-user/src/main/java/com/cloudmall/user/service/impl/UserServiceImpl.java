@@ -58,7 +58,7 @@ public class UserServiceImpl implements UserService {
   /** 密码摘要编码器。 */
   private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder();
 
-  /** 余额请求金额与原扣款快照的DECIMAL(18,2)容量上界，不舍入或截断金额。 */
+  /** 资金请求金额与钱包/账本快照的DECIMAL(18,2)容量上界，不舍入或截断金额。 */
   private static final BigDecimal MAX_BALANCE_MONEY = new BigDecimal("9999999999999999.99");
 
   /** 关联退款读取采用100加一哨兵，超限必须补证后再处理。 */
@@ -453,9 +453,11 @@ public class UserServiceImpl implements UserService {
       ensureDebitMatches(existing, userId, request);
       if (attempt != null && !Objects.equals(attempt.state, existing.state))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属与账本状态待核对", 409);
-      if ("REJECTED".equals(existing.state)) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
-      if (!"APPLIED".equals(existing.state))
+      if (!"APPLIED".equals(existing.state) && !"REJECTED".equals(existing.state))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款账本状态待核对", 409);
+      if (!isProvenLegacyDebitSnapshot(existing))
+        throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款账本资金快照待核对", 409);
+      if ("REJECTED".equals(existing.state)) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
       cacheDebitResult(userId, existing);
       return ApiResponse.ok(
           BalanceDebitVO.from(existing.operationKey, existing.state, existing.balanceAfter));
@@ -463,7 +465,9 @@ public class UserServiceImpl implements UserService {
     if (attempt != null || historical != null)
       throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属缺少对应账本事实", 409);
 
-    // 3. 在任何余额变化之前用唯一键认领最终账本键，避免跨用户或协议并发双扣。
+    // 3. 先核当前钱包域，再用唯一键认领最终账本键，避免坏余额或跨协议并发双扣。
+    if (!validBalanceMoney(user.balance))
+      throw new BizException("BALANCE_DEBIT_UNKNOWN", "用户余额资金事实待核对", 409);
     LocalDateTime currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
     boolean rejected = user.balance.compareTo(request.amount) < 0;
     attempt = new BalanceDebitAttemptPO();
@@ -518,6 +522,8 @@ public class UserServiceImpl implements UserService {
         || !Objects.equals(attempt.ledgerKey, request.operationKey)
         || attempt.xid != null
         || attempt.branchId != null
+        || !validBalanceMoney(attempt.amount)
+        || attempt.amount.signum() <= 0
         || attempt.amount.compareTo(request.amount) != 0) {
       throw new BizException("IDEMPOTENCY_CONFLICT", "扣款归属对应的请求不一致", 409);
     }
@@ -540,16 +546,36 @@ public class UserServiceImpl implements UserService {
     }
   }
 
-  /** 校验重复扣款的请求载荷完全一致。 */
+  /** 原扣款实际键和不可变载荷须精确匹配，来源必须NULL；金额缺证沿原幂等冲突拒绝。 */
   private void ensureDebitMatches(
       BalanceLedgerPO existing, Long userId, BalanceDebitRequestDTO request) {
-    if (!Objects.equals(existing.userId, userId)
+    if (!Objects.equals(existing.operationKey, request.operationKey)
+        || !Objects.equals(existing.userId, userId)
         || !"DEBIT".equals(existing.operationType)
+        || existing.originalOperationKey != null
         || !Objects.equals(existing.payNo, request.payNo)
         || !Objects.equals(existing.orderNo, request.orderNo)
+        || !validBalanceMoney(existing.amount)
+        || existing.amount.signum() <= 0
         || existing.amount.compareTo(request.amount) != 0) {
       throw new BizException("IDEMPOTENCY_CONFLICT", "扣款操作键对应的请求不一致", 409);
     }
+  }
+
+  /**
+   * 已知Legacy终态必须由原合法余额快照证明；已核金额由调用方保证，不能用当前钱包改写历史决策。
+   * APPLIED证明差额，REJECTED证明未扣款且原余额不足；状态冲突及未知态先由原调用方拒绝。
+   */
+  private static boolean isProvenLegacyDebitSnapshot(BalanceLedgerPO existing) {
+    if (!validBalanceMoney(existing.balanceBefore) || !validBalanceMoney(existing.balanceAfter)) {
+      return false;
+    }
+    if ("APPLIED".equals(existing.state)) {
+      return existing.balanceBefore.subtract(existing.balanceAfter).compareTo(existing.amount) == 0;
+    }
+    return "REJECTED".equals(existing.state)
+        && existing.balanceBefore.compareTo(existing.balanceAfter) == 0
+        && existing.balanceBefore.compareTo(existing.amount) < 0;
   }
 
   /** 原退款必须精确匹配已应用载荷及余额差额，缺字段或坏历史不能成为重放证明。 */
