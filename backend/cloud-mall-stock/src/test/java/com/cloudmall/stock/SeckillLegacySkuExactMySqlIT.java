@@ -284,12 +284,16 @@ class SeckillLegacySkuExactMySqlIT {
                   ? "RESERVED"
                   : "REJECTED".equals(state) ? "REJECTED" : "UNKNOWN",
               outer.status);
-          assertEquals(Long.parseLong(skuText), outer.items.get(0).skuId);
-          assertEquals(1, outer.items.get(0).quantity);
+          if ("PENDING".equals(state)) assertTrue(outer.items.isEmpty());
+          else {
+            assertEquals(Long.parseLong(skuText), outer.items.get(0).skuId);
+            assertEquals(1, outer.items.get(0).quantity);
+          }
           tracked.sql.clear();
           var bare = bareRead();
           assertEquals(outer.status, bare.status);
-          assertEquals(Long.parseLong(skuText), bare.items.get(0).skuId);
+          if ("PENDING".equals(state)) assertTrue(bare.items.isEmpty());
+          else assertEquals(Long.parseLong(skuText), bare.items.get(0).skuId);
           assertEquals(1, tracked.sql.size());
           assertOnlySelects();
           assertEquals(before, facts());
@@ -460,8 +464,11 @@ class SeckillLegacySkuExactMySqlIT {
                   ? "RESERVED"
                   : "REJECTED".equals(state) ? "REJECTED" : "UNKNOWN",
               result.status);
-          assertEquals(1, result.items.size());
-          assertEquals(7L, result.items.get(0).skuId);
+          if ("PENDING".equals(state)) assertTrue(result.items.isEmpty());
+          else {
+            assertEquals(1, result.items.size());
+            assertEquals(7L, result.items.get(0).skuId);
+          }
           assertEquals("ACCEPTED".equals(state) ? 2 : 3, tracked.sql.size());
           assertOnlySelects();
           tracked.sql.clear();
@@ -469,6 +476,85 @@ class SeckillLegacySkuExactMySqlIT {
           assertEquals(1, tracked.sql.size());
           assertEquals(before, facts());
         }
+  }
+
+  @Test
+  void unsupportedLegacyStatusesStayEmptyWithAndWithoutPrimaryService() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : unsupportedLegacyStatuses())
+      assertions.add(
+          () -> {
+            reset();
+            seedLegacy(state, 7L);
+            var before = facts();
+            tracked.checking = true;
+            var outer = read();
+            assertEquals(3, tracked.sql.size());
+            assertOnlySelects();
+            tracked.sql.clear();
+            var bare = bareRead();
+            assertEquals(1, tracked.sql.size());
+            assertOnlySelects();
+            for (String orderState : List.of("PAID", "CANCELLED")) {
+              tracked.sql.clear();
+              assertEquals("UNKNOWN", orderFallback(orderState));
+              assertEquals(3, tracked.sql.size());
+              assertOnlySelects();
+            }
+            assertAll(
+                () -> assertUnknownSku(outer),
+                () -> assertUnknownSku(bare),
+                () -> assertEquals(before, facts()));
+          });
+    assertAll(assertions);
+  }
+
+  @Test
+  void actualControllerReturnsUnknownEmptyForUnsupportedLegacyStates() throws Exception {
+    StockController controller = new StockController();
+    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
+    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
+    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    var mvc =
+        MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : unsupportedLegacyStatuses())
+      assertions.add(
+          () -> {
+            reset();
+            seedLegacy(state, 7L);
+            var before = facts();
+            tracked.checking = true;
+            mvc.perform(get("/api/stock/reservations/" + ORDER_NO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.orderNo").value(ORDER_NO))
+                .andExpect(jsonPath("$.data.status").value("UNKNOWN"))
+                .andExpect(jsonPath("$.data.items").isEmpty());
+            assertEquals(3, tracked.sql.size());
+            assertOnlySelects();
+            assertEquals(before, facts());
+          });
+    assertAll(assertions);
+  }
+
+  /** 原VARCHAR支持的非两受理协议状态，NULL仅unit。 */
+  private static List<String> unsupportedLegacyStatuses() {
+    return List.of(
+        "PENDING",
+        "PUBLISHED",
+        "ORDER_CREATED",
+        "UNKNOWN",
+        "CONFLICT",
+        "",
+        " ",
+        "accepted",
+        "Accepted",
+        "ACCEPTED ",
+        " ACCEPTED",
+        "rejected",
+        "REJECTED ");
   }
 
   /** 不伪造正SKU，不让无效REJECTED变成Order冲突/成功依据。 */

@@ -107,7 +107,11 @@ class SeckillLegacyContextDimensionsTest {
                       .reservation(ORDER_NO)
                       .data;
           assertEquals(expected, bare.status);
-          assertEquals(7L, bare.items.get(0).skuId);
+          if ("PENDING".equals(state)) {
+            assertTrue(bare.items.isEmpty());
+          } else {
+            assertEquals(7L, bare.items.get(0).skuId);
+          }
           var primary =
               new SeckillQuotaSettlementService(mock(SeckillQuotaSettlementMapper.class), stocks)
                   .reservation(ORDER_NO);

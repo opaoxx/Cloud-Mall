@@ -102,8 +102,12 @@ class SeckillLegacySkuExactTest {
                 ? "RESERVED"
                 : "REJECTED".equals(state) ? "REJECTED" : "UNKNOWN",
             result.status);
-        assertEquals(expected, result.items.get(0).skuId);
-        assertEquals(1, result.items.get(0).quantity);
+        if ("PENDING".equals(state)) {
+          assertTrue(result.items.isEmpty());
+        } else {
+          assertEquals(expected, result.items.get(0).skuId);
+          assertEquals(1, result.items.get(0).quantity);
+        }
       }
     }
   }

@@ -1696,3 +1696,9 @@ SQL/Lua/接口协议保持；查询后变化、查询耗时后的租约窗口和
 结算GET只对五个协议状态核来源并输出原明细；CONFLICT、未知或错误拼写/空白状态返回UNKNOWN和空明细。
 未知状态仍是非null候选，不查受理来源，不落普通库存，也不进行GET迁移；原身份/维度/键/回执校验优先级保持。
 合法五状态、历史受理查询及写协议保持，Order fallback仍UNKNOWN，不将旧路径描述为已经错误完成。
+
+### CM-18 历史受理未知状态的空明细查询（16T57）
+
+无结算行的历史兼容查询仅保留ACCEPTED/REJECTED原状态与明细；PENDING等其它状态返回UNKNOWN和空明细。
+原身份、SKU和上下文校验优先，未知结果不落普通库存；主查询、SQL及写状态保持，不扩展PUBLISHED/ORDER_CREATED映射。
+此门只收窄未证明的明细输出，不证明原请求/hash/订单完整因果，Order fallback继续保持UNKNOWN。

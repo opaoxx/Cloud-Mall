@@ -335,6 +335,9 @@ public class StockServiceImpl implements StockService {
       if (!SeckillAcceptanceDimensions.hasValidContext(seckillFact))
         return ApiResponse.ok(unknownReservationProof(orderNo));
       String acceptedStatus = String.valueOf(seckillFact.get("status"));
+      // 历史未受支持状态不能公开原SKU；保留非null候选以阻止普通库存fallback。
+      if (!"ACCEPTED".equals(acceptedStatus) && !"REJECTED".equals(acceptedStatus))
+        return ApiResponse.ok(unknownReservationProof(orderNo));
       String status =
           "ACCEPTED".equals(acceptedStatus)
               ? "RESERVED"
