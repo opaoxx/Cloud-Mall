@@ -1044,6 +1044,130 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         : List.of("00", "03", "0003", "00000000000000000000000000000000000000003");
   }
 
+  @Test
+  void reserveMalformedCountersCannotLeavePartialDebitOrAcceptanceMarker() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (int counterIndex : List.of(0, 5, 4))
+      for (String value : malformedReserveCounterTexts(counterIndex))
+        assertions.add(
+            () -> {
+              reset();
+              var original = row("RELEASE_PENDING", "owned-idem");
+              var keys = prepareFreshReserveRedis(original);
+              fixtureRedis.opsForValue().set(keys.get(counterIndex), value);
+              var before = redisDumpFacts(keys);
+              var databaseBefore = facts();
+              Long receipt = null;
+              RuntimeException scriptFailure = null;
+              try {
+                receipt = executeReserveLua(original, keys, 1000L, 10L);
+              } catch (RuntimeException failure) {
+                scriptFailure = failure;
+              }
+              Long observedReceipt = receipt;
+              RuntimeException observedFailure = scriptFailure;
+              assertAll(
+                  () -> assertNull(observedFailure, "非法计数应返回-1而非写后异常"),
+                  () -> assertEquals(Long.valueOf(-1), observedReceipt),
+                  () -> assertEquals(before, redisDumpFacts(keys), "不得留下库存/用户/受理部分写入"),
+                  () -> assertEquals(databaseBefore, facts()));
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void reserveCanonicalAndMissingCountersKeepDebitReceiptAndReplayProtocol() {
+    for (String mode : List.of("present", "zero", "missing")) {
+      reset();
+      var original = row("RELEASE_PENDING", "owned-idem");
+      var keys = prepareFreshReserveRedis(original);
+      if ("zero".equals(mode)) {
+        fixtureRedis.opsForValue().set(keys.get(5), "0");
+        fixtureRedis.opsForValue().set(keys.get(4), "0");
+      } else if ("missing".equals(mode)) fixtureRedis.delete(List.of(keys.get(5), keys.get(4)));
+      var databaseBefore = facts();
+      long expectedUserCount = "present".equals(mode) ? 3L : 1L;
+      long expectedRevision = "present".equals(mode) ? 4L : 1L;
+      assertEquals(Long.valueOf(1), executeReserveLua(original, keys, 1000L, 10L));
+      assertEquals("4", fixtureRedis.opsForValue().get(keys.get(0)));
+      assertEquals(String.valueOf(expectedUserCount), fixtureRedis.opsForValue().get(keys.get(5)));
+      assertEquals(String.valueOf(expectedRevision), fixtureRedis.opsForValue().get(keys.get(4)));
+      assertEquals(original.orderNo, fixtureRedis.opsForValue().get(keys.get(2)));
+      assertEquals(
+          "RESERVED|" + original.orderNo + "|" + expectedRevision,
+          fixtureRedis.opsForValue().get(keys.get(3)));
+      Long ttl = fixtureRedis.getExpire(keys.get(5));
+      assertNotNull(ttl);
+      assertTrue(ttl > 0 && ttl <= 60);
+      assertEquals(-1L, fixtureRedis.getExpire(keys.get(2)));
+      assertEquals(databaseBefore, facts());
+      // 真实reserve marker继续兼容release；用户计数不因释放递减。
+      assertEquals(Long.valueOf(expectedRevision + 1), executeReleaseLua(original, keys));
+      assertEquals("5", fixtureRedis.opsForValue().get(keys.get(0)));
+      assertEquals(String.valueOf(expectedUserCount), fixtureRedis.opsForValue().get(keys.get(5)));
+      fixtureRedis.opsForValue().set(keys.get(0), "05");
+      fixtureRedis.opsForValue().set(keys.get(5), "02");
+      fixtureRedis.opsForValue().set(keys.get(4), "03");
+      var replayBefore = redisDumpFacts(keys);
+      assertEquals(Long.valueOf(3), executeReserveLua(original, keys, 3000L, 10L));
+      assertEquals(replayBefore, redisDumpFacts(keys));
+      assertEquals(databaseBefore, facts());
+    }
+  }
+
+  @Test
+  void canonicalReserveBusinessRejectionsStillReturnOriginalCodesWithoutWrites() {
+    for (String outcome : List.of("stock-zero", "user-limit", "before-start", "ended")) {
+      reset();
+      var original = row("RELEASE_PENDING", "owned-idem");
+      var keys = prepareFreshReserveRedis(original);
+      if ("stock-zero".equals(outcome)) fixtureRedis.opsForValue().set(keys.get(0), "0");
+      long now = "before-start".equals(outcome) ? -1L : "ended".equals(outcome) ? 2000L : 1000L;
+      long userLimit = "user-limit".equals(outcome) ? 2L : 10L;
+      long expected =
+          "stock-zero".equals(outcome)
+              ? 0L
+              : "user-limit".equals(outcome) ? 2L : "before-start".equals(outcome) ? 4L : 5L;
+      var before = redisDumpFacts(keys);
+      var databaseBefore = facts();
+      assertEquals(Long.valueOf(expected), executeReserveLua(original, keys, now, userLimit));
+      assertEquals(before, redisDumpFacts(keys));
+      assertEquals(databaseBefore, facts());
+    }
+  }
+
+  /** 只准备未受理Redis状态；原row仅供键/参数，不seed已ACCEPTED的SQL事实。 */
+  private static List<String> prepareFreshReserveRedis(SeckillQuotaSettlementPO original) {
+    var keys = prepareRedis(original);
+    fixtureRedis.delete(List.of(keys.get(2), keys.get(3)));
+    return keys;
+  }
+
+  /** 生产reserve资源脚本真实执行，meta仅纳入不变快照，KEYS以原顺序stock/user/accepted/op/revision。 */
+  private static Long executeReserveLua(
+      SeckillQuotaSettlementPO original, List<String> keys, long now, long userLimit) {
+    var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
+    script.setLocation(
+        new org.springframework.core.io.ClassPathResource("lua/seckill-reserve.lua"));
+    script.setResultType(Long.class);
+    return fixtureRedis.execute(
+        script,
+        List.of(keys.get(0), keys.get(5), keys.get(2), keys.get(3), keys.get(4)),
+        original.orderNo,
+        String.valueOf(userLimit),
+        String.valueOf(now),
+        "0",
+        "2000",
+        "60",
+        "10");
+  }
+
+  /** 三个待写计数的非规范前导零文本，数值仍落已有范围。 */
+  private static List<String> malformedReserveCounterTexts(int counterIndex) {
+    String digit = counterIndex == 0 ? "5" : counterIndex == 5 ? "2" : "3";
+    return List.of("00", "0" + digit, "000" + digit, "0".repeat(36) + digit);
+  }
+
   /** 原生产资源脚本在真实Redis直接执行；KEYS不含不应变更的user计数。 */
   private static Long executeReleaseLua(SeckillQuotaSettlementPO original, List<String> keys) {
     var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();

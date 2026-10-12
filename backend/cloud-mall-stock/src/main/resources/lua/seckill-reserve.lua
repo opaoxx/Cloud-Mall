@@ -18,8 +18,10 @@ end
 local stockValue = redis.call('GET', KEYS[1])
 local userValue = redis.call('GET', KEYS[2]) or '0'
 local revisionValue = redis.call('GET', KEYS[5]) or '0'
-if not string.match(stockValue, '^%d+$') or not string.match(userValue, '^%d+$')
-    or not string.match(revisionValue, '^%d+$') then return -1 end
+-- DECR/INCRBY/INCR require canonical integers, otherwise earlier debit writes may remain.
+if (stockValue ~= '0' and not string.match(stockValue, '^[1-9]%d*$'))
+    or (userValue ~= '0' and not string.match(userValue, '^[1-9]%d*$'))
+    or (revisionValue ~= '0' and not string.match(revisionValue, '^[1-9]%d*$')) then return -1 end
 local available = tonumber(stockValue)
 local used = tonumber(userValue)
 local revision = tonumber(revisionValue)
