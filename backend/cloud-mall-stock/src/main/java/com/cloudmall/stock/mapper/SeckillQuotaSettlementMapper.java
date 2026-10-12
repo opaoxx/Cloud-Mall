@@ -29,9 +29,9 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
   int ensureTable();
 
   /**
-   * 启动仅补建精确 ACCEPTED、原正身份及合法幂等键的事实，不猜测 Redis 释放结果。
+   * 启动仅补建精确 ACCEPTED、原正身份及合法订单号/幂等键的事实，不猜测 Redis 释放结果。
    *
-   * <p>原键的 UTF8 HEX 空白集合与 Java17 Character.isWhitespace 对齐；仅检查，不裁剪或改写原键。
+   * <p>原订单号/键的 UTF8 HEX 空白集合与 Java17 Character.isWhitespace 对齐；仅检查，不改写原值。
    */
   @Insert(
       "INSERT IGNORE INTO seckill_quota_settlement"
@@ -43,6 +43,9 @@ public interface SeckillQuotaSettlementMapper extends BaseMapper<SeckillQuotaSet
           + " r.status=BINARY 'ACCEPTED' AND r.activity_id>0 AND r.sku_id>0 AND r.user_id>0 AND"
           + " CHAR_LENGTH(r.idempotency_key) BETWEEN 1 AND 128 AND BINARY r.idempotency_key<>BINARY"
           + " 'null' AND HEX(CONVERT(r.idempotency_key USING utf8mb4)) NOT REGEXP"
+          + " '^(09|0[A-D]|1[C-F]|20|E19A80|E2808[0-68-9A]|E280A[89]|E2819F|E38080)*$' AND"
+          + " CHAR_LENGTH(r.order_no) BETWEEN 1 AND 64 AND BINARY r.order_no<>BINARY 'null' AND"
+          + " HEX(CONVERT(r.order_no USING utf8mb4)) NOT REGEXP"
           + " '^(09|0[A-D]|1[C-F]|20|E19A80|E2808[0-68-9A]|E280A[89]|E2819F|E38080)*$'")
   int insertMissingAcceptedOpen(LocalDateTime occurredAt);
 

@@ -726,7 +726,7 @@ class SeckillLegacySkuExactMySqlIT {
   @Test
   void invalidStartupIdempotencyCannotCreateOpenViaSqlOrPrimaryHook() {
     List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
-    for (String key : invalidStartupIdempotencyKeys())
+    for (String key : invalidStartupContextStrings())
       for (String entry : List.of("sql", "primary"))
         assertions.add(
             () -> {
@@ -847,8 +847,8 @@ class SeckillLegacySkuExactMySqlIT {
     assertAll(assertions);
   }
 
-  /** 穷举当前Java17 whitespace，不镜像生产SQL正则；每个字符及混合blank都是真实原key。 */
-  private static List<String> invalidStartupIdempotencyKeys() {
+  /** 穷举当前Java17 whitespace，不镜像生产SQL正则；每个字符及混合blank都是真实原上下文字段。 */
+  private static List<String> invalidStartupContextStrings() {
     List<String> keys = new ArrayList<>(List.of("", "null"));
     StringBuilder combined = new StringBuilder();
     int whitespaceCount = 0;
@@ -863,6 +863,113 @@ class SeckillLegacySkuExactMySqlIT {
     assertEquals(25, whitespaceCount, "Java语义升级时必须重新评审SQL空白集合");
     keys.add(combined.toString());
     return keys;
+  }
+
+  @Test
+  void invalidStartupOrderCannotCreateOpenViaSqlOrPrimaryHook() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String orderNo : invalidStartupContextStrings())
+      for (String entry : List.of("sql", "primary"))
+        assertions.add(
+            () -> {
+              reset();
+              seedLegacy("ACCEPTED", 7L);
+              fixture.update("UPDATE seckill_reservation SET order_no=?", orderNo);
+              var before = facts();
+              if ("sql".equals(entry)) {
+                int inserted =
+                    settlementMapper.insertMissingAcceptedOpen(
+                        java.time.LocalDateTime.of(2026, 10, 12, 11, 0));
+                assertAll(
+                    () -> assertEquals(0, inserted),
+                    () -> assertNull(settlementMapper.findSettlement(orderNo)),
+                    () -> assertEquals(before, facts()));
+              } else {
+                settlementService.ensureTable();
+                assertAll(
+                    () -> assertNull(settlementMapper.findSettlement(orderNo)),
+                    () -> assertEquals(before, facts()));
+              }
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void validStartupOrderKeepsOriginalBytesAndUnicode64Boundary() {
+    List<String> orders =
+        new ArrayList<>(
+            List.of(
+                ORDER_NO, " order-with-spaces ", "NULL", "null ", "x".repeat(64), "😺".repeat(64)));
+    for (int codePoint : List.of(0x00A0, 0x2007, 0x202F, 0x0085, 0x0000, 0x180E, 0x200B))
+      orders.add(new String(Character.toChars(codePoint)));
+    orders.add(new String(Character.toChars(0x2003)) + "x" + new String(Character.toChars(0x3000)));
+    for (String orderNo : orders)
+      for (String entry : List.of("sql", "primary")) {
+        assertFalse(orderNo.isBlank());
+        reset();
+        seedLegacy("ACCEPTED", 7L);
+        fixture.update("UPDATE seckill_reservation SET order_no=?", orderNo);
+        var before = facts();
+        var occurredAt = java.time.LocalDateTime.of(2026, 10, 12, 11, 0, 0, 123000000);
+        if ("sql".equals(entry))
+          assertEquals(1, settlementMapper.insertMissingAcceptedOpen(occurredAt));
+        else settlementService.ensureTable();
+        var current = settlementMapper.findSettlement(orderNo);
+        assertEquals(orderNo, current.orderNo);
+        assertEquals(10L, current.activityId);
+        assertEquals(7L, current.skuId);
+        assertEquals(8L, current.userId);
+        assertEquals("private-idem", current.idempotencyKey);
+        assertEquals("OPEN", current.status);
+        assertEquals(1L, current.revision);
+        assertEquals(1, current.quantity);
+        assertNull(current.operationKey);
+        assertNull(current.redisRevision);
+        if ("sql".equals(entry)) {
+          assertEquals(occurredAt, current.createdAt);
+          assertEquals(occurredAt, current.updatedAt);
+        }
+        var after = facts();
+        for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+          if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+            assertEquals(before.get(tableIndex), after.get(tableIndex));
+        assertEquals(0, settlementMapper.insertMissingAcceptedOpen(occurredAt.plusHours(1)));
+        settlementService.ensureTable();
+        assertEquals(after, facts());
+      }
+  }
+
+  @Test
+  void oversizedOwnedOrderCannotBeTruncatedIntoAnotherStartupIdentity() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String orderNo : List.of("x".repeat(65), "😺".repeat(65)))
+      for (String entry : List.of("sql", "primary"))
+        assertions.add(
+            () -> {
+              reset();
+              fixture.execute(
+                  "ALTER TABLE seckill_reservation MODIFY order_no VARCHAR(128) NOT NULL");
+              try {
+                seedLegacy("ACCEPTED", 7L);
+                fixture.update("UPDATE seckill_reservation SET order_no=?", orderNo);
+                var before = facts();
+                if ("sql".equals(entry)) {
+                  int inserted =
+                      settlementMapper.insertMissingAcceptedOpen(
+                          java.time.LocalDateTime.of(2026, 10, 12, 11, 0));
+                  assertAll(() -> assertEquals(0, inserted), () -> assertEquals(before, facts()));
+                } else {
+                  settlementService.ensureTable();
+                  assertEquals(before, facts());
+                }
+              } finally {
+                tracked.checking = false;
+                fixture.update("DELETE FROM seckill_reservation");
+                fixture.execute(
+                    "ALTER TABLE seckill_reservation MODIFY order_no VARCHAR(64) NOT NULL");
+              }
+            });
+    assertAll(assertions);
   }
 
   /** 原VARCHAR内的别名和其它受理态；不在夹具中规范化原status。 */
