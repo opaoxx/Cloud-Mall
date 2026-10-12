@@ -650,6 +650,79 @@ class SeckillLegacySkuExactMySqlIT {
     assertEquals(createdFacts, facts());
   }
 
+  @Test
+  void nonPositiveStartupIdentityCannotCreateOpenViaSqlOrPrimaryHook() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String field : List.of("activity_id", "sku_id", "user_id"))
+      for (long value : List.of(0L, -1L))
+        for (String entry : List.of("sql", "primary"))
+          assertions.add(
+              () -> {
+                reset();
+                seedLegacy("ACCEPTED", 7L);
+                fixture.update("UPDATE seckill_reservation SET " + field + "=?", value);
+                var before = facts();
+                if ("sql".equals(entry)) {
+                  int inserted =
+                      settlementMapper.insertMissingAcceptedOpen(
+                          java.time.LocalDateTime.of(2026, 10, 12, 11, 0));
+                  assertAll(
+                      () -> assertEquals(0, inserted, field + ":" + value),
+                      () -> assertNull(settlementMapper.findSettlement(ORDER_NO)),
+                      () -> assertEquals(before, facts()));
+                } else {
+                  settlementService.ensureTable();
+                  assertAll(
+                      () ->
+                          assertNull(
+                              settlementMapper.findSettlement(ORDER_NO), field + ":" + value),
+                      () -> assertEquals(before, facts()));
+                }
+              });
+    assertAll(assertions);
+  }
+
+  @Test
+  void positiveStartupIdentityBoundariesKeepOriginalTupleAndIdempotency() {
+    for (String field : List.of("activity_id", "sku_id", "user_id"))
+      for (long value : List.of(1L, Long.MAX_VALUE))
+        for (String entry : List.of("sql", "primary")) {
+          reset();
+          seedLegacy("ACCEPTED", 7L);
+          fixture.update("UPDATE seckill_reservation SET " + field + "=?", value);
+          var before = facts();
+          var occurredAt = java.time.LocalDateTime.of(2026, 10, 12, 11, 0, 0, 123000000);
+          if ("sql".equals(entry))
+            assertEquals(1, settlementMapper.insertMissingAcceptedOpen(occurredAt));
+          else settlementService.ensureTable();
+          var current = settlementMapper.findSettlement(ORDER_NO);
+          assertNotNull(current.id);
+          assertEquals(ORDER_NO, current.orderNo);
+          assertEquals("activity_id".equals(field) ? value : 10L, current.activityId);
+          assertEquals("sku_id".equals(field) ? value : 7L, current.skuId);
+          assertEquals("user_id".equals(field) ? value : 8L, current.userId);
+          assertEquals("private-idem", current.idempotencyKey);
+          assertEquals("OPEN", current.status);
+          assertEquals(1L, current.revision);
+          assertEquals(1, current.quantity);
+          assertNull(current.operationKey);
+          assertNull(current.redisRevision);
+          assertNull(current.leaseOwner);
+          assertNull(current.leaseUntil);
+          if ("sql".equals(entry)) {
+            assertEquals(occurredAt, current.createdAt);
+            assertEquals(occurredAt, current.updatedAt);
+          }
+          var after = facts();
+          for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+            if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+              assertEquals(before.get(tableIndex), after.get(tableIndex));
+          assertEquals(0, settlementMapper.insertMissingAcceptedOpen(occurredAt.plusHours(1)));
+          settlementService.ensureTable();
+          assertEquals(after, facts());
+        }
+  }
+
   /** 原VARCHAR内的别名和其它受理态；不在夹具中规范化原status。 */
   private static List<String> unprovenStartupStates() {
     return List.of(
