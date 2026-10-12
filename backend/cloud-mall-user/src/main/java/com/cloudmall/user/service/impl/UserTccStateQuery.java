@@ -112,7 +112,7 @@ public class UserTccStateQuery {
     Integer expectedFence;
     if ("TRYING".equals(attempt.state)) {
       require(debit != null && ledger == null);
-      require(ledgers.selectDebitByPayNo(receive.payNo) == null);
+      requireEmptyDebitScope(receive.payNo);
       requireEmptyPaymentLedger(receive.payNo);
       expectedFence = 1;
     } else if ("CONFIRMED".equals(attempt.state)) {
@@ -141,7 +141,7 @@ public class UserTccStateQuery {
     } else if ("CANCELLED".equals(attempt.state)) {
       require(ledger == null);
       // 同支付号的其他键或未完成DEBIT也与取消证明矛盾，不把固定键缺行等同于无扣款。
-      require(ledgers.selectDebitByPayNo(receive.payNo) == null);
+      requireEmptyDebitScope(receive.payNo);
       requireEmptyPaymentLedger(receive.payNo);
       expectedFence = debit == null ? 4 : 3;
     } else throw conflict();
@@ -155,6 +155,12 @@ public class UserTccStateQuery {
     else require(!"TRYING".equals(attempt.state));
     view.state = attempt.state;
     return view;
+  }
+
+  /** 未确认同pay扣款候选必须可靠empty；LIMIT2重复是业务冲突，DAO故障仍由原链传播。 */
+  private void requireEmptyDebitScope(String payNo) {
+    List<BalanceLedgerPO> candidates = ledgers.findDebitCandidatesByPayNo(payNo);
+    require(candidates != null && candidates.isEmpty());
   }
 
   /** 原DEBIT/固定键已先核；可靠空的全类型范围才证明未确认状态无账本，DAO故障不转换。 */

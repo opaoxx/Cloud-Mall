@@ -341,7 +341,8 @@ class UserTccStateQueryTest {
                   alternate.orderNo = "other-order";
                   alternate.amount = null;
                 }
-                when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(alternate);
+                when(ledgers.findDebitCandidatesByPayNo("pay-query-1"))
+                    .thenReturn(List.of(alternate));
                 BizException failure =
                     assertThrows(
                         BizException.class,
@@ -371,7 +372,7 @@ class UserTccStateQueryTest {
               setUp();
               installKnownState("CANCELLED");
               if (emptyCancel) when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
-              when(ledgers.selectDebitByPayNo("pay-query-1")).thenThrow(unavailable);
+              when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenThrow(unavailable);
               RuntimeException failure =
                   assertThrows(
                       RuntimeException.class,
@@ -409,7 +410,7 @@ class UserTccStateQueryTest {
     when(ledgers.selectByOperationKey("pay-query-1")).thenReturn(ledger());
     assertThrows(BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
     org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-        .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+        .findDebitCandidatesByPayNo(org.mockito.ArgumentMatchers.any());
     verifyNoInteractions(fences);
     for (String state : List.of("TRYING", "CONFIRMED", "UNKNOWN")) {
       setUp();
@@ -419,10 +420,10 @@ class UserTccStateQueryTest {
       assertEquals(state, query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
       if ("UNKNOWN".equals(state))
         org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-            .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+            .findDebitCandidatesByPayNo(org.mockito.ArgumentMatchers.any());
       else if ("CONFIRMED".equals(state))
         org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo("pay-query-1");
-      else org.mockito.Mockito.verify(ledgers).selectDebitByPayNo("pay-query-1");
+      else org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo("pay-query-1");
     }
   }
 
@@ -443,7 +444,7 @@ class UserTccStateQueryTest {
                 observed.userId = 42L;
                 observed.amount = null;
               }
-              when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(observed);
+              when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenReturn(List.of(observed));
               var conflict =
                   assertThrows(
                       BizException.class,
@@ -525,7 +526,7 @@ class UserTccStateQueryTest {
               installKnownState(state);
               if ("CONFIRMED".equals(state))
                 when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenThrow(unavailable);
-              else when(ledgers.selectDebitByPayNo("pay-query-1")).thenThrow(unavailable);
+              else when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenThrow(unavailable);
               RuntimeException observed =
                   assertThrows(
                       RuntimeException.class,
@@ -561,7 +562,7 @@ class UserTccStateQueryTest {
       assertThrows(
           BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
       org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-          .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+          .findDebitCandidatesByPayNo(org.mockito.ArgumentMatchers.any());
       verifyNoInteractions(fences);
     }
   }
@@ -585,7 +586,7 @@ class UserTccStateQueryTest {
             assertEquals(409, conflict.getHttpStatus());
             assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
             org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-                .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+                .findDebitCandidatesByPayNo(org.mockito.ArgumentMatchers.any());
             verifyNoInteractions(fences);
           });
     }
@@ -683,7 +684,7 @@ class UserTccStateQueryTest {
         prepareUnconfirmedScope(state);
         if ("fixed".equals(oldGate))
           when(ledgers.selectByOperationKey("pay-query-1")).thenReturn(ledger());
-        else when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(ledger());
+        else when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenReturn(List.of(ledger()));
         org.mockito.Mockito.doThrow(fault).when(ledgers).findPaymentLedgerCandidates("pay-query-1");
         assertEquals(
             "USER_TCC_STATE_CONFLICT",
@@ -755,6 +756,34 @@ class UserTccStateQueryTest {
       verifyNoInteractions(fences);
       org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
           .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+    }
+  }
+
+  /** 未确认三形态缺/单/多候选均先冲突，只有可靠empty才继续raw范围与Fence。 */
+  @Test
+  void unconfirmedBoundedDebitScopeRejectsUnavailableAndExistingRows() {
+    for (String state : List.of("TRYING", "CANCELLED", "empty-cancel")) {
+      for (String variant : List.of("null-list", "single", "null-row", "two", "three")) {
+        setUp();
+        prepareUnconfirmedScope(state);
+        List<BalanceLedgerPO> candidates =
+            switch (variant) {
+              case "null-list" -> null;
+              case "single" -> List.of(ledger());
+              case "null-row" -> java.util.Collections.singletonList(null);
+              case "two" -> List.of(ledger(), ledger());
+              default -> List.of(ledger(), ledger(), ledger());
+            };
+        when(ledgers.findDebitCandidatesByPayNo("pay-query-1")).thenReturn(candidates);
+        var failure =
+            assertThrows(
+                BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+            .findPaymentLedgerCandidates(org.mockito.ArgumentMatchers.any());
+        verifyNoInteractions(fences);
+      }
     }
   }
 

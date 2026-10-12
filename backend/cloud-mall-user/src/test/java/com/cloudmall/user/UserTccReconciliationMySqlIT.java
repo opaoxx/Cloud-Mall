@@ -195,6 +195,74 @@ class UserTccReconciliationMySqlIT {
     }
   }
 
+  /** 未确认的多DEBIT同样是明确冲突，不能在raw no-funds门前变成500/503。 */
+  @Test
+  void unconfirmedDuplicateDebitsReturnConflictWithoutChangingFacts() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("TRYING", "CANCELLED", "empty-cancel")) {
+      for (String variant : List.of("APPLIED", "UNKNOWN", "type-alias", "pay-alias", "multiple")) {
+        assertions.add(
+            () -> {
+              seed("TRYING".equals(mode) ? "TRYING" : "CANCELLED");
+              if ("empty-cancel".equals(mode)) {
+                fixture.update("DELETE FROM balance_tcc_debit");
+                fixture.update("UPDATE tcc_fence_log SET status=4");
+              }
+              String payNo = "pay-alias".equals(variant) ? "PAY1" : "pay1";
+              String type = "type-alias".equals(variant) ? "debit" : "DEBIT";
+              String state = "UNKNOWN".equals(variant) ? "UNKNOWN" : "APPLIED";
+              seedAlternateLedger(payNo, type, state);
+              fixture.update(
+                  "INSERT INTO"
+                      + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                      + " VALUES(3,7,'second-debit',?,?,'202610order1',10,?,100,90,'2026-10-11')",
+                  type,
+                  payNo,
+                  state);
+              if ("multiple".equals(variant))
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                        + " VALUES(4,7,'third-debit','DEBIT','pay1','202610order1',10,'APPLIED',100,90,'2026-10-11')");
+              var before = facts();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> {
+                    tracked.reset();
+                    tracked.checking = true;
+                    mvc.perform(
+                            get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                                .header("X-User-Id", "7")
+                                .header("X-Internal-Service", "cloud-mall-pay")
+                                .header("X-Internal-Callback-Token", "ops-secret")
+                                .param("xid", "private-tc:8091:original"))
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+                    assertEquals(1, tracked.connections);
+                    assertEquals(before, facts());
+                  },
+                  () -> {
+                    tracked.reset();
+                    tracked.checking = true;
+                    mvc.perform(
+                            get("/api/internal/users/7/balance/tcc-reconciliation/pay1")
+                                .header("X-Internal-Service", "cm18-reconciliation")
+                                .header("X-Internal-Callback-Token", "ops-secret"))
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"))
+                        .andExpect(header().string("Cache-Control", "no-store"));
+                    assertEquals(1, tracked.connections);
+                    assertEquals(before, facts());
+                  });
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    verifyNoInteractions(resource, receiveStore);
+  }
+
   /** 多DEBIT是明确持久事实冲突，不应由单行Mapper变成500/503不可用。 */
   @Test
   void confirmedStateDuplicateDebitsAreConflictRatherThanSystemUnavailable() throws Exception {
