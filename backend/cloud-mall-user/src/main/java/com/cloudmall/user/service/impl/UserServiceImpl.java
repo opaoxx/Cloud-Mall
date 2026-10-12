@@ -54,8 +54,8 @@ public class UserServiceImpl implements UserService {
   /** 密码摘要编码器。 */
   private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder();
 
-  /** 原扣款金额与余额快照的DECIMAL(18,2)容量上界，不补造或截断持久事实。 */
-  private static final BigDecimal MAX_REFUND_ORIGINAL_MONEY = new BigDecimal("9999999999999999.99");
+  /** 余额请求金额与原扣款快照的DECIMAL(18,2)容量上界，不舍入或截断金额。 */
+  private static final BigDecimal MAX_BALANCE_MONEY = new BigDecimal("9999999999999999.99");
 
   /** 用户事实数据 Mapper。 */
   @Autowired private UserMapper userMapper;
@@ -351,7 +351,7 @@ public class UserServiceImpl implements UserService {
     return value != null
         && value.signum() >= 0
         && value.stripTrailingZeros().scale() <= 2
-        && value.compareTo(MAX_REFUND_ORIGINAL_MONEY) <= 0;
+        && value.compareTo(MAX_BALANCE_MONEY) <= 0;
   }
 
   /** 在用户行锁保护下认领唯一归属，再同事务执行扣款与账本写入。 */
@@ -460,9 +460,12 @@ public class UserServiceImpl implements UserService {
     }
   }
 
-  /** 校验正金额，避免余额操作产生负数或零金额流水。 */
+  /** 请求金额必须为正且无损落在18.2域，避免SQL隐式舍入、溢出或零金额流水。 */
   private void validateMoney(BigDecimal amount, String message) {
-    if (amount == null || amount.signum() <= 0) {
+    if (amount == null
+        || amount.signum() <= 0
+        || amount.compareTo(MAX_BALANCE_MONEY) > 0
+        || amount.stripTrailingZeros().scale() > 2) {
       throw new BizException(ErrorCodes.INVALID, message, 400);
     }
   }

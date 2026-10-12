@@ -306,6 +306,116 @@ class BalanceLedgerServiceTest {
     }
   }
 
+  /** fresh/replay与兼容入口非法金额须在任何Mapper和缓存之前拒绝。 */
+  @Test
+  void invalidLegacyMoneyDomainStopsAllEntryPointsBeforeAnyMapper() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String operation : java.util.List.of("debit", "refund", "compat")) {
+      for (boolean replay : java.util.List.of(false, true)) {
+        for (BigDecimal amount :
+            new BigDecimal[] {
+              null,
+              BigDecimal.ZERO,
+              new BigDecimal("-1"),
+              new BigDecimal("0.001"),
+              new BigDecimal("10.001"),
+              new BigDecimal("1.999"),
+              new BigDecimal("10000000000000000.00"),
+              new BigDecimal("9999999999999999.991")
+            }) {
+          assertions.add(
+              () -> {
+                setUp();
+                when(userMapper.selectActiveForUpdate(7L))
+                    .thenReturn(activeUser(new BigDecimal("100.00")));
+                when(userMapper.selectByIdForUpdate(7L))
+                    .thenReturn(activeUser(new BigDecimal("90.00")));
+                if (replay)
+                  when(balanceLedgerMapper.selectByOperationKey(any()))
+                      .thenReturn(
+                          "refund".equals(operation)
+                              ? appliedRefund("refund-1", new BigDecimal("100.00"))
+                              : appliedDebit("pay-1", new BigDecimal("90.00")));
+                var failure =
+                    assertThrows(
+                        com.cloudmall.common.error.BizException.class,
+                        () -> invokeLegacyMoney(operation, amount, 7L));
+                assertEquals(400, failure.getHttpStatus());
+                assertEquals("COMMON_INVALID_ARGUMENT", failure.getCode());
+                org.mockito.Mockito.verifyNoInteractions(
+                    userMapper, balanceLedgerMapper, balanceDebitAttemptMapper, valueOperations);
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 先校验调用者身份，不以非法金额改变403优先级。 */
+  @Test
+  void callerIdentityStillPrecedesInvalidLegacyMoneyDomain() {
+    for (String operation : java.util.List.of("debit", "refund", "compat")) {
+      setUp();
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> invokeLegacyMoney(operation, new BigDecimal("0.001"), 8L));
+      assertEquals(403, failure.getHttpStatus());
+      assertEquals("COMMON_FORBIDDEN", failure.getCode());
+      org.mockito.Mockito.verifyNoInteractions(
+          userMapper, balanceLedgerMapper, balanceDebitAttemptMapper, valueOperations);
+    }
+  }
+
+  /** 合法尾零/cent/上限不误拒，既有重放不二次扣款；退款来源金额域保持。 */
+  @Test
+  void validLegacyMoneyDomainKeepsCentTailZerosAndMaximum() {
+    for (String amountText : java.util.List.of("0.01", "0.010", "10.000", "9999999999999999.99")) {
+      BigDecimal amount = new BigDecimal(amountText);
+      setUp();
+      var request = debitRequest();
+      request.amount = amount;
+      var existing = appliedDebit("pay-1", BigDecimal.ZERO);
+      existing.amount = amount;
+      existing.balanceBefore = amount;
+      when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(amount));
+      when(balanceLedgerMapper.selectByOperationKey("pay-1")).thenReturn(existing);
+      userService.debitInternal(7L, 7L, request);
+      verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+      setUp();
+      var refund = refundRequest();
+      refund.amount = amount;
+      var original = appliedDebit("pay-1", BigDecimal.ZERO);
+      original.amount = amount;
+      original.balanceBefore = amount;
+      when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(BigDecimal.ZERO));
+      when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(original);
+      when(balanceLedgerMapper.sumAppliedRefunds("pay-1")).thenReturn(BigDecimal.ZERO);
+      when(userMapper.creditBalance(any(), any(), any())).thenReturn(1);
+      userService.refundInternal(7L, 7L, refund);
+      verify(userMapper).creditBalance(eq(7L), eq(amount), any());
+    }
+  }
+
+  /** 只替换金额/调用者，三个原公开入口真实执行，保持原JSON/DTO字段。 */
+  private void invokeLegacyMoney(String operation, BigDecimal amount, Long callerId) {
+    if ("debit".equals(operation)) {
+      var request = debitRequest();
+      request.amount = amount;
+      userService.debitInternal(7L, callerId, request);
+    } else if ("refund".equals(operation)) {
+      var request = refundRequest();
+      request.amount = amount;
+      userService.refundInternal(7L, callerId, request);
+    } else {
+      var request = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+      request.paymentKey = "pay-1";
+      request.amount = amount;
+      userService.debit(7L, callerId, request);
+    }
+  }
+
   /** 每组合重置替身，disabled仅模拟已确认TCC，避免把Legacy禁用拒绝当新源门复现。 */
   private BalanceRefundRequestDTO installRefundProofMode(String mode) {
     setUp();

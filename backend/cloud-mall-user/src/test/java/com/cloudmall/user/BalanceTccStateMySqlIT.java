@@ -369,6 +369,124 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 非法精度/容量不得创建零金额事实或部分扣退款，HTTP与真实事务错误均为400。 */
+  @Test
+  void legacyRequestMoneyDomainRejectsRoundingAndOverflowWithoutWriting() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String operation : List.of("debit", "refund")) {
+      for (String amountText : List.of("0.001", "10.001", "10000000000000000.00")) {
+        assertions.add(
+            () -> {
+              closeContext();
+              createTransactionalServices();
+              var original = request("money-invalid", 7L, "10.00");
+              if ("refund".equals(operation)) {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              }
+              var before = allFundsFacts();
+              var failure =
+                  assertThrows(
+                      BizException.class,
+                      () -> {
+                        if ("debit".equals(operation))
+                          debitLegacy("money-invalid", "money-invalid", 7L, amountText);
+                        else
+                          legacy.refundInternal(
+                              7L, 7L, refundRequest(original, "refund-money-invalid", amountText));
+                      });
+              assertEquals(400, failure.getHttpStatus());
+              assertEquals("COMMON_INVALID_ARGUMENT", failure.getCode());
+              assertEquals(before, allFundsFacts());
+              var mvc =
+                  org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                          context.getBean(UserController.class))
+                      .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                      .build();
+              Map<String, String> body =
+                  "debit".equals(operation)
+                      ? Map.of(
+                          "operationKey",
+                          "money-invalid",
+                          "payNo",
+                          "money-invalid",
+                          "orderNo",
+                          "order-money-invalid",
+                          "amount",
+                          amountText)
+                      : Map.of(
+                          "refundOperationKey",
+                          "refund-money-invalid",
+                          "originalOperationKey",
+                          original.ledgerKey,
+                          "payNo",
+                          original.payNo,
+                          "orderNo",
+                          original.orderNo,
+                          "amount",
+                          amountText);
+              String payload =
+                  new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(body);
+              mvc.perform(
+                      org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                              "/api/internal/users/7/balance/"
+                                  + ("debit".equals(operation) ? "debits" : "refunds"))
+                          .header("X-User-Id", "7")
+                          .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                          .content(payload))
+                  .andExpect(
+                      org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                          .isBadRequest())
+                  .andExpect(
+                      org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                              "$.code")
+                          .value("COMMON_INVALID_ARGUMENT"));
+              assertEquals(before, allFundsFacts());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** cent/合法尾零的实际余额和账本一致，上限合法但余额不足仍沿原PAYMENT_FAILED。 */
+  @Test
+  void legacyValidMoneyKeepsCentTailZerosMaximumAndInsufficientFundsProtocol() {
+    for (String amountText : List.of("0.01", "0.010", "10.000")) {
+      closeContext();
+      createTransactionalServices();
+      BigDecimal amount = new BigDecimal(amountText);
+      var original = request("money-valid", 7L, amountText);
+      debitLegacy(original.payNo, original.ledgerKey, 7L, amountText);
+      assertFunds(
+          7L,
+          new BigDecimal("100.00")
+              .subtract(amount)
+              .setScale(2, java.math.RoundingMode.UNNECESSARY)
+              .toPlainString(),
+          "0.00");
+      legacy.refundInternal(7L, 7L, refundRequest(original, "refund-money-valid", amountText));
+      assertFunds(7L, "100.00", "0.00");
+      for (BigDecimal stored :
+          fixture.queryForList("SELECT amount FROM balance_ledger ORDER BY id", BigDecimal.class))
+        assertEquals(0, stored.compareTo(amount));
+    }
+    closeContext();
+    createTransactionalServices();
+    var failure =
+        assertThrows(
+            BizException.class,
+            () -> debitLegacy("money-max", "money-max", 7L, "9999999999999999.99"));
+    assertEquals(409, failure.getHttpStatus());
+    assertEquals("PAYMENT_FAILED", failure.getCode());
+    assertFunds(7L, "100.00", "0.00");
+    assertEquals(1, ledgerCount());
+    assertEquals(
+        "REJECTED", fixture.queryForObject("SELECT state FROM balance_ledger", String.class));
+    assertEquals(
+        new BigDecimal("9999999999999999.99"),
+        fixture.queryForObject("SELECT amount FROM balance_ledger", BigDecimal.class));
+  }
+
   @Test
   void confirmIsAtomicIdempotentAndStillWorksWhenDisabled() {
     BalanceTccDebitTryDTO request = request("confirmed", 7L, "10.00");
