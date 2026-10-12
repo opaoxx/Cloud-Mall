@@ -3,9 +3,9 @@
 -- ARGV: orderNo, operationKey, settlementRevision, quantity
 local orderNo = ARGV[1]
 local operationKey = ARGV[2]
-local settlementRevision = tonumber(ARGV[3])
-local quantity = tonumber(ARGV[4])
-if not orderNo or not operationKey or settlementRevision ~= 2 or quantity ~= 1 then return 0 end
+-- Original request tokens are fixed by the settlement protocol, not numeric aliases.
+if not orderNo or not operationKey or ARGV[3] ~= '2' or ARGV[4] ~= '1' then return 0 end
+local quantity = 1
 if operationKey ~= orderNo .. ':ROLLBACK' then return 0 end
 
 local operationMarkerKey = KEYS[4]
@@ -19,7 +19,7 @@ if acceptedOrderNo ~= orderNo then return 0 end
 local appliedPrefix = 'APPLIED|' .. operationKey .. '|2|'
 if marker and string.sub(marker, 1, string.len(appliedPrefix)) == appliedPrefix then
   local savedRevisionText = string.sub(marker, string.len(appliedPrefix) + 1)
-  if not string.match(savedRevisionText, '^%d+$') then return 0 end
+  if not string.match(savedRevisionText, '^[1-9]%d*$') then return 0 end
   local savedRevision = tonumber(savedRevisionText)
   if savedRevision and savedRevision > 0 and savedRevision <= 1000000000000 then return savedRevision end
   return 0
@@ -27,7 +27,7 @@ end
 local reservedPrefix = 'RESERVED|' .. orderNo .. '|'
 if not marker or string.sub(marker, 1, string.len(reservedPrefix)) ~= reservedPrefix then return 0 end
 local acceptanceRevisionText = string.sub(marker, string.len(reservedPrefix) + 1)
-if not string.match(acceptanceRevisionText, '^%d+$') then return 0 end
+if not string.match(acceptanceRevisionText, '^[1-9]%d*$') then return 0 end
 local acceptanceRevision = tonumber(acceptanceRevisionText)
 if not acceptanceRevision or acceptanceRevision <= 0 or acceptanceRevision > 1000000000000 then return 0 end
 
@@ -47,8 +47,8 @@ if not stockText or not revisionText or not stockLimitText or not startAtText or
    -- Redis INCRBY rejects padded integers; validate both writable counters before either write.
    or (stockText ~= '0' and not string.match(stockText, '^[1-9]%d*$'))
    or (revisionText ~= '0' and not string.match(revisionText, '^[1-9]%d*$'))
-   or not string.match(stockLimitText, '^%d+$') or startAtText == ''
-   or endAtText == '' or not string.match(perUserLimitText, '^%d+$') then return 0 end
+   or not string.match(stockLimitText, '^[1-9]%d*$') or startAtText == ''
+   or endAtText == '' or not string.match(perUserLimitText, '^[1-9]%d*$') then return 0 end
 local stock = tonumber(stockText)
 local currentRevision = tonumber(revisionText)
 local stockLimit = tonumber(stockLimitText)

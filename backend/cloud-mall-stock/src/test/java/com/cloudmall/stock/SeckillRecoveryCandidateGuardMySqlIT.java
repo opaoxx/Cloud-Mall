@@ -1037,6 +1037,201 @@ class SeckillRecoveryCandidateGuardMySqlIT {
       }
   }
 
+  @Test
+  void releaseArgumentAliasesCannotDebitOrReadBackAppliedReceipt() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String phase : List.of("RESERVED", "APPLIED")) {
+      for (int argumentIndex : List.of(2, 3)) {
+        String canonical = argumentIndex == 2 ? "2" : "1";
+        for (String alias :
+            List.of(
+                "0" + canonical,
+                canonical + ".0",
+                canonical + "e0",
+                "+" + canonical,
+                " " + canonical,
+                "000000000000000000000000000000000000" + canonical)) {
+          assertions.add(
+              () -> {
+                reset();
+                var original = row("RELEASE_PENDING", "owned-idem");
+                seed(original);
+                var keys = prepareRedis(original);
+                if ("APPLIED".equals(phase))
+                  assertEquals(Long.valueOf(4), executeReleaseLua(original, keys));
+                var before = redisDumpFacts(keys);
+                var databaseBefore = facts();
+                String[] arguments = {original.orderNo, original.operationKey, "2", "1"};
+                arguments[argumentIndex] = alias;
+                assertAll(
+                    phase + "/" + argumentIndex + "/" + alias,
+                    () ->
+                        assertEquals(Long.valueOf(0), executeReleaseWithArguments(keys, arguments)),
+                    () -> assertEquals(before, redisDumpFacts(keys)),
+                    () -> assertEquals(databaseBefore, facts()));
+              });
+        }
+      }
+    }
+    assertAll(assertions);
+  }
+
+  @Test
+  void releaseMarkerAndMetadataTokensRequireCanonicalPositiveText() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String tokenKind :
+        List.of("acceptance-revision", "saved-revision", "stockLimit", "perUserLimit")) {
+      String canonical =
+          "acceptance-revision".equals(tokenKind)
+              ? "1"
+              : "saved-revision".equals(tokenKind) ? "4" : "10";
+      for (String badToken :
+          List.of(
+              "0" + canonical,
+              "000" + canonical,
+              "000000000000000000000000000000000000" + canonical,
+              "0",
+              "bad",
+              canonical + ".0",
+              canonical + "e0")) {
+        assertions.add(
+            () -> {
+              reset();
+              var original = row("RELEASE_PENDING", "owned-idem");
+              seed(original);
+              var keys = prepareRedis(original);
+              corruptReleaseNumericToken(original, keys, tokenKind, badToken);
+              var before = redisDumpFacts(keys);
+              var databaseBefore = facts();
+              assertAll(
+                  tokenKind + "/" + badToken,
+                  () -> assertEquals(Long.valueOf(0), executeReleaseLua(original, keys)),
+                  () -> assertEquals(before, redisDumpFacts(keys)),
+                  () -> assertEquals(databaseBefore, facts()));
+            });
+      }
+    }
+    assertAll(assertions);
+  }
+
+  @Test
+  void recoveryCannotFinalizeAliasedReleaseMarkerOrMetadataEvidence() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+      for (String tokenKind :
+          List.of("acceptance-revision", "saved-revision", "stockLimit", "perUserLimit")) {
+        String canonical =
+            "acceptance-revision".equals(tokenKind)
+                ? "1"
+                : "saved-revision".equals(tokenKind) ? "4" : "10";
+        for (String alias :
+            List.of(
+                "0" + canonical,
+                "000" + canonical,
+                "000000000000000000000000000000000000" + canonical)) {
+          assertions.add(
+              () -> {
+                reset();
+                var original = row(state, "owned-idem");
+                seed(original);
+                var keys = prepareRedis(original);
+                corruptReleaseNumericToken(original, keys, tokenKind, alias);
+                var before = redisDumpFacts(keys);
+                var databaseBefore = facts();
+                assertEquals(0, recovery.recoverDue(), tokenKind + "/" + alias);
+                var current = realMapper.findSettlement(original.orderNo);
+                assertAll(
+                    () -> assertEquals(before, redisDumpFacts(keys)),
+                    () -> assertEquals("PROJECTION_BLOCKED", current.status),
+                    () -> assertEquals("SECKILL_RELEASE_PROJECTION_BLOCKED", current.lastError),
+                    () -> assertNull(current.redisRevision));
+                assertEquals(original.orderNo, current.orderNo);
+                assertEquals(original.activityId, current.activityId);
+                assertEquals(original.skuId, current.skuId);
+                assertEquals(original.userId, current.userId);
+                assertEquals(original.idempotencyKey, current.idempotencyKey);
+                assertEquals(original.createdAt, current.createdAt);
+                assertEquals(original.operationKey, current.operationKey);
+                assertEquals(original.revision, current.revision);
+                assertEquals(original.quantity, current.quantity);
+                var after = facts();
+                for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++) {
+                  if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+                    assertEquals(databaseBefore.get(tableIndex), after.get(tableIndex));
+                }
+                verify(observedMapper, never())
+                    .markReleased(any(), any(), anyLong(), anyLong(), any(), any());
+                verify(observedMapper, never())
+                    .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+              });
+        }
+      }
+    }
+    assertAll(assertions);
+  }
+
+  @Test
+  void canonicalReleaseNumericBoundariesKeepRealAppliedReplayIndependentOfMetadata() {
+    for (String boundary : List.of("minimum", "normal", "maximum")) {
+      reset();
+      var original = row("RELEASE_PENDING", "owned-idem");
+      seed(original);
+      var keys = prepareRedis(original);
+      long expectedRevision = 4L;
+      String expectedStock = "6";
+      if ("minimum".equals(boundary)) {
+        fixtureRedis.opsForValue().set(keys.get(0), "0");
+        fixtureRedis.opsForValue().set(keys.get(4), "1");
+        fixtureRedis.opsForHash().put(keys.get(1), "stockLimit", "1");
+        fixtureRedis.opsForHash().put(keys.get(1), "perUserLimit", "1");
+        expectedRevision = 2L;
+        expectedStock = "1";
+      } else if ("maximum".equals(boundary)) {
+        fixtureRedis.opsForValue().set(keys.get(0), "999999999999");
+        fixtureRedis.opsForValue().set(keys.get(4), "999999999999");
+        fixtureRedis
+            .opsForValue()
+            .set(keys.get(3), "RESERVED|" + original.orderNo + "|999999999999");
+        fixtureRedis.opsForHash().put(keys.get(1), "stockLimit", "1000000000000");
+        fixtureRedis.opsForHash().put(keys.get(1), "perUserLimit", "1000000000000");
+        expectedRevision = 1000000000000L;
+        expectedStock = "1000000000000";
+      }
+      var databaseBefore = facts();
+      assertEquals(Long.valueOf(expectedRevision), executeReleaseLua(original, keys));
+      assertEquals(expectedStock, fixtureRedis.opsForValue().get(keys.get(0)));
+      assertEquals(String.valueOf(expectedRevision), fixtureRedis.opsForValue().get(keys.get(4)));
+      assertEquals(
+          "APPLIED|" + original.operationKey + "|2|" + expectedRevision,
+          fixtureRedis.opsForValue().get(keys.get(3)));
+      assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+      // APPLIED来自真实首次Lua，仅随后破坏当前投影证明它不依赖RESERVED门。
+      fixtureRedis.opsForValue().set(keys.get(0), "05");
+      fixtureRedis.opsForValue().set(keys.get(4), "03");
+      fixtureRedis.opsForHash().put(keys.get(1), "stockLimit", "010");
+      fixtureRedis.opsForHash().put(keys.get(1), "perUserLimit", "010");
+      var before = redisDumpFacts(keys);
+      assertEquals(Long.valueOf(expectedRevision), executeReleaseLua(original, keys));
+      assertEquals(before, redisDumpFacts(keys));
+      assertEquals(databaseBefore, facts());
+    }
+  }
+
+  /** APPLIED先由真实释放产生再仅替换回执文本；其余token保持原状态与数值域。 */
+  private static void corruptReleaseNumericToken(
+      SeckillQuotaSettlementPO original, List<String> keys, String tokenKind, String badToken) {
+    if ("acceptance-revision".equals(tokenKind)) {
+      fixtureRedis.opsForValue().set(keys.get(3), "RESERVED|" + original.orderNo + "|" + badToken);
+    } else if ("saved-revision".equals(tokenKind)) {
+      assertEquals(Long.valueOf(4), executeReleaseLua(original, keys));
+      fixtureRedis
+          .opsForValue()
+          .set(keys.get(3), "APPLIED|" + original.operationKey + "|2|" + badToken);
+    } else {
+      fixtureRedis.opsForHash().put(keys.get(1), tokenKind, badToken);
+    }
+  }
+
   /** 真实可存但Redis INCR解析不接受的十进制前导零；数值仍落原Lua界内。 */
   private static List<String> malformedCounterTexts(int counterIndex) {
     return counterIndex == 0
@@ -1432,17 +1627,23 @@ class SeckillRecoveryCandidateGuardMySqlIT {
 
   /** 原生产资源脚本在真实Redis直接执行；KEYS不含不应变更的user计数。 */
   private static Long executeReleaseLua(SeckillQuotaSettlementPO original, List<String> keys) {
+    return executeReleaseWithArguments(
+        keys,
+        new String[] {
+          original.orderNo,
+          original.operationKey,
+          String.valueOf(original.revision),
+          String.valueOf(original.quantity)
+        });
+  }
+
+  /** 以原五键顺序执行生产释放脚本，可替换ARGV文本，不模拟回执或异常。 */
+  private static Long executeReleaseWithArguments(List<String> keys, String[] arguments) {
     var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
     script.setLocation(
         new org.springframework.core.io.ClassPathResource("lua/seckill-quota-release.lua"));
     script.setResultType(Long.class);
-    return fixtureRedis.execute(
-        script,
-        keys.subList(0, 5),
-        original.orderNo,
-        original.operationKey,
-        String.valueOf(original.revision),
-        String.valueOf(original.quantity));
+    return fixtureRedis.execute(script, keys.subList(0, 5), (Object[]) arguments);
   }
 
   /** Redis DUMP比较各原类型完整内容且允许缺键；不比较自然流逝的TTL。 */
