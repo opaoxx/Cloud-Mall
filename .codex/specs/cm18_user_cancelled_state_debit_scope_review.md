@@ -22,7 +22,7 @@ require(ledgers.selectDebitByPayNo(receive.payNo) == null)
 
 - TRYING/CONFIRMED/UNKNOWN 不增加该查询；写服务已有 `requireNoLedger` 和 T24 terminal reader 的独立检查不删除、不合并。
 - Unit：CANCELLED 两 mode × APPLIED/其它 state DEBIT、alternate key/CI alias、多行异常、缺金额、无 DEBIT、REFUND/其它 pay 合法；固定 key conflict 优先，DB fault 原样传播。
-- Owned MySQL 同 RR：真实 alternate key/多状态 DEBIT、HTTP state/T9 诊断均 409/no-store/no write；合法 empty cancel 增加 1 次 SELECT，原 9→10 计数预期，source checksum/资金 facts 不变。
+- Owned MySQL 同 RR：真实 alternate key/多状态 DEBIT、HTTP state 保持既有缓存契约且 409，T9 诊断 409/no-store；两者均无写入。合法 empty cancel 增加 1 次 SELECT，原 9→10 计数预期，source checksum/资金 facts 不变。
 - 不改变 DDL/Mapper SQL/状态机/锁序/API/flags；不启动 App/RM/TC/固定端口，owned 资源 finally 清理。
 
 本切片只冻结 CANCELLED 的全 pay DEBIT scope，不处理全退款/全账户因果、历史覆盖或 CM18 M1–M4；CM20/CM21 仍等待 CM18 整体完成。

@@ -314,6 +314,110 @@ class UserTccStateQueryTest {
   }
 
   /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
+  /** 任意状态/键的同pay DEBIT都与取消证明矛盾，坏金额/外单不应使矛盾消失。 */
+  @Test
+  void cancelledStateCannotIgnoreAlternateDebitKeysOrStates() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (boolean emptyCancel : List.of(false, true)) {
+      for (String ledgerState : List.of("APPLIED", "PENDING", "UNKNOWN")) {
+        for (boolean corruptIdentity : List.of(false, true)) {
+          assertions.add(
+              () -> {
+                setUp();
+                installKnownState("CANCELLED");
+                if (emptyCancel) {
+                  when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
+                  when(fences.findByBranch("xid-query-1", 12L)).thenReturn(fence(4, 12L));
+                }
+                var alternate = ledger();
+                alternate.operationKey = "another-debit-key";
+                alternate.state = ledgerState;
+                if (corruptIdentity) {
+                  alternate.userId = 42L;
+                  alternate.orderNo = "other-order";
+                  alternate.amount = null;
+                }
+                when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(alternate);
+                BizException failure =
+                    assertThrows(
+                        BizException.class,
+                        () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+                assertEquals(409, failure.getHttpStatus());
+                assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+                verifyNoInteractions(fences);
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 新读取故障或同pay多行不能伪装无账本、取消成功，异常仍由原包装层处理。 */
+  @Test
+  void cancelledDebitScopeFailuresPropagateBeforeFenceQuery() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (boolean emptyCancel : List.of(false, true)) {
+      for (RuntimeException unavailable :
+          List.of(
+              new org.springframework.dao.DataRetrievalFailureException("owned-test-db-failure"),
+              new org.apache.ibatis.exceptions.TooManyResultsException(
+                  "owned-test-multiple-debits"))) {
+        assertions.add(
+            () -> {
+              setUp();
+              installKnownState("CANCELLED");
+              if (emptyCancel) when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
+              when(ledgers.selectDebitByPayNo("pay-query-1")).thenThrow(unavailable);
+              RuntimeException failure =
+                  assertThrows(
+                      RuntimeException.class,
+                      () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+              org.junit.jupiter.api.Assertions.assertSame(unavailable, failure);
+              verifyNoInteractions(fences);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 无同pay扣款时，释放及empty tombstone取消均保留原Fence与历史过期兼容。 */
+  @Test
+  void cancelledWithoutAnyDebitKeepsOriginalTerminalAndExpirySemantics() {
+    for (boolean emptyCancel : List.of(false, true)) {
+      for (boolean expiredFence : List.of(false, true)) {
+        setUp();
+        installKnownState("CANCELLED");
+        if (emptyCancel) when(debits.selectByPayNo("pay-query-1")).thenReturn(null);
+        when(fences.findByBranch("xid-query-1", 12L))
+            .thenReturn(expiredFence ? null : fence(emptyCancel ? 4 : 3, 12L));
+        var state = query.read(7L, "tcc-debit:pay-query-1", "xid-query-1");
+        assertEquals("CANCELLED", state.state);
+        org.junit.jupiter.api.Assertions.assertFalse(state.ledgerApplied);
+      }
+    }
+  }
+
+  /** 固定键冲突仍先短路，未取消三态不得额外查询全pay DEBIT或扩大原范围。 */
+  @Test
+  void fixedLedgerConflictAndOtherStatesKeepDebitScopeQueryPriority() {
+    setUp();
+    installKnownState("CANCELLED");
+    when(ledgers.selectByOperationKey("pay-query-1")).thenReturn(ledger());
+    assertThrows(BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+    org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+        .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+    verifyNoInteractions(fences);
+    for (String state : List.of("TRYING", "CONFIRMED", "UNKNOWN")) {
+      setUp();
+      if ("UNKNOWN".equals(state))
+        when(receives.findByOperationKey("tcc-debit:pay-query-1")).thenReturn(receive(null));
+      else installKnownState(state);
+      assertEquals(state, query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+      org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+          .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+    }
+  }
+
   private TccFenceLogPO installKnownState(String state) {
     UserTccReceivePO receive = receive(12L);
     when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);

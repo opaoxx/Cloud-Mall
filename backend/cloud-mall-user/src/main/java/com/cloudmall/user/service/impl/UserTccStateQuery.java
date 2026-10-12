@@ -131,6 +131,8 @@ public class UserTccStateQuery {
       expectedFence = 2;
     } else if ("CANCELLED".equals(attempt.state)) {
       require(ledger == null);
+      // 同支付号的其他键或未完成DEBIT也与取消证明矛盾，不把固定键缺行等同于无扣款。
+      require(ledgers.selectDebitByPayNo(receive.payNo) == null);
       expectedFence = debit == null ? 4 : 3;
     } else throw conflict();
     TccFenceLogPO fence = fences.findByBranch(xid, attempt.branchId);

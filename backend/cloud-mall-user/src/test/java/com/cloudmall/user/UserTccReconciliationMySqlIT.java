@@ -195,8 +195,167 @@ class UserTccReconciliationMySqlIT {
     }
   }
 
+  /** 同pay别键DEBIT即使未APPLIED或CI别名，两个取消形态也不得输出已取消。 */
   @Test
-  void knownStatesAndOtherTransactionsFrozenFundsUseNineReadOnlySelects() {
+  void alternateDebitKeysCannotProveCancelledStateThroughRealReadRoutes() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (boolean emptyCancel : List.of(false, true)) {
+      for (String ledgerState : List.of("APPLIED", "PENDING", "UNKNOWN")) {
+        for (String payNo : List.of("pay1", "PAY1")) {
+          assertions.add(
+              () -> {
+                prepareCancelledMode(emptyCancel);
+                seedAlternateLedger(payNo, "DEBIT", ledgerState);
+                var before = facts();
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> {
+                      tracked.reset();
+                      tracked.checking = true;
+                      mvc.perform(
+                              get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                                  .header("X-User-Id", "7")
+                                  .header("X-Internal-Service", "cloud-mall-pay")
+                                  .header("X-Internal-Callback-Token", "ops-secret")
+                                  .param("xid", "private-tc:8091:original"))
+                          .andExpect(status().isConflict())
+                          .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+                      assertEquals(1, tracked.connections);
+                      assertEquals(before, facts());
+                    },
+                    () -> {
+                      tracked.reset();
+                      tracked.checking = true;
+                      mvc.perform(
+                              get("/api/internal/users/7/balance/tcc-reconciliation/pay1")
+                                  .header("X-Internal-Service", "cm18-reconciliation")
+                                  .header("X-Internal-Callback-Token", "ops-secret"))
+                          .andExpect(status().isConflict())
+                          .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"))
+                          .andExpect(header().string("Cache-Control", "no-store"));
+                      assertEquals(1, tracked.connections);
+                      assertEquals(before, facts());
+                    });
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    verifyNoInteractions(resource, receiveStore);
+  }
+
+  /** 纯退款/其它pay扣款不在同pay DEBIT范围，无扣款的取消及Fence历史TTL保持。 */
+  @Test
+  void healthyCancelledModesIgnoreRefundAndOtherPaymentsWithoutWriting() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    for (boolean emptyCancel : List.of(false, true)) {
+      for (boolean expiredFence : List.of(false, true)) {
+        for (String control : List.of("none", "refund", "other-payment-debit")) {
+          prepareCancelledMode(emptyCancel);
+          if (expiredFence) fixture.update("DELETE FROM tcc_fence_log");
+          if (!"none".equals(control))
+            seedAlternateLedger(
+                "refund".equals(control) ? "pay1" : "pay2",
+                "refund".equals(control) ? "REFUND" : "DEBIT",
+                "APPLIED");
+          var before = facts();
+          tracked.reset();
+          tracked.checking = true;
+          mvc.perform(
+                  get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                      .header("X-User-Id", "7")
+                      .header("X-Internal-Service", "cloud-mall-pay")
+                      .header("X-Internal-Callback-Token", "ops-secret")
+                      .param("xid", "private-tc:8091:original"))
+              .andExpect(status().isOk())
+              .andExpect(jsonPath("$.data.state").value("CANCELLED"))
+              .andExpect(jsonPath("$.data.ledgerApplied").value(false));
+          assertEquals(1, tracked.connections);
+          assertEquals(before, facts());
+          tracked.reset();
+          var report = inspect();
+          assertEquals("CANCELLED", report.tccState);
+          assertEquals("BLOCKED_EXTERNAL_EVIDENCE", report.classification);
+          assertEquals(1, tracked.connections);
+          assertEquals(before, facts());
+        }
+      }
+    }
+    verifyNoInteractions(resource, receiveStore);
+  }
+
+  /** 同RR首次读不混入外部新DEBIT，下次快照必须拒绝，读取不撤销writer真实事实。 */
+  @Test
+  void cancelledDebitScopeRemainsWithinOneSnapshotAndSeesConflictOnNextRead() {
+    prepareCancelledMode(true);
+    var before = facts();
+    afterReceiveRead.set(() -> seedAlternateLedger("pay1", "DEBIT", "APPLIED"));
+    tracked.reset();
+    tracked.checking = true;
+    assertEquals("CANCELLED", inspect().tccState);
+    assertEquals(1, tracked.connections);
+    var afterWriter = facts();
+    for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++) {
+      if (!"balance_ledger".equals(TABLES.get(tableIndex)))
+        assertEquals(before.get(tableIndex), afterWriter.get(tableIndex));
+    }
+    assertEquals(1, afterWriter.get(TABLES.indexOf("balance_ledger")).size());
+    tracked.reset();
+    var conflict = assertThrows(BizException.class, () -> inspect());
+    assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
+    assertEquals(409, conflict.getHttpStatus());
+    assertEquals(1, tracked.connections);
+    assertEquals(afterWriter, facts());
+  }
+
+  /** 构造原User state及诊断Controller，真实RR与Mapper，不启动端口或资金写资源。 */
+  private static MockMvc cancelledEvidenceRoutes(
+      BalanceTccDebitLocalResource resource, UserTccReceiveStore receiveStore) {
+    var query =
+        (UserTccStateQuery)
+            readProxy(
+                    new UserTccStateQuery(
+                        session.getMapper(UserTccReceiveMapper.class),
+                        session.getMapper(BalanceDebitAttemptMapper.class),
+                        session.getMapper(BalanceTccDebitMapper.class),
+                        session.getMapper(BalanceLedgerMapper.class),
+                        session.getMapper(TccFenceLogMapper.class)))
+                .getProxy();
+    var bridge =
+        new UserTccHttpService(
+            resource, receiveStore, query, session.getMapper(UserMapper.class), "ops-secret");
+    return MockMvcBuilders.standaloneSetup(
+            new UserTccController(bridge), new UserTccReconciliationController(service))
+        .setControllerAdvice(new GlobalExceptionHandler())
+        .build();
+  }
+
+  /** 只在owned库准备既有释放取消或attempt-only空取消，不执行真实资金写。 */
+  private static void prepareCancelledMode(boolean emptyCancel) {
+    seed("CANCELLED");
+    if (emptyCancel) {
+      fixture.update("DELETE FROM balance_tcc_debit");
+      fixture.update("UPDATE tcc_fence_log SET status=4");
+    }
+  }
+
+  /** 不占固定pay ledgerKey的候选，只写owned；按原Mapper范围区分DEBIT/REFUND与其它pay。 */
+  private static void seedAlternateLedger(String payNo, String operationType, String ledgerState) {
+    fixture.update(
+        "INSERT INTO"
+            + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+            + " VALUES(2,7,'alternate-owned-key',?,?,'202610order1',10,?,100,90,'2026-10-11')",
+        operationType,
+        payNo,
+        ledgerState);
+  }
+
+  @Test
+  void knownStatesAndOtherTransactionsFrozenFundsUseConditionalReadOnlySelects() {
     for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED")) {
       seed(state);
       otherDebit(7L, "TRYING", "20.00");
@@ -210,7 +369,7 @@ class UserTccReconciliationMySqlIT {
       assertFalse(report.automaticActionsAllowed);
       assertEquals("TRYING".equals(state) ? "30.00" : "20.00", report.account.tryingFrozenTotal());
       assertEquals(1, tracked.connections);
-      assertEquals(9, tracked.statements.size());
+      assertEquals("CANCELLED".equals(state) ? 10 : 9, tracked.statements.size());
       assertEquals(before, facts());
       String accountSql =
           tracked.statements.stream()
@@ -242,6 +401,7 @@ class UserTccReconciliationMySqlIT {
     report = inspect();
     assertEquals("BLOCKED_EXTERNAL_EVIDENCE", report.classification);
     assertEquals("CANCELLED", report.tccState);
+    assertEquals(10, tracked.statements.size());
     assertEquals(before, facts());
   }
 
@@ -607,7 +767,9 @@ class UserTccReconciliationMySqlIT {
           tracked.checking = true;
           assertEquals(state, query.read(7L, "tcc-debit:pay1", "private-tc:8091:original").state);
           assertEquals(1, tracked.connections);
-          assertEquals("UNKNOWN".equals(state) ? 4 : 5, tracked.statements.size());
+          assertEquals(
+              "UNKNOWN".equals(state) ? 4 : "CANCELLED".equals(state) ? 6 : 5,
+              tracked.statements.size());
           assertEquals(before, facts());
         }
       }
@@ -799,7 +961,12 @@ class UserTccReconciliationMySqlIT {
                   "SELECT COUNT(*) FROM tcc_fence_log WHERE xid=? AND branch_id=11",
                   Integer.class,
                   "private-tc:8091:original"));
-          assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 5, 6);
+          assertPersistedConflictThroughFourRoutes(
+              mvc,
+              stateRoute,
+              diagnosticRoute,
+              "CANCELLED".equals(state) ? 6 : 5,
+              "CANCELLED".equals(state) ? 7 : 6);
         }
       }
       tracked.checking = false;
@@ -815,7 +982,12 @@ class UserTccReconciliationMySqlIT {
                 "SELECT COUNT(*) FROM tcc_fence_log WHERE xid=? AND branch_id=11",
                 Integer.class,
                 "private-tc:8091:original"));
-        assertPersistedConflictThroughFourRoutes(mvc, stateRoute, diagnosticRoute, 5, 6);
+        assertPersistedConflictThroughFourRoutes(
+            mvc,
+            stateRoute,
+            diagnosticRoute,
+            "CANCELLED".equals(state) ? 6 : 5,
+            "CANCELLED".equals(state) ? 7 : 6);
       }
       tracked.checking = false;
       fixture.execute(
@@ -842,7 +1014,7 @@ class UserTccReconciliationMySqlIT {
               .andExpect(status().isOk())
               .andExpect(jsonPath("$.data.state").value(state));
         assertEquals(1, tracked.connections);
-        assertEquals(5, tracked.statements.size());
+        assertEquals("CANCELLED".equals(state) ? 6 : 5, tracked.statements.size());
         assertEquals(before, facts());
       }
       verifyNoInteractions(resource, receiveStore);
@@ -953,7 +1125,9 @@ class UserTccReconciliationMySqlIT {
                     .param("xid", "private-tc:8091:original"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data.state").value(state));
-        assertEquals("UNKNOWN".equals(state) ? 4 : 5, tracked.statements.size());
+        assertEquals(
+            "UNKNOWN".equals(state) ? 4 : "CANCELLED".equals(state) ? 6 : 5,
+            tracked.statements.size());
         assertEquals(1, tracked.connections);
         assertEquals(before, facts());
         tracked.reset();
@@ -969,7 +1143,9 @@ class UserTccReconciliationMySqlIT {
                         "UNKNOWN".equals(state)
                             ? "BLOCKED_LOCAL_EVIDENCE"
                             : "BLOCKED_EXTERNAL_EVIDENCE"));
-        assertEquals("UNKNOWN".equals(state) ? 8 : 9, tracked.statements.size());
+        assertEquals(
+            "UNKNOWN".equals(state) ? 8 : "CANCELLED".equals(state) ? 10 : 9,
+            tracked.statements.size());
         assertEquals(1, tracked.connections);
         assertEquals(before, facts());
       }
