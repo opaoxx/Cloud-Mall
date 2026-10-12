@@ -300,16 +300,17 @@ public class PayConsistencyService {
     }
   }
 
-  /** 查询订单服务的只读支付状态，并检查归属和金额契约。 */
+  /** 只读订单必须精确对应原订单号、归属和金额，不用别单或CI别名作支付决策。 */
   private OrderClient.OrderView readOrderState(PayDebitIntentPO intent) {
     ApiResponse<OrderClient.OrderView> response =
         orderClient.paymentState(intent.orderNo, intent.userId);
     if (response == null || !"0".equals(response.code) || response.data == null)
       throw new IllegalStateException("订单支付状态查询结果未知");
     OrderClient.OrderView order = response.data;
-    if (!Objects.equals(order.userId(), intent.userId)
+    if (!Objects.equals(order.orderNo(), intent.orderNo)
+        || !Objects.equals(order.userId(), intent.userId)
         || order.payAmount().compareTo(intent.amount) != 0)
-      throw new BizException(ErrorCodes.CONFLICT, "订单归属或金额与支付意图不一致", 409);
+      throw new BizException(ErrorCodes.CONFLICT, "订单身份、归属或金额与支付意图不一致", 409);
     return order;
   }
 

@@ -802,6 +802,153 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** 同用户/金额的错订单不得决定任一支付终态或触发新的资金写。 */
+  @Test
+  void everyOrderReadRequiresTheExactIntentOrderNumber() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path :
+        java.util.List.of(
+            "no-debit-cancel",
+            "fresh-debit",
+            "rejected",
+            "applied-cancel",
+            "paid",
+            "refund-marker",
+            "after-paid")) {
+      for (String variant :
+          java.util.List.of(
+              "other", "null", "blank", "case-alias", "accent-alias", "space-alias")) {
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath(path, wrongOrderNumber(variant));
+              String expected =
+                  java.util.List.of("no-debit-cancel", "fresh-debit", "rejected").contains(path)
+                      ? "INIT"
+                      : "ORDER_SYNC_UNKNOWN";
+              assertEquals(expected, consistencyService.process("pay-1"), path + ":" + variant);
+              verify(userClient, never()).debit(any(), any(), any());
+              verify(userClient, never()).refund(any(), any(), any());
+              verify(orderClient, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+                  .paid(any(), any());
+              verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+              verify(intentMapper)
+                  .recordRetryOwnedLegacy(
+                      eq("pay-1"),
+                      anyString(),
+                      eq(expected),
+                      org.mockito.ArgumentMatchers.contains("订单身份、归属或金额与支付意图不一致"),
+                      any(),
+                      any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 已在等待退款的意图遇到错订单仍保持原退款恢复方向，不误完成或重新退款。 */
+  @Test
+  void wrongOrderKeepsTheDurableRefundPendingRetryDirection() {
+    configureOrderIdentityPath("applied-cancel", "order-other");
+    PayDebitIntentPO pendingRefund = intent();
+    pendingRefund.status = "REFUND_PENDING";
+    when(intentMapper.findByPayNo("pay-1")).thenReturn(pendingRefund);
+    assertEquals("REFUND_PENDING", consistencyService.process("pay-1"));
+    verify(userClient, never()).refund(any(), any(), any());
+    verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+    verify(intentMapper)
+        .recordRetryOwnedLegacy(
+            eq("pay-1"), anyString(), eq("REFUND_PENDING"), anyString(), any(), any());
+  }
+
+  /** 原订单号与数值相等的金额尾零在全部决策路径保持原结果。 */
+  @Test
+  void exactOrderIdentityKeepsNormalDecisionsAndFollowupRead() {
+    for (String path :
+        java.util.List.of(
+            "no-debit-cancel",
+            "fresh-debit",
+            "rejected",
+            "applied-cancel",
+            "paid",
+            "refund-marker",
+            "after-paid")) {
+      setUp();
+      configureOrderIdentityPath(path, "order-1");
+      String expected =
+          switch (path) {
+            case "no-debit-cancel", "rejected" -> "FAILED";
+            case "fresh-debit", "paid" -> "SUCCESS";
+            default -> "REFUNDED";
+          };
+      assertEquals(expected, consistencyService.process("pay-1"));
+      verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq(expected), any());
+      if ("fresh-debit".equals(path)) verify(userClient).debit(eq(7L), eq(7L), any());
+      else verify(userClient, never()).debit(any(), any(), any());
+      if (java.util.List.of("applied-cancel", "after-paid").contains(path))
+        verify(userClient).refund(eq(7L), eq(7L), any());
+      else verify(userClient, never()).refund(any(), any(), any());
+      verify(
+              orderClient,
+              org.mockito.Mockito.times(
+                  java.util.List.of("fresh-debit", "after-paid").contains(path) ? 1 : 0))
+          .paid(any(), any());
+    }
+  }
+
+  /** 只变返回orderNo，其它字段满足原事实，二次GET保留已发paid这一事实。 */
+  private void configureOrderIdentityPath(String path, String returnedOrderNo) {
+    if (java.util.List.of("no-debit-cancel", "fresh-debit").contains(path))
+      when(userClient.operation(7L, "pay-1", 7L)).thenThrow(refundReadFault(404));
+    else
+      when(userClient.operation(7L, "pay-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView(
+                      "pay-1",
+                      "DEBIT",
+                      "rejected".equals(path) ? "REJECTED" : "APPLIED",
+                      "10.00",
+                      "refund-marker".equals(path) ? "refund:pay-1" : null)));
+    when(userClient.debit(eq(7L), eq(7L), any()))
+        .thenReturn(ApiResponse.ok(new UserClient.BalanceView("pay-1", "APPLIED", "90.00")));
+    when(userClient.refund(eq(7L), eq(7L), any()))
+        .thenReturn(
+            ApiResponse.ok(new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00")));
+    when(payRecordMapper.markOwnedLegacySuccess(any(), any(), any(), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyFailed(any(), any(), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefunded(any(), any(), any())).thenReturn(1);
+    when(orderClient.paid("order-1", 7L)).thenReturn(ApiResponse.ok(order("PAID")));
+    String status =
+        "paid".equals(path) ? "PAID" : "fresh-debit".equals(path) ? "PENDING_PAYMENT" : "CANCELLED";
+    var returned =
+        new OrderClient.OrderView(
+            returnedOrderNo, status, new BigDecimal("10.000"), 7L, "SUCCEEDED");
+    if ("after-paid".equals(path))
+      when(orderClient.paymentState("order-1", 7L))
+          .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")), ApiResponse.ok(returned));
+    else if ("fresh-debit".equals(path))
+      when(orderClient.paymentState("order-1", 7L))
+          .thenReturn(ApiResponse.ok(returned), ApiResponse.ok(order("PAID")));
+    else when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(returned));
+  }
+
+  /** 错键覆盖缺失和MySQL CI可等价的别名，Java判断必须精确。 */
+  private static String wrongOrderNumber(String variant) {
+    return switch (variant) {
+      case "other" -> "order-other";
+      case "null" -> null;
+      case "blank" -> " ";
+      case "case-alias" -> "ORDER-1";
+      case "accent-alias" -> "órder-1";
+      case "space-alias" -> "order-1 ";
+      default -> throw new AssertionError(variant);
+    };
+  }
+
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */
   private void prepareRefundPath(boolean marker, String refundKey) {
     setUp();

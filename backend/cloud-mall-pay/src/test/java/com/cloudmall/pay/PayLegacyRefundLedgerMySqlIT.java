@@ -981,6 +981,195 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
   }
 
+  /** 七种决策的错订单读都只能保留原retry，真实两表不能被该返回结清。 */
+  @Test
+  void wrongOrderIdentityCannotSettleOrStartFundsWithRealMappers() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path :
+        List.of(
+            "no-debit-cancel",
+            "fresh-debit",
+            "rejected",
+            "applied-cancel",
+            "paid",
+            "refund-marker",
+            "after-paid")) {
+      for (String variant :
+          List.of("other", "null", "blank", "case-alias", "accent-alias", "space-alias")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(path, wrongRemoteOrderNumber(variant), user, orders);
+              String expected =
+                  List.of("no-debit-cancel", "fresh-debit", "rejected").contains(path)
+                      ? "INIT"
+                      : "ORDER_SYNC_UNKNOWN";
+              assertEquals(
+                  expected, newService(user, orders).process("pay-1"), path + ":" + variant);
+              assertEquals(expected, intentStatus());
+              assertEquals(
+                  "INIT".equals(expected) ? "PENDING" : "ORDER_SYNC_UNKNOWN", paymentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertNotNull(intentNextRetry());
+              String error =
+                  fixture.queryForObject(
+                      "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'", String.class);
+              assertTrue(error.contains("订单身份、归属或金额与支付意图不一致"));
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, never()).refund(any(), any(), any());
+              verify(orders, times("after-paid".equals(path) ? 1 : 0)).paid(any(), any());
+              assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 同order身份的七条链真实落终态，已退款marker不重新退款。 */
+  @Test
+  void exactRemoteOrderIdentityKeepsHealthyRealTerminalDecisions() {
+    for (String path :
+        List.of(
+            "no-debit-cancel",
+            "fresh-debit",
+            "rejected",
+            "applied-cancel",
+            "paid",
+            "refund-marker",
+            "after-paid")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(path, "order-1", user, orders);
+      String expected =
+          switch (path) {
+            case "no-debit-cancel", "rejected" -> "FAILED";
+            case "fresh-debit", "paid" -> "SUCCESS";
+            default -> "REFUNDED";
+          };
+      assertEquals(expected, newService(user, orders).process("pay-1"));
+      assertEquals(expected, paymentStatus());
+      assertEquals(expected, intentStatus());
+      assertNull(intentLeaseOwner());
+      if ("fresh-debit".equals(path)) verify(user).debit(eq(7L), eq(7L), any());
+      else verify(user, never()).debit(any(), any(), any());
+      if (List.of("applied-cancel", "after-paid").contains(path))
+        verify(user).refund(eq(7L), eq(7L), any());
+      else verify(user, never()).refund(any(), any(), any());
+      verify(orders, times(List.of("fresh-debit", "after-paid").contains(path) ? 1 : 0))
+          .paid(any(), any());
+    }
+  }
+
+  /** 退款等待方向遇错order保留原retry，不因此变为初始或结清。 */
+  @Test
+  void wrongOrderIdentityRetainsActualRefundPendingIntent() {
+    seedIntentAndPayment("REFUND_PENDING", "REFUND_PENDING");
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    configureRemoteOrderIdentityPath("applied-cancel", "order-other", user, orders);
+    assertEquals("REFUND_PENDING", newService(user, orders).process("pay-1"));
+    assertEquals("REFUND_PENDING", intentStatus());
+    assertEquals("REFUND_PENDING", paymentStatus());
+    assertTrue(retryErrorPresent());
+    assertTrue(
+        fixture
+            .queryForObject(
+                "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'", String.class)
+            .contains("订单身份、归属或金额与支付意图不一致"));
+    assertNull(intentLeaseOwner());
+    verify(user, never()).refund(any(), any(), any());
+    verify(user, never()).debit(any(), any(), any());
+    verify(orders, never()).paid(any(), any());
+  }
+
+  /** 保存原资金身份、金额、paid_at及创建时间；只排除允许变化的retry/stage字段。 */
+  private static List<List<Map<String, Object>>> immutableRecoveryFacts(
+      List<List<Map<String, Object>>> facts) {
+    var immutable = new ArrayList<List<Map<String, Object>>>();
+    for (int tableIndex = 0; tableIndex < facts.size(); tableIndex++) {
+      var rows = new ArrayList<Map<String, Object>>();
+      for (Map<String, Object> original : facts.get(tableIndex)) {
+        var row = new java.util.HashMap<>(original);
+        for (String field : List.of("status", "updated_at")) row.remove(field);
+        if (tableIndex == 1)
+          for (String field :
+              List.of("attempts", "next_retry_at", "lease_owner", "lease_until", "last_error"))
+            row.remove(field);
+        rows.add(row);
+      }
+      immutable.add(rows);
+    }
+    return immutable;
+  }
+
+  /** Remote仅替身，真实PayMapper；只破坏订单号，正金额尾零和其它事实保持。 */
+  private static void configureRemoteOrderIdentityPath(
+      String path, String returnedOrderNo, UserClient user, OrderClient orders) {
+    if (List.of("no-debit-cancel", "fresh-debit").contains(path))
+      stubRefundOperation(user, "not-found", "pay-1", "10.00");
+    else
+      when(user.operation(7L, "pay-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView(
+                      "pay-1",
+                      "DEBIT",
+                      "rejected".equals(path) ? "REJECTED" : "APPLIED",
+                      "10.00",
+                      "refund-marker".equals(path) ? "refund:pay-1" : null)));
+    when(user.operation(7L, "refund:pay-1", 7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new UserClient.BalanceOperationView(
+                    "refund:pay-1", "REFUND", "APPLIED", "10.00", null)));
+    when(user.debit(eq(7L), eq(7L), any()))
+        .thenReturn(ApiResponse.ok(new UserClient.BalanceView("pay-1", "APPLIED", "90.00")));
+    when(user.refund(eq(7L), eq(7L), any()))
+        .thenReturn(
+            ApiResponse.ok(new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00")));
+    when(orders.paid("order-1", 7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new OrderClient.OrderView("order-1", "PAID", BigDecimal.TEN, 7L, "SUCCEEDED")));
+    String status =
+        "paid".equals(path) ? "PAID" : "fresh-debit".equals(path) ? "PENDING_PAYMENT" : "CANCELLED";
+    var returned =
+        new OrderClient.OrderView(
+            returnedOrderNo, status, new BigDecimal("10.000"), 7L, "SUCCEEDED");
+    if ("after-paid".equals(path))
+      when(orders.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")),
+              ApiResponse.ok(returned));
+    else if ("fresh-debit".equals(path))
+      when(orders.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(returned),
+              ApiResponse.ok(
+                  new OrderClient.OrderView("order-1", "PAID", BigDecimal.TEN, 7L, "SUCCEEDED")));
+    else when(orders.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(returned));
+  }
+
+  /** 缺失/别单以及三种CI别名必须逐字符拒绝。 */
+  private static String wrongRemoteOrderNumber(String variant) {
+    return switch (variant) {
+      case "other" -> "order-other";
+      case "null" -> null;
+      case "blank" -> " ";
+      case "case-alias" -> "ORDER-1";
+      case "accent-alias" -> "órder-1";
+      case "space-alias" -> "order-1 ";
+      default -> throw new AssertionError(variant);
+    };
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");
