@@ -33,6 +33,13 @@ class BalanceLedgerServiceTest {
   private UserMapper userMapper;
   private BalanceLedgerMapper balanceLedgerMapper;
   private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
+
+  /** 原冻结行读取替身，用于确认退款本地事实，不写实际资金。 */
+  private com.cloudmall.user.mapper.BalanceTccDebitMapper balanceTccDebitMapper;
+
+  /** 当前用例可修改的已确认冻结行，复制实际原DEBIT快照。 */
+  private com.cloudmall.user.domain.po.BalanceTccDebitPO originalRefundFreeze;
+
   private ValueOperations<String, String> valueOperations;
 
   /** 当前退款用例可改变的原扣款证明，正常字段完整且不连接真实库。 */
@@ -44,6 +51,7 @@ class BalanceLedgerServiceTest {
     userMapper = mock(UserMapper.class);
     balanceLedgerMapper = mock(BalanceLedgerMapper.class);
     balanceDebitAttemptMapper = mock(BalanceDebitAttemptMapper.class);
+    balanceTccDebitMapper = mock(com.cloudmall.user.mapper.BalanceTccDebitMapper.class);
     when(balanceDebitAttemptMapper.insert(any())).thenReturn(1);
     when(balanceLedgerMapper.insert(any())).thenReturn(1);
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
@@ -54,6 +62,7 @@ class BalanceLedgerServiceTest {
     ReflectionTestUtils.setField(
         userService, "balanceDebitAttemptMapper", balanceDebitAttemptMapper);
     ReflectionTestUtils.setField(userService, "redis", redisTemplate);
+    ReflectionTestUtils.setField(userService, "balanceTccDebitMapper", balanceTccDebitMapper);
   }
 
   @Test
@@ -111,6 +120,8 @@ class BalanceLedgerServiceTest {
     refund.payNo = "pay-tcc";
     refund.orderNo = "order-tcc";
     BalanceDebitAttemptPO attempt = confirmedTccAttempt();
+    when(balanceTccDebitMapper.selectByPayNo(attempt.payNo))
+        .thenReturn(confirmedRefundFreeze(attempt, original));
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
     when(balanceLedgerMapper.selectByOperationKey("refund:pay-tcc"))
         .thenReturn(null)
@@ -266,6 +277,9 @@ class BalanceLedgerServiceTest {
       originalRefundDebit.amount = new BigDecimal("10.000");
       originalRefundDebit.balanceBefore = new BigDecimal("10.000");
       originalRefundDebit.balanceAfter = new BigDecimal("0.000");
+      originalRefundFreeze.amount = originalRefundDebit.amount;
+      originalRefundFreeze.balanceBefore = originalRefundDebit.balanceBefore;
+      originalRefundFreeze.balanceAfterTry = originalRefundDebit.balanceAfter;
       userService.refundInternal(7L, 7L, request);
       verify(userMapper, times("disabled-replay".equals(mode) ? 0 : 1))
           .creditBalance(any(), any(), any());
@@ -670,6 +684,144 @@ class BalanceLedgerServiceTest {
             RuntimeException.class, () -> userService.refundInternal(7L, 7L, activeRequest)));
   }
 
+  /** NULL归属金额必须404而不是NPE，原错误归属先于新增freeze查询。 */
+  @Test
+  void disabledRefundAttemptMoneyMustBeProvenBeforeFreezeRead() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String mode : java.util.List.of("disabled-fresh", "disabled-replay")) {
+      for (BigDecimal amount :
+          new BigDecimal[] {
+            null,
+            BigDecimal.ZERO,
+            new BigDecimal("-1"),
+            new BigDecimal("10.001"),
+            new BigDecimal("10000000000000000.00")
+          }) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              var attempt = confirmedTccAttempt();
+              attempt.payNo = request.payNo;
+              attempt.orderNo = request.orderNo;
+              attempt.ledgerKey = request.originalOperationKey;
+              attempt.operationKey = "tcc-debit:" + request.payNo;
+              attempt.amount = amount;
+              when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(attempt);
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> userService.refundInternal(7L, 7L, request));
+              assertEquals(404, failure.getHttpStatus());
+              assertEquals("COMMON_NOT_FOUND", failure.getCode());
+              org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
+              verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 单独的CONFIRMED attempt标签不足以证明真实确认冻结、分支及金额快照。 */
+  @Test
+  void disabledRefundRequiresExactConfirmedFreezeAndOriginalDebitSnapshot() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String mode : java.util.List.of("disabled-fresh", "disabled-replay")) {
+      for (String variant :
+          java.util.List.of(
+              "missing",
+              "state",
+              "user",
+              "pay",
+              "order",
+              "key",
+              "xid",
+              "branch",
+              "amount-null",
+              "amount",
+              "before-null",
+              "after-null",
+              "before",
+              "after",
+              "negative")) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              switch (variant) {
+                case "missing" ->
+                    when(balanceTccDebitMapper.selectByPayNo("pay-1")).thenReturn(null);
+                case "state" -> originalRefundFreeze.state = "TRYING";
+                case "user" -> originalRefundFreeze.userId = 8L;
+                case "pay" -> originalRefundFreeze.payNo = "PAY-1";
+                case "order" -> originalRefundFreeze.orderNo = "other";
+                case "key" -> originalRefundFreeze.operationKey = "TCC-debit:pay-1";
+                case "xid" -> originalRefundFreeze.xid = "other";
+                case "branch" -> originalRefundFreeze.branchId = 99L;
+                case "amount-null" -> originalRefundFreeze.amount = null;
+                case "amount" -> originalRefundFreeze.amount = new BigDecimal("11.00");
+                case "before-null" -> originalRefundFreeze.balanceBefore = null;
+                case "after-null" -> originalRefundFreeze.balanceAfterTry = null;
+                case "before" -> originalRefundFreeze.balanceBefore = new BigDecimal("101.00");
+                case "after" -> originalRefundFreeze.balanceAfterTry = new BigDecimal("89.00");
+                case "negative" -> originalRefundFreeze.balanceAfterTry = new BigDecimal("-1.00");
+                default -> throw new AssertionError(variant);
+              }
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> userService.refundInternal(7L, 7L, request));
+              assertEquals(404, failure.getHttpStatus());
+              assertEquals("COMMON_NOT_FOUND", failure.getCode());
+              verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** active无freeze查询，disabled健康复制/尾零及DAO异常渠道保持。 */
+  @Test
+  void disabledRefundFreezeProofKeepsHealthyMoneyActiveIsolationAndReadFailure() {
+    var activeRequest = installRefundProofMode("active-fresh");
+    userService.refundInternal(7L, 7L, activeRequest);
+    org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
+    var request = installRefundProofMode("disabled-fresh");
+    originalRefundFreeze.amount = new BigDecimal("10.000");
+    originalRefundFreeze.balanceBefore = new BigDecimal("100.000");
+    originalRefundFreeze.balanceAfterTry = new BigDecimal("90.000");
+    userService.refundInternal(7L, 7L, request);
+    verify(userMapper).creditBalance(any(), any(), any());
+    var failureRequest = installRefundProofMode("disabled-fresh");
+    var unavailable =
+        new org.springframework.dao.DataRetrievalFailureException("owned-freeze-read-failure");
+    when(balanceTccDebitMapper.selectByPayNo("pay-1")).thenThrow(unavailable);
+    org.junit.jupiter.api.Assertions.assertSame(
+        unavailable,
+        assertThrows(
+            RuntimeException.class, () -> userService.refundInternal(7L, 7L, failureRequest)));
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
+  /** 合法冻结PO复制原本地确认tuple和原DEBIT快照，不以状态标签代替金额来源。 */
+  private com.cloudmall.user.domain.po.BalanceTccDebitPO confirmedRefundFreeze(
+      BalanceDebitAttemptPO attempt, BalanceLedgerPO original) {
+    var freeze = new com.cloudmall.user.domain.po.BalanceTccDebitPO();
+    freeze.userId = attempt.userId;
+    freeze.payNo = attempt.payNo;
+    freeze.orderNo = attempt.orderNo;
+    freeze.operationKey = attempt.operationKey;
+    freeze.xid = attempt.xid;
+    freeze.branchId = attempt.branchId;
+    freeze.state = "CONFIRMED";
+    freeze.amount = original.amount;
+    freeze.balanceBefore = original.balanceBefore;
+    freeze.balanceAfterTry = original.balanceAfter;
+    return freeze;
+  }
+
   /** 每组合重置替身，disabled仅模拟已确认TCC，避免把Legacy禁用拒绝当新源门复现。 */
   private BalanceRefundRequestDTO installRefundProofMode(String mode) {
     setUp();
@@ -693,6 +845,8 @@ class BalanceLedgerServiceTest {
     attempt.ledgerKey = request.originalOperationKey;
     attempt.operationKey = "tcc-debit:" + request.payNo;
     when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(attempt);
+    originalRefundFreeze = confirmedRefundFreeze(attempt, originalRefundDebit);
+    when(balanceTccDebitMapper.selectByPayNo(request.payNo)).thenReturn(originalRefundFreeze);
     return request;
   }
 

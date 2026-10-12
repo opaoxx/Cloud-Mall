@@ -14,6 +14,7 @@ import com.cloudmall.user.domain.dto.DebitRequestDTO;
 import com.cloudmall.user.domain.dto.ProfileDTO;
 import com.cloudmall.user.domain.po.BalanceDebitAttemptPO;
 import com.cloudmall.user.domain.po.BalanceLedgerPO;
+import com.cloudmall.user.domain.po.BalanceTccDebitPO;
 import com.cloudmall.user.domain.po.UserAddressPO;
 import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.domain.vo.BalanceDebitVO;
@@ -23,6 +24,7 @@ import com.cloudmall.user.domain.vo.UserAddressVO;
 import com.cloudmall.user.domain.vo.UserVO;
 import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
+import com.cloudmall.user.mapper.BalanceTccDebitMapper;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.service.UserService;
@@ -65,6 +67,9 @@ public class UserServiceImpl implements UserService {
 
   /** LEGACY/TCC 共享扣款归属，所有扣款入口必须核对该事实。 */
   @Autowired private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
+
+  /** 原TCC冻结/确认事实，仅用于禁用用户退款的本地来源证明。 */
+  @Autowired private BalanceTccDebitMapper balanceTccDebitMapper;
 
   /** 用户地址数据 Mapper。 */
   @Autowired private UserAddressMapper userAddressMapper;
@@ -306,22 +311,41 @@ public class UserServiceImpl implements UserService {
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
   }
 
-  /** 禁用用户仅允许完全匹配已确认 TCC 扣款的退款，不能放宽 Legacy 退款边界。 */
+  /** 禁用用户先核归属，再复核原确认冻结及账本快照；只读本地事实，不扩展Legacy退款。 */
   private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceRefundRequestDTO request) {
     BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
-    return attempt != null
-        && "TCC".equals(attempt.mode)
-        && "CONFIRMED".equals(attempt.state)
-        && attempt.xid != null
-        && !attempt.xid.isBlank()
-        && attempt.branchId != null
-        && attempt.branchId > 0
-        && Objects.equals(attempt.userId, original.userId)
-        && Objects.equals(attempt.payNo, original.payNo)
-        && Objects.equals(attempt.orderNo, original.orderNo)
-        && attempt.amount.compareTo(original.amount) == 0
-        && Objects.equals(attempt.ledgerKey, request.originalOperationKey)
-        && Objects.equals(attempt.operationKey, "tcc-debit:" + request.payNo);
+    if (attempt == null
+        || !"TCC".equals(attempt.mode)
+        || !"CONFIRMED".equals(attempt.state)
+        || attempt.xid == null
+        || attempt.xid.isBlank()
+        || attempt.branchId == null
+        || attempt.branchId <= 0
+        || !Objects.equals(attempt.userId, original.userId)
+        || !Objects.equals(attempt.payNo, original.payNo)
+        || !Objects.equals(attempt.orderNo, original.orderNo)
+        || !validBalanceMoney(attempt.amount)
+        || attempt.amount.signum() <= 0
+        || attempt.amount.compareTo(original.amount) != 0
+        || !Objects.equals(attempt.ledgerKey, request.originalOperationKey)
+        || !Objects.equals(attempt.operationKey, "tcc-debit:" + request.payNo)) return false;
+    BalanceTccDebitPO frozen = balanceTccDebitMapper.selectByPayNo(request.payNo);
+    return frozen != null
+        && "CONFIRMED".equals(frozen.state)
+        && Objects.equals(frozen.userId, attempt.userId)
+        && Objects.equals(frozen.payNo, attempt.payNo)
+        && Objects.equals(frozen.orderNo, attempt.orderNo)
+        && Objects.equals(frozen.operationKey, attempt.operationKey)
+        && Objects.equals(frozen.xid, attempt.xid)
+        && Objects.equals(frozen.branchId, attempt.branchId)
+        && validBalanceMoney(frozen.amount)
+        && frozen.amount.signum() > 0
+        && frozen.amount.compareTo(original.amount) == 0
+        && validBalanceMoney(frozen.balanceBefore)
+        && validBalanceMoney(frozen.balanceAfterTry)
+        && frozen.balanceBefore.compareTo(original.balanceBefore) == 0
+        && frozen.balanceAfterTry.compareTo(original.balanceAfter) == 0
+        && frozen.balanceBefore.subtract(frozen.balanceAfterTry).compareTo(frozen.amount) == 0;
   }
 
   /** disabled 退款必须先证明原 DEBIT/APPLIED 和完整已确认 TCC 归属。 */

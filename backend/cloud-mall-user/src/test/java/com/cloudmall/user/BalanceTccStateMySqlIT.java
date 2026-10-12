@@ -789,6 +789,86 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 确认后仅破坏原冻结/归属事实，禁用fresh/replay不得放行，HTTP亦不二次credit。 */
+  @Test
+  void disabledRefundRejectsMissingOrCorruptConfirmedFreezeInRealTransactions() {
+    fixture.execute("ALTER TABLE balance_debit_attempt MODIFY amount DECIMAL(18,2) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (boolean replay : List.of(false, true)) {
+        for (String mutation :
+            List.of("missing", "state", "branch", "xid", "snapshot", "attempt-null")) {
+          assertions.add(
+              () -> {
+                closeContext();
+                createTransactionalServices();
+                var original = request("freeze-proof", 7L, "10.000");
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+                var refund = refundRequest(original, "refund-freeze-proof", "10.00");
+                if (replay) legacy.refundInternal(7L, 7L, refund);
+                fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+                switch (mutation) {
+                  case "missing" -> fixture.update("DELETE FROM balance_tcc_debit");
+                  case "state" -> fixture.update("UPDATE balance_tcc_debit SET state='TRYING'");
+                  case "branch" -> fixture.update("UPDATE balance_tcc_debit SET branch_id=99");
+                  case "xid" ->
+                      fixture.update("UPDATE balance_tcc_debit SET xid='other-owned-xid'");
+                  case "snapshot" ->
+                      fixture.update("UPDATE balance_tcc_debit SET balance_after_try=95");
+                  case "attempt-null" ->
+                      fixture.update("UPDATE balance_debit_attempt SET amount=NULL");
+                  default -> throw new AssertionError(mutation);
+                }
+                var before = allFundsFacts();
+                var failure =
+                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                assertEquals(404, failure.getHttpStatus());
+                assertEquals("COMMON_NOT_FOUND", failure.getCode());
+                assertEquals(before, allFundsFacts());
+                var mvc =
+                    org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                            context.getBean(UserController.class))
+                        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                        .build();
+                String payload =
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(
+                            Map.of(
+                                "refundOperationKey",
+                                refund.refundOperationKey,
+                                "originalOperationKey",
+                                refund.originalOperationKey,
+                                "payNo",
+                                refund.payNo,
+                                "orderNo",
+                                refund.orderNo,
+                                "amount",
+                                "10.00"));
+                mvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(payload))
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                            .isNotFound())
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                                "$.code")
+                            .value("COMMON_NOT_FOUND"));
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt");
+      fixture.execute("ALTER TABLE balance_debit_attempt MODIFY amount DECIMAL(18,2) NOT NULL");
+    }
+  }
+
   @Test
   void confirmIsAtomicIdempotentAndStillWorksWhenDisabled() {
     BalanceTccDebitTryDTO request = request("confirmed", 7L, "10.00");
