@@ -54,6 +54,9 @@ public class UserServiceImpl implements UserService {
   /** 密码摘要编码器。 */
   private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder();
 
+  /** 原扣款金额与余额快照的DECIMAL(18,2)容量上界，不补造或截断持久事实。 */
+  private static final BigDecimal MAX_REFUND_ORIGINAL_MONEY = new BigDecimal("9999999999999999.99");
+
   /** 用户事实数据 Mapper。 */
   @Autowired private UserMapper userMapper;
 
@@ -242,12 +245,14 @@ public class UserServiceImpl implements UserService {
       @PathVariable Long userId,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId,
       @Valid @RequestBody BalanceRefundRequestDTO request) {
+    // 1. 校验调用者和请求金额，按原顺序锁定用户。
     assertInternalCaller(userId, callerId);
     validateMoney(request.amount, "退款金额不合法");
     UserPO user = userMapper.selectByIdForUpdate(userId);
     if (user == null) {
       throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
     }
+    // 2. 既有退款按原重放协议核验，禁用用户仍需证明原TCC扣款。
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
     if (existing != null) {
       if (!Objects.equals(user.status, 1)) {
@@ -259,16 +264,14 @@ public class UserServiceImpl implements UserService {
       return ApiResponse.ok(
           BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));
     }
+    // 3. 新退款必须先证明原扣款身份和资金快照，再计算合计或写余额。
     BalanceLedgerPO original =
         balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
     if (!Objects.equals(user.status, 1)) requireDisabledTccRefund(original, request, userId);
-    if (original == null
-        || !Objects.equals(userId, original.userId)
-        || !"APPLIED".equals(original.state)
-        || !Objects.equals(request.payNo, original.payNo)
-        || !Objects.equals(request.orderNo, original.orderNo)) {
+    if (!isProvenRefundOriginalDebit(original, request, userId)) {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
+    // 4. 保持原退款合计、条件credit和账本写序，不改已有资金动作。
     BigDecimal refundedAmount = balanceLedgerMapper.sumAppliedRefunds(request.originalOperationKey);
     if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
       throw new BizException("BALANCE_REFUND_EXCEEDED", "退款金额超过原扣款", 409);
@@ -317,17 +320,38 @@ public class UserServiceImpl implements UserService {
   /** disabled 退款必须先证明原 DEBIT/APPLIED 和完整已确认 TCC 归属。 */
   private void requireDisabledTccRefund(
       BalanceLedgerPO original, BalanceRefundRequestDTO request, Long userId) {
-    if (original == null
-        || !Objects.equals(original.userId, userId)
-        || !"DEBIT".equals(original.operationType)
-        || !"APPLIED".equals(original.state)
-        || !Objects.equals(original.payNo, request.payNo)
-        || !Objects.equals(original.orderNo, request.orderNo)) {
+    if (!isProvenRefundOriginalDebit(original, request, userId)) {
       throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
     }
     if (!confirmedTccRefund(original, request)) {
       throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
     }
+  }
+
+  /** 原锁定候选须为精确DEBIT和合法快照；只核原字段，不推断当前钱包或全部退款因果。 */
+  private static boolean isProvenRefundOriginalDebit(
+      BalanceLedgerPO original, BalanceRefundRequestDTO request, Long userId) {
+    return original != null
+        && Objects.equals(original.operationKey, request.originalOperationKey)
+        && "DEBIT".equals(original.operationType)
+        && "APPLIED".equals(original.state)
+        && original.originalOperationKey == null
+        && Objects.equals(original.userId, userId)
+        && Objects.equals(original.payNo, request.payNo)
+        && Objects.equals(original.orderNo, request.orderNo)
+        && validRefundOriginalMoney(original.amount)
+        && original.amount.signum() > 0
+        && validRefundOriginalMoney(original.balanceBefore)
+        && validRefundOriginalMoney(original.balanceAfter)
+        && original.balanceBefore.subtract(original.balanceAfter).compareTo(original.amount) == 0;
+  }
+
+  /** 持久金额必须存在、非负且无损落在18.2域，允许零余额和数值等值尾零。 */
+  private static boolean validRefundOriginalMoney(BigDecimal value) {
+    return value != null
+        && value.signum() >= 0
+        && value.stripTrailingZeros().scale() <= 2
+        && value.compareTo(MAX_REFUND_ORIGINAL_MONEY) <= 0;
   }
 
   /** 在用户行锁保护下认领唯一归属，再同事务执行扣款与账本写入。 */

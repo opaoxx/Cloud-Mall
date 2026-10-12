@@ -35,6 +35,9 @@ class BalanceLedgerServiceTest {
   private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
   private ValueOperations<String, String> valueOperations;
 
+  /** 当前退款用例可改变的原扣款证明，正常字段完整且不连接真实库。 */
+  private BalanceLedgerPO originalRefundDebit;
+
   @BeforeEach
   void setUp() {
     userService = new UserServiceImpl();
@@ -165,6 +168,186 @@ class BalanceLedgerServiceTest {
         () -> userService.refundInternal(7L, 7L, request));
   }
 
+  /** CI候选及非法原来源不能成为新增退款或disabled重放证明。 */
+  @Test
+  void refundRejectsUnprovenOriginalIdentityTypeAndOrigin() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh", "disabled-replay")) {
+      for (String variant :
+          java.util.List.of(
+              "missing",
+              "key-case",
+              "key-other",
+              "type-case",
+              "type-refund",
+              "origin-empty",
+              "origin-self",
+              "user",
+              "pay",
+              "order",
+              "state")) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              switch (variant) {
+                case "missing" ->
+                    when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(null);
+                case "key-case" -> originalRefundDebit.operationKey = "PAY-1";
+                case "key-other" -> originalRefundDebit.operationKey = "other-key";
+                case "type-case" -> originalRefundDebit.operationType = "debit";
+                case "type-refund" -> originalRefundDebit.operationType = "REFUND";
+                case "origin-empty" -> originalRefundDebit.originalOperationKey = "";
+                case "origin-self" -> originalRefundDebit.originalOperationKey = "pay-1";
+                case "user" -> originalRefundDebit.userId = 8L;
+                case "pay" -> originalRefundDebit.payNo = "PAY-1";
+                case "order" -> originalRefundDebit.orderNo = "other-order";
+                case "state" -> originalRefundDebit.state = "REJECTED";
+                default -> throw new AssertionError(variant);
+              }
+              assertOriginalRefundRejected(mode, request);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 坏原金额/余额及差额须在汇总、确认归属比较和credit之前拒绝，不能NPE。 */
+  @Test
+  void refundRejectsUnprovenOriginalMoneyAndDeltaBeforeCredit() {
+    java.util.List<org.junit.jupiter.api.function.Executable> assertions =
+        new java.util.ArrayList<>();
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh", "disabled-replay")) {
+      for (String variant :
+          java.util.List.of(
+              "amount-null",
+              "amount-zero",
+              "amount-negative",
+              "amount-scale",
+              "amount-cap",
+              "before-null",
+              "after-null",
+              "before-negative",
+              "after-negative",
+              "balance-cap",
+              "delta")) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              switch (variant) {
+                case "amount-null" -> originalRefundDebit.amount = null;
+                case "amount-zero" -> originalRefundDebit.amount = BigDecimal.ZERO;
+                case "amount-negative" -> originalRefundDebit.amount = new BigDecimal("-1.00");
+                case "amount-scale" -> originalRefundDebit.amount = new BigDecimal("10.001");
+                case "amount-cap" ->
+                    originalRefundDebit.amount = new BigDecimal("10000000000000000.00");
+                case "before-null" -> originalRefundDebit.balanceBefore = null;
+                case "after-null" -> originalRefundDebit.balanceAfter = null;
+                case "before-negative" ->
+                    originalRefundDebit.balanceBefore = new BigDecimal("-1.00");
+                case "after-negative" -> originalRefundDebit.balanceAfter = new BigDecimal("-1.00");
+                case "balance-cap" ->
+                    originalRefundDebit.balanceBefore = new BigDecimal("10000000000000000.00");
+                case "delta" -> originalRefundDebit.balanceAfter = new BigDecimal("95.00");
+                default -> throw new AssertionError(variant);
+              }
+              assertOriginalRefundRejected(mode, request);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 纯字段门保零余额/无损尾零，不改变active已有退款重放不读source的原边界。 */
+  @Test
+  void validOriginalRefundProofKeepsZeroBalanceTailZerosAndReplayBoundaries() {
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh", "disabled-replay")) {
+      var request = installRefundProofMode(mode);
+      originalRefundDebit.amount = new BigDecimal("10.000");
+      originalRefundDebit.balanceBefore = new BigDecimal("10.000");
+      originalRefundDebit.balanceAfter = new BigDecimal("0.000");
+      userService.refundInternal(7L, 7L, request);
+      verify(userMapper, times("disabled-replay".equals(mode) ? 0 : 1))
+          .creditBalance(any(), any(), any());
+    }
+    var request = installRefundProofMode("active-fresh");
+    when(balanceLedgerMapper.selectByOperationKey("refund-1"))
+        .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+    when(balanceLedgerMapper.selectDebitForUpdate("pay-1"))
+        .thenThrow(new AssertionError("active replay不得扩大原source读取范围"));
+    userService.refundInternal(7L, 7L, request);
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
+  /** 原查询或汇总故障原样传播，不把数据库错误转换成无扣款或写退款。 */
+  @Test
+  void refundOriginalLookupAndAggregateFailuresKeepExistingExceptionChannel() {
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh", "disabled-replay")) {
+      var request = installRefundProofMode(mode);
+      var unavailable =
+          new org.springframework.dao.DataRetrievalFailureException("owned-original-read-failure");
+      when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenThrow(unavailable);
+      org.junit.jupiter.api.Assertions.assertSame(
+          unavailable,
+          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      var request = installRefundProofMode(mode);
+      var unavailable =
+          new org.springframework.dao.DataRetrievalFailureException("owned-sum-read-failure");
+      when(balanceLedgerMapper.sumAppliedRefunds("pay-1")).thenThrow(unavailable);
+      org.junit.jupiter.api.Assertions.assertSame(
+          unavailable,
+          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+  }
+
+  /** 每组合重置替身，disabled仅模拟已确认TCC，避免把Legacy禁用拒绝当新源门复现。 */
+  private BalanceRefundRequestDTO installRefundProofMode(String mode) {
+    setUp();
+    var request = refundRequest();
+    var user = activeUser(new BigDecimal("90.00"));
+    boolean disabled = mode.startsWith("disabled");
+    if (disabled) user.status = 0;
+    originalRefundDebit = appliedDebit("pay-1", new BigDecimal("90.00"));
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
+    when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(originalRefundDebit);
+    when(balanceLedgerMapper.selectByOperationKey("refund-1"))
+        .thenReturn(
+            "disabled-replay".equals(mode)
+                ? appliedRefund("refund-1", new BigDecimal("100.00"))
+                : null);
+    when(balanceLedgerMapper.sumAppliedRefunds("pay-1")).thenReturn(BigDecimal.ZERO);
+    when(userMapper.creditBalance(any(), any(), any())).thenReturn(1);
+    var attempt = confirmedTccAttempt();
+    attempt.payNo = request.payNo;
+    attempt.orderNo = request.orderNo;
+    attempt.ledgerKey = request.originalOperationKey;
+    attempt.operationKey = "tcc-debit:" + request.payNo;
+    when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(attempt);
+    return request;
+  }
+
+  /** 固定错误码保持，源缺证不得查sum/attempt、写钱包或创建新退款。 */
+  private void assertOriginalRefundRejected(String mode, BalanceRefundRequestDTO request) {
+    var failure =
+        assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> userService.refundInternal(7L, 7L, request));
+    assertEquals(mode.startsWith("disabled") ? 404 : 409, failure.getHttpStatus());
+    assertEquals(
+        mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",
+        failure.getCode());
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).sumAppliedRefunds(any());
+    verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).selectByPayNo(any());
+  }
+
   private BalanceDebitAttemptPO confirmedTccAttempt() {
     BalanceDebitAttemptPO attempt = new BalanceDebitAttemptPO();
     attempt.mode = "TCC";
@@ -217,6 +400,7 @@ class BalanceLedgerServiceTest {
     ledger.amount = new BigDecimal("10.00");
     ledger.state = "APPLIED";
     ledger.balanceAfter = balanceAfter;
+    ledger.balanceBefore = balanceAfter.add(ledger.amount);
     return ledger;
   }
 
