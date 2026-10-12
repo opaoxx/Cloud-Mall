@@ -12,6 +12,7 @@ import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.util.PayDebitModes;
 import feign.FeignException;
+import io.seata.core.context.RootContext;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -22,6 +23,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /** 用持久支付意图、用户账本和订单事实收敛模拟余额支付。 */
 @Service
@@ -50,18 +54,26 @@ public class PayConsistencyService {
   /** 订单状态查询与幂等同步 Feign 客户端。 */
   private final OrderClient orderClient;
 
+  /** 仅包本地Pay两表终态写的独立短事务，不包含RPC或重试。 */
+  private final TransactionTemplate terminalTransactions;
+
   /** 创建支付一致性服务。 */
   public PayConsistencyService(
       PayDebitIntentService payDebitIntentService,
       PayDebitIntentMapper payDebitIntentMapper,
       PayRecordMapper payRecordMapper,
       UserClient userClient,
-      OrderClient orderClient) {
+      OrderClient orderClient,
+      PlatformTransactionManager transactionManager) {
     this.payDebitIntentService = payDebitIntentService;
     this.payDebitIntentMapper = payDebitIntentMapper;
     this.payRecordMapper = payRecordMapper;
     this.userClient = userClient;
     this.orderClient = orderClient;
+    this.terminalTransactions =
+        new TransactionTemplate(Objects.requireNonNull(transactionManager, "Pay终态缺少本地事务管理器"));
+    this.terminalTransactions.setPropagationBehavior(
+        TransactionDefinition.PROPAGATION_REQUIRES_NEW);
   }
 
   /** 在调用用户服务前保存意图，并尝试完成一次支付同步。 */
@@ -262,12 +274,7 @@ public class PayConsistencyService {
 
   /** 用户账本和订单都明确成功后才标记支付成功。 */
   private String finishSuccess(PayDebitIntentPO intent, String claimToken) {
-    LocalDateTime terminalTime = now();
-    requireOwnedLegacyWrite(
-        payRecordMapper.markOwnedLegacySuccess(
-            intent.payNo, claimToken, terminalTime, terminalTime));
-    requireOwnedLegacyWrite(
-        payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "SUCCESS", now()));
+    commitOwnedLegacyTerminal(intent, claimToken, "SUCCESS");
     return "SUCCESS";
   }
 
@@ -275,11 +282,7 @@ public class PayConsistencyService {
   private String finishRefunded(PayDebitIntentPO intent, String claimToken) {
     requireOwnedLegacyWrite(
         payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
-    LocalDateTime terminalTime = now();
-    requireOwnedLegacyWrite(
-        payRecordMapper.markOwnedLegacyRefunded(intent.payNo, claimToken, terminalTime));
-    requireOwnedLegacyWrite(
-        payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "REFUNDED", now()));
+    commitOwnedLegacyTerminal(intent, claimToken, "REFUNDED");
     return "REFUNDED";
   }
 
@@ -346,12 +349,33 @@ public class PayConsistencyService {
 
   /** 明确没有扣款且订单已取消或账本拒绝时标记失败。 */
   private String failWithoutDebit(PayDebitIntentPO intent, String claimToken) {
-    LocalDateTime terminalTime = now();
-    requireOwnedLegacyWrite(
-        payRecordMapper.markOwnedLegacyFailed(intent.payNo, claimToken, terminalTime));
-    requireOwnedLegacyWrite(
-        payDebitIntentMapper.finishOwnedLegacy(intent.payNo, claimToken, "FAILED", now()));
+    commitOwnedLegacyTerminal(intent, claimToken, "FAILED");
     return "FAILED";
+  }
+
+  /** 同一Pay本地事务内提交两个终态写；任一缺证或异常均回滚，不继承全局上下文。 */
+  private void commitOwnedLegacyTerminal(
+      PayDebitIntentPO intent, String claimToken, String terminalState) {
+    if (RootContext.getXID() != null) throw new IllegalStateException("Legacy终态不得继承全局事务");
+    terminalTransactions.executeWithoutResult(
+        transactionStatus -> {
+          LocalDateTime terminalTime = now();
+          int changed =
+              switch (terminalState) {
+                case "SUCCESS" ->
+                    payRecordMapper.markOwnedLegacySuccess(
+                        intent.payNo, claimToken, terminalTime, terminalTime);
+                case "REFUNDED" ->
+                    payRecordMapper.markOwnedLegacyRefunded(intent.payNo, claimToken, terminalTime);
+                case "FAILED" ->
+                    payRecordMapper.markOwnedLegacyFailed(intent.payNo, claimToken, terminalTime);
+                default -> throw new IllegalArgumentException("未知Legacy支付终态");
+              };
+          requireOwnedLegacyWrite(changed);
+          requireOwnedLegacyWrite(
+              payDebitIntentMapper.finishOwnedLegacy(
+                  intent.payNo, claimToken, terminalState, now()));
+        });
   }
 
   /** 正常推进必须恰好更新一行，不以readback绕过owner或期限；异常沿原恢复链处理。 */

@@ -34,19 +34,27 @@ class PayConsistencyServiceTest {
   private OrderClient orderClient;
   private PayConsistencyService consistencyService;
 
+  /** 单元事务管理器，仅核调用定义，不冒称实际SQL回滚。 */
+  private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
   @BeforeEach
   void setUp() {
     intentMapper = mock(PayDebitIntentMapper.class);
     payRecordMapper = mock(PayRecordMapper.class);
     userClient = mock(UserClient.class);
     orderClient = mock(OrderClient.class);
+    transactionManager = mock(org.springframework.transaction.PlatformTransactionManager.class);
+    when(transactionManager.getTransaction(any()))
+        .thenAnswer(
+            invocation -> new org.springframework.transaction.support.SimpleTransactionStatus());
     consistencyService =
         new PayConsistencyService(
             mock(PayDebitIntentService.class),
             intentMapper,
             payRecordMapper,
             userClient,
-            orderClient);
+            orderClient,
+            transactionManager);
     when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(1);
     when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
     when(intentMapper.hasOwnedLegacyLease(anyString(), anyString(), any())).thenReturn(true);
@@ -404,6 +412,7 @@ class PayConsistencyServiceTest {
   /** 三方向均由原资金与订单事实确定，owned写成功只由当前替身控制。 */
   private void prepareTerminalTest(String terminal) {
     prepareRefundPath("REFUNDED".equals(terminal), "custom-refund");
+    if (!"REFUNDED".equals(terminal)) when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
     if ("SUCCESS".equals(terminal))
       when(orderClient.paymentState("order-1", 7L)).thenReturn(ApiResponse.ok(order("PAID")));
     if ("FAILED".equals(terminal))
@@ -495,6 +504,60 @@ class PayConsistencyServiceTest {
         .recordRetry(anyString(), anyString(), anyString(), anyString(), any(), any());
     verify(userClient, never()).debit(any(), any(), any());
     verify(userClient, never()).refund(any(), any(), any());
+  }
+
+  /** 本地终态定义必须REQUIRES_NEW，成功提交与零行回滚仅在fake manager层验证。 */
+  @Test
+  void terminalTransactionDefinitionCommitsOrRollsBackAsOneUnit() {
+    for (boolean fail : java.util.List.of(false, true)) {
+      prepareTerminalTest("SUCCESS");
+      if (fail)
+        when(intentMapper.finishOwnedLegacy(anyString(), anyString(), anyString(), any()))
+            .thenReturn(0);
+      assertEquals(fail ? "ORDER_SYNC_UNKNOWN" : "SUCCESS", consistencyService.process("pay-1"));
+      var definition =
+          org.mockito.ArgumentCaptor.forClass(
+              org.springframework.transaction.TransactionDefinition.class);
+      verify(transactionManager).getTransaction(definition.capture());
+      assertEquals(
+          org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW,
+          definition.getValue().getPropagationBehavior());
+      verify(transactionManager, org.mockito.Mockito.times(fail ? 0 : 1)).commit(any());
+      verify(transactionManager, org.mockito.Mockito.times(fail ? 1 : 0)).rollback(any());
+    }
+  }
+
+  /** 缺事务管理器时构造器必须拒绝，不能回退到旧无事务处理。 */
+  @Test
+  void missingTerminalTransactionManagerFailsFast() {
+    org.junit.jupiter.api.Assertions.assertThrows(
+        NullPointerException.class,
+        () ->
+            new PayConsistencyService(
+                mock(PayDebitIntentService.class),
+                intentMapper,
+                payRecordMapper,
+                userClient,
+                orderClient,
+                null));
+  }
+
+  /** 调用者已有Seata XID时不进入本地终态块，也不解绑调用者的上下文。 */
+  @Test
+  void terminalTransactionRejectsInheritedGlobalContext() {
+    org.junit.jupiter.api.Assertions.assertNull(io.seata.core.context.RootContext.getXID());
+    prepareTerminalTest("SUCCESS");
+    io.seata.core.context.RootContext.bind("owned-global-context-probe");
+    try {
+      assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+      verify(transactionManager, never()).getTransaction(any());
+      verify(payRecordMapper, never())
+          .markOwnedLegacySuccess(anyString(), anyString(), any(), any());
+      verify(intentMapper, never()).finishOwnedLegacy(anyString(), anyString(), anyString(), any());
+      assertEquals("owned-global-context-probe", io.seata.core.context.RootContext.getXID());
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
   }
 
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */

@@ -1854,3 +1854,9 @@ Legacy的SUCCESS、FAILED、REFUNDED支付记录通过单条关联UPDATE核对�
 等待订单同步、等待退款及意图推进/重试使用当前未过期token和双表LEGACY模式条件。正常中间写必须恰好影响一行；异常清理失去资格时不回退普通payNo写。
 
 User扣款、Order支付、User退款三个写RPC前再读取当前领取资格，明确失效时停止调用。成功路径和请求契约保持；资格读取与RPC发出之间仍有窗口，不能作为下游原子fencing或两表事务保证。
+
+### CM-18 Legacy两表终态本地原子提交（16T82）
+
+Legacy支付记录终态与意图完成在同一Pay数据源的REQUIRES_NEW短事务内提交；任一owned更新非一行或异常均回滚两表终态写，避免先落支付终态却留下未完成意图。
+
+远端User/Order调用、claim、前置REFUND_PENDING、stage及retry保持在短事务之外。已有Seata XID时拒绝进入终态块，不解绑调用者上下文；本批只保证本地两表原子，不保证跨服务或完整租约fencing。

@@ -42,7 +42,12 @@ class PayDebitModeIsolationTest {
     when(intents.claim(anyString(), anyString(), any(), any())).thenReturn(1);
     PayConsistencyService service =
         new PayConsistencyService(
-            mock(PayDebitIntentService.class), intents, records, users, orders);
+            mock(PayDebitIntentService.class),
+            intents,
+            records,
+            users,
+            orders,
+            mock(org.springframework.transaction.PlatformTransactionManager.class));
 
     BizException failure = assertThrows(BizException.class, () -> service.process("pay-tcc"));
 
@@ -69,7 +74,12 @@ class PayDebitModeIsolationTest {
     when(records.selectByPayNo("pay-mixed")).thenReturn(List.of(payment));
     PayConsistencyService service =
         new PayConsistencyService(
-            mock(PayDebitIntentService.class), intents, records, users, orders);
+            mock(PayDebitIntentService.class),
+            intents,
+            records,
+            users,
+            orders,
+            mock(org.springframework.transaction.PlatformTransactionManager.class));
 
     assertThrows(BizException.class, () -> service.process("pay-mixed"));
 
@@ -91,7 +101,8 @@ class PayDebitModeIsolationTest {
             intents,
             records,
             mock(UserClient.class),
-            mock(OrderClient.class));
+            mock(OrderClient.class),
+            mock(org.springframework.transaction.PlatformTransactionManager.class));
 
     assertThrows(BizException.class, () -> service.process("pay-future"));
 

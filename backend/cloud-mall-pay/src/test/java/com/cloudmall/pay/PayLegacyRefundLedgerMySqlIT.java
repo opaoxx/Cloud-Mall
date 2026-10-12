@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
@@ -135,7 +136,9 @@ class PayLegacyRefundLedgerMySqlIT {
             intents,
             records,
             mock(UserClient.class),
-            mock(OrderClient.class));
+            mock(OrderClient.class),
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(
+                fixture.getDataSource()));
   }
 
   @Test
@@ -605,6 +608,205 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 实际支付记录已执行后intent零行/异常/数据库触发器错误必须回滚原终态写。 */
+  @Test
+  void terminalPairFailureRollsBackPaymentAfterIntentFinishFault() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String terminal : List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      for (String fault : List.of("zero", "exception", "trigger")) {
+        assertions.add(
+            () -> {
+              fixture.execute("DROP TRIGGER IF EXISTS reject_owned_finish");
+              seedIntentAndPayment("PENDING", "INIT");
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              when(user.operation(7L, "pay-1", 7L))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceOperationView(
+                              "pay-1",
+                              "DEBIT",
+                              "FAILED".equals(terminal) ? "REJECTED" : "APPLIED",
+                              "10.00",
+                              "REFUNDED".equals(terminal) ? "custom-refund" : null)));
+              when(user.operation(7L, "custom-refund", 7L))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceOperationView(
+                              "custom-refund", "REFUND", "APPLIED", "10.00", null)));
+              when(orders.paymentState("order-1", 7L))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new OrderClient.OrderView(
+                              "order-1",
+                              "SUCCESS".equals(terminal) ? "PAID" : "CANCELLED",
+                              BigDecimal.TEN,
+                              7L,
+                              "SUCCEEDED")));
+              PayDebitIntentMapper actualIntents = intents;
+              var failingIntents = org.mockito.Mockito.spy(actualIntents);
+              var sawPaymentTerminal = new java.util.concurrent.atomic.AtomicBoolean();
+              var terminalWasTransactional = new java.util.concurrent.atomic.AtomicBoolean();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        sawPaymentTerminal.set(terminal.equals(paymentStatus()));
+                        terminalWasTransactional.set(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        if ("zero".equals(fault)) return 0;
+                        if ("exception".equals(fault))
+                          throw new IllegalStateException("owned-intent-finish-failure");
+                        return invocation.callRealMethod();
+                      })
+                  .when(failingIntents)
+                  .finishOwnedLegacy(eq("pay-1"), anyString(), eq(terminal), any());
+              if ("trigger".equals(fault))
+                fixture.execute(
+                    "CREATE TRIGGER reject_owned_finish BEFORE UPDATE ON pay_debit_intent FOR EACH"
+                        + " ROW BEGIN IF NEW.status IN ('SUCCESS','REFUNDED','FAILED') THEN SIGNAL"
+                        + " SQLSTATE '45000' SET MESSAGE_TEXT='owned terminal failure'; END IF;"
+                        + " END");
+              intents = failingIntents;
+              try {
+                String result = newService(user, orders).process("pay-1");
+                assertNotEquals(terminal, result);
+                assertTrue(sawPaymentTerminal.get());
+                assertNotEquals(terminal, paymentStatus());
+                assertNotEquals(terminal, intentStatus());
+                assertTrue(terminalWasTransactional.get());
+                assertNull(
+                    fixture.queryForObject(
+                        "SELECT paid_at FROM pay_record WHERE pay_no='pay-1'",
+                        java.sql.Timestamp.class));
+                assertNull(intentLeaseOwner());
+                assertTrue(retryErrorPresent());
+                verify(user, never()).debit(any(), any(), any());
+                verify(user, never()).refund(any(), any(), any());
+              } finally {
+                intents = actualIntents;
+                fixture.execute("DROP TRIGGER IF EXISTS reject_owned_finish");
+              }
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 三终态的两SQL共用一个事务连接，所有User/Order交互仍发生在短事务外。 */
+  @Test
+  void healthyTerminalPairCommitsOnOneConnectionWithRpcOutside() {
+    for (String terminal : List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      when(user.operation(eq(7L), anyString(), eq(7L)))
+          .thenAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                String key = invocation.getArgument(1);
+                if ("custom-refund".equals(key))
+                  return ApiResponse.ok(
+                      new UserClient.BalanceOperationView(key, "REFUND", "APPLIED", "10.00", null));
+                return ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "pay-1",
+                        "DEBIT",
+                        "FAILED".equals(terminal) ? "REJECTED" : "APPLIED",
+                        "10.00",
+                        "REFUNDED".equals(terminal) ? "custom-refund" : null));
+              });
+      OrderClient orders = mock(OrderClient.class);
+      when(orders.paymentState("order-1", 7L))
+          .thenAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                return ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1",
+                        "SUCCESS".equals(terminal) ? "PAID" : "CANCELLED",
+                        BigDecimal.TEN,
+                        7L,
+                        "SUCCEEDED"));
+              });
+      var connectionIds = new java.util.HashSet<Integer>();
+      var observed = new ArrayList<String>();
+      PayRecordMapper actualRecords = records;
+      PayDebitIntentMapper actualIntents = intents;
+      PayRecordMapper instrumentedRecords =
+          (PayRecordMapper)
+              java.lang.reflect.Proxy.newProxyInstance(
+                  actualRecords.getClass().getClassLoader(),
+                  new Class<?>[] {PayRecordMapper.class},
+                  (proxy, method, arguments) -> {
+                    if (method
+                        .getName()
+                        .equals(
+                            "markOwnedLegacy"
+                                + ("SUCCESS".equals(terminal)
+                                    ? "Success"
+                                    : "REFUNDED".equals(terminal) ? "Refunded" : "Failed"))) {
+                      assertTrue(
+                          org.springframework.transaction.support.TransactionSynchronizationManager
+                              .isActualTransactionActive());
+                      observed.add("payment");
+                      java.sql.Connection connection =
+                          org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                              fixture.getDataSource());
+                      try {
+                        connectionIds.add(System.identityHashCode(connection));
+                      } finally {
+                        org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                            connection, fixture.getDataSource());
+                      }
+                    }
+                    try {
+                      return method.invoke(actualRecords, arguments);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                      throw failure.getCause();
+                    }
+                  });
+      var instrumentedIntents = org.mockito.Mockito.spy(actualIntents);
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                assertTrue(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                assertEquals(terminal, paymentStatus());
+                observed.add("intent");
+                java.sql.Connection connection =
+                    org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                        fixture.getDataSource());
+                try {
+                  connectionIds.add(System.identityHashCode(connection));
+                } finally {
+                  org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                      connection, fixture.getDataSource());
+                }
+                return invocation.callRealMethod();
+              })
+          .when(instrumentedIntents)
+          .finishOwnedLegacy(eq("pay-1"), anyString(), eq(terminal), any());
+      records = instrumentedRecords;
+      intents = instrumentedIntents;
+      try {
+        assertEquals(terminal, newService(user, orders).process("pay-1"));
+        assertEquals(List.of("payment", "intent"), observed);
+        assertEquals(1, connectionIds.size());
+        assertEquals(terminal, paymentStatus());
+        assertEquals(terminal, intentStatus());
+        assertNull(intentLeaseOwner());
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, never()).refund(any(), any(), any());
+      } finally {
+        records = actualRecords;
+        intents = actualIntents;
+      }
+    }
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");
@@ -637,7 +839,13 @@ class PayLegacyRefundLedgerMySqlIT {
   private PayConsistencyService newService(UserClient user, OrderClient orders) {
     consistency =
         new PayConsistencyService(
-            mock(PayDebitIntentService.class), intents, records, user, orders);
+            mock(PayDebitIntentService.class),
+            intents,
+            records,
+            user,
+            orders,
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(
+                fixture.getDataSource()));
     return consistency;
   }
 
