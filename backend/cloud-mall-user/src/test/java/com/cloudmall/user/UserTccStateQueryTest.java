@@ -559,6 +559,59 @@ class UserTccStateQueryTest {
     }
   }
 
+  /** DEBIT不是退款，原固定账本的非NULL origin必须在scope查询前拒绝。 */
+  @Test
+  void confirmedFixedDebitCannotCarryRefundOrigin() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (String origin : List.of("", "null", "pay-query-1", "other-pay", "PAY-query-1", " ")) {
+      assertions.add(
+          () -> {
+            setUp();
+            installKnownState("CONFIRMED");
+            var fixed = ledger();
+            fixed.originalOperationKey = origin;
+            when(ledgers.selectByOperationKey("pay-query-1")).thenReturn(fixed);
+            var conflict =
+                assertThrows(
+                    BizException.class,
+                    () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+            assertEquals(409, conflict.getHttpStatus());
+            assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
+            org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+                .selectDebitByPayNo(org.mockito.ArgumentMatchers.any());
+            verifyNoInteractions(fences);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 固定账本合法但范围候选携带origin也不能成为原扣款证明。 */
+  @Test
+  void confirmedScopeDebitCannotCarryRefundOrigin() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (String origin : List.of("", "null", "pay-query-1", "other-pay", "PAY-query-1", " ")) {
+      assertions.add(
+          () -> {
+            setUp();
+            installKnownState("CONFIRMED");
+            var candidate = ledger();
+            candidate.originalOperationKey = origin;
+            when(ledgers.selectDebitByPayNo("pay-query-1")).thenReturn(candidate);
+            var conflict =
+                assertThrows(
+                    BizException.class,
+                    () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+            assertEquals(409, conflict.getHttpStatus());
+            assertEquals("USER_TCC_STATE_CONFLICT", conflict.getCode());
+            verifyNoInteractions(fences);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    setUp();
+    installKnownState("CONFIRMED");
+    assertEquals("CONFIRMED", query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
+  }
+
   /** 完整原资金载荷，返回可变Fence以只改变本次被测来源。 */
   private TccFenceLogPO installKnownState(String state) {
     UserTccReceivePO receive = receive(12L);

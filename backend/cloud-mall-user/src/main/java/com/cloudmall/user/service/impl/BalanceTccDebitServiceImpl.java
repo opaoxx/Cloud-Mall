@@ -281,7 +281,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
         || !Objects.equals(ledger.userId, request.userId)
         || !Objects.equals(ledger.payNo, request.payNo)
         || !Objects.equals(ledger.orderNo, request.orderNo)
-        || ledger.amount.compareTo(request.amount) != 0) throw unknown();
+        || ledger.amount.compareTo(request.amount) != 0
+        || ledger.originalOperationKey != null) throw unknown();
   }
 
   /** 调用处已判金额非NULL；原快照须合法且差额对应实际资金量，不修复原记录。 */

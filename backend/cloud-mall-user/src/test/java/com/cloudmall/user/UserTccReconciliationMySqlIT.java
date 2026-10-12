@@ -454,6 +454,55 @@ class UserTccReconciliationMySqlIT {
     verifyNoInteractions(resource, receiveStore);
   }
 
+  /** 真实原DEBIT被写入非NULL origin后，state与T9在原scope之前拒绝且无写。 */
+  @Test
+  void confirmedDebitWithRefundOriginCannotBeProvenByReadRoutes() throws Exception {
+    var resource = mock(BalanceTccDebitLocalResource.class);
+    var receiveStore = mock(UserTccReceiveStore.class);
+    var mvc = cancelledEvidenceRoutes(resource, receiveStore);
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String origin : List.of("", "null", "pay1", "other-pay", "PAY1", " ")) {
+      assertions.add(
+          () -> {
+            seed("CONFIRMED");
+            fixture.update("UPDATE balance_ledger SET original_operation_key=? WHERE id=1", origin);
+            var before = facts();
+            org.junit.jupiter.api.Assertions.assertAll(
+                () -> {
+                  tracked.reset();
+                  tracked.checking = true;
+                  mvc.perform(
+                          get("/api/internal/users/7/balance/tcc-debits/tcc-debit:pay1")
+                              .header("X-User-Id", "7")
+                              .header("X-Internal-Service", "cloud-mall-pay")
+                              .header("X-Internal-Callback-Token", "ops-secret")
+                              .param("xid", "private-tc:8091:original"))
+                      .andExpect(status().isConflict())
+                      .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"));
+                  assertEquals(1, tracked.connections);
+                  assertEquals(4, tracked.statements.size());
+                  assertEquals(before, facts());
+                },
+                () -> {
+                  tracked.reset();
+                  tracked.checking = true;
+                  mvc.perform(
+                          get("/api/internal/users/7/balance/tcc-reconciliation/pay1")
+                              .header("X-Internal-Service", "cm18-reconciliation")
+                              .header("X-Internal-Callback-Token", "ops-secret"))
+                      .andExpect(status().isConflict())
+                      .andExpect(jsonPath("$.code").value("USER_TCC_STATE_CONFLICT"))
+                      .andExpect(header().string("Cache-Control", "no-store"));
+                  assertEquals(1, tracked.connections);
+                  assertEquals(5, tracked.statements.size());
+                  assertEquals(before, facts());
+                });
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    verifyNoInteractions(resource, receiveStore);
+  }
+
   /** 构造原User state及诊断Controller，真实RR与Mapper，不启动端口或资金写资源。 */
   private static MockMvc cancelledEvidenceRoutes(
       BalanceTccDebitLocalResource resource, UserTccReceiveStore receiveStore) {

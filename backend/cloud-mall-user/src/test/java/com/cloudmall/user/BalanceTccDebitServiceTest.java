@@ -478,6 +478,26 @@ class BalanceTccDebitServiceTest {
   }
 
   /** 固定409及原code，所有金额/状态写Mapper都不得调用。 */
+  /** 确认重放不接受退款专用origin字段，不清算/重扣/改状态。 */
+  @Test
+  void confirmedReplaysRejectRefundOriginOnOriginalDebit() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new java.util.ArrayList<>();
+    for (String operation : List.of("try", "confirm")) {
+      for (String origin : List.of("", "null", "pay1", "other-pay", "PAY1", " ")) {
+        assertions.add(
+            () -> {
+              installFunds("CONFIRMED", "none");
+              originalLedger.originalOperationKey = origin;
+              assertPersistedAmountConflict(operation, "BALANCE_TCC_UNKNOWN");
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    installFunds("CONFIRMED", "none");
+    assertEquals("CONFIRMED", service.tryDebit(request()).state);
+    assertEquals("CONFIRMED", service.confirmDebit(completion()).state);
+  }
+
   private void assertPersistedAmountConflict(String operation, String code) {
     BalanceTccDebitTryDTO original = request();
     BalanceTccDebitFinalizeDTO completion = new BalanceTccDebitFinalizeDTO();

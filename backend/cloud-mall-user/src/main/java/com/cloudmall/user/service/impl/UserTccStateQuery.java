@@ -127,7 +127,8 @@ public class UserTccStateQuery {
               && Objects.equals(ledger.payNo, receive.payNo)
               && Objects.equals(ledger.orderNo, receive.orderNo)
               && Objects.equals(ledger.operationKey, receive.ledgerKey)
-              && ledger.amount.compareTo(receive.amount) == 0);
+              && ledger.amount.compareTo(receive.amount) == 0
+              && ledger.originalOperationKey == null);
       require(matchesDebitScope(ledgers.selectDebitByPayNo(receive.payNo), ledger));
       view.ledgerApplied = true;
       expectedFence = 2;
@@ -163,7 +164,8 @@ public class UserTccStateQuery {
         && validBalance(candidate.balanceAfter)
         && candidate.amount.compareTo(original.amount) == 0
         && candidate.balanceBefore.compareTo(original.balanceBefore) == 0
-        && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
+        && candidate.balanceAfter.compareTo(original.balanceAfter) == 0
+        && candidate.originalOperationKey == null;
   }
 
   /** 原claim载荷先于任何资金查询核验，null分支是尚未bind的合法状态，不补造接收事实。 */

@@ -175,6 +175,59 @@ class BalanceTccStateMySqlIT {
     if (context != null) context.close();
   }
 
+  /** 首次原扣款实际写出NULL，损坏origin后两确认重放均拒绝且四表资金事实不变。 */
+  @Test
+  void confirmedReplayRejectsNonNullDebitOriginWithoutChangingAnyFundsFact() {
+    var original = request("origin-contract", 7L, "10.000");
+    assertEquals("TRYING", service.tryDebit(original).state);
+    assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(original)).state);
+    assertEquals(
+        null,
+        fixture.queryForObject(
+            "SELECT original_operation_key FROM balance_ledger WHERE operation_key=?",
+            String.class,
+            original.ledgerKey));
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String origin :
+        List.of("", "null", "origin-contract", "other-pay", "ORIGIN-CONTRACT", " ")) {
+      for (String operation : List.of("try", "confirm")) {
+        assertions.add(
+            () -> {
+              fixture.update(
+                  "UPDATE balance_ledger SET original_operation_key=? WHERE operation_key=?",
+                  origin,
+                  original.ledgerKey);
+              var before = allFundsFacts();
+              var conflict =
+                  assertThrows(
+                      BizException.class,
+                      () -> {
+                        if ("try".equals(operation)) service.tryDebit(original);
+                        else service.confirmDebit(finalizeRequest(original));
+                      });
+              assertEquals(409, conflict.getHttpStatus());
+              assertEquals("BALANCE_TCC_UNKNOWN", conflict.getCode());
+              assertEquals(before, allFundsFacts());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+    fixture.update(
+        "UPDATE balance_ledger SET original_operation_key=NULL WHERE operation_key=?",
+        original.ledgerKey);
+    var before = allFundsFacts();
+    assertEquals("CONFIRMED", service.tryDebit(original).state);
+    setEnabled(false);
+    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+    var disabledBefore = allFundsFacts();
+    assertEquals("CONFIRMED", service.confirmDebit(finalizeRequest(original)).state);
+    assertEquals(disabledBefore, allFundsFacts());
+    // 健康try重放未改变原资金事实；disabled测试只由fixture显式修改账号状态。
+    assertEquals(before.get(1), disabledBefore.get(1));
+    assertEquals(before.get(2), disabledBefore.get(2));
+    assertEquals(before.get(3), disabledBefore.get(3));
+  }
+
   @Test
   void confirmIsAtomicIdempotentAndStillWorksWhenDisabled() {
     BalanceTccDebitTryDTO request = request("confirmed", 7L, "10.00");
