@@ -27,7 +27,7 @@ GO。`UserTccStateQuery` TRYING/CANCELLED 分支当前只确认固定 DEBIT key 
 ## 4. 验收
 
 - Unit：TRYING/CANCELLED × freeze/attempt-only，orphan REFUND/UNKNOWN/type、null row、CI alias、null list、DAO fault；旧 DEBIT/fixed-key 优先与 attempt-null UNKNOWN 保持。
-- Native RR/HTTP：真实 User owned ledger 在四状态/适用入口下，任意 same-pay 非 DEBIT 行阻止状态报告；健康 empty、CONFIRMED 带 REFUND、invalid wallet/status 优先保持；只修改 owned ledger，source checksum 与 no-write tracking 不变。
+- Native RR/HTTP：真实 User owned ledger 覆盖三种未确认形态（TRYING with freeze、CANCELLED with freeze、CANCELLED attempt-only）及 CONFIRMED healthy control；任意 same-pay 非 DEBIT 行在前三种形态阻止状态报告，CONFIRMED 带 REFUND 仍合法。other-pay REFUND、invalid wallet/status 优先保持；只修改 owned ledger，source checksum 与 no-write tracking 不变。
 - 如新增全 type SELECT，准确更新查询计数；不访问 funds worker/Pay/Order，不启动 TC/RM，不宣称全历史或完整账户因果。
 - 保留 T67–T89、User state/diagnostic 及 TCC 回归。
 
