@@ -128,6 +128,7 @@ class SeckillQuotaSettlementRecoveryTest {
     SeckillQuotaSettlementMapper mapper = mock(SeckillQuotaSettlementMapper.class);
     when(mapper.findDue(any(), anyInt())).thenReturn(List.of(settlement));
     when(mapper.findDueAfter(any(), anyLong(), anyInt())).thenReturn(List.of());
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
     var owner = new AtomicReference<String>();
     var leaseUntil = new AtomicReference<LocalDateTime>();
     when(mapper.claim(anyString(), anyString(), eq(2L), anyString(), any(), any()))

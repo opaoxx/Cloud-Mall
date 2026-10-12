@@ -245,6 +245,12 @@ class SeckillRecoveryScanFairnessTest {
                       .findFirst()
                       .orElse(null);
                 }
+                if ("findMatchingAcceptanceId".equals(method)) {
+                  var original = invocation.getArgument(0, SeckillQuotaSettlementPO.class);
+                  assertNotNull(original);
+                  assertEquals(original.orderNo + ":ROLLBACK", original.operationKey);
+                  return 1L;
+                }
                 if ("markReleased".equals(method)) {
                   String orderNo = invocation.getArgument(0);
                   released.add(Long.parseLong(orderNo.substring(6)));

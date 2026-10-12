@@ -107,6 +107,7 @@ class SeckillRecoveryCandidateGuardTest {
                 any(),
                 same(original));
         verify(mapper).findSettlement(original.orderNo);
+        verify(mapper).findMatchingAcceptanceId(same(original));
         verifyNoMoreInteractions(redis);
         assertEquals(idempotency, original.idempotencyKey);
       }
@@ -147,6 +148,7 @@ class SeckillRecoveryCandidateGuardTest {
         .markReleased(
             eq(healthy.orderNo), eq(healthy.operationKey), eq(2L), eq(7L), any(), same(healthy));
     verify(mapper).findSettlement(healthy.orderNo);
+    verify(mapper).findMatchingAcceptanceId(same(healthy));
     verifyNoMoreInteractions(mapper);
   }
 
@@ -203,6 +205,7 @@ class SeckillRecoveryCandidateGuardTest {
   /** claim后返回独立原行副本，注入动态owner/lease，满足16T40读回门。 */
   private static void stubClaimReadback(
       SeckillQuotaSettlementMapper mapper, SeckillQuotaSettlementPO original) {
+    when(mapper.findMatchingAcceptanceId(same(original))).thenReturn(1L);
     var owner = new AtomicReference<String>();
     var leaseUntil = new AtomicReference<LocalDateTime>();
     doAnswer(

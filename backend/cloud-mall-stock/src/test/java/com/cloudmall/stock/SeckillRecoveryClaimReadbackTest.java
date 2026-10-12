@@ -48,6 +48,41 @@ class SeckillRecoveryClaimReadbackTest {
   }
 
   @Test
+  void missingAcceptanceAfterValidClaimCannotCallLuaOrWriteCompensation() {
+    var mapper = mapper(current -> {});
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn((Long) null);
+    var redis = redis();
+    assertEquals(0, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
+    verify(mapper).findDue(any(), eq(50));
+    verify(mapper).claim(eq("order-24"), eq("order-24:ROLLBACK"), eq(2L), any(), any(), any());
+    verify(mapper).findSettlement("order-24");
+    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
+    verifyNoMoreInteractions(mapper);
+    verifyNoInteractions(redis);
+  }
+
+  @Test
+  void sourceQueryFailureBeforeLuaKeepsOriginalCatchAndRetry() {
+    var mapper = mapper(current -> {});
+    when(mapper.findMatchingAcceptanceId(any()))
+        .thenThrow(new IllegalStateException("owned-pre-lua-source-failure"));
+    var redis = redis();
+    assertEquals(0, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
+    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
+    verify(mapper)
+        .retry(
+            eq("order-24"),
+            eq("order-24:ROLLBACK"),
+            eq(2L),
+            any(),
+            contains("owned-pre-lua-source-failure"),
+            any(),
+            any(),
+            argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
+    verifyNoInteractions(redis);
+  }
+
+  @Test
   void healthyClaimAllowsPendingBlockedAndMutableDiagnosticChanges() {
     for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
       var mapper =
@@ -68,6 +103,8 @@ class SeckillRecoveryClaimReadbackTest {
           .thenReturn(1);
       assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
       verify(mapper).findSettlement("order-24");
+      verify(mapper)
+          .findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
       verify(redis)
           .execute(
               any(RedisScript.class),
@@ -121,7 +158,8 @@ class SeckillRecoveryClaimReadbackTest {
     var redis = redis();
     assertEquals(1, new SeckillQuotaSettlementRecovery(mapper, redis).recoverDue());
     verify(mapper, times(2)).findSettlement("order-24");
-    verify(mapper).findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
+    verify(mapper, times(2))
+        .findMatchingAcceptanceId(argThat(SeckillRecoveryClaimReadbackTest::isOriginal));
     verify(mapper, never()).retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
     verify(redis)
         .execute(
@@ -167,6 +205,7 @@ class SeckillRecoveryClaimReadbackTest {
   private static SeckillQuotaSettlementMapper mapper(Consumer<SeckillQuotaSettlementPO> mutation) {
     var mapper = mock(SeckillQuotaSettlementMapper.class);
     var original = row();
+    when(mapper.findMatchingAcceptanceId(any())).thenReturn(1L);
     when(mapper.findDue(any(), eq(50))).thenReturn(List.of(original));
     var currentClaimed =
         new java.util.concurrent.atomic.AtomicReference<SeckillQuotaSettlementPO>();

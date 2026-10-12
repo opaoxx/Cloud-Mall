@@ -263,6 +263,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
         verify(observedMapper, times(2)).findDue(any(), eq(50));
         verify(observedMapper, times(2)).findSettlement(original.orderNo);
+        verify(observedMapper, times(2))
+            .findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
         verify(observedMapper).findDueAfter(any(), eq(1L), eq(50));
         verify(observedMapper, times(2))
             .claim(eq(original.orderNo), eq(original.operationKey), eq(2L), any(), any(), any());
@@ -355,6 +357,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
                     any(),
                     any(SeckillQuotaSettlementPO.class));
             verify(observedMapper, times(2)).findSettlement(original.orderNo);
+            verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
             verifyNoMoreInteractions(observedMapper);
           });
     assertAll(assertions);
@@ -374,7 +377,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
               var snapshot = installReleasedWriter(original, "source-" + variant);
               clearInvocations(observedMapper, observedRedis);
               assertEquals(0, recovery.recoverDue(), state + ":" + variant);
-              verify(observedMapper)
+              verify(observedMapper, times(2))
                   .findMatchingAcceptanceId(
                       argThat(
                           candidate ->
@@ -414,7 +417,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         var snapshot = installReleasedWriter(original, "exact");
         clearInvocations(observedMapper, observedRedis);
         assertEquals(1, recovery.recoverDue());
-        verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+        verify(observedMapper, times(2))
+            .findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
         verify(observedMapper, never())
             .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
         assertEquals(snapshot.get(), facts());
@@ -1139,6 +1143,58 @@ class SeckillRecoveryCandidateGuardMySqlIT {
   }
 
   @Test
+  void sourceLostAfterRealClaimCannotReleasePreviouslyHealthyProjection() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String variant : badAcceptanceSources())
+        assertions.add(
+            () -> {
+              reset();
+              var original = row(state, "owned-idem");
+              seed(original);
+              var keys = prepareRedis(original);
+              var redisBefore = redisDumpFacts(keys);
+              var snapshot = installClaimWriter(original, "source-" + variant);
+              clearInvocations(observedMapper, observedRedis);
+              assertEquals(0, recovery.recoverDue(), state + ":" + variant);
+              assertAll(
+                  () -> verifyNoInteractions(observedRedis),
+                  () ->
+                      verify(observedMapper, never())
+                          .markReleased(any(), any(), anyLong(), anyLong(), any(), any()),
+                  () ->
+                      verify(observedMapper, never())
+                          .markProjectionBlocked(
+                              any(), any(), anyLong(), any(), any(), any(), any()),
+                  () ->
+                      verify(observedMapper, never())
+                          .retry(any(), any(), anyLong(), any(), any(), any(), any(), any()),
+                  () -> assertEquals(snapshot.get(), facts(), "保留原lease/source/六表事实: " + variant),
+                  () -> assertEquals(redisBefore, redisDumpFacts(keys), "Lua前不得改变六个键: " + variant));
+              verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void healthyPreLuaSourceObservationKeepsAllAcceptedStatesAndSingleRelease() {
+    for (String sourceState : List.of("ACCEPTED", "PUBLISHED", "ORDER_CREATED"))
+      for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED")) {
+        reset();
+        var original = row(state, "😺".repeat(128));
+        seed(original);
+        fixture.update("UPDATE seckill_reservation SET status=?", sourceState);
+        var keys = prepareRedis(original);
+        assertEquals(1, recovery.recoverDue());
+        verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
+        verify(observedMapper, never())
+            .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+        assertReleased(original);
+        assertSingleReleaseProjection(original, keys);
+      }
+  }
+
+  @Test
   void changedClaimFactsOrLostLeaseCannotReleaseOldProjection() {
     List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
     for (String variant :
@@ -1207,6 +1263,7 @@ class SeckillRecoveryCandidateGuardMySqlIT {
               eq(4L),
               any(),
               any(SeckillQuotaSettlementPO.class));
+      verify(observedMapper).findMatchingAcceptanceId(any(SeckillQuotaSettlementPO.class));
       verifyNoMoreInteractions(observedMapper);
       assertReleased(original);
       assertSingleReleaseProjection(original, keys);
@@ -1678,7 +1735,10 @@ class SeckillRecoveryCandidateGuardMySqlIT {
                     fixture.update(
                         "UPDATE seckill_quota_settlement SET"
                             + " status='PROJECTION_BLOCKED',last_error='diagnostic-only',updated_at='2026-10-12'");
-                default -> throw new AssertionError(variant);
+                default -> {
+                  if (!variant.startsWith("source-")) throw new AssertionError(variant);
+                  corruptAcceptanceSource(original, variant.substring("source-".length()));
+                }
               }
               snapshot.set(facts());
               return 1;

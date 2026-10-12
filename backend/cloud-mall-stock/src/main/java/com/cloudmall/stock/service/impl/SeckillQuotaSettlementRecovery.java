@@ -123,6 +123,8 @@ public class SeckillQuotaSettlementRecovery {
       // 2. claim成功后核当前事实和本租约；已观察漂移不得投影或以旧条件补偿。
       SeckillQuotaSettlementPO claimed = settlementMapper.findSettlement(settlement.orderNo);
       if (!claimReadbackMatches(settlement, claimed, owner, now())) return false;
+      // 来源在claim后仍可能变化；已观察缺证时保留租约，不执行Lua或补偿写。
+      if (settlementMapper.findMatchingAcceptanceId(settlement) == null) return false;
       // 3. 仅用通过原行/租约证明的字段调用既有Lua投影，不重写动作方向。
       List<String> keys =
           List.of(
