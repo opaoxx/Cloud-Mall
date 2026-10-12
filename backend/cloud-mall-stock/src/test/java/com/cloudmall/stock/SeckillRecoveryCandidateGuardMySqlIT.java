@@ -927,6 +927,123 @@ class SeckillRecoveryCandidateGuardMySqlIT {
     fixtureRedis.expire(acceptedKey, Duration.ofMinutes(5));
   }
 
+  @Test
+  void nonCanonicalCountersCannotPartiallyWriteBeforeLuaFailure() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (int counterIndex : List.of(0, 4))
+      for (String value : malformedCounterTexts(counterIndex))
+        assertions.add(
+            () -> {
+              reset();
+              var original = row("RELEASE_PENDING", "owned-idem");
+              seed(original);
+              var keys = prepareRedis(original);
+              fixtureRedis.opsForValue().set(keys.get(counterIndex), value);
+              var before = redisDumpFacts(keys);
+              var databaseBefore = facts();
+              Long receipt = null;
+              RuntimeException scriptFailure = null;
+              try {
+                receipt = executeReleaseLua(original, keys);
+              } catch (RuntimeException failure) {
+                scriptFailure = failure;
+              }
+              Long observedReceipt = receipt;
+              RuntimeException observedFailure = scriptFailure;
+              assertAll(
+                  () -> assertNull(observedFailure, "非法计数应返回0，不触发INCR异常"),
+                  () -> assertEquals(Long.valueOf(0), observedReceipt),
+                  () -> assertEquals(before, redisDumpFacts(keys), "版本与库存不得部分写入"),
+                  () -> assertEquals(databaseBefore, facts()));
+            });
+    assertAll(assertions);
+  }
+
+  @Test
+  void recoveryBlocksMalformedCountersWithoutChangingAnyRedisFact() {
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (int counterIndex : List.of(0, 4))
+        for (String value : malformedCounterTexts(counterIndex))
+          assertions.add(
+              () -> {
+                reset();
+                var original = row(state, "owned-idem");
+                seed(original);
+                var keys = prepareRedis(original);
+                fixtureRedis.opsForValue().set(keys.get(counterIndex), value);
+                var before = redisDumpFacts(keys);
+                var databaseBefore = facts();
+                assertEquals(0, recovery.recoverDue());
+                var current = realMapper.findSettlement(original.orderNo);
+                assertAll(
+                    () -> assertEquals(before, redisDumpFacts(keys), "block不得留下版本部分递增"),
+                    () -> assertEquals("PROJECTION_BLOCKED", current.status),
+                    () -> assertEquals("SECKILL_RELEASE_PROJECTION_BLOCKED", current.lastError),
+                    () -> assertNull(current.redisRevision));
+                assertEquals(original.orderNo, current.orderNo);
+                assertEquals(original.activityId, current.activityId);
+                assertEquals(original.skuId, current.skuId);
+                assertEquals(original.userId, current.userId);
+                assertEquals(original.idempotencyKey, current.idempotencyKey);
+                assertEquals(original.createdAt, current.createdAt);
+                assertEquals(original.operationKey, current.operationKey);
+                assertEquals(original.revision, current.revision);
+                assertEquals(original.quantity, current.quantity);
+                var after = facts();
+                for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
+                  if (!"seckill_quota_settlement".equals(TABLES.get(tableIndex)))
+                    assertEquals(databaseBefore.get(tableIndex), after.get(tableIndex));
+                verify(observedMapper, never())
+                    .markReleased(any(), any(), anyLong(), anyLong(), any(), any());
+                verify(observedMapper, never())
+                    .retry(any(), any(), anyLong(), any(), any(), any(), any(), any());
+              });
+    assertAll(assertions);
+  }
+
+  @Test
+  void canonicalZeroAndPositiveCountersKeepReleaseAndAppliedReplay() {
+    for (String state : List.of("RELEASE_PENDING", "PROJECTION_BLOCKED"))
+      for (String stockText : List.of("0", "5")) {
+        reset();
+        var original = row(state, "owned-idem");
+        seed(original);
+        var keys = prepareRedis(original);
+        fixtureRedis.opsForValue().set(keys.get(0), stockText);
+        assertEquals(1, recovery.recoverDue());
+        assertReleased(original);
+        assertEquals(
+            String.valueOf(Integer.parseInt(stockText) + 1),
+            fixtureRedis.opsForValue().get(keys.get(0)));
+        assertEquals("4", fixtureRedis.opsForValue().get(keys.get(4)));
+        assertEquals("2", fixtureRedis.opsForValue().get(keys.get(5)));
+        verify(observedRedis)
+            .execute(
+                any(org.springframework.data.redis.core.script.RedisScript.class),
+                anyList(),
+                eq(original.orderNo),
+                eq(original.operationKey),
+                eq("2"),
+                eq("1"));
+        // 原APPLIED真实由第一次Lua产生；幂等回执不重写后来损坏的投影计数。
+        fixtureRedis.opsForValue().set(keys.get(0), "05");
+        fixtureRedis.opsForValue().set(keys.get(4), "03");
+        var appliedBefore = redisDumpFacts(keys);
+        var databaseBefore = facts();
+        assertEquals(Long.valueOf(4), executeReleaseLua(original, keys));
+        assertEquals(appliedBefore, redisDumpFacts(keys));
+        assertEquals(databaseBefore, facts());
+      }
+  }
+
+  /** 真实可存但Redis INCR解析不接受的十进制前导零；数值仍落原Lua界内。 */
+  private static List<String> malformedCounterTexts(int counterIndex) {
+    return counterIndex == 0
+        ? List.of("00", "05", "0005", "00000000000000000000000000000000000000005")
+        : List.of("00", "03", "0003", "00000000000000000000000000000000000000003");
+  }
+
   /** 原生产资源脚本在真实Redis直接执行；KEYS不含不应变更的user计数。 */
   private static Long executeReleaseLua(SeckillQuotaSettlementPO original, List<String> keys) {
     var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();

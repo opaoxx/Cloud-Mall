@@ -44,7 +44,9 @@ local startAtText = redis.call('HGET', metaKey, 'startAt')
 local endAtText = redis.call('HGET', metaKey, 'endAt')
 local perUserLimitText = redis.call('HGET', metaKey, 'perUserLimit')
 if not stockText or not revisionText or not stockLimitText or not startAtText or not endAtText or not perUserLimitText
-   or not string.match(stockText, '^%d+$') or not string.match(revisionText, '^%d+$')
+   -- Redis INCRBY rejects padded integers; validate both writable counters before either write.
+   or (stockText ~= '0' and not string.match(stockText, '^[1-9]%d*$'))
+   or (revisionText ~= '0' and not string.match(revisionText, '^[1-9]%d*$'))
    or not string.match(stockLimitText, '^%d+$') or startAtText == ''
    or endAtText == '' or not string.match(perUserLimitText, '^%d+$') then return 0 end
 local stock = tonumber(stockText)
