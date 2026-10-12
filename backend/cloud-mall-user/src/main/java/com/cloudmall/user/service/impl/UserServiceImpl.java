@@ -372,6 +372,13 @@ public class UserServiceImpl implements UserService {
     if (!isProvenRefundOriginalDebit(original, request, userId)) {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
+    // 同pay唯一DEBIT候选须复制已证明原来源，不能忽略其它状态或CI别名扣款。
+    List<BalanceLedgerPO> debitCandidates =
+        balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo);
+    if (debitCandidates == null
+        || debitCandidates.size() != 1
+        || !matchesRefundDebitScope(original, debitCandidates.get(0), request, userId))
+      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
     BigDecimal refundedAmount = provenRefundedAmount(original);
     if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
@@ -471,6 +478,21 @@ public class UserServiceImpl implements UserService {
         && validBalanceMoney(original.balanceBefore)
         && validBalanceMoney(original.balanceAfter)
         && original.balanceBefore.subtract(original.balanceAfter).compareTo(original.amount) == 0;
+  }
+
+  /** 原DEBIT已通过proof；唯一候选必须复制其主键/精确载荷/数值快照，缺证或别行不能作为来源。 */
+  private static boolean matchesRefundDebitScope(
+      BalanceLedgerPO original,
+      BalanceLedgerPO candidate,
+      BalanceRefundRequestDTO request,
+      Long userId) {
+    return candidate != null
+        && candidate.id != null
+        && Objects.equals(candidate.id, original.id)
+        && isProvenRefundOriginalDebit(candidate, request, userId)
+        && candidate.amount.compareTo(original.amount) == 0
+        && candidate.balanceBefore.compareTo(original.balanceBefore) == 0
+        && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
   }
 
   /** 新退款保留原单次候选读取与错误协议，随后复用纯字段逐行kernel。 */
