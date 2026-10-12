@@ -31,9 +31,11 @@ import com.cloudmall.user.service.UserService;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import javax.annotation.PostConstruct;
 import javax.validation.Valid;
@@ -58,6 +60,9 @@ public class UserServiceImpl implements UserService {
 
   /** 余额请求金额与原扣款快照的DECIMAL(18,2)容量上界，不舍入或截断金额。 */
   private static final BigDecimal MAX_BALANCE_MONEY = new BigDecimal("9999999999999999.99");
+
+  /** 关联退款读取采用100加一哨兵，超限必须补证后再处理。 */
+  private static final int MAX_REFUND_CANDIDATES = 100;
 
   /** 用户事实数据 Mapper。 */
   @Autowired private UserMapper userMapper;
@@ -276,8 +281,8 @@ public class UserServiceImpl implements UserService {
     if (!isProvenRefundOriginalDebit(original, request, userId)) {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
-    // 4. 保持原退款合计、条件credit和账本写序，不改已有资金动作。
-    BigDecimal refundedAmount = balanceLedgerMapper.sumAppliedRefunds(request.originalOperationKey);
+    // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
+    BigDecimal refundedAmount = provenRefundedAmount(original);
     if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
       throw new BizException("BALANCE_REFUND_EXCEEDED", "退款金额超过原扣款", 409);
     }
@@ -375,6 +380,40 @@ public class UserServiceImpl implements UserService {
         && validBalanceMoney(original.balanceBefore)
         && validBalanceMoney(original.balanceAfter)
         && original.balanceBefore.subtract(original.balanceAfter).compareTo(original.amount) == 0;
+  }
+
+  /** 复用未过滤的CI关联候选并精确证明每行；超限、缺证或坏行直接拒绝，DAO异常原样传播。 仅全部行合法后由调用方检查累计额度，不用负数抵消或提前超额隐藏坏行，不证明全账户因果。 */
+  private BigDecimal provenRefundedAmount(BalanceLedgerPO original) {
+    List<BalanceLedgerPO> candidates =
+        balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
+    if (candidates == null || candidates.size() > MAX_REFUND_CANDIDATES) {
+      throw new BizException("BALANCE_REFUND_INVALID", "退款累计证据不完整或不一致", 409);
+    }
+    Set<String> operationKeys = new HashSet<>();
+    BigDecimal refundedAmount = BigDecimal.ZERO;
+    for (BalanceLedgerPO candidate : candidates) {
+      if (candidate == null
+          || candidate.operationKey == null
+          || candidate.operationKey.isBlank()
+          || Objects.equals(candidate.operationKey, original.operationKey)
+          || !operationKeys.add(candidate.operationKey)
+          || !"REFUND".equals(candidate.operationType)
+          || !"APPLIED".equals(candidate.state)
+          || !Objects.equals(candidate.userId, original.userId)
+          || !Objects.equals(candidate.originalOperationKey, original.operationKey)
+          || !Objects.equals(candidate.payNo, original.payNo)
+          || !Objects.equals(candidate.orderNo, original.orderNo)
+          || !validBalanceMoney(candidate.amount)
+          || candidate.amount.signum() <= 0
+          || !validBalanceMoney(candidate.balanceBefore)
+          || !validBalanceMoney(candidate.balanceAfter)
+          || candidate.balanceAfter.subtract(candidate.balanceBefore).compareTo(candidate.amount)
+              != 0) {
+        throw new BizException("BALANCE_REFUND_INVALID", "退款累计证据不完整或不一致", 409);
+      }
+      refundedAmount = refundedAmount.add(candidate.amount);
+    }
+    return refundedAmount;
   }
 
   /** 持久金额必须存在、非负且无损落在18.2域，允许零余额和数值等值尾零。 */

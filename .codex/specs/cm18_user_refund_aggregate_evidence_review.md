@@ -10,7 +10,7 @@ GO。fresh refund 当前使用 SQL `SUM` 直接汇总 `original_operation_key` �
 
 在原 DEBIT proof 通过后复用已有 `findLinkedRefundCandidates(original.operationKey)`，不新增 SQL/锁/DDL/接口。该查询保留原键的全部类型/状态 CI 候选并 LIMIT 101：
 
-- null list、DAO 异常或 size > 100 均 fail closed，沿 active `BALANCE_REFUND_INVALID`/409；不把 null 当空集合，不 credit/insert。
+- null list 或 size > 100 fail closed，沿 active `BALANCE_REFUND_INVALID`/409；不把 null 当空集合，不 credit/insert。DAO exception 原样沿现有异常链传播，不转换为该业务错误码。
 - 候选不要求或依赖正 `id`；id 只是排序/数据库主键事实，不作为本批资金证明字段。避免用缺失 id 掩盖仍应核验的候选。
 - 候选 operationKey 必须非 null、非 blank、精确唯一，且不得等于原 DEBIT operationKey。生产唯一键由既有 CI UNIQUE 约束保证；逐行集合仍应拒绝重复精确 operationKey，不做 trim/casefold/别名归一。
 

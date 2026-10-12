@@ -1737,6 +1737,222 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 新退款集合逐行门在Legacy/TCC/disabled三条真实路径上拒绝坏候选，不credit或insert。 */
+  @Test
+  void refundCandidateRowsRejectMalformedTuplesBeforeAnyFundsMutation() {
+    fixture.execute("ALTER TABLE balance_ledger MODIFY amount DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc"))
+        for (String mutation :
+            List.of(
+                "negative",
+                "zero",
+                "wrong-type",
+                "wrong-state",
+                "alias-origin",
+                "wrong-user",
+                "wrong-pay",
+                "wrong-order",
+                "null-money",
+                "bad-delta")) {
+          assertions.add(
+              () -> {
+                closeContext();
+                createTransactionalServices();
+                BalanceTccDebitTryDTO original = request("refund-candidates", 7L, "10.00");
+                String debitKey =
+                    "active-legacy".equals(mode) ? "legacy-refund-candidates" : original.ledgerKey;
+                if ("active-legacy".equals(mode)) {
+                  debitLegacy(original.payNo, debitKey, 7L, "10.00");
+                } else {
+                  service.tryDebit(original);
+                  service.confirmDebit(finalizeRequest(original));
+                }
+                BalanceRefundRequestDTO firstRefund =
+                    refundRequest(original, "refund-candidate-a", "4.00");
+                firstRefund.originalOperationKey = debitKey;
+                BalanceRefundRequestDTO secondRefund =
+                    refundRequest(original, "refund-candidate-b", "4.00");
+                secondRefund.originalOperationKey = debitKey;
+                legacy.refundInternal(7L, 7L, firstRefund);
+                legacy.refundInternal(7L, 7L, secondRefund);
+                if ("disabled-tcc".equals(mode)) {
+                  setEnabled(false);
+                  fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+                }
+                switch (mutation) {
+                  case "negative" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET amount=-4 WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "zero" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET amount=0 WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "wrong-type" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET operation_type='DEBIT' WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "wrong-state" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET state='PENDING' WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "alias-origin" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET original_operation_key=UPPER(?) WHERE"
+                              + " operation_key='refund-candidate-b'",
+                          debitKey);
+                  case "wrong-user" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET user_id=8 WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "wrong-pay" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET pay_no='other-pay' WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "wrong-order" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET order_no='other-order' WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "null-money" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET amount=NULL WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  case "bad-delta" ->
+                      fixture.update(
+                          "UPDATE balance_ledger SET balance_after=99 WHERE"
+                              + " operation_key='refund-candidate-b'");
+                  default -> throw new AssertionError(mutation);
+                }
+                var before = allFundsFacts();
+                BalanceRefundRequestDTO refund =
+                    refundRequest(
+                        original, "refund-new-key", "negative".equals(mutation) ? "5.00" : "1.00");
+                refund.originalOperationKey = debitKey;
+                var mvc =
+                    org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                            context.getBean(UserController.class))
+                        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                        .build();
+                String payload =
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(
+                            Map.of(
+                                "refundOperationKey", refund.refundOperationKey,
+                                "originalOperationKey", refund.originalOperationKey,
+                                "payNo", refund.payNo,
+                                "orderNo", refund.orderNo,
+                                "amount", refund.amount.toPlainString()));
+                mvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(payload))
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                            .isConflict())
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                                "$.code")
+                            .value("BALANCE_REFUND_INVALID"));
+                assertEquals(before, allFundsFacts());
+                BizException directFailure =
+                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                assertEquals(409, directFailure.getHttpStatus());
+                assertEquals("BALANCE_REFUND_INVALID", directFailure.getCode());
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY amount DECIMAL(18,2) NOT NULL, MODIFY balance_before"
+              + " DECIMAL(18,2) NOT NULL, MODIFY balance_after DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 真实有界集合覆盖100/101行，100行可完成，101行在candidate limit前拒绝。 */
+  @Test
+  void refundCandidateLimitStopsAtOneHundredRows() {
+    for (int candidateCount : List.of(100, 101)) {
+      closeContext();
+      createTransactionalServices();
+      BalanceTccDebitTryDTO original = request("refund-limit", 7L, "2.00");
+      service.tryDebit(original);
+      service.confirmDebit(finalizeRequest(original));
+      for (int index = 0; index < candidateCount; index++)
+        seedLinkedRefundCandidate(
+            2L + index, original.ledgerKey, original, "refund-limit-" + index, "0.01");
+      var before = allFundsFacts();
+      BalanceRefundRequestDTO refund =
+          refundRequest(original, "refund-limit-request", candidateCount == 100 ? "1.00" : "0.01");
+      if (candidateCount == 100) {
+        int beforeLedgerCount = ledgerCount();
+        legacy.refundInternal(7L, 7L, refund);
+        assertEquals(beforeLedgerCount + 1, ledgerCount());
+        assertEquals(
+            "99.00",
+            fixture.queryForObject(
+                "SELECT CAST(balance AS CHAR) FROM mall_user WHERE id=7", String.class));
+      } else {
+        BizException failure =
+            assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+        assertEquals(before, allFundsFacts());
+      }
+    }
+  }
+
+  /** 两条已核退款与本次request恰好达到原扣款，重放幂等，超额request固定拒绝。 */
+  @Test
+  void refundAggregateExactReplayAndExcessKeepFundsBounded() {
+    closeContext();
+    createTransactionalServices();
+    BalanceTccDebitTryDTO original = request("refund-aggregate", 7L, "10.00");
+    service.tryDebit(original);
+    service.confirmDebit(finalizeRequest(original));
+    BalanceRefundRequestDTO firstRefund = refundRequest(original, "refund-aggregate-a", "4.00");
+    legacy.refundInternal(7L, 7L, firstRefund);
+    BalanceRefundRequestDTO secondRefund = refundRequest(original, "refund-aggregate-b", "5.00");
+    legacy.refundInternal(7L, 7L, secondRefund);
+    BalanceRefundRequestDTO refund = refundRequest(original, "refund-aggregate-new", "1.00");
+    legacy.refundInternal(7L, 7L, refund);
+    var afterFirst = allFundsFacts();
+    legacy.refundInternal(7L, 7L, refund);
+    assertEquals(afterFirst, allFundsFacts());
+    BalanceRefundRequestDTO excess = refundRequest(original, "refund-aggregate-excess", "1.00");
+    BizException failure =
+        assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, excess));
+    assertEquals(409, failure.getHttpStatus());
+    assertEquals("BALANCE_REFUND_EXCEEDED", failure.getCode());
+    assertEquals(afterFirst, allFundsFacts());
+  }
+
+  /** owned测试库逐行写入退款候选；不写源库，不调用RM/TC。 */
+  private void seedLinkedRefundCandidate(
+      long identifier,
+      String originalOperationKey,
+      BalanceTccDebitTryDTO original,
+      String operationKey,
+      String amount) {
+    BigDecimal refundAmount = new BigDecimal(amount);
+    fixture.update(
+        "INSERT INTO"
+            + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+            + " VALUES(?,7,?,'REFUND',?,?,?,?,'APPLIED',90,90+?,'2026-10-12')",
+        identifier,
+        operationKey,
+        originalOperationKey,
+        original.payNo,
+        original.orderNo,
+        refundAmount,
+        refundAmount);
+  }
+
   /** 只从owned库核完整资金四表，包含所有身份、金额、状态和时间。 */
   private List<List<Map<String, Object>>> allFundsFacts() {
     return List.of("mall_user", "balance_debit_attempt", "balance_tcc_debit", "balance_ledger")

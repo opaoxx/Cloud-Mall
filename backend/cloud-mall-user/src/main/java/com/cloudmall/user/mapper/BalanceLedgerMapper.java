@@ -41,7 +41,7 @@ public interface BalanceLedgerMapper extends BaseMapper<BalanceLedgerPO> {
   @Select("select * from balance_ledger where operation_key=#{operationKey}")
   BalanceLedgerPO selectByOperationKey(@Param("operationKey") String operationKey);
 
-  /** 锁定原扣款对应的退款总额，供退款事务校验。 */
+  /** 读取已应用退款的SQL总额；不加锁，也不证明关联行完整性。 */
   @Select(
       "select coalesce(sum(amount),0) from balance_ledger"
           + " where original_operation_key=#{originalOperationKey}"
