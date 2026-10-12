@@ -409,6 +409,63 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 缺归属但仍有同pay冻结的新退款不得冒充历史Legacy，任何冻结候选都不入账。 */
+  @Test
+  void activeFreshRefundRejectsMissingOwnerWithTccFreezeWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mutation :
+        List.of("CONFIRMED", "TRYING", "CANCELLED", "UNKNOWN", "pay-alias", "other-user")) {
+      assertions.add(
+          () -> {
+            for (String table :
+                List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+              fixture.update("DELETE FROM " + table);
+            fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+            setEnabled(true);
+            var original = request("active-refund-owner-" + mutation, 7L, "10.00");
+            service.tryDebit(original);
+            service.confirmDebit(finalizeRequest(original));
+            fixture.update("DELETE FROM balance_debit_attempt");
+            switch (mutation) {
+              case "CONFIRMED" -> {}
+              case "TRYING", "CANCELLED", "UNKNOWN" ->
+                  fixture.update("UPDATE balance_tcc_debit SET state=?", mutation);
+              case "pay-alias" ->
+                  fixture.update("UPDATE balance_tcc_debit SET pay_no=UPPER(pay_no)");
+              case "other-user" -> fixture.update("UPDATE balance_tcc_debit SET user_id=8");
+              default -> throw new AssertionError(mutation);
+            }
+            var refund = refundRequest(original, "active-refund-owner-request", "1.00");
+            var before = allFundsFacts();
+            var response =
+                org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                        context.getBean(UserController.class))
+                    .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                    .build()
+                    .perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(
+                                new com.fasterxml.jackson.databind.ObjectMapper()
+                                    .writeValueAsString(refund)))
+                    .andReturn();
+            org.junit.jupiter.api.Assertions.assertAll(
+                () -> assertEquals(409, response.getResponse().getStatus(), mutation),
+                () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                () -> {
+                  var failure =
+                      assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                  assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                  assertEquals(409, failure.getHttpStatus());
+                },
+                () -> assertEquals(before, allFundsFacts()));
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 已观察TCC归属的active新退款必须证明确认冻结，坏事实不能触发真实credit。 */
   @Test
   void activeFreshRefundRejectsUnprovenTccOwnerWithoutWriting() {

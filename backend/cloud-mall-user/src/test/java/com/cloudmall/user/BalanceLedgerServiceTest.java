@@ -1958,9 +1958,10 @@ class BalanceLedgerServiceTest {
   void activeFreshRefundOwnerKeepsHistoricalCompatibilityAndReplayReads() {
     for (String mode : java.util.List.of("missing", "LEGACY", "TCC")) {
       var request = installRefundProofMode("active-fresh");
-      if ("missing".equals(mode))
+      if ("missing".equals(mode)) {
         when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
-      else {
+        when(balanceTccDebitMapper.selectByPayNo(request.payNo)).thenReturn(null);
+      } else {
         originalRefundAttempt.mode = mode;
         if ("LEGACY".equals(mode)) {
           originalRefundAttempt.state = "APPLIED";
@@ -1972,7 +1973,7 @@ class BalanceLedgerServiceTest {
       }
       userService.refundInternal(7L, 7L, request);
       verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
-      if ("TCC".equals(mode)) verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
+      if (!"LEGACY".equals(mode)) verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
       else org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
       verify(userMapper).creditBalance(any(), any(), any());
     }
@@ -2080,6 +2081,71 @@ class BalanceLedgerServiceTest {
     org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+  }
+
+  /** 无owner仍有冻结时不能解释为历史Legacy，任意state/坏字段/别名/foreign均拒绝。 */
+  @Test
+  void activeFreshRefundWithoutOwnerRejectsAnyObservedFreeze() {
+    for (String variant :
+        java.util.List.of(
+            "CONFIRMED",
+            "TRYING",
+            "CANCELLED",
+            "UNKNOWN",
+            "missing-fields",
+            "pay-alias",
+            "other-user")) {
+      var request = installRefundProofMode("active-fresh");
+      when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+      if ("missing-fields".equals(variant))
+        when(balanceTccDebitMapper.selectByPayNo(request.payNo))
+            .thenReturn(new com.cloudmall.user.domain.po.BalanceTccDebitPO());
+      else if ("pay-alias".equals(variant)) originalRefundFreeze.payNo = "PAY-1";
+      else if ("other-user".equals(variant)) originalRefundFreeze.userId = 8L;
+      else originalRefundFreeze.state = variant;
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> userService.refundInternal(7L, 7L, request));
+      assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+      assertEquals("原扣款不存在或未应用", failure.getMessage());
+      assertEquals(409, failure.getHttpStatus());
+      verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
+      verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+  }
+
+  /** 无owner查询故障不得充当无冻结，旧source门优先；真正无冻结历史保持可退款。 */
+  @Test
+  void missingRefundOwnerFreezeFaultKeepsPriorityAndEmptyHistoryCompatibility() {
+    var request = installRefundProofMode("active-fresh");
+    when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+    var failure =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "owned-missing-owner-freeze-fault");
+    org.mockito.Mockito.doThrow(failure).when(balanceTccDebitMapper).selectByPayNo(request.payNo);
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    var invalidRequest = installRefundProofMode("active-fresh");
+    originalRefundDebit.originalOperationKey = "bad-source";
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceTccDebitMapper)
+        .selectByPayNo(invalidRequest.payNo);
+    assertOriginalRefundRejected("active-fresh", invalidRequest);
+    org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
+    var historicalRequest = installRefundProofMode("active-fresh");
+    when(balanceDebitAttemptMapper.selectByPayNo(historicalRequest.payNo)).thenReturn(null);
+    when(balanceTccDebitMapper.selectByPayNo(historicalRequest.payNo)).thenReturn(null);
+    userService.refundInternal(7L, 7L, historicalRequest);
+    verify(balanceDebitAttemptMapper).selectByPayNo(historicalRequest.payNo);
+    verify(balanceTccDebitMapper).selectByPayNo(historicalRequest.payNo);
+    verify(userMapper).creditBalance(any(), any(), any());
   }
 
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
