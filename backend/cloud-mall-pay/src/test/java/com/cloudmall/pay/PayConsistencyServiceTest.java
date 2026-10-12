@@ -647,9 +647,10 @@ class PayConsistencyServiceTest {
     verify(intentService).ensureIntent(payment);
     verify(intentMapper).claim(eq("pay-1"), anyString(), any(), any());
     prepareTerminalTest("SUCCESS");
-    when(intentMapper.findDue(any(), eq(50))).thenReturn(java.util.List.of(intent()));
+    when(intentMapper.findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50)))
+        .thenReturn(java.util.List.of(intent()));
     consistencyService.recoverDue();
-    verify(intentMapper).findDue(any(), eq(50));
+    verify(intentMapper).findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50));
     verify(intentMapper).claim(eq("pay-1"), anyString(), any(), any());
     verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
   }
@@ -973,6 +974,130 @@ class PayConsistencyServiceTest {
       verify(orderClient, never()).paid(any(), any());
       verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("REFUNDED"), any());
     }
+  }
+
+  /** 全部坏头也推进、空尾回环，每轮不补短批且最多处理50条。 */
+  @Test
+  void boundedScanMovesPastFailuresAndWrapsAtTheEnd() {
+    PayConsistencyService recovery = org.mockito.Mockito.spy(consistencyService);
+    var blocked = new java.util.ArrayList<PayDebitIntentPO>();
+    for (long identifier = 1; identifier <= 50; identifier++) {
+      PayDebitIntentPO candidate = intent();
+      candidate.id = identifier;
+      candidate.payNo = "blocked-" + identifier;
+      blocked.add(candidate);
+    }
+    PayDebitIntentPO healthy = intent();
+    healthy.id = 51L;
+    healthy.payNo = "healthy";
+    when(intentMapper.findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50)))
+        .thenReturn(blocked);
+    when(intentMapper.findDueAfter(any(), eq(50L), eq(50))).thenReturn(java.util.List.of(healthy));
+    when(intentMapper.findDueAfter(any(), eq(51L), eq(50))).thenReturn(java.util.List.of());
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              String payNo = invocation.getArgument(0);
+              if (payNo.startsWith("blocked-")) throw new IllegalStateException("owned-poison");
+              return "INIT";
+            })
+        .when(recovery)
+        .process(anyString());
+    recovery.recoverDue();
+    recovery.recoverDue();
+    recovery.recoverDue();
+    verify(recovery).process("healthy");
+    verify(recovery, org.mockito.Mockito.times(101)).process(anyString());
+    verify(intentMapper, org.mockito.Mockito.times(2))
+        .findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50));
+    verify(intentMapper).findDueAfter(any(), eq(50L), eq(50));
+    verify(intentMapper).findDueAfter(any(), eq(51L), eq(50));
+    verify(intentMapper, never()).findDue(any(), org.mockito.ArgumentMatchers.anyInt());
+  }
+
+  /** DAO错误不能提交扫描进度，下一轮从同一游标重试；空回环仍有界。 */
+  @Test
+  void scanQueryFailureDoesNotAdvanceOrResetTheCursor() {
+    PayConsistencyService recovery = org.mockito.Mockito.spy(consistencyService);
+    PayDebitIntentPO candidate = intent();
+    candidate.id = 9L;
+    when(intentMapper.findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50)))
+        .thenReturn(java.util.List.of(candidate), java.util.List.of());
+    var failure =
+        new org.springframework.dao.DataAccessResourceFailureException("owned-scan-fault");
+    when(intentMapper.findDueAfter(any(), eq(9L), eq(50)))
+        .thenThrow(failure)
+        .thenReturn(java.util.List.of());
+    org.mockito.Mockito.doReturn("INIT").when(recovery).process("pay-1");
+    recovery.recoverDue();
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        org.junit.jupiter.api.Assertions.assertThrows(
+            org.springframework.dao.DataAccessResourceFailureException.class,
+            recovery::recoverDue));
+    recovery.recoverDue();
+    verify(intentMapper, org.mockito.Mockito.times(2)).findDueAfter(any(), eq(9L), eq(50));
+    verify(intentMapper, org.mockito.Mockito.times(2))
+        .findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50));
+    verify(recovery).process("pay-1");
+  }
+
+  /** 并发旧轮结束时不能覆盖另一个已完成轮次的游标；不启动监听或业务App。 */
+  @Test
+  void lateScanCompletionCannotOverwriteChangedCursor() throws Exception {
+    PayConsistencyService recovery = org.mockito.Mockito.spy(consistencyService);
+    PayDebitIntentPO slow = intent();
+    slow.id = 50L;
+    slow.payNo = "slow";
+    PayDebitIntentPO newer = intent();
+    newer.id = 100L;
+    newer.payNo = "newer";
+    when(intentMapper.findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50)))
+        .thenReturn(java.util.List.of(slow), java.util.List.of(newer), java.util.List.of());
+    when(intentMapper.findDueAfter(any(), eq(100L), eq(50))).thenReturn(java.util.List.of());
+    var entered = new java.util.concurrent.CountDownLatch(1);
+    var release = new java.util.concurrent.CountDownLatch(1);
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              entered.countDown();
+              org.junit.jupiter.api.Assertions.assertTrue(
+                  release.await(10, java.util.concurrent.TimeUnit.SECONDS));
+              throw new IllegalStateException("owned-slow-scan-fault");
+            })
+        .when(recovery)
+        .process("slow");
+    org.mockito.Mockito.doReturn("INIT").when(recovery).process("newer");
+    var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+    try {
+      var task = executor.submit(recovery::recoverDue);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          entered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+      recovery.recoverDue();
+      release.countDown();
+      task.get(10, java.util.concurrent.TimeUnit.SECONDS);
+      recovery.recoverDue();
+      verify(intentMapper).findDueAfter(any(), eq(100L), eq(50));
+      verify(intentMapper, never()).findDueAfter(any(), eq(50L), eq(50));
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+      org.junit.jupiter.api.Assertions.assertTrue(
+          executor.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS));
+    }
+  }
+
+  /** 缺失候选id不制造游标，下一轮保留原起点；实际数据库主键非NULL。 */
+  @Test
+  void missingCandidateIdDoesNotInventScanProgress() {
+    PayConsistencyService recovery = org.mockito.Mockito.spy(consistencyService);
+    PayDebitIntentPO candidate = intent();
+    candidate.id = null;
+    when(intentMapper.findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50)))
+        .thenReturn(java.util.List.of(candidate));
+    org.mockito.Mockito.doReturn("INIT").when(recovery).process("pay-1");
+    recovery.recoverDue();
+    recovery.recoverDue();
+    verify(intentMapper, org.mockito.Mockito.times(2))
+        .findDueAfter(any(), org.mockito.ArgumentMatchers.isNull(), eq(50));
   }
 
   /** 重置每个分支的独立替身，POST失败时持久意图已处于REFUND_PENDING。 */

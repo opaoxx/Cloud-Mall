@@ -126,6 +126,26 @@ class PayRecoveryScanMySqlIT {
     assertEquals(before, fixture.queryForMap("SELECT * FROM pay_debit_intent"));
   }
 
+  /** 新环扫描只轮转主键，负/零/最大值不做加法并保留到期/租约/模式资格。 */
+  @Test
+  void ringScanKeepsEligibilityAndSignedPrimaryKeyBoundaries() {
+    insert(-9, "negative", "LEGACY", "LEGACY", "INIT", NOW, null);
+    insert(-3, "future", "LEGACY", "LEGACY", "INIT", NOW.plusSeconds(1), null);
+    insert(0, "leased", "LEGACY", "LEGACY", "INIT", NOW, NOW.plusSeconds(1));
+    insert(1, "done", "LEGACY", "LEGACY", "SUCCESS", NOW, null);
+    insert(2, "ready", "LEGACY", "LEGACY", "INIT", NOW, null);
+    insert(3, "expired", "LEGACY", "LEGACY", "REFUND_PENDING", NOW, NOW);
+    insert(4, "blocked", "TCC", "LEGACY", "INIT", NOW, null);
+    insert(Long.MAX_VALUE, "maximum", "LEGACY", "LEGACY", "DEBITED", NOW, null);
+    assertEquals(List.of("negative", "ready"), payNos(mapper.findDueAfter(NOW, null, 2)));
+    assertEquals(List.of("negative"), payNos(mapper.findDueAfter(NOW, Long.MIN_VALUE, 0)));
+    assertEquals(List.of("ready", "expired"), payNos(mapper.findDueAfter(NOW, 0L, 2)));
+    assertEquals(List.of("expired", "maximum"), payNos(mapper.findDueAfter(NOW, 2L, 50)));
+    assertTrue(mapper.findDueAfter(NOW, Long.MAX_VALUE, 50).isEmpty());
+    fixture.update("UPDATE pay_debit_intent SET lease_until=NULL WHERE id=0");
+    assertEquals(List.of("leased", "ready"), payNos(mapper.findDueAfter(NOW, -9L, 2)));
+  }
+
   /** 两份记录使用同一支付键；null 支付模式代表缺少支付单的孤立意图。 */
   private void insert(
       long identifier,

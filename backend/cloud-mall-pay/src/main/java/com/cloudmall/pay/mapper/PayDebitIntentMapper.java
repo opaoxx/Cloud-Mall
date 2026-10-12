@@ -100,6 +100,23 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
+  /** 恢复器有界主键轮转读取到期候选；null下界从头读，不改旧时间优先扫描。 */
+  public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
+    return jdbcTemplate.query(
+        "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
+            + " payment.pay_no=intent.pay_no WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
+            + " payment.debit_mode='LEGACY' AND intent.status IN"
+            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
+            + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
+            + " AND (? IS NULL OR intent.id>?) ORDER BY intent.id LIMIT ?",
+        ROW_MAPPER,
+        now,
+        now,
+        afterId,
+        afterId,
+        Math.max(1, limit));
+  }
+
   /** 仅在支付单与意图均为 LEGACY 时条件领取恢复任务。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(

@@ -1267,6 +1267,66 @@ class PayLegacyRefundLedgerMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 坏载荷在领取前拒绝，不能永久占满扫描队头并阻塞健康后项。 */
+  @Test
+  void corruptHeadCannotStarveHealthyRecoveryAcrossBoundedTicks() {
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    for (long identifier = 1; identifier <= 111; identifier++) {
+      boolean blocked = identifier <= 60;
+      String payNo = (blocked ? "blocked-scan-" : "healthy-scan-") + identifier;
+      String orderNo = "order-" + payNo;
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'PENDING','LEGACY',NOW(3),NOW(3))",
+          identifier,
+          payNo,
+          orderNo);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',0,NOW(3)-INTERVAL 1 DAY,NOW(3),NOW(3))",
+          identifier,
+          payNo,
+          blocked ? "mismatched-" + payNo : orderNo);
+    }
+    var blockedBefore = blockedRecoveryFacts();
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    when(user.operation(eq(7L), anyString(), eq(7L)))
+        .thenThrow(new IllegalStateException("owned-scan-user-read-fault"));
+    PayConsistencyService service = newService(user, orders);
+    // 1. 三轮各最多50个候选，应越过60坏行并实际领取全部51个健康后项。
+    for (int tick = 0; tick < 3; tick++) service.recoverDue();
+    assertEquals(
+        51,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id>60 AND attempts=1 AND lease_owner IS"
+                + " NULL AND last_error LIKE '%owned-scan-user-read-fault%'",
+            Integer.class));
+    verify(user, times(51)).operation(eq(7L), anyString(), eq(7L));
+    assertEquals(blockedBefore, blockedRecoveryFacts());
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT SUM(attempts) FROM pay_debit_intent WHERE id<=60", Integer.class));
+    // 2. 到尾部后回环读取最小主键坏头，坏事实仍不改且不新增远端调用。
+    service.recoverDue();
+    assertEquals(blockedBefore, blockedRecoveryFacts());
+    verify(user, times(51)).operation(eq(7L), anyString(), eq(7L));
+    verify(user, never()).debit(any(), any(), any());
+    verify(user, never()).refund(any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(orders);
+  }
+
+  /** 保存队头两张owned表的完整事实，包括不会改动的错误/租约/时间字段。 */
+  private List<List<Map<String, Object>>> blockedRecoveryFacts() {
+    return List.of(
+        fixture.queryForList("SELECT * FROM pay_record WHERE id<=60 ORDER BY id"),
+        fixture.queryForList("SELECT * FROM pay_debit_intent WHERE id<=60 ORDER BY id"));
+  }
+
   /** 创建LEGACY支付意图和取消/待支付支付记录。 */
   private void seedIntentAndPayment(String paymentStatus, String intentStatus) {
     fixture.update("DELETE FROM pay_debit_intent");

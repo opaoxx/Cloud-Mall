@@ -19,6 +19,7 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -58,6 +59,9 @@ public class PayConsistencyService {
   /** 仅包本地Pay两表终态写的独立短事务，不包含RPC或重试。 */
   private final TransactionTemplate terminalTransactions;
 
+  /** 仅代表本进程扫描进度；重启复位，不等于业务成功或持久完成。 */
+  private final AtomicReference<Long> scanAfterId = new AtomicReference<>();
+
   /** 创建支付一致性服务。 */
   public PayConsistencyService(
       PayDebitIntentService payDebitIntentService,
@@ -87,20 +91,32 @@ public class PayConsistencyService {
     return process(intent.payNo);
   }
 
-  /** 无调用者事务时扫描未完成意图；已有事务则在扫描前拒绝。 */
+  /** 无调用者事务时每轮最多恢复50个到期候选，以主键轮转避免坏队头阻塞。 */
   @Scheduled(fixedDelayString = "${cloudmall.pay.recovery-interval-ms:5000}")
   public void recoverDue() {
     // 1. 扫描前拒绝继承的事务，保持每条恢复的独立提交边界。
     requireStandaloneLegacyRecovery();
-    // 2. 只读取达到重试时间的非终态意图。
-    List<PayDebitIntentPO> due = payDebitIntentMapper.findDue(now(), 50);
-    // 3. 每条意图以 payNo 独立认领和恢复，不阻塞后续记录。
-    for (PayDebitIntentPO intent : due) {
-      try {
-        process(intent.payNo);
-      } catch (RuntimeException recoveryFailure) {
-        log.warn("支付恢复任务本轮失败，下一轮继续处理，payNo={}", intent.payNo, recoveryFailure);
+    Long startCursor = scanAfterId.get();
+    LocalDateTime scanTime = now();
+    // 2. 查询异常不改变游标；首段为空才回环，最多两次查询和50条处理。
+    List<PayDebitIntentPO> due = payDebitIntentMapper.findDueAfter(scanTime, startCursor, 50);
+    if (due.isEmpty() && startCursor != null) {
+      due = payDebitIntentMapper.findDueAfter(scanTime, null, 50);
+    }
+    Long endCursor = due.isEmpty() ? null : due.get(due.size() - 1).id;
+    if (!due.isEmpty() && endCursor == null) endCursor = startCursor;
+    try {
+      // 3. 处理失败也前移扫描，坏行仅观察，不修复或猜测其业务状态。
+      for (PayDebitIntentPO intent : due) {
+        try {
+          process(intent.payNo);
+        } catch (RuntimeException recoveryFailure) {
+          log.warn("支付恢复任务本轮失败，下一轮继续处理，payNo={}", intent.payNo, recoveryFailure);
+        }
       }
+    } finally {
+      // 4. 只有原游标仍有效才更新，迟到旧轮不能覆盖已变化的扫描进度。
+      scanAfterId.compareAndSet(startCursor, endCursor);
     }
   }
 
