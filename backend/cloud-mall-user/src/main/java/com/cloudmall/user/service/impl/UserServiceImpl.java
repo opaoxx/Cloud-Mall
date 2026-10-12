@@ -489,15 +489,22 @@ public class UserServiceImpl implements UserService {
     }
   }
 
-  /** 校验重复退款的请求载荷完全一致。 */
+  /** 原退款必须精确匹配已应用载荷及余额差额，缺字段或坏历史不能成为重放证明。 */
   private void ensureRefundMatches(
       BalanceLedgerPO existing, Long userId, BalanceRefundRequestDTO request) {
-    if (!Objects.equals(existing.userId, userId)
+    if (!Objects.equals(existing.operationKey, request.refundOperationKey)
+        || !Objects.equals(existing.userId, userId)
         || !"REFUND".equals(existing.operationType)
         || !Objects.equals(existing.originalOperationKey, request.originalOperationKey)
         || !Objects.equals(existing.payNo, request.payNo)
         || !Objects.equals(existing.orderNo, request.orderNo)
-        || existing.amount.compareTo(request.amount) != 0) {
+        || !"APPLIED".equals(existing.state)
+        || !validBalanceMoney(existing.amount)
+        || existing.amount.signum() <= 0
+        || existing.amount.compareTo(request.amount) != 0
+        || !validBalanceMoney(existing.balanceBefore)
+        || !validBalanceMoney(existing.balanceAfter)
+        || existing.balanceAfter.subtract(existing.balanceBefore).compareTo(existing.amount) != 0) {
       throw new BizException("IDEMPOTENCY_CONFLICT", "退款操作键对应的请求不一致", 409);
     }
   }

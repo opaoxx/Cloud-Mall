@@ -649,6 +649,146 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 已实际refund后仅破坏其原row，CI key/state/null/delta不能200重放，钱不得二次写。 */
+  @Test
+  void persistedRefundReplayRejectsCorruptOwnedLedgerThroughRealHttp() {
+    fixture.execute(
+        "ALTER TABLE balance_ledger MODIFY amount DECIMAL(20,3) NULL, MODIFY balance_before"
+            + " DECIMAL(20,3) NULL, MODIFY balance_after DECIMAL(20,3) NULL");
+    List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
+    try {
+      for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+        for (String mutation :
+            List.of(
+                "operation_key=UPPER(operation_key)",
+                "state='REJECTED'",
+                "amount=NULL",
+                "balance_before=NULL",
+                "balance_before=-1",
+                "balance_after=NULL",
+                "balance_after=100.001",
+                "balance_after=99")) {
+          assertions.add(
+              () -> {
+                closeContext();
+                createTransactionalServices();
+                var original = request("replay-proof", 7L, "10.00");
+                String debitKey =
+                    "active-legacy".equals(mode) ? "custom-replay-proof" : original.ledgerKey;
+                if ("active-legacy".equals(mode))
+                  debitLegacy(original.payNo, debitKey, 7L, "10.00");
+                else {
+                  service.tryDebit(original);
+                  service.confirmDebit(finalizeRequest(original));
+                }
+                var refund = refundRequest(original, "refund-replay-proof", "10.00");
+                refund.originalOperationKey = debitKey;
+                legacy.refundInternal(7L, 7L, refund);
+                if (mode.startsWith("disabled"))
+                  fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+                fixture.update(
+                    "UPDATE balance_ledger SET " + mutation + " WHERE operation_key=?",
+                    refund.refundOperationKey);
+                var before = allFundsFacts();
+                var failure =
+                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                assertEquals(409, failure.getHttpStatus());
+                assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                assertEquals(before, allFundsFacts());
+                var mvc =
+                    org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                            context.getBean(UserController.class))
+                        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                        .build();
+                String payload =
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(
+                            Map.of(
+                                "refundOperationKey",
+                                refund.refundOperationKey,
+                                "originalOperationKey",
+                                refund.originalOperationKey,
+                                "payNo",
+                                refund.payNo,
+                                "orderNo",
+                                refund.orderNo,
+                                "amount",
+                                "10.00"));
+                mvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(payload))
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                            .isConflict())
+                    .andExpect(
+                        org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                                "$.code")
+                            .value("IDEMPOTENCY_CONFLICT"));
+                assertEquals(before, allFundsFacts());
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(assertions);
+    } finally {
+      fixture.update("DELETE FROM balance_ledger");
+      fixture.execute(
+          "ALTER TABLE balance_ledger MODIFY amount DECIMAL(18,2) NOT NULL, MODIFY balance_before"
+              + " DECIMAL(18,2) NOT NULL, MODIFY balance_after DECIMAL(18,2) NOT NULL");
+    }
+  }
+
+  /** 历史合法refund快照与当前wallet无因果等价，既有active/disabled重放不二次credit。 */
+  @Test
+  void persistedRefundReplayKeepsHealthyHistoryAndChangingWallet() throws Exception {
+    for (boolean disabled : List.of(false, true)) {
+      closeContext();
+      createTransactionalServices();
+      var original = request("replay-valid", 7L, "10.000");
+      service.tryDebit(original);
+      service.confirmDebit(finalizeRequest(original));
+      fixture.update("UPDATE mall_user SET balance=0 WHERE id=7");
+      var refund = refundRequest(original, "refund-replay-valid", "10.000");
+      legacy.refundInternal(7L, 7L, refund);
+      fixture.update("UPDATE mall_user SET balance=50,status=? WHERE id=7", disabled ? 0 : 1);
+      var before = allFundsFacts();
+      legacy.refundInternal(7L, 7L, refund);
+      assertEquals(before, allFundsFacts());
+      assertFunds(7L, "50.00", "0.00");
+      assertEquals(2, ledgerCount());
+      var mvc =
+          org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                  context.getBean(UserController.class))
+              .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+              .build();
+      String payload =
+          new com.fasterxml.jackson.databind.ObjectMapper()
+              .writeValueAsString(
+                  Map.of(
+                      "refundOperationKey",
+                      refund.refundOperationKey,
+                      "originalOperationKey",
+                      refund.originalOperationKey,
+                      "payNo",
+                      refund.payNo,
+                      "orderNo",
+                      refund.orderNo,
+                      "amount",
+                      "10.000"));
+      mvc.perform(
+              org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                      "/api/internal/users/7/balance/refunds")
+                  .header("X-User-Id", "7")
+                  .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                  .content(payload))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+      assertEquals(before, allFundsFacts());
+    }
+  }
+
   @Test
   void confirmIsAtomicIdempotentAndStillWorksWhenDisabled() {
     BalanceTccDebitTryDTO request = request("confirmed", 7L, "10.00");
