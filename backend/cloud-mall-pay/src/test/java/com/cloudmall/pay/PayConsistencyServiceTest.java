@@ -84,6 +84,7 @@ class PayConsistencyServiceTest {
     when(payRecordMapper.lockOwnedLegacyTerminalSource(any(), anyString(), any()))
         .thenReturn(payment);
     when(payRecordMapper.lockOwnedLegacyStageSource(any(), anyString(), any())).thenReturn(payment);
+    when(payRecordMapper.lockOwnedLegacyRetrySource(any(), anyString(), any())).thenReturn(payment);
     when(userClient.operation(7L, "pay-1", 7L)).thenReturn(ApiResponse.ok(appliedDebit()));
     when(userClient.operation(7L, "refund:pay-1", 7L))
         .thenReturn(ApiResponse.ok(refundFact("refund:pay-1", "10.00")));
@@ -3202,6 +3203,54 @@ class PayConsistencyServiceTest {
               org.springframework.transaction.TransactionStatus.class);
       ordered.verify(transactionManager).commit(committed.capture());
       org.junit.jupiter.api.Assertions.assertFalse(committed.getValue().isRollbackOnly());
+      org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+    }
+  }
+
+  /** source缺证正常结束callback，保原返回方向，不尝试任何cleanup写。 */
+  @Test
+  void missingRetrySourceSkipsCleanupAndPreservesResult() {
+    when(orderClient.paymentState("order-1", 7L))
+        .thenThrow(new IllegalStateException("owned-order-read-unavailable"));
+    when(payRecordMapper.lockOwnedLegacyRetrySource(any(), anyString(), any())).thenReturn(null);
+    assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+    verify(payRecordMapper).lockOwnedLegacyRetrySource(any(), anyString(), any());
+    verify(payRecordMapper, never()).markOwnedLegacyOrderUnknown(any(), any(), any());
+    verify(intentMapper, never()).recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any());
+    verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+    verify(transactionManager).commit(any());
+    verify(userClient, never()).debit(any(), any(), any());
+    verify(userClient, never()).refund(any(), any(), any());
+    verify(orderClient, never()).paid(any(), any());
+  }
+
+  /** 三retry方向先锁原快照和token，再执行原单写或两写并提交。 */
+  @Test
+  void retrySourceLockPrecedesCleanupAndCommit() {
+    for (String retryStatus : java.util.List.of("INIT", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      setUp();
+      var expected = intent();
+      org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+          consistencyService,
+          "recordOwnedLegacyRetry",
+          expected,
+          "owned-token",
+          retryStatus,
+          "owned-error");
+      var ordered = org.mockito.Mockito.inOrder(payRecordMapper, intentMapper, transactionManager);
+      ordered
+          .verify(payRecordMapper)
+          .lockOwnedLegacyRetrySource(eq(expected), eq("owned-token"), any());
+      if ("ORDER_SYNC_UNKNOWN".equals(retryStatus))
+        ordered
+            .verify(payRecordMapper)
+            .markOwnedLegacyOrderUnknown(eq("pay-1"), eq("owned-token"), any());
+      else verify(payRecordMapper, never()).markOwnedLegacyOrderUnknown(any(), any(), any());
+      ordered
+          .verify(intentMapper)
+          .recordRetryOwnedLegacy(
+              eq("pay-1"), eq("owned-token"), eq(retryStatus), eq("owned-error"), any(), any());
+      ordered.verify(transactionManager).commit(any());
       org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
     }
   }

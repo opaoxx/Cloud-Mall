@@ -480,10 +480,12 @@ public class PayConsistencyService {
     if (RootContext.getXID() != null) return;
     retryTransactions.executeWithoutResult(
         transactionStatus -> {
-          // 2. 保原支付清理顺序与零行best-effort语义，不调用无owner旧方法。
+          // 2. 先核并锁定两表原载荷；缺证只跳过清理，不改写新tuple或释放其租约。
+          if (payRecordMapper.lockOwnedLegacyRetrySource(intent, claimToken, now()) == null) return;
+          // 3. 保原支付清理顺序与零行best-effort语义，不调用无owner旧方法。
           if ("ORDER_SYNC_UNKNOWN".equals(retryStatus))
             payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now());
-          // 3. 意图重试未落盘则撤回本次支付清理；原错误截断、退避和清租约由Mapper保持。
+          // 4. 意图重试未落盘则撤回本次支付清理；原错误截断、退避和清租约由Mapper保持。
           if (payDebitIntentMapper.recordRetryOwnedLegacy(
                   intent.payNo,
                   claimToken,
