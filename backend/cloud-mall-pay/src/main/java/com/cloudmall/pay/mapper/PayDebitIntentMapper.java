@@ -90,7 +90,7 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 先过滤零年月日及原计数、键、载荷资格不符的LEGACY候选，再限制批量。 */
+  /** 先过滤零年月日、超出月末及原计数、键、载荷资格不符的候选，再限制批量。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
@@ -105,12 +105,16 @@ public class PayDebitIntentMapper {
             + " intent.attempts>=0"
             + " AND YEAR(intent.next_retry_at)>=1000 AND MONTH(intent.next_retry_at)>0"
             + " AND DAYOFMONTH(intent.next_retry_at)>0"
+            + " AND DAYOFMONTH(intent.next_retry_at)<=DAYOFMONTH(LAST_DAY(intent.next_retry_at))"
             + " AND YEAR(intent.created_at)>=1000 AND MONTH(intent.created_at)>0"
             + " AND DAYOFMONTH(intent.created_at)>0"
+            + " AND DAYOFMONTH(intent.created_at)<=DAYOFMONTH(LAST_DAY(intent.created_at))"
             + " AND YEAR(intent.updated_at)>=1000 AND MONTH(intent.updated_at)>0"
             + " AND DAYOFMONTH(intent.updated_at)>0"
+            + " AND DAYOFMONTH(intent.updated_at)<=DAYOFMONTH(LAST_DAY(intent.updated_at))"
             + " AND (intent.lease_until IS NULL OR (YEAR(intent.lease_until)>=1000"
-            + " AND MONTH(intent.lease_until)>0 AND DAYOFMONTH(intent.lease_until)>0))"
+            + " AND MONTH(intent.lease_until)>0 AND DAYOFMONTH(intent.lease_until)>0"
+            + " AND DAYOFMONTH(intent.lease_until)<=DAYOFMONTH(LAST_DAY(intent.lease_until))))"
             + " AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
             + " intent.lease_until<=?)"
             + " ORDER BY intent.next_retry_at,intent.id LIMIT ?",
@@ -122,7 +126,7 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 主键轮转过滤零年月日并保持原资格；null从头读，保原时间与批量。 */
+  /** 主键轮转过滤零年月日和超出月末的日期；null从头读，保原资格、时间与批量。 */
   public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
@@ -137,12 +141,16 @@ public class PayDebitIntentMapper {
             + " intent.attempts>=0"
             + " AND YEAR(intent.next_retry_at)>=1000 AND MONTH(intent.next_retry_at)>0"
             + " AND DAYOFMONTH(intent.next_retry_at)>0"
+            + " AND DAYOFMONTH(intent.next_retry_at)<=DAYOFMONTH(LAST_DAY(intent.next_retry_at))"
             + " AND YEAR(intent.created_at)>=1000 AND MONTH(intent.created_at)>0"
             + " AND DAYOFMONTH(intent.created_at)>0"
+            + " AND DAYOFMONTH(intent.created_at)<=DAYOFMONTH(LAST_DAY(intent.created_at))"
             + " AND YEAR(intent.updated_at)>=1000 AND MONTH(intent.updated_at)>0"
             + " AND DAYOFMONTH(intent.updated_at)>0"
+            + " AND DAYOFMONTH(intent.updated_at)<=DAYOFMONTH(LAST_DAY(intent.updated_at))"
             + " AND (intent.lease_until IS NULL OR (YEAR(intent.lease_until)>=1000"
-            + " AND MONTH(intent.lease_until)>0 AND DAYOFMONTH(intent.lease_until)>0))"
+            + " AND MONTH(intent.lease_until)>0 AND DAYOFMONTH(intent.lease_until)>0"
+            + " AND DAYOFMONTH(intent.lease_until)<=DAYOFMONTH(LAST_DAY(intent.lease_until))))"
             + " AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
             + " intent.lease_until<=?)"
             + " AND (? IS NULL OR intent.id>?) ORDER BY intent.id LIMIT ?",
@@ -156,7 +164,7 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 零年月日及原资格检查通过才领取，INT上限饱和；拒绝不改意图，不保证领取后稳定。 */
+  /** 年月日下界、月末上界及原资格通过才领取，INT上限饱和；拒绝不改意图。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=CASE WHEN"
@@ -174,7 +182,12 @@ public class PayDebitIntentMapper {
             + " DAYOFMONTH(next_retry_at)>0 AND YEAR(created_at)>=1000 AND MONTH(created_at)>0 AND"
             + " DAYOFMONTH(created_at)>0 AND YEAR(updated_at)>=1000 AND MONTH(updated_at)>0 AND"
             + " DAYOFMONTH(updated_at)>0 AND (lease_until IS NULL OR (YEAR(lease_until)>=1000 AND"
-            + " MONTH(lease_until)>0 AND DAYOFMONTH(lease_until)>0)) AND next_retry_at<=? AND"
+            + " MONTH(lease_until)>0 AND DAYOFMONTH(lease_until)>0"
+            + " AND DAYOFMONTH(lease_until)<=DAYOFMONTH(LAST_DAY(lease_until))))"
+            + " AND DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at))"
+            + " AND DAYOFMONTH(created_at)<=DAYOFMONTH(LAST_DAY(created_at))"
+            + " AND DAYOFMONTH(updated_at)<=DAYOFMONTH(LAST_DAY(updated_at))"
+            + " AND next_retry_at<=? AND"
             + " (lease_until IS NULL OR lease_until<=?)",
         owner,
         leaseUntil,

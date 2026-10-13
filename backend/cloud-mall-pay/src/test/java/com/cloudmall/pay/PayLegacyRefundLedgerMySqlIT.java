@@ -4114,6 +4114,202 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 非零但超出当月日数的历史时间不得进入扫描或在领取时被覆盖修写。 */
+  @Test
+  void invalidMonthDaysDoNotScanOrClaim() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String field : List.of("next_retry_at", "created_at", "updated_at", "lease_until")) {
+      for (String value :
+          List.of(
+              "2026-02-29 00:00:00.000",
+              "2026-02-30 00:00:00.000",
+              "2026-02-31 00:00:00.000",
+              "2026-04-31 00:00:00.000",
+              "2026-06-31 00:00:00.000",
+              "2026-09-31 00:00:00.000",
+              "2026-11-31 00:00:00.000",
+              "1900-02-29 00:00:00.000",
+              "2100-02-29 00:00:00.000")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              writeOwnedHistoricalTimeInMode(field, value, 1L, "ALLOW_INVALID_DATES");
+              var before = rawIntentTimeFacts();
+              // 包含2100非闰年样本，固定更晚的due参考时间，避免未来时间条件掩盖月日缺口。
+              var currentTime = LocalDateTime.of(2101, 1, 1, 0, 0);
+              org.junit.jupiter.api.Assertions.assertAll(
+                  field + ":" + value,
+                  () ->
+                      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                          () -> assertTrue(intents.findDue(currentTime, 1).isEmpty())),
+                  () ->
+                      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                          () -> assertTrue(intents.findDueAfter(currentTime, null, 1).isEmpty())),
+                  () ->
+                      assertEquals(
+                          0,
+                          intents.claim(
+                              "pay-1",
+                              "t167-invalid-token",
+                              currentTime.plusSeconds(30),
+                              currentTime)),
+                  () -> assertEquals(before, rawIntentTimeFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 100个超出当月日数的坏头先过滤，健康尾仍按原顺序扫描并实际领取恢复。 */
+  @Test
+  void invalidMonthDayHeadCannotBlockHealthyRecovery() {
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    var fields = List.of("next_retry_at", "created_at", "updated_at", "lease_until");
+    var invalidTimes =
+        List.of(
+            "2026-02-29 00:00:00.000",
+            "2026-02-30 00:00:00.000",
+            "2026-02-31 00:00:00.000",
+            "2026-04-31 00:00:00.000",
+            "2026-06-31 00:00:00.000",
+            "2026-09-31 00:00:00.000",
+            "1900-02-29 00:00:00.000",
+            "1000-02-29 00:00:00.000");
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      String payNo = "t167-pay-" + identifier;
+      String orderNo = "t167-order-" + identifier;
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'PENDING','LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          currentTime,
+          currentTime);
+      var due = currentTime.minusSeconds(identifier == 101 ? 3 : identifier == 102 ? 5 : 4);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,last_error,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',0,?,'owned-month-day-proof',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          due,
+          currentTime,
+          currentTime);
+      if (identifier <= 100) {
+        int variant = (int) (identifier - 1);
+        writeOwnedHistoricalTimeInMode(
+            fields.get(variant % 4),
+            invalidTimes.get((variant / 4) % invalidTimes.size()),
+            identifier,
+            "ALLOW_INVALID_DATES");
+      }
+    }
+    var before = rawIntentTimeFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 0).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(102L, 103L, 101L),
+        intents.findDue(currentTime, 50).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(101L, 102L, 103L),
+        intents.findDueAfter(currentTime, null, 50).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(102L),
+        intents.findDueAfter(currentTime, 101L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(103L),
+        intents.findDueAfter(currentTime, 102L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertTrue(intents.findDueAfter(currentTime, 103L, 1).isEmpty());
+    assertEquals(before, rawIntentTimeFacts());
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    when(user.operation(eq(7L), anyString(), eq(7L)))
+        .thenThrow(new IllegalStateException("owned-month-day-user-read-fault"));
+    var service = newService(user, orders);
+    service.recoverDue();
+    assertEquals(
+        3,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id>100 AND attempts=1 AND lease_owner IS"
+                + " NULL AND last_error LIKE '%owned-month-day-user-read-fault%'",
+            Integer.class));
+    verify(user, times(3)).operation(eq(7L), anyString(), eq(7L));
+    assertEquals(before.get(0), rawIntentTimeFacts().get(0));
+    assertEquals(before.get(1).subList(0, 100), rawIntentTimeFacts().get(1).subList(0, 100));
+    service.recoverDue();
+    verify(user, times(3)).operation(eq(7L), anyString(), eq(7L));
+    verify(user, never()).debit(any(), any(), any());
+    verify(user, never()).refund(any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(orders);
+    assertEquals(before.get(1).subList(0, 100), rawIntentTimeFacts().get(1).subList(0, 100));
+  }
+
+  /** 合法闰日、世纪非闰月末、30/31天月末和年份边界保原due及nullable租约资格。 */
+  @Test
+  void validMonthEndsPreserveRecoveryAndClaimRules() {
+    var currentTime = LocalDateTime.of(2101, 1, 1, 0, 0);
+    for (String field : List.of("next_retry_at", "created_at", "updated_at", "lease_until")) {
+      for (String value :
+          List.of(
+              "1000-02-28 00:00:00.000",
+              "1900-02-28 00:00:00.000",
+              "2000-02-29 12:34:56.789",
+              "2024-02-29 12:34:56.789",
+              "2100-02-28 00:00:00.000",
+              "2026-04-30 00:00:00.000",
+              "2026-01-31 00:00:00.000",
+              "9999-12-31 23:59:59.999")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        fixture.update(
+            "UPDATE pay_debit_intent SET next_retry_at=?,last_error='owned-month-day-proof' WHERE"
+                + " id=1",
+            currentTime);
+        writeOwnedHistoricalTimeInMode(field, value, 1L, "ALLOW_INVALID_DATES");
+        var before = rawIntentTimeFacts();
+        boolean eligible =
+            !(value.startsWith("9999")
+                && (field.equals("next_retry_at") || field.equals("lease_until")));
+        assertEquals(eligible ? 1 : 0, intents.findDue(currentTime, 1).size(), field + ":" + value);
+        assertEquals(
+            eligible ? 1 : 0,
+            intents.findDueAfter(currentTime, null, 1).size(),
+            field + ":" + value);
+        assertEquals(before, rawIntentTimeFacts());
+        assertEquals(
+            eligible ? 1 : 0,
+            intents.claim(
+                "pay-1", "t167-month-end-token", currentTime.plusSeconds(30), currentTime),
+            field + ":" + value);
+        if (eligible) {
+          assertEquals(1, intentAttempts());
+          assertEquals("t167-month-end-token", intentLeaseOwner());
+          assertEquals(before.get(0), rawIntentTimeFacts().get(0));
+          var expected = new java.util.LinkedHashMap<>(before.get(1).get(0));
+          var claimed = new java.util.LinkedHashMap<>(rawIntentTimeFacts().get(1).get(0));
+          for (String changed : List.of("lease_owner", "lease_until", "attempts", "updated_at")) {
+            expected.remove(changed);
+            claimed.remove(changed);
+          }
+          assertEquals(expected, claimed);
+        } else assertEquals(before, rawIntentTimeFacts());
+      }
+    }
+  }
+
   /** 原schema历史零时间不能进入实际JDBC扫描，也不能领取并顺带改坏metadata。 */
   @Test
   void zeroCalendarTimesDoNotScanOrClaim() {
@@ -4299,6 +4495,13 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 仅借用本类owned连接模拟历史写入，SESSION模式finally恢复，禁止全局/原业务库。 */
   private void writeOwnedHistoricalTime(String field, String value, long identifier) {
+    writeOwnedHistoricalTimeInMode(field, value, identifier, "");
+  }
+
+  /** 固定owned历史fixture模式临时作用于借用连接，退出时恢复原SESSION配置。 */
+  private void writeOwnedHistoricalTimeInMode(
+      String field, String value, long identifier, String fixtureMode) {
+    assertTrue(List.of("", "ALLOW_INVALID_DATES").contains(fixtureMode));
     assertTrue(List.of("next_retry_at", "created_at", "updated_at", "lease_until").contains(field));
     try (var connection = ownedPool.getConnection();
         var statement = connection.createStatement()) {
@@ -4308,12 +4511,24 @@ class PayLegacyRefundLedgerMySqlIT {
         assertTrue(result.next());
         originalMode = result.getString(1);
       }
-      statement.execute("SET SESSION sql_mode=''");
+      try (var configure = connection.prepareStatement("SET SESSION sql_mode=?")) {
+        configure.setString(1, fixtureMode);
+        configure.execute();
+      }
       try (var update =
           connection.prepareStatement("UPDATE pay_debit_intent SET " + field + "=? WHERE id=?")) {
         update.setString(1, value);
         update.setLong(2, identifier);
         assertEquals(1, update.executeUpdate());
+        try (var stored =
+            connection.prepareStatement(
+                "SELECT CAST(" + field + " AS CHAR) FROM pay_debit_intent WHERE id=?")) {
+          stored.setLong(1, identifier);
+          try (var result = stored.executeQuery()) {
+            assertTrue(result.next());
+            assertEquals(value, result.getString(1));
+          }
+        }
       } finally {
         try (var restore = connection.prepareStatement("SET SESSION sql_mode=?")) {
           restore.setString(1, originalMode);
