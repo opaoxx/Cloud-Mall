@@ -18,7 +18,7 @@ User/receipt NULL 缺失整体仍可沿原 UNKNOWN（仅对应端缺失）；完
 ## 3. 验收与边界
 
 - Unit：execution/receipt/user malformed/null money red；合法双端 CONFIRMED/取消/TRYING/UNKNOWN、identity/amount mismatch/Fence/branch controls；
-- Coordinator recover + real Evidence/Mapper + controlled bridge/Store/TC substitutes：畸形金额由原 UNKNOWN 变 conflict 且不 observe/no TC，缺一端仍合法 UNKNOWN；不写原 DB/服务。
+- Coordinator recover + real Evidence，Mapper/Bridge/Store/TC 使用 Mockito substitutes：畸形金额由原 UNKNOWN 变 conflict 且不 observe/no TC，缺一端仍合法 UNKNOWN；本轮无 DB/Spring RR 代理或真实服务写入。
 - 测试不启动真实资金/事务链，不宣称真实 TC/账户因果；保 T169 时序观察。
 
 ## 4. 交付边界
