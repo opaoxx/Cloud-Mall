@@ -6,6 +6,7 @@ import com.cloudmall.pay.domain.po.PayTccDispatchPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
+import com.cloudmall.pay.util.PayErrorMessages;
 import java.time.LocalDateTime;
 import java.util.Objects;
 import org.springframework.context.annotation.DependsOn;
@@ -81,7 +82,7 @@ public class PayTccDispatchPersistence {
     return new BizException("PAY_TCC_DISPATCH_CONFLICT", "Pay dispatch 原支付或取消 gate 冲突", 409);
   }
 
-  /** 独立提交 User 只读结果镜像。 */
+  /** 独立提交User只读结果镜像，诊断按列容量保留512完整Unicode码点。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean mirror(
       String payNo,
@@ -109,7 +110,12 @@ public class PayTccDispatchPersistence {
     if ("TRY_UNKNOWN".equals(targetState) && "TRY_ACCEPTED".equals(current.state)) return false;
     expectedState = current.state;
     if (dispatchMapper.mirrorState(
-            payNo, expectedState, targetState, branchId, lastError, updatedAt)
+            payNo,
+            expectedState,
+            targetState,
+            branchId,
+            PayErrorMessages.truncate(lastError),
+            updatedAt)
         != 1) {
       throw new IllegalStateException("TCC 派发镜像状态未更新");
     }

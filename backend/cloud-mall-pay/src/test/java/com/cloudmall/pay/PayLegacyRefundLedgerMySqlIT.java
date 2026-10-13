@@ -71,6 +71,9 @@ class PayLegacyRefundLedgerMySqlIT {
   /** 被测一致性服务。 */
   private PayConsistencyService consistency;
 
+  /** 仅派发镜像验收使用的owned真实Mapper。 */
+  private com.cloudmall.pay.mapper.PayTccDispatchMapper dispatchMirrorMapper;
+
   @BeforeAll
   static void setupDatabase() {
     String url = System.getProperty("cloudmall.pay.mysql.test.url");
@@ -292,6 +295,24 @@ class PayLegacyRefundLedgerMySqlIT {
   @Test
   void expiredSameInstanceAttemptCannotReleaseTheReclaimedLease() throws Exception {
     seedIntentAndPayment("PENDING", "INIT");
+    var rejectedClaim = new java.util.concurrent.atomic.AtomicReference<String>();
+    var diagnosticIntents = org.mockito.Mockito.spy(intents);
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              int affectedRows = (Integer) invocation.callRealMethod();
+              if (affectedRows == 0) {
+                var facts =
+                    fixture.queryForMap(
+                        "SELECT *,NOW(3) AS database_now FROM pay_debit_intent WHERE"
+                            + " pay_no='pay-1'");
+                facts.put("application_now", invocation.getArgument(3));
+                rejectedClaim.set(facts.toString());
+              }
+              return affectedRows;
+            })
+        .when(diagnosticIntents)
+        .claim(any(), any(), any(), any());
+    intents = diagnosticIntents;
     UserClient user = mock(UserClient.class);
     var firstReading = new java.util.concurrent.CountDownLatch(1);
     var secondReading = new java.util.concurrent.CountDownLatch(1);
@@ -321,7 +342,9 @@ class PayLegacyRefundLedgerMySqlIT {
           "UPDATE pay_debit_intent SET lease_until=NOW(3)-INTERVAL 1"
               + " SECOND,next_retry_at=NOW(3)-INTERVAL 1 SECOND WHERE pay_no='pay-1'");
       var second = workers.submit(() -> sameInstance.process("pay-1"));
-      assertTrue(secondReading.await(10, java.util.concurrent.TimeUnit.SECONDS));
+      assertTrue(
+          secondReading.await(10, java.util.concurrent.TimeUnit.SECONDS),
+          () -> "second claim facts: " + rejectedClaim.get());
       var reclaimed = fixture.queryForMap("SELECT * FROM pay_debit_intent WHERE pay_no='pay-1'");
       var paymentBefore = fixture.queryForMap("SELECT * FROM pay_record WHERE pay_no='pay-1'");
       releaseFirst.countDown();
@@ -4112,6 +4135,227 @@ class PayLegacyRefundLedgerMySqlIT {
       verify(user).refund(any(), any(), any());
       verify(orders, never()).paid(any(), any());
     }
+  }
+
+  /** public镜像面对长诊断应正常提交512字符前缀，而不是数据库DataTooLong。 */
+  @Test
+  void dispatchMirrorBoundsLongErrorBeforeRealSql() {
+    var store = ownedDispatchPersistence();
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String error : List.of("a".repeat(513), "a".repeat(511) + "😀tail")) {
+      assertions.add(
+          () -> {
+            seedOwnedDispatch("POST_ATTEMPTED", null);
+            var updatedAt = LocalDateTime.of(2026, 10, 14, 12, 34, 56, 789000000);
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    assertTrue(
+                        dispatchTransaction(
+                            () ->
+                                store.mirror(
+                                    "pay-1", "stale-state", "TRY_UNKNOWN", 7L, error, updatedAt))));
+            assertEquals(
+                error.startsWith("a".repeat(513)) ? "a".repeat(512) : "a".repeat(511) + "😀",
+                fixture.queryForObject(
+                    "SELECT last_error FROM pay_tcc_dispatch WHERE id=1", String.class));
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 真实dispatch列接受完整512字符前缀，状态/分支/时间之外所有原载荷保持。 */
+  @Test
+  void dispatchMirrorPrefixesFitColumnAndKeepFacts() {
+    var store = ownedDispatchPersistence();
+    String[][] examples = {
+      {null, null},
+      {"", ""},
+      {"a".repeat(511), "a".repeat(511)},
+      {"a".repeat(512), "a".repeat(512)},
+      {"a".repeat(513), "a".repeat(512)},
+      {"界".repeat(513), "界".repeat(512)},
+      {"😀".repeat(511), "😀".repeat(511)},
+      {"😀".repeat(512), "😀".repeat(512)},
+      {"😀".repeat(513), "😀".repeat(512)},
+      {"a".repeat(511) + "😀tail", "a".repeat(511) + "😀"},
+      {"😀".repeat(256) + "a".repeat(256) + "tail", "😀".repeat(256) + "a".repeat(256)},
+      {"错".repeat(255) + "😀".repeat(257) + "tail", "错".repeat(255) + "😀".repeat(257)},
+      {"é".repeat(257), "é".repeat(256)}
+    };
+    var updatedAt = LocalDateTime.of(2026, 10, 14, 12, 34, 56, 789000000);
+    for (String[] example : examples) {
+      seedOwnedDispatch("POST_ATTEMPTED", null);
+      var original = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+      var payBefore = rawIntentTimeFacts();
+      assertTrue(
+          dispatchTransaction(
+              () ->
+                  store.mirror("pay-1", "stale-state", "TRY_UNKNOWN", 7L, example[0], updatedAt)));
+      var after = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+      assertEquals(example[1], after.get("last_error"));
+      assertEquals("TRY_UNKNOWN", after.get("state"));
+      assertEquals(7L, after.get("user_branch_id"));
+      assertEquals(updatedAt, after.get("updated_at"));
+      assertEquals(
+          example[1] == null ? null : example[1].codePointCount(0, example[1].length()),
+          fixture.queryForObject(
+              "SELECT CHAR_LENGTH(last_error) FROM pay_tcc_dispatch WHERE id=1", Integer.class));
+      assertEquals(
+          example[1] == null ? null : example[1].getBytes(StandardCharsets.UTF_8).length,
+          fixture.queryForObject(
+              "SELECT OCTET_LENGTH(last_error) FROM pay_tcc_dispatch WHERE id=1", Integer.class));
+      for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+        original.remove(changed);
+        after.remove(changed);
+      }
+      assertEquals(original, after);
+      assertEquals(payBefore, rawIntentTimeFacts());
+    }
+    seedOwnedDispatch("POST_ATTEMPTED", 7L);
+    assertTrue(
+        dispatchTransaction(
+            () -> store.mirror("pay-1", "stale-state", "TRY_UNKNOWN", null, null, updatedAt)));
+    assertEquals(
+        7L,
+        fixture.queryForObject(
+            "SELECT user_branch_id FROM pay_tcc_dispatch WHERE id=1", Long.class));
+    assertNull(
+        fixture.queryForObject("SELECT last_error FROM pay_tcc_dispatch WHERE id=1", String.class));
+  }
+
+  /** 原终态/分支/受理门不写；真实CAS零行仍抛原错误，短事务回滚整个变化。 */
+  @Test
+  void dispatchMirrorGuardsAndZeroRowRollbackKeepFacts() {
+    var store = ownedDispatchPersistence();
+    var updatedAt = LocalDateTime.of(2026, 10, 14, 12, 34, 56, 789000000);
+    for (String state : List.of("CONFIRMED", "CANCELLED", "PREPARED", "TRY_ACCEPTED")) {
+      seedOwnedDispatch(state, 7L);
+      var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+      var payBefore = rawIntentTimeFacts();
+      assertTrue(
+          !dispatchTransaction(
+              () ->
+                  store.mirror(
+                      "pay-1", "stale-state", "TRY_UNKNOWN", 7L, "😀".repeat(513), updatedAt)));
+      assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
+      assertEquals(payBefore, rawIntentTimeFacts());
+    }
+    for (Long branch : List.of(0L, -1L, 8L)) {
+      seedOwnedDispatch("POST_ATTEMPTED", 7L);
+      var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+      org.junit.jupiter.api.Assertions.assertThrows(
+          com.cloudmall.common.error.BizException.class,
+          () ->
+              dispatchTransaction(
+                  () ->
+                      store.mirror(
+                          "pay-1",
+                          "stale-state",
+                          "TRY_UNKNOWN",
+                          branch,
+                          "a".repeat(513),
+                          updatedAt)));
+      assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
+    }
+    seedOwnedDispatch("CONFIRMED", 7L);
+    var terminal = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+    org.junit.jupiter.api.Assertions.assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () ->
+            dispatchTransaction(
+                () ->
+                    store.mirror(
+                        "pay-1", "stale-state", "CANCELLED", 7L, "a".repeat(513), updatedAt)));
+    assertEquals(terminal, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
+    seedOwnedDispatch("POST_ATTEMPTED", 7L);
+    var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+    var payBefore = rawIntentTimeFacts();
+    var actual = dispatchMirrorMapper;
+    var guarded =
+        org.mockito.Mockito.mock(
+            com.cloudmall.pay.mapper.PayTccDispatchMapper.class,
+            org.mockito.AdditionalAnswers.delegatesTo(actual));
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              fixture.update("UPDATE pay_tcc_dispatch SET state='TRY_ACCEPTED' WHERE id=1");
+              int changed =
+                  actual.mirrorState(
+                      invocation.getArgument(0),
+                      invocation.getArgument(1),
+                      invocation.getArgument(2),
+                      invocation.getArgument(3),
+                      invocation.getArgument(4),
+                      invocation.getArgument(5));
+              assertEquals(0, changed);
+              return changed;
+            })
+        .when(guarded)
+        .mirrorState(any(), any(), any(), any(), any(), any());
+    var rejected =
+        new com.cloudmall.pay.service.impl.PayTccDispatchPersistence(
+            guarded, records, mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class,
+            () ->
+                dispatchTransaction(
+                    () ->
+                        rejected.mirror(
+                            "pay-1",
+                            "stale-state",
+                            "TRY_UNKNOWN",
+                            7L,
+                            "😀".repeat(513),
+                            updatedAt)));
+    assertEquals("TCC 派发镜像状态未更新", failure.getMessage());
+    assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
+    assertEquals(payBefore, rawIntentTimeFacts());
+  }
+
+  /** 仅在owned库克隆原dispatch DDL，以原真实MyBatis Mapper执行public镜像逻辑。 */
+  private com.cloudmall.pay.service.impl.PayTccDispatchPersistence ownedDispatchPersistence() {
+    fixture.execute("DROP TABLE IF EXISTS pay_tcc_dispatch");
+    String definition =
+        (String) source.queryForMap("SHOW CREATE TABLE pay_tcc_dispatch").get("Create Table");
+    fixture.execute(definition);
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccDispatchMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      dispatchMirrorMapper = session.getMapper(com.cloudmall.pay.mapper.PayTccDispatchMapper.class);
+      return new com.cloudmall.pay.service.impl.PayTccDispatchPersistence(
+          dispatchMirrorMapper, records, mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned dispatch factory failed", failure);
+    }
+  }
+
+  /** 包装同owned数据源的短事务，实际FOR UPDATE与CAS在同一连接内完成。 */
+  private boolean dispatchTransaction(java.util.function.Supplier<Boolean> action) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    return Boolean.TRUE.equals(template.execute(transactionStatus -> action.get()));
+  }
+
+  /** 只在owned表生成唯一派发事实，保固定操作键、分支及原创建时间。 */
+  private void seedOwnedDispatch(String state, Long branchId) {
+    seedIntentAndPayment("PENDING", "INIT");
+    fixture.update("DELETE FROM pay_tcc_dispatch");
+    fixture.update(
+        "INSERT INTO"
+            + " pay_tcc_dispatch(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,state,post_attempted_at,user_branch_id,last_error,created_at,updated_at)"
+            + " VALUES(1,'pay-1','t171-xid',7,'order-1',10,'tcc-debit:pay-1','pay-1',?,?,?,'owned-original-error',?,?)",
+        state,
+        LocalDateTime.of(2026, 10, 1, 0, 0),
+        branchId,
+        LocalDateTime.of(2026, 10, 1, 0, 0),
+        LocalDateTime.of(2026, 10, 1, 0, 0));
   }
 
   /** 两种实际重试写入应保留512码点边界上的完整补充字符，不能存为替换字符。 */

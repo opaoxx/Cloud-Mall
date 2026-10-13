@@ -145,6 +145,29 @@ class PayTccDispatchPersistenceTest {
     assertFalse(persistence.markPostAttempted(dispatch, LocalDateTime.now()));
   }
 
+  /** 捕获实际镜像参数，长Unicode诊断被限制但当前状态/分支/更新时间不变。 */
+  @Test
+  void mirrorBoundsErrorAndPreservesCurrentStateCas() {
+    var current = dispatch("POST_ATTEMPTED", 7L);
+    when(dispatchMapper.selectForUpdate(current.payNo)).thenReturn(current);
+    when(dispatchMapper.mirrorState(any(), any(), any(), any(), any(), any())).thenReturn(1);
+    var updatedAt = LocalDateTime.of(2026, 10, 14, 12, 34, 56, 789000000);
+    org.junit.jupiter.api.Assertions.assertTrue(
+        persistence.mirror(
+            current.payNo, "stale-state", "TRY_UNKNOWN", 7L, "😀".repeat(513), updatedAt));
+    var error = org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(dispatchMapper)
+        .mirrorState(
+            org.mockito.ArgumentMatchers.eq(current.payNo),
+            org.mockito.ArgumentMatchers.eq("POST_ATTEMPTED"),
+            org.mockito.ArgumentMatchers.eq("TRY_UNKNOWN"),
+            org.mockito.ArgumentMatchers.eq(7L),
+            error.capture(),
+            org.mockito.ArgumentMatchers.same(updatedAt));
+    org.junit.jupiter.api.Assertions.assertEquals("😀".repeat(512), error.getValue());
+    org.mockito.Mockito.verifyNoInteractions(payRecordMapper, cancelMapper);
+  }
+
   private PayTccDispatchPO dispatch(String state, Long branchId) {
     PayTccDispatchPO dispatch = new PayTccDispatchPO();
     dispatch.payNo = "pay-persistence-1";
