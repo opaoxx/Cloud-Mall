@@ -526,7 +526,7 @@ public class UserServiceImpl implements UserService {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
-  /** APPLIED原DEBIT已先证明；同pay本地owner/freeze及Legacy接收互斥只读验证，DAO异常原样。 */
+  /** APPLIED原DEBIT已先证明；同pay来源及Legacy接收互斥只读验证，非重复数据库故障原样。 */
   private void requireAppliedDebitOwnership(BalanceLedgerPO original) {
     BalanceDebitAttemptPO attempt =
         readDebitOwnershipCandidate(
@@ -537,8 +537,7 @@ public class UserServiceImpl implements UserService {
             : confirmedTccRefund(original, attempt)))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
-    if ((attempt == null || "LEGACY".equals(attempt.mode))
-        && balanceTccDebitMapper.selectByPayNo(original.payNo) != null)
+    if ((attempt == null || "LEGACY".equals(attempt.mode)) && hasTccFreezeConflict(original.payNo))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     // 原归属/冻结已先证明；Legacy或缺归属历史不得忽略独立接收事实，TCC保持原确认链。
     if ((attempt == null || "LEGACY".equals(attempt.mode)) && hasTccReceiveConflict(original.payNo))
@@ -562,16 +561,38 @@ public class UserServiceImpl implements UserService {
         && attempt.amount.compareTo(original.amount) == 0;
   }
 
-  /** 拒款原快照已先证明；有效Legacy或null历史均须无同pay冻结/接收，DAO异常原样传播。 */
+  /** 拒款原快照已先证明；有效Legacy或null历史均须无同pay冻结/接收，非重复数据库故障原样。 */
   private void requireRejectedDebitOwnership(BalanceLedgerPO original) {
     BalanceDebitAttemptPO attempt =
         readDebitOwnershipCandidate(
             original.payNo, () -> new BizException(ErrorCodes.CONFLICT, "余额账本事实待核对", 409));
     requireBalanceOperationEvidence(
         attempt == null || isProvenLegacyDebitOwnership(original, attempt));
-    requireBalanceOperationEvidence(balanceTccDebitMapper.selectByPayNo(original.payNo) == null);
+    requireBalanceOperationEvidence(!hasTccFreezeConflict(original.payNo));
     // 原账本/归属/冻结门已通过；拒款不能忽略独立接收事实或按其元数据过滤。
     requireBalanceOperationEvidence(!hasTccReceiveConflict(original.payNo));
+  }
+
+  /** 单次冻结点读观察存在性；精确多结果表示存在冲突，其它故障原样且不伪造PO。 */
+  private boolean hasTccFreezeConflict(String payNo) {
+    try {
+      return balanceTccDebitMapper.selectByPayNo(payNo) != null;
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) return true;
+      throw failure;
+    }
+  }
+
+  /** 确认来源必须唯一；精确多结果返回null使原proof失败，其它故障及正常候选原样。 */
+  private BalanceTccDebitPO readConfirmableTccFreeze(String payNo) {
+    try {
+      return balanceTccDebitMapper.selectByPayNo(payNo);
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) return null;
+      throw failure;
+    }
   }
 
   /** 归属保持原单次点读；仅精确多结果调用所属入口异常工厂，其它故障/null/单行原样。 */
@@ -621,7 +642,7 @@ public class UserServiceImpl implements UserService {
             request.payNo, () -> new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404)));
   }
 
-  /** 调用方已观察归属；复核原TCC元组和确认冻结，不重复读取attempt或扩展Legacy。 */
+  /** 调用方已观察归属；复核原TCC元组和唯一确认冻结，重复冻结不能作为确认来源。 */
   private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceDebitAttemptPO attempt) {
     if (attempt == null
         || !"TCC".equals(attempt.mode)
@@ -638,7 +659,7 @@ public class UserServiceImpl implements UserService {
         || attempt.amount.compareTo(original.amount) != 0
         || !Objects.equals(attempt.ledgerKey, original.operationKey)
         || !Objects.equals(attempt.operationKey, "tcc-debit:" + original.payNo)) return false;
-    BalanceTccDebitPO frozen = balanceTccDebitMapper.selectByPayNo(original.payNo);
+    BalanceTccDebitPO frozen = readConfirmableTccFreeze(original.payNo);
     return frozen != null
         && "CONFIRMED".equals(frozen.state)
         && Objects.equals(frozen.userId, attempt.userId)
@@ -850,7 +871,7 @@ public class UserServiceImpl implements UserService {
       if (!isProvenDebitSnapshot(existing))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款账本资金快照待核对", 409);
       // 原tuple/state/snapshot已先证明；Legacy历史不能忽略同pay矛盾冻结或更新缓存。
-      if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
+      if (hasTccFreezeConflict(request.payNo))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款来源存在TCC冻结事实", 409);
       // 历史原来源/冻结门已通过；任意接收事实都要求核对，不缓存矛盾历史结果。
       if (hasTccReceiveConflict(request.payNo))
@@ -871,7 +892,7 @@ public class UserServiceImpl implements UserService {
     if (!paymentLedgerCandidates.isEmpty())
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有资金账本事实", 409);
     // 原归属/账本门已先核；首次Legacy不得与同pay残留TCC冻结并存，不按state过滤。
-    if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
+    if (hasTccFreezeConflict(request.payNo))
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有TCC冻结事实", 409);
     // 原账本/冻结门已通过；任意已观察receive均阻断，不用flag或元数据隐藏原来源。
     if (hasTccReceiveConflict(request.payNo))

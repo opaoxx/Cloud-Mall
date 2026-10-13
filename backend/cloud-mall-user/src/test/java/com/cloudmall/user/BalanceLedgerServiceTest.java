@@ -1714,6 +1714,173 @@ class BalanceLedgerServiceTest {
     if (route.endsWith("get")) assertOperationReadOnly();
   }
 
+  /** 十七入口的精确多冻结都不能确认为唯一来源或空范围，固定业务拒绝且不写。 */
+  @Test
+  void freezeMultipleResultsKeepCallerBusinessFailures() {
+    for (String route :
+        java.util.List.of(
+            "fresh-debits",
+            "fresh-compat",
+            "applied-replay-debits",
+            "applied-replay-compat",
+            "rejected-replay-debits",
+            "rejected-replay-compat",
+            "rejected-get",
+            "applied-debit-get",
+            "applied-refund-get",
+            "active-fresh",
+            "active-replay",
+            "disabled-fresh",
+            "disabled-replay",
+            "tcc-debit-get",
+            "tcc-refund-get",
+            "tcc-active-fresh",
+            "tcc-active-replay")) {
+      for (boolean wrapped : java.util.List.of(false, true)) {
+        var action = installFreezeClassificationRoute(route);
+        var duplicate =
+            new org.apache.ibatis.exceptions.TooManyResultsException("freeze-duplicate");
+        RuntimeException failure =
+            wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+        org.mockito.Mockito.doThrow(failure).when(balanceTccDebitMapper).selectByPayNo("pay-1");
+        var rejected = assertThrows(com.cloudmall.common.error.BizException.class, action);
+        boolean disabled = route.startsWith("disabled");
+        boolean getter = route.endsWith("get");
+        boolean refunding = route.startsWith("active") || route.startsWith("tcc-active");
+        boolean fresh = route.startsWith("fresh");
+        assertEquals(
+            disabled
+                ? "COMMON_NOT_FOUND"
+                : getter
+                    ? "COMMON_CONFLICT"
+                    : refunding
+                        ? "BALANCE_REFUND_INVALID"
+                        : fresh ? "IDEMPOTENCY_CONFLICT" : "BALANCE_DEBIT_UNKNOWN",
+            rejected.getCode());
+        assertEquals(
+            disabled
+                ? "用户不存在"
+                : getter
+                    ? "余额账本事实待核对"
+                    : refunding ? "原扣款不存在或未应用" : fresh ? "支付号已有TCC冻结事实" : "扣款来源存在TCC冻结事实",
+            rejected.getMessage());
+        assertEquals(disabled ? 404 : 409, rejected.getHttpStatus());
+        verify(balanceTccDebitMapper).selectByPayNo("pay-1");
+        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        assertLegacyNoMoneyOrCacheWrite();
+        if (getter) assertOperationReadOnly();
+      }
+    }
+  }
+
+  /** 非目标异常原样；owner缺证优先，不将冻结多结果分类扩大到其它来源/查询故障。 */
+  @Test
+  void freezeClassificationKeepsOtherFaultsAndOwnerPriority() {
+    for (String route :
+        java.util.List.of(
+            "fresh-debits",
+            "fresh-compat",
+            "applied-replay-debits",
+            "applied-replay-compat",
+            "rejected-replay-debits",
+            "rejected-replay-compat",
+            "rejected-get",
+            "applied-debit-get",
+            "applied-refund-get",
+            "active-fresh",
+            "active-replay",
+            "disabled-fresh",
+            "disabled-replay",
+            "tcc-debit-get",
+            "tcc-refund-get",
+            "tcc-active-fresh",
+            "tcc-active-replay")) {
+      for (String shape :
+          java.util.List.of(
+              "resource",
+              "sql-wrapper",
+              "nested-too-many",
+              "other-wrapper",
+              "runtime-cause",
+              "message-only")) {
+        var action = installFreezeClassificationRoute(route);
+        RuntimeException failure =
+            switch (shape) {
+              case "resource" ->
+                  new org.springframework.dao.DataAccessResourceFailureException(
+                      "freeze-jdbc-fault");
+              case "sql-wrapper" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new java.sql.SQLException("freeze-sql-fault"));
+              case "nested-too-many" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new org.apache.ibatis.exceptions.PersistenceException(
+                          "outer",
+                          new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+              case "other-wrapper" ->
+                  new org.apache.ibatis.exceptions.PersistenceException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              case "runtime-cause" ->
+                  new IllegalArgumentException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              default -> new IllegalArgumentException("TooManyResultsException is only text");
+            };
+        org.mockito.Mockito.doThrow(failure).when(balanceTccDebitMapper).selectByPayNo("pay-1");
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure, assertThrows(RuntimeException.class, action));
+        verify(balanceTccDebitMapper).selectByPayNo("pay-1");
+        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        assertLegacyNoMoneyOrCacheWrite();
+        if (route.endsWith("get")) assertOperationReadOnly();
+      }
+      var guarded = installFreezeClassificationRoute(route);
+      String expectedCode;
+      if (route.endsWith("get")) {
+        if ("rejected-get".equals(route)) installRejectedOperationOwner(true).state = "APPLIED";
+        else
+          installAppliedOperationOwner(route.startsWith("tcc") ? "TCC" : "LEGACY").mode = "UNKNOWN";
+        expectedCode = "COMMON_CONFLICT";
+      } else if (route.startsWith("active")
+          || route.startsWith("disabled")
+          || route.startsWith("tcc-active")) {
+        originalRefundAttempt.mode = "UNKNOWN";
+        expectedCode = route.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID";
+      } else {
+        var invalidOwner = new BalanceDebitAttemptPO();
+        invalidOwner.mode = "TCC";
+        when(balanceDebitAttemptMapper.selectByPayNo("pay-1")).thenReturn(invalidOwner);
+        expectedCode = "IDEMPOTENCY_CONFLICT";
+      }
+      org.mockito.Mockito.doThrow(
+              new org.apache.ibatis.exceptions.TooManyResultsException("freeze-must-not-run"))
+          .when(balanceTccDebitMapper)
+          .selectByPayNo("pay-1");
+      assertEquals(
+          expectedCode,
+          assertThrows(com.cloudmall.common.error.BizException.class, guarded).getCode());
+      org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, userTccReceiveMapper);
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      assertLegacyNoMoneyOrCacheWrite();
+    }
+  }
+
+  /** 既有十三入口加四个真实TCC来源夹具，均经公开Service调用原冻结校验。 */
+  private org.junit.jupiter.api.function.Executable installFreezeClassificationRoute(String route) {
+    if (!route.startsWith("tcc")) return installOwnershipClassificationRoute(route);
+    String appliedRoute =
+        switch (route) {
+          case "tcc-debit-get" -> "debit-get";
+          case "tcc-refund-get" -> "refund-get";
+          case "tcc-active-fresh" -> "fresh-refund";
+          case "tcc-active-replay" -> "replay-refund";
+          default -> throw new AssertionError("Unexpected freeze classification route");
+        };
+    var request = installAppliedReceiveRoute(appliedRoute, "TCC");
+    return () -> invokeAppliedReceiveRoute(appliedRoute, request);
+  }
+
   /** 十三入口的归属精确多结果只转换到各自原业务错误，不运行后置冻结/接收或资金写。 */
   @Test
   void ownershipMultipleResultsKeepCallerBusinessFailures() {
