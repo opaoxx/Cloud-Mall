@@ -291,6 +291,17 @@ public class UserServiceImpl implements UserService {
     } else {
       requireBalanceOperationEvidence(containsRefundSnapshot(candidates, ledger));
     }
+    // 5. 原selector/current membership已先证明；APPLIED再核本地归属，不读当前钱包。
+    if ("APPLIED".equals(original.state)) {
+      try {
+        requireAppliedDebitOwnership(original);
+      } catch (BizException invalidOwnership) {
+        if ("BALANCE_REFUND_INVALID".equals(invalidOwnership.getCode())) {
+          throw new BizException(ErrorCodes.CONFLICT, "余额账本事实待核对", 409);
+        }
+        throw invalidOwnership;
+      }
+    }
     return ApiResponse.ok(BalanceOperationVO.from(ledger, refundOperationKey));
   }
 
@@ -373,7 +384,7 @@ public class UserServiceImpl implements UserService {
         if (!isProvenRefundOriginalDebit(original, request, userId)
             || existing.amount.compareTo(original.amount) > 0)
           throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
-        requireActiveRefundOwnership(original, request);
+        requireAppliedDebitOwnership(original);
       } else if (existing.amount.compareTo(original.amount) > 0) {
         // disabled原source/TCC与退款行已先证明；复用已读原额，不新增查询或再次入账。
         throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
@@ -394,7 +405,7 @@ public class UserServiceImpl implements UserService {
     // 同pay唯一DEBIT候选须复制已证明原来源，不能忽略其它状态或CI别名扣款。
     requireRefundDebitScope(original, request, userId);
     // active原DEBIT已证明，再核同pay归属/冻结，不重复读取原source。
-    if (Objects.equals(user.status, 1)) requireActiveRefundOwnership(original, request);
+    if (Objects.equals(user.status, 1)) requireAppliedDebitOwnership(original);
     // 4. 逐行证明集合及金额额度，再核新增后的记录容量，避免创建无法恢复的第101条。
     requireFreshRefundCollection(original, request.amount);
     LocalDateTime currentTime = LocalDateTime.now();
@@ -453,18 +464,17 @@ public class UserServiceImpl implements UserService {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
-  /** active原DEBIT已先证明；同pay本地owner/freeze按原规则只读验证，DAO异常原样传播。 */
-  private void requireActiveRefundOwnership(
-      BalanceLedgerPO original, BalanceRefundRequestDTO request) {
-    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+  /** APPLIED原DEBIT已先证明；同pay本地owner/freeze只读验证，DAO异常原样传播。 */
+  private void requireAppliedDebitOwnership(BalanceLedgerPO original) {
+    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
     if (attempt != null
         && !("LEGACY".equals(attempt.mode)
             ? isProvenLegacyRefundAttempt(original, attempt)
-            : confirmedTccRefund(original, request, attempt)))
+            : confirmedTccRefund(original, attempt)))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
     if ((attempt == null || "LEGACY".equals(attempt.mode))
-        && balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
+        && balanceTccDebitMapper.selectByPayNo(original.payNo) != null)
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
@@ -487,13 +497,11 @@ public class UserServiceImpl implements UserService {
 
   /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */
   private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceRefundRequestDTO request) {
-    return confirmedTccRefund(
-        original, request, balanceDebitAttemptMapper.selectByPayNo(request.payNo));
+    return confirmedTccRefund(original, balanceDebitAttemptMapper.selectByPayNo(request.payNo));
   }
 
   /** 调用方已观察归属；复核原TCC元组和确认冻结，不重复读取attempt或扩展Legacy。 */
-  private boolean confirmedTccRefund(
-      BalanceLedgerPO original, BalanceRefundRequestDTO request, BalanceDebitAttemptPO attempt) {
+  private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceDebitAttemptPO attempt) {
     if (attempt == null
         || !"TCC".equals(attempt.mode)
         || !"CONFIRMED".equals(attempt.state)
@@ -507,9 +515,9 @@ public class UserServiceImpl implements UserService {
         || !validBalanceMoney(attempt.amount)
         || attempt.amount.signum() <= 0
         || attempt.amount.compareTo(original.amount) != 0
-        || !Objects.equals(attempt.ledgerKey, request.originalOperationKey)
-        || !Objects.equals(attempt.operationKey, "tcc-debit:" + request.payNo)) return false;
-    BalanceTccDebitPO frozen = balanceTccDebitMapper.selectByPayNo(request.payNo);
+        || !Objects.equals(attempt.ledgerKey, original.operationKey)
+        || !Objects.equals(attempt.operationKey, "tcc-debit:" + original.payNo)) return false;
+    BalanceTccDebitPO frozen = balanceTccDebitMapper.selectByPayNo(original.payNo);
     return frozen != null
         && "CONFIRMED".equals(frozen.state)
         && Objects.equals(frozen.userId, attempt.userId)

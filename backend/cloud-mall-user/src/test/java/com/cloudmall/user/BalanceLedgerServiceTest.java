@@ -1131,7 +1131,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
-  /** 合法单行和部分/100集合保持原字段与selector，查询不扩当前wallet/归属。 */
+  /** 合法单行和部分/100集合保持原字段与selector，APPLIED核归属但不读当前wallet。 */
   @Test
   void operationQueryHealthyHistoryKeepsFieldsAndBoundedRefunds() {
     for (String mode : java.util.List.of("DEBIT", "REJECTED", "REFUND")) {
@@ -1204,11 +1204,139 @@ class BalanceLedgerServiceTest {
     assertOperationReadOnly();
   }
 
-  /** 查询不得写入账本、钱包、归属/冻结或Redis，亦不得读取当前钱包。 */
+  /** APPLIED两个主行均不能忽略本地归属/冻结，坏来源统一待核对且不写资金。 */
+  @Test
+  void appliedOperationRejectsContradictoryOwnerAndFreeze() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String type : java.util.List.of("DEBIT", "REFUND")) {
+      for (String mode : java.util.List.of("TCC", "LEGACY", "missing")) {
+        for (String variant :
+            java.util.List.of(
+                "owner-state",
+                "owner-user",
+                "owner-key",
+                "owner-amount",
+                "unknown-mode",
+                "freeze-missing",
+                "freeze-state",
+                "ghost-owner")) {
+          if ("missing".equals(mode) && !"freeze-state".equals(variant)) continue;
+          if ("LEGACY".equals(mode) && "freeze-missing".equals(variant)) continue;
+          assertions.add(
+              () -> {
+                String key = installOperationQuery(type);
+                var attempt = installAppliedOperationOwner(mode);
+                switch (variant) {
+                  case "owner-state" -> attempt.state = "TRYING";
+                  case "owner-user" -> attempt.userId = 8L;
+                  case "owner-key" -> attempt.operationKey = "other-key";
+                  case "owner-amount" -> attempt.amount = BigDecimal.ZERO;
+                  case "unknown-mode" -> attempt.mode = "UNKNOWN";
+                  case "freeze-missing" ->
+                      when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo))
+                          .thenReturn(null);
+                  case "ghost-owner" -> {
+                    when(balanceDebitAttemptMapper.selectByPayNo(operationSource.payNo))
+                        .thenReturn(null);
+                    when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo))
+                        .thenReturn(new com.cloudmall.user.domain.po.BalanceTccDebitPO());
+                  }
+                  default ->
+                      when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo))
+                          .thenReturn(new com.cloudmall.user.domain.po.BalanceTccDebitPO());
+                }
+                assertOperationConflict(key);
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 新DAO原样、原集合/selector先拒；健康TCC/Legacy/null及REJECTED预算明确。 */
+  @Test
+  void appliedOperationOwnerKeepsPriorityAndHealthyHistory() {
+    for (String phase : java.util.List.of("attempt", "freeze")) {
+      String key = installOperationQuery("REFUND");
+      installAppliedOperationOwner("TCC");
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "operation-owner-read-fault");
+      if ("attempt".equals(phase))
+        org.mockito.Mockito.doThrow(failure)
+            .when(balanceDebitAttemptMapper)
+            .selectByPayNo(operationSource.payNo);
+      else
+        org.mockito.Mockito.doThrow(failure)
+            .when(balanceTccDebitMapper)
+            .selectByPayNo(operationSource.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+      assertOperationReadOnly();
+    }
+    for (String gate : java.util.List.of("source", "collection", "selector")) {
+      String key = installOperationQuery("source".equals(gate) ? "REFUND" : "DEBIT");
+      org.mockito.Mockito.doThrow(new AssertionError("original gate must precede owner"))
+          .when(balanceDebitAttemptMapper)
+          .selectByPayNo(operationSource.payNo);
+      if ("source".equals(gate)) operationSource.operationType = "OTHER";
+      else if ("collection".equals(gate))
+        when(balanceLedgerMapper.findLinkedRefundCandidates(operationSource.operationKey))
+            .thenReturn(null);
+      else
+        when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
+            .thenReturn("foreign-refund");
+      assertOperationConflict(key);
+      org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
+    }
+    for (String type : java.util.List.of("DEBIT", "REFUND")) {
+      for (String mode : java.util.List.of("TCC", "LEGACY", "missing")) {
+        String key = installOperationQuery(type);
+        installAppliedOperationOwner(mode);
+        var response =
+            (com.cloudmall.user.domain.vo.BalanceOperationVO)
+                userService.balanceOperation(7L, key, 7L).data;
+        assertEquals(key, response.operationKey);
+        assertEquals("APPLIED", response.state);
+        verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
+        verify(balanceTccDebitMapper).selectByPayNo(operationSource.payNo);
+        assertOperationReadOnly();
+      }
+    }
+    String rejectedKey = installOperationQuery("REJECTED");
+    userService.balanceOperation(7L, rejectedKey, 7L);
+    org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
+  }
+
+  /** 构造独立已确认TCC或APPLIED Legacy来源，null owner历史默认无冻结。 */
+  private BalanceDebitAttemptPO installAppliedOperationOwner(String mode) {
+    var attempt = new BalanceDebitAttemptPO();
+    attempt.mode = mode;
+    attempt.state = "TCC".equals(mode) ? "CONFIRMED" : "APPLIED";
+    attempt.userId = operationSource.userId;
+    attempt.payNo = operationSource.payNo;
+    attempt.orderNo = operationSource.orderNo;
+    attempt.operationKey =
+        "TCC".equals(mode) ? "tcc-debit:" + operationSource.payNo : operationSource.operationKey;
+    attempt.ledgerKey = operationSource.operationKey;
+    attempt.amount = operationSource.amount;
+    attempt.xid = "TCC".equals(mode) ? "operation-owner-xid" : null;
+    attempt.branchId = "TCC".equals(mode) ? 3L : null;
+    when(balanceDebitAttemptMapper.selectByPayNo(operationSource.payNo))
+        .thenReturn("missing".equals(mode) ? null : attempt);
+    when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo))
+        .thenReturn("TCC".equals(mode) ? confirmedRefundFreeze(attempt, operationSource) : null);
+    return attempt;
+  }
+
+  /** 查询不得写入账本、钱包、归属/冻结或Redis，归属Mapper只允许新增点读。 */
   private void assertOperationReadOnly() {
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
-    org.mockito.Mockito.verifyNoInteractions(
-        userMapper, balanceDebitAttemptMapper, balanceTccDebitMapper, valueOperations);
+    org.mockito.Mockito.verifyNoInteractions(userMapper, valueOperations);
+    for (Object mapper : java.util.List.of(balanceDebitAttemptMapper, balanceTccDebitMapper))
+      for (var invocation : org.mockito.Mockito.mockingDetails(mapper).getInvocations())
+        assertEquals("selectByPayNo", invocation.getMethod().getName());
   }
 
   /** 新扣款钱包损坏必须在claim前拒绝，兼容入口同样不能记录假不足。 */

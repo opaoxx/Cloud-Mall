@@ -409,6 +409,90 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** APPLIED原DEBIT的归属矛盾不能通过DEBIT/REFUND两个GET，真实四表不写。 */
+  @Test
+  void appliedOperationRejectsContradictoryOwnershipWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("legacy", "tcc")) {
+      for (String variant :
+          List.of(
+              "owner-state",
+              "owner-user",
+              "owner-amount",
+              "freeze-missing-or-ghost",
+              "freeze-state-or-mode",
+              "owner-missing-with-freeze")) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              setEnabled(true);
+              var original = request("operation-owner-" + mode + "-" + variant, 7L, "10.00");
+              if ("tcc".equals(mode)) {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+              var refund = refundRequest(original, "completed-owner-refund", "2.00");
+              legacy.refundInternal(7L, 7L, refund);
+              switch (variant) {
+                case "owner-state" ->
+                    fixture.update("UPDATE balance_debit_attempt SET state='TRYING'");
+                case "owner-user" -> fixture.update("UPDATE balance_debit_attempt SET user_id=8");
+                case "owner-amount" -> fixture.update("UPDATE balance_debit_attempt SET amount=0");
+                case "freeze-state-or-mode" -> {
+                  if ("tcc".equals(mode))
+                    fixture.update("UPDATE balance_tcc_debit SET state='TRYING'");
+                  else fixture.update("UPDATE balance_debit_attempt SET mode='UNKNOWN'");
+                }
+                case "freeze-missing-or-ghost", "owner-missing-with-freeze" -> {
+                  if ("legacy".equals(mode))
+                    fixture.update(
+                        "INSERT INTO"
+                            + " balance_tcc_debit(id,operation_key,xid,branch_id,user_id,pay_no,order_no,amount,state,balance_before,balance_after_try,created_at,updated_at)"
+                            + " VALUES(-1,?,'refund-owner-ghost',1,7,?,?,10,'CONFIRMED',100,90,NOW(3),NOW(3))",
+                        original.operationKey,
+                        original.payNo,
+                        original.orderNo);
+                  else if ("freeze-missing-or-ghost".equals(variant))
+                    fixture.update("DELETE FROM balance_tcc_debit");
+                  if ("owner-missing-with-freeze".equals(variant))
+                    fixture.update("DELETE FROM balance_debit_attempt");
+                }
+                default -> throw new AssertionError(variant);
+              }
+              var before = allFundsFacts();
+              var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+              for (String key : List.of(original.ledgerKey, refund.refundOperationKey)) {
+                checks.add(
+                    () -> {
+                      var response = operationHttp(key);
+                      org.junit.jupiter.api.Assertions.assertAll(
+                          () ->
+                              assertEquals(
+                                  409,
+                                  response.getResponse().getStatus(),
+                                  mode + ":" + variant + ":" + key),
+                          () -> assertHttpCode(response, "COMMON_CONFLICT"),
+                          () -> {
+                            var failure =
+                                assertThrows(
+                                    BizException.class, () -> legacy.balanceOperation(7L, key, 7L));
+                            assertEquals("COMMON_CONFLICT", failure.getCode());
+                            assertEquals("余额账本事实待核对", failure.getMessage());
+                          },
+                          () -> assertEquals(before, allFundsFacts()));
+                    });
+              }
+              org.junit.jupiter.api.Assertions.assertAll(checks);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** active已退款原DEBIT正常也不能忽略当前owner/freeze矛盾，Legacy/TCC不二次入账。 */
   @Test
   void activeRefundReplayRejectsContradictoryOwnershipWithoutWriting() {
@@ -3737,6 +3821,12 @@ class BalanceTccStateMySqlIT {
                                 "UPDATE balance_ledger SET amount=3 WHERE"
                                     + " operation_key='query-refund'")) {
                       assertEquals(1, statement.executeUpdate());
+                      try (java.sql.PreparedStatement ownerWriter =
+                          writer.prepareStatement(
+                              "UPDATE balance_debit_attempt SET state='TRYING' WHERE"
+                                  + " pay_no='query-debit'")) {
+                        assertEquals(1, ownerWriter.executeUpdate());
+                      }
                     }
                   }
                   if ("findLinkedRefundCandidates".equals(name)) {
@@ -3748,13 +3838,59 @@ class BalanceTccStateMySqlIT {
                   return result;
                 });
     ReflectionTestUtils.setField(target, "balanceLedgerMapper", instrumented);
+    var ownerMappers = new java.util.LinkedHashMap<String, Object>();
+    for (String fieldName : List.of("balanceDebitAttemptMapper", "balanceTccDebitMapper")) {
+      Object actualOwnerMapper = ReflectionTestUtils.getField(target, fieldName);
+      ownerMappers.put(fieldName, actualOwnerMapper);
+      Class<?> mapperType =
+          "balanceDebitAttemptMapper".equals(fieldName)
+              ? com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class
+              : com.cloudmall.user.mapper.BalanceTccDebitMapper.class;
+      Object observedOwnerMapper =
+          java.lang.reflect.Proxy.newProxyInstance(
+              actualOwnerMapper.getClass().getClassLoader(),
+              new Class<?>[] {mapperType},
+              (proxy, mapperMethod, arguments) -> {
+                if ("selectByPayNo".equals(mapperMethod.getName())) {
+                  observations.add(
+                      fieldName
+                          + ":"
+                          + org.springframework.transaction.support
+                              .TransactionSynchronizationManager.isActualTransactionActive()
+                          + ":"
+                          + org.springframework.transaction.support
+                              .TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+                          + ":"
+                          + org.springframework.transaction.support
+                              .TransactionSynchronizationManager
+                              .getCurrentTransactionIsolationLevel());
+                  java.sql.Connection observedConnection =
+                      org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                          testDataSource);
+                  try {
+                    connectionIds.add(System.identityHashCode(observedConnection));
+                  } finally {
+                    org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                        observedConnection, testDataSource);
+                  }
+                }
+                try {
+                  return mapperMethod.invoke(actualOwnerMapper, arguments);
+                } catch (java.lang.reflect.InvocationTargetException failure) {
+                  throw failure.getCause();
+                }
+              });
+      ReflectionTestUtils.setField(target, fieldName, observedOwnerMapper);
+    }
     try {
       assertEquals(200, operationHttp("query-debit").getResponse().getStatus());
       assertEquals(
           List.of(
               "selectByOperationKey:true:true:4",
               "findLinkedRefundCandidates:true:true:4",
-              "selectFirstRefundOperationKey:true:true:4"),
+              "selectFirstRefundOperationKey:true:true:4",
+              "balanceDebitAttemptMapper:true:true:4",
+              "balanceTccDebitMapper:true:true:4"),
           observations);
       assertEquals(1, connectionIds.size());
       assertEquals(List.of("2.00"), observedAmounts);
@@ -3770,9 +3906,13 @@ class BalanceTccStateMySqlIT {
       for (var row : expected.get(3))
         if ("query-refund".equals(row.get("operation_key")))
           row.put("amount", new BigDecimal("3.00"));
+      for (var row : expected.get(1))
+        if ("query-debit".equals(row.get("pay_no"))) row.put("state", "TRYING");
       assertEquals(expected, allFundsFacts());
     } finally {
       ReflectionTestUtils.setField(target, "balanceLedgerMapper", actualMapper);
+      ownerMappers.forEach(
+          (fieldName, mapper) -> ReflectionTestUtils.setField(target, fieldName, mapper));
     }
     for (String scenario : List.of("rejected", "no-attempt", "wallet-null")) {
       closeContext();
