@@ -409,6 +409,141 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 实际Mapper须102行哨兵、按id保留全type/state/CI/foreign候选，不过滤坏历史。 */
+  @Test
+  void refundPaymentCandidateQueryPreservesAllRowsAndLimit102() {
+    var original = request("refund-sentinel-contract", 7L, "10.00");
+    service.tryDebit(original);
+    service.confirmDebit(finalizeRequest(original));
+    fixture.update("UPDATE balance_ledger SET id=1 WHERE operation_key=?", original.ledgerKey);
+    for (long identifier = 2; identifier <= 104; identifier++) {
+      fixture.update(
+          "INSERT INTO"
+              + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+              + " VALUES(?,?,?,?,?,?,0.01,?,100,100.01,NOW(3))",
+          identifier,
+          identifier % 2 == 0 ? 8L : 7L,
+          "sentinel-row-" + identifier,
+          identifier % 3 == 0 ? "UNKNOWN" : identifier % 3 == 1 ? "DEBIT" : "REFUND",
+          identifier % 2 == 0 ? original.payNo.toUpperCase(java.util.Locale.ROOT) : original.payNo,
+          original.orderNo,
+          identifier % 2 == 0 ? "PENDING" : "APPLIED");
+    }
+    var before = allFundsFacts();
+    var rows =
+        context
+            .getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class)
+            .findRefundPaymentLedgerCandidates(original.payNo);
+    assertEquals(102, rows.size());
+    assertEquals(
+        java.util.stream.LongStream.rangeClosed(1, 102).boxed().toList(),
+        rows.stream().map(row -> row.id).toList());
+    assertTrue(rows.stream().anyMatch(row -> "UNKNOWN".equals(row.operationType)));
+    assertTrue(rows.stream().anyMatch(row -> "PENDING".equals(row.state)));
+    assertTrue(rows.stream().anyMatch(row -> Long.valueOf(8).equals(row.userId)));
+    assertTrue(
+        rows.stream()
+            .anyMatch(row -> original.payNo.toUpperCase(java.util.Locale.ROOT).equals(row.payNo)));
+    assertEquals(before, allFundsFacts());
+  }
+
+  /** 未/错关联的同pay退款不能被累计遗漏，真实三模式的新退款不超退或增加账本。 */
+  @Test
+  void freshRefundRejectsUnlinkedPaymentFactsWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+      for (boolean partial : List.of(false, true)) {
+        for (String variant :
+            List.of(
+                "origin-null",
+                "origin-other",
+                "unknown-type",
+                "unknown-state",
+                "pay-alias",
+                "foreign-user")) {
+          assertions.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                setEnabled(true);
+                var original =
+                    request("pay-refund-membership-" + mode + "-" + variant, 7L, "10.00");
+                String debitKey =
+                    "active-legacy".equals(mode) ? "legacy-membership-source" : original.ledgerKey;
+                if ("active-legacy".equals(mode))
+                  debitLegacy(original.payNo, debitKey, 7L, "10.00");
+                else {
+                  service.tryDebit(original);
+                  service.confirmDebit(finalizeRequest(original));
+                }
+                if (partial) {
+                  var previous = refundRequest(original, "legitimate-linked-refund", "3.00");
+                  previous.originalOperationKey = debitKey;
+                  legacy.refundInternal(7L, 7L, previous);
+                }
+                BigDecimal priorBalance =
+                    fixture.queryForObject(
+                        "SELECT balance FROM mall_user WHERE id=7", BigDecimal.class);
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                        + " VALUES(-1,?,'orphan-payment-refund',?,?,?,?,2,?,?,?,NOW(3))",
+                    "foreign-user".equals(variant) ? 8L : 7L,
+                    "unknown-type".equals(variant) ? "UNKNOWN" : "REFUND",
+                    "origin-other".equals(variant) ? "absent-original-key" : null,
+                    "pay-alias".equals(variant)
+                        ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                        : original.payNo,
+                    original.orderNo,
+                    "unknown-state".equals(variant) ? "PENDING" : "APPLIED",
+                    priorBalance,
+                    priorBalance.add(new BigDecimal("2.00")));
+                fixture.update("UPDATE mall_user SET balance=balance+2 WHERE id=7");
+                if ("disabled-tcc".equals(mode))
+                  fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+                var refund =
+                    refundRequest(original, "new-refund-membership", partial ? "7.00" : "10.00");
+                refund.originalOperationKey = debitKey;
+                var before = allFundsFacts();
+                var response =
+                    org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                            context.getBean(UserController.class))
+                        .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                        .build()
+                        .perform(
+                            org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .post("/api/internal/users/7/balance/refunds")
+                                .header("X-User-Id", "7")
+                                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                                .content(
+                                    new com.fasterxml.jackson.databind.ObjectMapper()
+                                        .writeValueAsString(refund)))
+                        .andReturn();
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () ->
+                        assertEquals(
+                            409,
+                            response.getResponse().getStatus(),
+                            mode + ":" + partial + ":" + variant),
+                    () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                    () -> {
+                      var failure =
+                          assertThrows(
+                              BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                      assertEquals(409, failure.getHttpStatus());
+                    },
+                    () -> assertEquals(before, allFundsFacts()));
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 有效Legacy归属也不能忽略同pay矛盾TCC冻结，新退款不改变任何资金事实。 */
   @Test
   void activeFreshLegacyRefundRejectsTccFreezeWithoutWriting() {

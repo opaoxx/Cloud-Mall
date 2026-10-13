@@ -111,6 +111,8 @@ class BalanceLedgerServiceTest {
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
     when(balanceLedgerMapper.selectByOperationKey("refund-1")).thenReturn(null).thenReturn(refund);
     when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(original);
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo))
+        .thenReturn(java.util.List.of(original));
     when(balanceLedgerMapper.findDebitCandidatesByPayNo(original.payNo))
         .thenReturn(java.util.List.of(original));
     when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(java.util.List.of());
@@ -147,6 +149,8 @@ class BalanceLedgerServiceTest {
         .thenReturn(null)
         .thenReturn(refund);
     when(balanceLedgerMapper.selectDebitForUpdate("pay-tcc")).thenReturn(original);
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo))
+        .thenReturn(java.util.List.of(original));
     when(balanceLedgerMapper.findDebitCandidatesByPayNo(original.payNo))
         .thenReturn(java.util.List.of(original));
     when(balanceLedgerMapper.findLinkedRefundCandidates("pay-tcc")).thenReturn(java.util.List.of());
@@ -179,6 +183,8 @@ class BalanceLedgerServiceTest {
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
     when(balanceLedgerMapper.selectByOperationKey("refund-disabled")).thenReturn(null);
     when(balanceLedgerMapper.selectDebitForUpdate("pay-disabled")).thenReturn(original);
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo))
+        .thenReturn(java.util.List.of(original));
     when(balanceLedgerMapper.findDebitCandidatesByPayNo(original.payNo))
         .thenReturn(java.util.List.of(original));
     when(balanceDebitAttemptMapper.selectByPayNo("pay-disabled")).thenReturn(null);
@@ -429,6 +435,8 @@ class BalanceLedgerServiceTest {
       original.balanceBefore = amount;
       when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(BigDecimal.ZERO));
       when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(original);
+      when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo))
+          .thenReturn(java.util.List.of(original));
       when(balanceLedgerMapper.findDebitCandidatesByPayNo(original.payNo))
           .thenReturn(java.util.List.of(original));
       when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(java.util.List.of());
@@ -538,8 +546,11 @@ class BalanceLedgerServiceTest {
     }
     var request = installRefundProofMode("active-fresh");
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(null));
+    var priorRefund = linkedRefund("prior-full", "10.00");
     when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
-        .thenReturn(java.util.List.of(linkedRefund("prior-full", "10.00")));
+        .thenReturn(java.util.List.of(priorRefund));
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates("pay-1"))
+        .thenReturn(java.util.List.of(originalRefundDebit, priorRefund));
     var excessRequest = request;
     assertEquals(
         "BALANCE_REFUND_EXCEEDED",
@@ -2223,6 +2234,163 @@ class BalanceLedgerServiceTest {
     return request;
   }
 
+  /** 同pay全范围缺证、错source或任意孤立退款/未知候选都不能继续新退款。 */
+  @Test
+  void freshRefundPaymentScopeRejectsMissingAndMalformedFacts() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      for (String variant :
+          java.util.List.of(
+              "null-list",
+              "empty",
+              "null-row",
+              "source-missing",
+              "source-duplicate",
+              "source-id",
+              "source-snapshot",
+              "orphan",
+              "wrong-origin",
+              "unknown-type",
+              "unknown-state",
+              "pay-alias",
+              "foreign",
+              "limit102")) {
+        assertions.add(
+            () -> {
+              var request = installRefundProofMode(mode);
+              var source = copyRefundDebit(originalRefundDebit);
+              var refund = linkedRefund("pay-candidate", "2.00");
+              switch (variant) {
+                case "source-id" -> source.id = 99L;
+                case "source-snapshot" -> {
+                  source.balanceBefore = new BigDecimal("110.00");
+                  source.balanceAfter = new BigDecimal("100.00");
+                }
+                case "orphan" -> refund.originalOperationKey = null;
+                case "wrong-origin" -> refund.originalOperationKey = "other-original";
+                case "unknown-type" -> refund.operationType = "UNKNOWN";
+                case "unknown-state" -> refund.state = "PENDING";
+                case "pay-alias" -> refund.payNo = "PAY-1";
+                case "foreign" -> refund.userId = 8L;
+                default -> {}
+              }
+              java.util.List<BalanceLedgerPO> rows =
+                  switch (variant) {
+                    case "null-list" -> null;
+                    case "empty" -> java.util.List.of();
+                    case "source-missing" -> java.util.List.of(refund);
+                    case "source-duplicate" -> java.util.List.of(source, copyRefundDebit(source));
+                    case "null-row" -> {
+                      var mixed = new java.util.ArrayList<BalanceLedgerPO>();
+                      mixed.add(source);
+                      mixed.add(null);
+                      yield mixed;
+                    }
+                    case "limit102" -> {
+                      var mixed = new java.util.ArrayList<BalanceLedgerPO>();
+                      mixed.add(source);
+                      mixed.addAll(java.util.Collections.nCopies(101, refund));
+                      yield mixed;
+                    }
+                    case "source-id", "source-snapshot" -> java.util.List.of(source);
+                    default -> java.util.List.of(source, refund);
+                  };
+              when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(request.payNo))
+                  .thenReturn(rows);
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> userService.refundInternal(7L, 7L, request));
+              assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+              assertEquals("退款累计证据不完整或不一致", failure.getMessage());
+              assertEquals(409, failure.getHttpStatus());
+              verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 两集合各自合法也须同membership/数值快照，缺行、等额别key、快照漂移均拒绝。 */
+  @Test
+  void freshRefundRejectsDivergentLinkedAndPaymentMembership() {
+    for (String variant :
+        java.util.List.of("missing-linked", "missing-payment", "key", "amount", "snapshot")) {
+      var request = installRefundProofMode("active-fresh");
+      var linked = linkedRefund("refund-member", "2.00");
+      var payment = copyRefundDebit(linked);
+      switch (variant) {
+        case "key" -> payment.operationKey = "other-refund-member";
+        case "amount" -> {
+          payment.amount = new BigDecimal("3.00");
+          payment.balanceAfter = new BigDecimal("93.00");
+        }
+        case "snapshot" -> {
+          payment.balanceBefore = new BigDecimal("91.00");
+          payment.balanceAfter = new BigDecimal("93.00");
+        }
+        default -> {}
+      }
+      when(balanceLedgerMapper.findLinkedRefundCandidates(originalRefundDebit.operationKey))
+          .thenReturn(
+              "missing-linked".equals(variant) ? java.util.List.of() : java.util.List.of(linked));
+      when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(request.payNo))
+          .thenReturn(
+              "missing-payment".equals(variant)
+                  ? java.util.List.of(originalRefundDebit)
+                  : java.util.List.of(originalRefundDebit, payment));
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> userService.refundInternal(7L, 7L, request));
+      assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+  }
+
+  /** 第二集合DAO异常原样，linked坏证先拒不读第二集合；existingreplay不扩大读取。 */
+  @Test
+  void refundPaymentScopeFaultKeepsLinkedPriorityAndReplayIsolation() {
+    var request = installRefundProofMode("active-fresh");
+    var failure =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "owned-payment-membership-fault");
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .findRefundPaymentLedgerCandidates(request.payNo);
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    var invalidRequest = installRefundProofMode("active-fresh");
+    when(balanceLedgerMapper.findLinkedRefundCandidates(originalRefundDebit.operationKey))
+        .thenReturn(java.util.List.of(new BalanceLedgerPO()));
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .findRefundPaymentLedgerCandidates(invalidRequest.payNo);
+    assertEquals(
+        "BALANCE_REFUND_INVALID",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, invalidRequest))
+            .getCode());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never())
+        .findRefundPaymentLedgerCandidates(any());
+    var replayRequest = installRefundProofMode("active-fresh");
+    when(balanceLedgerMapper.selectByOperationKey(replayRequest.refundOperationKey))
+        .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .findRefundPaymentLedgerCandidates(replayRequest.payNo);
+    userService.refundInternal(7L, 7L, replayRequest);
+    verify(balanceLedgerMapper, org.mockito.Mockito.never())
+        .findRefundPaymentLedgerCandidates(any());
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
   private BalanceDebitRequestDTO installLegacyDebit(String entry, String state) {
     setUp();
@@ -2423,6 +2591,10 @@ class BalanceLedgerServiceTest {
         candidates = java.util.List.of(linkedRefund("prior-one", "10.00"));
       }
       when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(candidates);
+      var paymentRows = new java.util.ArrayList<BalanceLedgerPO>();
+      paymentRows.add(originalRefundDebit);
+      paymentRows.addAll(candidates);
+      when(balanceLedgerMapper.findRefundPaymentLedgerCandidates("pay-1")).thenReturn(paymentRows);
       if ("exceeded".equals(scenario)) {
         assertEquals(
             "BALANCE_REFUND_EXCEEDED",
@@ -2498,6 +2670,8 @@ class BalanceLedgerServiceTest {
     originalRefundDebit = appliedDebit("pay-1", new BigDecimal("90.00"));
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
     when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenReturn(originalRefundDebit);
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(originalRefundDebit.payNo))
+        .thenReturn(java.util.List.of(originalRefundDebit));
     when(balanceLedgerMapper.findDebitCandidatesByPayNo(originalRefundDebit.payNo))
         .thenReturn(java.util.List.of(originalRefundDebit));
     when(balanceLedgerMapper.selectByOperationKey("refund-1"))

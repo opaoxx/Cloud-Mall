@@ -74,7 +74,7 @@ public class UserServiceImpl implements UserService {
   /** LEGACY/TCC 共享扣款归属，所有扣款入口必须核对该事实。 */
   @Autowired private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
 
-  /** 原TCC冻结/确认事实，仅用于禁用用户退款的本地来源证明。 */
+  /** 原TCC冻结/确认事实，用于新退款来源与禁用用户本地确认证明。 */
   @Autowired private BalanceTccDebitMapper balanceTccDebitMapper;
 
   /** 用户地址数据 Mapper。 */
@@ -531,10 +531,49 @@ public class UserServiceImpl implements UserService {
         && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
   }
 
-  /** 新退款保留原单次候选读取与错误协议，随后复用纯字段逐行kernel。 */
+  /** 新退款先保原关联集合错误优先，再证明同pay全账本集合与其membership一致，不推断其它pay。 */
   private BigDecimal provenRefundedAmount(BalanceLedgerPO original) {
-    return provenRefundedAmount(
-        original, balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey));
+    List<BalanceLedgerPO> linkedRefunds =
+        balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
+    BigDecimal linkedTotal = provenRefundedAmount(original, linkedRefunds);
+    List<BalanceLedgerPO> paymentRows =
+        balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo);
+    requireRefundMembership(paymentRows != null && paymentRows.size() <= MAX_REFUND_CANDIDATES + 1);
+    List<BalanceLedgerPO> paymentRefunds = new java.util.ArrayList<>();
+    boolean originalObserved = false;
+    for (BalanceLedgerPO row : paymentRows) {
+      if (row != null && Objects.equals(row.operationKey, original.operationKey)) {
+        requireRefundMembership(!originalObserved && matchesRefundPaymentOriginal(original, row));
+        originalObserved = true;
+      } else paymentRefunds.add(row);
+    }
+    requireRefundMembership(originalObserved);
+    BigDecimal paymentTotal = provenRefundedAmount(original, paymentRefunds);
+    requireRefundMembership(
+        linkedRefunds.size() == paymentRefunds.size() && linkedTotal.compareTo(paymentTotal) == 0);
+    for (BalanceLedgerPO linked : linkedRefunds)
+      requireRefundMembership(containsRefundSnapshot(paymentRefunds, linked));
+    return linkedTotal;
+  }
+
+  /** 原DEBIT已证明；同pay集合必须观察同一主键及精确载荷/数值快照，不能复制别行。 */
+  private static boolean matchesRefundPaymentOriginal(
+      BalanceLedgerPO original, BalanceLedgerPO candidate) {
+    return candidate.id != null
+        && Objects.equals(candidate.id, original.id)
+        && "DEBIT".equals(candidate.operationType)
+        && "APPLIED".equals(candidate.state)
+        && isProvenBalanceOperationRow(candidate, original.userId, original.operationKey)
+        && Objects.equals(candidate.payNo, original.payNo)
+        && Objects.equals(candidate.orderNo, original.orderNo)
+        && candidate.amount.compareTo(original.amount) == 0
+        && candidate.balanceBefore.compareTo(original.balanceBefore) == 0
+        && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
+  }
+
+  /** 两集合已读证据缺失、超限或错配保持原累计证据409，不泄露原字段。 */
+  private static void requireRefundMembership(boolean matches) {
+    if (!matches) throw new BizException("BALANCE_REFUND_INVALID", "退款累计证据不完整或不一致", 409);
   }
 
   /** 已读取候选必须完整逐行证明后累计；不提前超额隐藏坏行，不推断全账户因果。 */

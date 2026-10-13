@@ -15,6 +15,10 @@ public interface BalanceLedgerMapper extends BaseMapper<BalanceLedgerPO> {
   @Select("SELECT * FROM balance_ledger WHERE pay_no=#{payNo} ORDER BY id LIMIT 101")
   java.util.List<BalanceLedgerPO> findPaymentLedgerCandidates(@Param("payNo") String payNo);
 
+  /** fresh退款同pay全账本候选，原DEBIT+100退款+1哨兵；保留CI/全类型/状态，不锁不写。 */
+  @Select("SELECT * FROM balance_ledger WHERE pay_no=#{payNo} ORDER BY id LIMIT 102")
+  java.util.List<BalanceLedgerPO> findRefundPaymentLedgerCandidates(@Param("payNo") String payNo);
+
   /** 保留原扣款键的CI关联候选及坏原行，100加一哨兵，不锁定或过滤退款类型。 */
   @Select(
       "SELECT * FROM balance_ledger WHERE original_operation_key=#{originalOperationKey}"
