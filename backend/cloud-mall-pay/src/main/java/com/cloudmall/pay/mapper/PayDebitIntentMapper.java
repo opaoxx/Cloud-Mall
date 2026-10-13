@@ -334,7 +334,7 @@ public class PayDebitIntentMapper {
     return Integer.valueOf(1).equals(matchingRows);
   }
 
-  /** 将JDBC行映射为支付意图，boxed标识/计数保留SQL NULL，其余字段保持原读取语义。 */
+  /** 映射支付意图时保留boxed数值与时间的SQL NULL，非NULL字段保持原读取及转换语义。 */
   private static final RowMapper<PayDebitIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {
         PayDebitIntentPO intent = new PayDebitIntentPO();
@@ -346,13 +346,16 @@ public class PayDebitIntentMapper {
         intent.status = resultSet.getString("status");
         intent.debitMode = resultSet.getString("debit_mode");
         intent.attempts = resultSet.getObject("attempts", Integer.class);
-        intent.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
+        Timestamp nextRetryAt = resultSet.getTimestamp("next_retry_at");
+        intent.nextRetryAt = nextRetryAt == null ? null : nextRetryAt.toLocalDateTime();
         intent.leaseOwner = resultSet.getString("lease_owner");
         Timestamp leaseUntil = resultSet.getTimestamp("lease_until");
         intent.leaseUntil = leaseUntil == null ? null : leaseUntil.toLocalDateTime();
         intent.lastError = resultSet.getString("last_error");
-        intent.createdAt = resultSet.getTimestamp("created_at").toLocalDateTime();
-        intent.updatedAt = resultSet.getTimestamp("updated_at").toLocalDateTime();
+        Timestamp createdAt = resultSet.getTimestamp("created_at");
+        intent.createdAt = createdAt == null ? null : createdAt.toLocalDateTime();
+        Timestamp updatedAt = resultSet.getTimestamp("updated_at");
+        intent.updatedAt = updatedAt == null ? null : updatedAt.toLocalDateTime();
         return intent;
       };
 }

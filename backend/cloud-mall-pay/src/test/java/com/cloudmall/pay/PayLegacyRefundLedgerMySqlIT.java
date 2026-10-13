@@ -4114,6 +4114,138 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** SQL NULL时间必须读为NULL，而不是NPE或用当前时间替代真实缺失。 */
+  @Test
+  void intentTimeMappingPreservesSqlNullWithoutFailure() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String missing : List.of("next_retry_at", "created_at", "updated_at", "times")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            var before = payFacts();
+            var expected = intents.findByPayNo("pay-1");
+            var projected = projectedIntentMapper(missing);
+            var observed =
+                org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                    () -> projected.findByPayNo("pay-1"), missing);
+            assertNotNull(observed);
+            assertEquals(
+                List.of("next_retry_at", "times").contains(missing) ? null : expected.nextRetryAt,
+                observed.nextRetryAt);
+            assertEquals(
+                List.of("created_at", "times").contains(missing) ? null : expected.createdAt,
+                observed.createdAt);
+            assertEquals(
+                List.of("updated_at", "times").contains(missing) ? null : expected.updatedAt,
+                observed.updatedAt);
+            assertEquals(1L, observed.id);
+            assertEquals(7L, observed.userId);
+            assertEquals(0, observed.attempts);
+            assertEquals(new BigDecimal("10.00"), observed.amount);
+            assertEquals(before, payFacts());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** NULL时间经普通/锁定查找都保真实缺失，其余11字段及原存储行完整保持。 */
+  @Test
+  void nullTimeProjectionKeepsOtherFieldsAndLookupVariants() {
+    seedIntentAndPayment("PENDING", "INIT");
+    fixture.update(
+        "UPDATE pay_debit_intent SET"
+            + " attempts=7,lease_owner='owned-time-observation',lease_until=NOW(3)+INTERVAL 10"
+            + " MINUTE,last_error='owned-existing-proof' WHERE id=1");
+    var before = payFacts();
+    var expected = intents.findByPayNo("pay-1");
+    for (String missing : List.of("next_retry_at", "created_at", "updated_at", "times")) {
+      var projected = projectedIntentMapper(missing);
+      for (var observed :
+          List.of(projected.findByPayNo("pay-1"), projected.findByPayNoForUpdate("pay-1"))) {
+        assertEquals(
+            List.of("next_retry_at", "times").contains(missing) ? null : expected.nextRetryAt,
+            observed.nextRetryAt);
+        assertEquals(
+            List.of("created_at", "times").contains(missing) ? null : expected.createdAt,
+            observed.createdAt);
+        assertEquals(
+            List.of("updated_at", "times").contains(missing) ? null : expected.updatedAt,
+            observed.updatedAt);
+        assertEquals(expected.id, observed.id);
+        assertEquals(expected.userId, observed.userId);
+        assertEquals(expected.attempts, observed.attempts);
+        assertEquals(expected.payNo, observed.payNo);
+        assertEquals(expected.orderNo, observed.orderNo);
+        assertEquals(expected.amount, observed.amount);
+        assertEquals(expected.status, observed.status);
+        assertEquals(expected.debitMode, observed.debitMode);
+        assertEquals(expected.leaseOwner, observed.leaseOwner);
+        assertEquals(expected.leaseUntil, observed.leaseUntil);
+        assertEquals(expected.lastError, observed.lastError);
+      }
+      assertNull(projected.findByPayNo("owned-missing-pay"));
+      assertNull(projected.findByPayNoForUpdate("owned-missing-pay"));
+      assertEquals(before, payFacts());
+    }
+    var stored = intents.findByPayNo("pay-1");
+    assertSameNonBoxedIntentFacts(expected, stored);
+    assertEquals(before, payFacts());
+  }
+
+  /** 非NULL日期保持旧Timestamp转换，不换时区API；毫秒/存储年边界及NULL lease保持。 */
+  @Test
+  void nonNullTimeMappingKeepsOriginalTimestampSemantics() {
+    var dates =
+        List.of(
+            LocalDateTime.of(1000, 1, 1, 0, 0),
+            LocalDateTime.of(2026, 10, 14, 12, 34, 56, 789000000),
+            LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999000000));
+    for (var date : dates) {
+      for (boolean leasePresent : List.of(false, true)) {
+        seedIntentAndPayment("PENDING", "INIT");
+        fixture.update(
+            "UPDATE pay_debit_intent SET"
+                + " next_retry_at=?,created_at=?,updated_at=?,lease_owner=?,lease_until=?,last_error='owned-existing-proof'"
+                + " WHERE id=1",
+            date,
+            date,
+            date,
+            leasePresent ? "owned-original-time" : null,
+            leasePresent ? date : null);
+        var before = payFacts();
+        var originalTimes =
+            fixture
+                .query(
+                    "SELECT next_retry_at,created_at,updated_at,lease_until FROM pay_debit_intent"
+                        + " WHERE id=1",
+                    (resultSet, rowNumber) -> {
+                      var lease = resultSet.getTimestamp("lease_until");
+                      return java.util.Arrays.asList(
+                          resultSet.getTimestamp("next_retry_at").toLocalDateTime(),
+                          resultSet.getTimestamp("created_at").toLocalDateTime(),
+                          resultSet.getTimestamp("updated_at").toLocalDateTime(),
+                          lease == null ? null : lease.toLocalDateTime());
+                    })
+                .get(0);
+        for (var observed :
+            List.of(intents.findByPayNo("pay-1"), intents.findByPayNoForUpdate("pay-1"))) {
+          assertEquals(originalTimes.get(0), observed.nextRetryAt);
+          assertEquals(originalTimes.get(1), observed.createdAt);
+          assertEquals(originalTimes.get(2), observed.updatedAt);
+          assertEquals(originalTimes.get(3), observed.leaseUntil);
+          assertEquals(date.getNano(), observed.nextRetryAt.getNano());
+          assertEquals(leasePresent ? "owned-original-time" : null, observed.leaseOwner);
+          assertEquals(1L, observed.id);
+          assertEquals(7L, observed.userId);
+          assertEquals(0, observed.attempts);
+          assertEquals(new BigDecimal("10.00"), observed.amount);
+          assertEquals("owned-existing-proof", observed.lastError);
+        }
+        assertEquals(before, payFacts());
+      }
+    }
+  }
+
   /** 实际JDBC NULL投影应保持三个boxed缺失值，不能伪造成0，读取不改存储事实。 */
   @Test
   void boxedIntentMappingPreservesSqlNullFacts() {
@@ -4143,9 +4275,19 @@ class PayLegacyRefundLedgerMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
-  /** 只替换固定查找SQL的SELECT数值投影，走生产ROW_MAPPER/真实driver，不ALTER schema。 */
+  /** 只替换固定查找SQL的SELECT字段投影，走生产ROW_MAPPER/真实driver，不ALTER schema。 */
   private PayDebitIntentMapper projectedIntentMapper(String missing) {
-    assertTrue(List.of("id", "user_id", "attempts", "all").contains(missing));
+    assertTrue(
+        List.of(
+                "id",
+                "user_id",
+                "attempts",
+                "all",
+                "next_retry_at",
+                "created_at",
+                "updated_at",
+                "times")
+            .contains(missing));
     var columns =
         List.of(
             "id",
@@ -4168,7 +4310,10 @@ class PayLegacyRefundLedgerMySqlIT {
                 column ->
                     (column.equals(missing)
                             || ("all".equals(missing)
-                                && List.of("id", "user_id", "attempts").contains(column)))
+                                && List.of("id", "user_id", "attempts").contains(column))
+                            || ("times".equals(missing)
+                                && List.of("next_retry_at", "created_at", "updated_at")
+                                    .contains(column)))
                         ? "NULL AS " + column
                         : column)
             .collect(java.util.stream.Collectors.joining(","));
