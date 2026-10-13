@@ -2401,3 +2401,9 @@ public派发镜像入口在写入前将诊断限制为512个完整Unicode码点�
 非终态execution观察写入必须恰好影响一行，否则返回原执行冲突，不再用readback掩盖未保存的观察。成功一行仍读取并返回最新记录，既有canonical终态的只读返回保持。
 
 原目标状态、XID/决议、诊断截断、SQL及事务规则保持，历史状态不会被自动归一化。本批以隔离MyBatis及本地短事务验证零行拒绝和回滚，真实TC故障矩阵与旧时序观察继续保留。
+
+### CM-18 Execution金额证据的冲突分类（16T173）
+
+已出现的execution/receipt金额缺失、User金额文本无法解析时，返回原资金载荷冲突，不再抛NPE/NumberFormat异常或被恢复流程降为暂不可用UNKNOWN。整体缺少一端仍按原规则UNKNOWN。
+
+金额沿用原BigDecimal数值等价，10/10.000/1E+1等表示保持；不新增金额域、归一化、状态或写入规则。本轮验证真实Evidence/Coordinator逻辑与查询、Store、Bridge、TC替身，未替代真实事务/资金链路验证。

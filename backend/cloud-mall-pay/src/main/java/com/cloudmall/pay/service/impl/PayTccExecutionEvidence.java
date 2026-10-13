@@ -33,6 +33,7 @@ public class PayTccExecutionEvidence {
   /** 缺失一端只能未知；TC 响应和网络超时不参与本方法的资金结论。 */
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public String classify(PayTccExecutionPO execution, PayTccDispatchVO user) {
+    require(execution != null && execution.amount != null);
     // 1. User 镜像必须完整匹配本次 execution，不可只看状态字串。
     if (user != null)
       require(
@@ -42,8 +43,7 @@ public class PayTccExecutionEvidence {
               && Objects.equals(user.orderNo, execution.orderNo)
               && Objects.equals(user.operationKey, execution.operationKey)
               && Objects.equals(user.ledgerKey, execution.ledgerKey)
-              && user.amount != null
-              && new BigDecimal(user.amount).compareTo(execution.amount) == 0);
+              && matchesUserAmount(user.amount, execution.amount));
     PayTccReceiptPO pay = receipts.selectByPayNo(execution.payNo);
     if (pay == null) return "UNKNOWN";
     require(
@@ -53,6 +53,7 @@ public class PayTccExecutionEvidence {
             && Objects.equals(pay.orderNo, execution.orderNo)
             && Objects.equals(pay.operationKey, execution.operationKey)
             && Objects.equals(pay.ledgerKey, execution.ledgerKey)
+            && pay.amount != null
             && pay.amount.compareTo(execution.amount) == 0);
     if ("CLAIMED".equals(pay.state)) return "UNKNOWN";
     // 2. 已受理和终态必须有原 branch；Fence 清理不能清掉永久归属。
@@ -83,6 +84,16 @@ public class PayTccExecutionEvidence {
         && Set.of("CONFIRMED", "CANCELLED").contains(user.state)) return "CONFLICT";
     if ("TRYING".equals(pay.state) && "TRY_ACCEPTED".equals(user.state)) return "TRYING";
     return "UNKNOWN";
+  }
+
+  /** 缺失或不可解析的金额文本是载荷冲突；合法数字保持原BigDecimal数值等价，不归一化。 */
+  private boolean matchesUserAmount(String amount, BigDecimal expectedAmount) {
+    if (amount == null) return false;
+    try {
+      return new BigDecimal(amount).compareTo(expectedAmount) == 0;
+    } catch (NumberFormatException malformedAmount) {
+      return false;
+    }
   }
 
   /** 字段矛盾不能被解释成普通缺失或自动改绑。 */
