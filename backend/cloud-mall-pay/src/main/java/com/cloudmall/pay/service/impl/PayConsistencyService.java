@@ -210,7 +210,7 @@ public class PayConsistencyService {
               || !"PENDING".equals(observedPaymentStatus)
               || operation.refundOperationKey() != null)
             throw new IllegalStateException("扣款拒绝事实与资金恢复状态不一致");
-          return failWithoutDebit(intent, claimToken);
+          return failWithoutDebit(intent, claimToken, true);
         }
         if (!"APPLIED".equals(operation.state()))
           throw new IllegalStateException("用户余额操作尚无最终结果: " + operation.state());
@@ -237,7 +237,7 @@ public class PayConsistencyService {
       if (operation == null && !"PENDING".equals(observedPaymentStatus))
         throw new IllegalStateException("原支付记录已进入资金恢复阶段但扣款账本缺失");
       if (operation == null && "CANCELLED".equals(order.status()))
-        return failWithoutDebit(intent, claimToken);
+        return failWithoutDebit(intent, claimToken, false);
       if (operation == null) {
         // 已支付订单缺少本支付的账本时只能核对来源，不能追加一笔新扣款。
         if (!"PENDING_PAYMENT".equals(order.status()))
@@ -452,8 +452,22 @@ public class PayConsistencyService {
     }
   }
 
-  /** 明确没有扣款且订单已取消或账本拒绝时标记失败。 */
-  private String failWithoutDebit(PayDebitIntentPO intent, String claimToken) {
+  /**
+   * 在终态事务外复核原无扣款或拒绝来源，再按原短事务标记失败。
+   *
+   * @param expectedRejected 原流程已观察拒绝来源；false表示已取消订单的账本缺失来源
+   */
+  private String failWithoutDebit(
+      PayDebitIntentPO intent, String claimToken, boolean expectedRejected) {
+    // 1. 末次读取只证明本次观察，不能用早期缺失或拒绝覆盖已变化的资金来源。
+    UserClient.BalanceOperationView latest = readDebitOperation(intent);
+    if (expectedRejected) {
+      if (latest == null) throw new IllegalStateException("原扣款账本未证明支付失败");
+      validateDebitOperation(intent, latest);
+      if (!"REJECTED".equals(latest.state()) || latest.refundOperationKey() != null)
+        throw new IllegalStateException("原扣款账本未证明支付失败");
+    } else if (latest != null) throw new IllegalStateException("原扣款账本未证明支付失败");
+    // 2. 证明通过后仍使用原双表终态事务，保留owner/lease条件及整体回滚。
     commitOwnedLegacyTerminal(intent, claimToken, "FAILED");
     return "FAILED";
   }
