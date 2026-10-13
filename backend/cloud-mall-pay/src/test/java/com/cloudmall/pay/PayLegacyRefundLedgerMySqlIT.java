@@ -4114,6 +4114,222 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 合法切换日期在四读取入口必须保留数据库日期组件，而非Timestamp混合历失败。 */
+  @Test
+  void cutoverTimesReadThroughLookupAndCandidates() {
+    String expectedTimezone = System.getProperty("cloudmall.pay.mysql.test.expected-timezone");
+    String actualTimezone = java.util.TimeZone.getDefault().getID();
+    if (expectedTimezone != null) assertEquals(expectedTimezone, actualTimezone);
+    System.out.println("CM16T168 test timezone=" + actualTimezone);
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String field : List.of("next_retry_at", "created_at", "updated_at", "lease_until")) {
+      for (String value :
+          List.of(
+              "1582-10-05 12:34:56.789", "1582-10-10 12:34:56.789", "1582-10-14 12:34:56.789")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              writeOwnedHistoricalTime(field, value, 1L);
+              var before = rawIntentTimeFacts();
+              var currentTime = LocalDateTime.of(2101, 1, 1, 0, 0);
+              org.junit.jupiter.api.Assertions.assertAll(
+                  field + ":" + value,
+                  () ->
+                      assertExactIntentFacts(
+                          org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                              () -> intents.findByPayNo("pay-1")),
+                          before.get(1).get(0)),
+                  () ->
+                      assertExactIntentFacts(
+                          org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                              () -> intents.findByPayNoForUpdate("pay-1")),
+                          before.get(1).get(0)),
+                  () -> {
+                    var candidates =
+                        org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                            () -> intents.findDue(currentTime, 1));
+                    assertEquals(1, candidates.size());
+                    assertExactIntentFacts(candidates.get(0), before.get(1).get(0));
+                  },
+                  () -> {
+                    var candidates =
+                        org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                            () -> intents.findDueAfter(currentTime, null, 1));
+                    assertEquals(1, candidates.size());
+                    assertExactIntentFacts(candidates.get(0), before.get(1).get(0));
+                  },
+                  () -> assertEquals(before, rawIntentTimeFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 年份边界、切换前后和现代毫秒日期保持，NULL投影及原due资格不新增授权。 */
+  @Test
+  void typedTimesKeepBoundaryComponentsAndNulls() {
+    var currentTime = LocalDateTime.of(2101, 1, 1, 0, 0);
+    for (String value :
+        List.of(
+            "1000-01-01 00:00:00.000",
+            "1582-10-04 12:34:56.789",
+            "1582-10-05 12:34:56.789",
+            "1582-10-10 12:34:56.789",
+            "1582-10-14 12:34:56.789",
+            "1582-10-15 12:34:56.789",
+            "2026-10-14 12:34:56.789",
+            "9999-12-31 23:59:59.999")) {
+      for (boolean leasePresent : List.of(false, true)) {
+        seedIntentAndPayment("PENDING", "INIT");
+        fixture.update(
+            "UPDATE pay_debit_intent SET"
+                + " lease_owner='owned-typed-time',last_error='owned-typed-proof',attempts=7 WHERE"
+                + " id=1");
+        for (String field : List.of("next_retry_at", "created_at", "updated_at"))
+          writeOwnedHistoricalTime(field, value, 1L);
+        if (leasePresent) writeOwnedHistoricalTime("lease_until", value, 1L);
+        var before = rawIntentTimeFacts();
+        var expected = before.get(1).get(0);
+        assertExactIntentFacts(intents.findByPayNo("pay-1"), expected);
+        assertExactIntentFacts(intents.findByPayNoForUpdate("pay-1"), expected);
+        boolean due = storedIntentTime(value).compareTo(currentTime) <= 0;
+        var timeCandidates = intents.findDue(currentTime, 1);
+        var cursorCandidates = intents.findDueAfter(currentTime, null, 1);
+        assertEquals(due ? 1 : 0, timeCandidates.size());
+        assertEquals(due ? 1 : 0, cursorCandidates.size());
+        if (due) {
+          assertExactIntentFacts(timeCandidates.get(0), expected);
+          assertExactIntentFacts(cursorCandidates.get(0), expected);
+        }
+        var projected = projectedIntentMapper("times");
+        var missing = new java.util.LinkedHashMap<>(expected);
+        for (String field : List.of("next_retry_at", "created_at", "updated_at"))
+          missing.put(field, null);
+        assertExactIntentFacts(projected.findByPayNo("pay-1"), missing);
+        assertExactIntentFacts(projected.findByPayNoForUpdate("pay-1"), missing);
+        assertNull(intents.findByPayNo("typed-missing"));
+        assertNull(intents.findByPayNoForUpdate("typed-missing"));
+        assertEquals(before, rawIntentTimeFacts());
+      }
+    }
+  }
+
+  /** 合法历史头不能被过滤或阻断整批，三轮最多50项原预算恢复全部103条记录。 */
+  @Test
+  void validHistoricalHeadAndHealthyTailRecoverAcrossTicks() {
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    var fields = List.of("next_retry_at", "created_at", "updated_at", "lease_until");
+    var historicalTimes =
+        List.of("1582-10-05 12:34:56.789", "1582-10-10 12:34:56.789", "1582-10-14 12:34:56.789");
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      String payNo = "t168-pay-" + identifier;
+      String orderNo = "t168-order-" + identifier;
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'PENDING','LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          currentTime,
+          currentTime);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',0,?,?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          currentTime.minusDays(1),
+          currentTime,
+          currentTime);
+      if (identifier <= 100) {
+        int variant = (int) (identifier - 1);
+        writeOwnedHistoricalTime(
+            fields.get(variant % 4), historicalTimes.get((variant / 4) % 3), identifier);
+      }
+    }
+    var before = rawIntentTimeFacts();
+    assertEquals(50, intents.findDue(currentTime, 50).size());
+    assertEquals(
+        java.util.stream.LongStream.rangeClosed(1, 50).boxed().toList(),
+        intents.findDueAfter(currentTime, null, 50).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(before, rawIntentTimeFacts());
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    when(user.operation(eq(7L), anyString(), eq(7L)))
+        .thenThrow(new IllegalStateException("owned-typed-time-read-fault"));
+    var service = newService(user, orders);
+    for (int tick = 0; tick < 3; tick++) {
+      service.recoverDue();
+      int processed = Math.min((tick + 1) * 50, 103);
+      assertEquals(
+          processed,
+          fixture.queryForObject(
+              "SELECT COUNT(*) FROM pay_debit_intent WHERE attempts=1 AND lease_owner IS NULL"
+                  + " AND last_error LIKE '%owned-typed-time-read-fault%'",
+              Integer.class));
+      verify(user, times(processed)).operation(eq(7L), anyString(), eq(7L));
+    }
+    var after = rawIntentTimeFacts();
+    assertEquals(before.get(0), after.get(0));
+    assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(after));
+    service.recoverDue();
+    verify(user, times(103)).operation(eq(7L), anyString(), eq(7L));
+    assertEquals(after, rawIntentTimeFacts());
+    verify(user, never()).debit(any(), any(), any());
+    verify(user, never()).refund(any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(orders);
+  }
+
+  /** 日期期望来自owned原存储CHAR事实，逐项比对全部14字段，不依赖Timestamp基线。 */
+  private static void assertExactIntentFacts(
+      com.cloudmall.pay.domain.po.PayDebitIntentPO observed, Map<String, Object> facts) {
+    assertNotNull(observed);
+    assertEquals(
+        java.util.Arrays.asList(
+            facts.get("id"),
+            facts.get("pay_no"),
+            facts.get("order_no"),
+            facts.get("user_id"),
+            facts.get("amount"),
+            facts.get("status"),
+            facts.get("debit_mode"),
+            facts.get("attempts"),
+            storedIntentTime(facts.get("next_retry_at")),
+            facts.get("lease_owner"),
+            storedIntentTime(facts.get("lease_until")),
+            facts.get("last_error"),
+            storedIntentTime(facts.get("created_at")),
+            storedIntentTime(facts.get("updated_at"))),
+        java.util.Arrays.asList(
+            observed.id,
+            observed.payNo,
+            observed.orderNo,
+            observed.userId,
+            observed.amount,
+            observed.status,
+            observed.debitMode,
+            observed.attempts,
+            observed.nextRetryAt,
+            observed.leaseOwner,
+            observed.leaseUntil,
+            observed.lastError,
+            observed.createdAt,
+            observed.updatedAt));
+  }
+
+  /** 已知合法DATETIME(3)的CAST CHAR文本按本批期望日期解析，NULL保缺失。 */
+  private static LocalDateTime storedIntentTime(Object text) {
+    return text == null ? null : LocalDateTime.parse(((String) text).replace(' ', 'T'));
+  }
+
   /** 非零但超出当月日数的历史时间不得进入扫描或在领取时被覆盖修写。 */
   @Test
   void invalidMonthDaysDoNotScanOrClaim() {
@@ -4633,9 +4849,9 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(before, payFacts());
   }
 
-  /** 非NULL日期保持旧Timestamp转换，不换时区API；毫秒/存储年边界及NULL lease保持。 */
+  /** 非NULL日期保原存储组件，避免沿用随测试JVM时区漂移的Timestamp基线。 */
   @Test
-  void nonNullTimeMappingKeepsOriginalTimestampSemantics() {
+  void nonNullTimeMappingPreservesStoredDateComponents() {
     var dates =
         List.of(
             LocalDateTime.of(1000, 1, 1, 0, 0),
@@ -4654,26 +4870,13 @@ class PayLegacyRefundLedgerMySqlIT {
             leasePresent ? "owned-original-time" : null,
             leasePresent ? date : null);
         var before = payFacts();
-        var originalTimes =
-            fixture
-                .query(
-                    "SELECT next_retry_at,created_at,updated_at,lease_until FROM pay_debit_intent"
-                        + " WHERE id=1",
-                    (resultSet, rowNumber) -> {
-                      var lease = resultSet.getTimestamp("lease_until");
-                      return java.util.Arrays.asList(
-                          resultSet.getTimestamp("next_retry_at").toLocalDateTime(),
-                          resultSet.getTimestamp("created_at").toLocalDateTime(),
-                          resultSet.getTimestamp("updated_at").toLocalDateTime(),
-                          lease == null ? null : lease.toLocalDateTime());
-                    })
-                .get(0);
         for (var observed :
             List.of(intents.findByPayNo("pay-1"), intents.findByPayNoForUpdate("pay-1"))) {
-          assertEquals(originalTimes.get(0), observed.nextRetryAt);
-          assertEquals(originalTimes.get(1), observed.createdAt);
-          assertEquals(originalTimes.get(2), observed.updatedAt);
-          assertEquals(originalTimes.get(3), observed.leaseUntil);
+          assertEquals(date, observed.nextRetryAt);
+          assertEquals(date, observed.createdAt);
+          assertEquals(date, observed.updatedAt);
+          assertEquals(leasePresent ? date : null, observed.leaseUntil);
+          assertExactIntentFacts(observed, rawIntentTimeFacts().get(1).get(0));
           assertEquals(date.getNano(), observed.nextRetryAt.getNano());
           assertEquals(leasePresent ? "owned-original-time" : null, observed.leaseOwner);
           assertEquals(1L, observed.id);

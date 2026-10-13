@@ -2,7 +2,6 @@ package com.cloudmall.pay.mapper;
 
 import com.cloudmall.pay.domain.po.PayDebitIntentPO;
 import java.math.BigDecimal;
-import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -367,7 +366,7 @@ public class PayDebitIntentMapper {
     return Integer.valueOf(1).equals(matchingRows);
   }
 
-  /** 映射支付意图时保留boxed数值与时间的SQL NULL，非NULL字段保持原读取及转换语义。 */
+  /** 保留boxed及时间SQL NULL；typed时间读取保留合法DATETIME组件，避免混合历转换。 */
   private static final RowMapper<PayDebitIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {
         PayDebitIntentPO intent = new PayDebitIntentPO();
@@ -379,16 +378,12 @@ public class PayDebitIntentMapper {
         intent.status = resultSet.getString("status");
         intent.debitMode = resultSet.getString("debit_mode");
         intent.attempts = resultSet.getObject("attempts", Integer.class);
-        Timestamp nextRetryAt = resultSet.getTimestamp("next_retry_at");
-        intent.nextRetryAt = nextRetryAt == null ? null : nextRetryAt.toLocalDateTime();
+        intent.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
         intent.leaseOwner = resultSet.getString("lease_owner");
-        Timestamp leaseUntil = resultSet.getTimestamp("lease_until");
-        intent.leaseUntil = leaseUntil == null ? null : leaseUntil.toLocalDateTime();
+        intent.leaseUntil = resultSet.getObject("lease_until", LocalDateTime.class);
         intent.lastError = resultSet.getString("last_error");
-        Timestamp createdAt = resultSet.getTimestamp("created_at");
-        intent.createdAt = createdAt == null ? null : createdAt.toLocalDateTime();
-        Timestamp updatedAt = resultSet.getTimestamp("updated_at");
-        intent.updatedAt = updatedAt == null ? null : updatedAt.toLocalDateTime();
+        intent.createdAt = resultSet.getObject("created_at", LocalDateTime.class);
+        intent.updatedAt = resultSet.getObject("updated_at", LocalDateTime.class);
         return intent;
       };
 }
