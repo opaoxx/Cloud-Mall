@@ -425,6 +425,99 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** owned遗留缺UNIQUE时，重复主/source键及隐藏在其它pay的同退款键必须业务409。 */
+  @Test
+  void operationQueryRejectsGloballyDuplicatedKeysWithoutWrites() {
+    var indexes =
+        fixture.queryForList(
+            "SHOW INDEX FROM balance_ledger WHERE Column_name='operation_key' AND Non_unique=0");
+    assertEquals(1, indexes.size());
+    String uniqueIndex = (String) indexes.get(0).get("Key_name");
+    assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+    fixture.execute("ALTER TABLE balance_ledger DROP INDEX `" + uniqueIndex + "`");
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String scenario :
+          List.of(
+              "primary-debit",
+              "primary-refund",
+              "primary-rejected",
+              "refund-source",
+              "hidden-refund")) {
+        for (boolean alias : List.of(false, true)) {
+          checks.add(
+              () -> {
+                if ("primary-rejected".equals(scenario)) {
+                  closeContext();
+                  createTransactionalServices();
+                  assertEquals(
+                      "PAYMENT_FAILED",
+                      assertThrows(
+                              BizException.class,
+                              () -> debitLegacy("global-rejected", "global-rejected", 7L, "101.00"))
+                          .getCode());
+                } else resetOperationFixture("refund");
+                String primaryKey =
+                    "primary-rejected".equals(scenario)
+                        ? "global-rejected"
+                        : "primary-refund".equals(scenario) || "refund-source".equals(scenario)
+                            ? "query-refund"
+                            : "query-debit";
+                String duplicatedKey =
+                    "refund-source".equals(scenario)
+                        ? "query-debit"
+                        : "hidden-refund".equals(scenario) ? "query-refund" : primaryKey;
+                String duplicateAlias =
+                    alias ? duplicatedKey.toUpperCase(java.util.Locale.ROOT) : duplicatedKey;
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                        + " SELECT -1,8,?,operation_type,CASE WHEN operation_type='REFUND' THEN"
+                        + " 'unrelated-origin' ELSE NULL"
+                        + " END,'unrelated-global-pay','unrelated-global-order',amount,state,balance_before,balance_after,created_at"
+                        + " FROM balance_ledger WHERE operation_key=?",
+                    duplicateAlias,
+                    duplicatedKey);
+                assertEquals(
+                    2,
+                    fixture.queryForObject(
+                        "SELECT COUNT(*) FROM balance_ledger WHERE operation_key=?",
+                        Integer.class,
+                        duplicatedKey));
+                var before = allFundsFacts();
+                var response = operationHttp(primaryKey);
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () ->
+                        assertEquals(
+                            409, response.getResponse().getStatus(), scenario + ":" + alias),
+                    () -> assertHttpCode(response, "COMMON_CONFLICT"),
+                    () -> {
+                      var failure =
+                          assertThrows(
+                              BizException.class,
+                              () -> legacy.balanceOperation(7L, primaryKey, 7L));
+                      assertEquals("COMMON_CONFLICT", failure.getCode());
+                      assertEquals("余额账本事实待核对", failure.getMessage());
+                    },
+                    () -> assertEquals(before, allFundsFacts()));
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      fixture.update("DELETE FROM balance_ledger WHERE id=-1");
+      fixture.execute(
+          "ALTER TABLE balance_ledger ADD UNIQUE INDEX `" + uniqueIndex + "` (operation_key)");
+      assertEquals(
+          1,
+          fixture
+              .queryForList(
+                  "SHOW INDEX FROM balance_ledger WHERE Column_name='operation_key' AND"
+                      + " Non_unique=0")
+              .size());
+    }
+  }
+
   /** 真实拒款账本不能忽略坏归属/冻结，合法旧余额不和当前钱包重新比较。 */
   @Test
   void rejectedOperationRejectsContradictoryOwnershipWithoutWriting() {
@@ -3896,6 +3989,7 @@ class BalanceTccStateMySqlIT {
                 (proxy, method, arguments) -> {
                   String name = method.getName();
                   if (List.of(
+                          "countOperationCandidates",
                           "selectByOperationKey",
                           "findLinkedRefundCandidates",
                           "selectFirstRefundOperationKey")
@@ -4001,11 +4095,13 @@ class BalanceTccStateMySqlIT {
       assertEquals(200, operationHttp("query-debit").getResponse().getStatus());
       assertEquals(
           List.of(
+              "countOperationCandidates:true:true:4",
               "selectByOperationKey:true:true:4",
               "findLinkedRefundCandidates:true:true:4",
               "selectFirstRefundOperationKey:true:true:4",
               "balanceDebitAttemptMapper:true:true:4",
-              "balanceTccDebitMapper:true:true:4"),
+              "balanceTccDebitMapper:true:true:4",
+              "countOperationCandidates:true:true:4"),
           observations);
       assertEquals(1, connectionIds.size());
       assertEquals(List.of("2.00"), observedAmounts);

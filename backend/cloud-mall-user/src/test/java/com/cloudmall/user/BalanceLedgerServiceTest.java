@@ -1168,6 +1168,7 @@ class BalanceLedgerServiceTest {
   /** 按查询类型准备完整原行；REFUND默认可观察到同一原DEBIT与自身集合。 */
   private String installOperationQuery(String mode) {
     setUp();
+    when(balanceLedgerMapper.countOperationCandidates(any())).thenReturn(1L);
     operationSource = appliedDebit("pay-1", new BigDecimal("90.00"));
     operationLedger =
         "REFUND".equals(mode)
@@ -1465,6 +1466,139 @@ class BalanceLedgerServiceTest {
     when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo))
         .thenReturn("TCC".equals(mode) ? confirmedRefundFreeze(attempt, operationSource) : null);
     return attempt;
+  }
+
+  /** primary/source/已观察refund键的缺证或重复必须拒绝，primary真正缺失保404。 */
+  @Test
+  void operationKeyUniquenessRejectsMissingOrDuplicatedEvidence() {
+    for (Long count : java.util.Arrays.asList(null, -1L, 0L, 2L, Long.MAX_VALUE)) {
+      String key = installOperationQuery("DEBIT");
+      when(balanceLedgerMapper.countOperationCandidates(key)).thenReturn(count);
+      if (Long.valueOf(0).equals(count)) {
+        var failure =
+            assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, key, 7L));
+        assertEquals("COMMON_NOT_FOUND", failure.getCode());
+        assertEquals(404, failure.getHttpStatus());
+      } else assertOperationConflict(key);
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectByOperationKey(any());
+      org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
+      for (String scope : java.util.List.of("source", "refund")) {
+        String scopedKey =
+            "source".equals(scope)
+                ? installOperationQuery("REFUND")
+                : installObservedOperationRefund();
+        String checkedKey =
+            "source".equals(scope) ? operationSource.operationKey : "observed-refund";
+        when(balanceLedgerMapper.countOperationCandidates(checkedKey)).thenReturn(count);
+        assertOperationConflict(scopedKey);
+        if ("source".equals(scope))
+          verify(balanceLedgerMapper, org.mockito.Mockito.never())
+              .selectByOperationKey(operationSource.operationKey);
+      }
+    }
+    String foreignKey = installOperationQuery("DEBIT");
+    operationLedger.userId = 8L;
+    assertEquals(
+        "COMMON_NOT_FOUND",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, foreignKey, 7L))
+            .getCode());
+    verify(balanceLedgerMapper).countOperationCandidates(foreignKey);
+    String callerKey = installOperationQuery("DEBIT");
+    assertEquals(
+        403,
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, callerKey, 8L))
+            .getHttpStatus());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).countOperationCandidates(any());
+  }
+
+  /** COUNT异常原对象、原kernel/marker/owner先级、100集合最多101次且无重复计数。 */
+  @Test
+  void operationKeyUniquenessKeepsDaoPriorityAndBoundedBudget() {
+    for (String phase : java.util.List.of("primary", "source", "refund")) {
+      String key =
+          "source".equals(phase)
+              ? installOperationQuery("REFUND")
+              : installObservedOperationRefund();
+      String countedKey =
+          "primary".equals(phase)
+              ? key
+              : "source".equals(phase) ? operationSource.operationKey : "observed-refund";
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "operation-unique-count-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceLedgerMapper)
+          .countOperationCandidates(countedKey);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+      assertOperationReadOnly();
+    }
+    for (String gate : java.util.List.of("collection", "marker", "owner")) {
+      String key = installObservedOperationRefund();
+      org.mockito.Mockito.doThrow(new AssertionError("old evidence must precede linked count"))
+          .when(balanceLedgerMapper)
+          .countOperationCandidates("observed-refund");
+      if ("collection".equals(gate))
+        when(balanceLedgerMapper.findLinkedRefundCandidates(operationSource.operationKey))
+            .thenReturn(null);
+      else if ("marker".equals(gate))
+        when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
+            .thenReturn("foreign-refund");
+      else installAppliedOperationOwner("LEGACY").state = "TRYING";
+      assertOperationConflict(key);
+      verify(balanceLedgerMapper, org.mockito.Mockito.never())
+          .countOperationCandidates("observed-refund");
+    }
+    for (String type : java.util.List.of("DEBIT", "REFUND")) {
+      String key = installOperationQuery(type);
+      var candidates = new java.util.ArrayList<BalanceLedgerPO>();
+      if ("REFUND".equals(type)) {
+        operationLedger.amount = new BigDecimal("0.01");
+        operationLedger.balanceBefore = new BigDecimal("90.00");
+        operationLedger.balanceAfter = new BigDecimal("90.01");
+        candidates.add(operationLedger);
+      }
+      for (int index = candidates.size(); index < 100; index++)
+        candidates.add(linkedRefund("count-budget-" + index, "0.01"));
+      var payment = new java.util.ArrayList<BalanceLedgerPO>(java.util.List.of(operationSource));
+      payment.addAll(candidates);
+      when(balanceLedgerMapper.findLinkedRefundCandidates(operationSource.operationKey))
+          .thenReturn(candidates);
+      when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(operationSource.payNo))
+          .thenReturn(payment);
+      when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
+          .thenReturn(candidates.get(0).operationKey);
+      userService.balanceOperation(7L, key, 7L);
+      verify(balanceLedgerMapper, times(101)).countOperationCandidates(any());
+      verify(balanceLedgerMapper).countOperationCandidates(key);
+      if ("REFUND".equals(type))
+        verify(balanceLedgerMapper).countOperationCandidates(operationSource.operationKey);
+      assertOperationReadOnly();
+    }
+    String rejectedKey = installOperationQuery("REJECTED");
+    userService.balanceOperation(7L, rejectedKey, 7L);
+    verify(balanceLedgerMapper).countOperationCandidates(rejectedKey);
+    assertOperationReadOnly();
+  }
+
+  /** 构造已证current pay退款，使其COUNT在所有旧证据门之后执行。 */
+  private String installObservedOperationRefund() {
+    String key = installOperationQuery("DEBIT");
+    var refund = linkedRefund("observed-refund", "1.00");
+    when(balanceLedgerMapper.findLinkedRefundCandidates(operationSource.operationKey))
+        .thenReturn(java.util.List.of(refund));
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(operationSource.payNo))
+        .thenReturn(java.util.List.of(operationSource, refund));
+    when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
+        .thenReturn(refund.operationKey);
+    return key;
   }
 
   /** 查询不得写入账本、钱包、归属/冻结或Redis，归属Mapper只允许新增点读。 */

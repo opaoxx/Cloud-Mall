@@ -240,6 +240,13 @@ public class UserServiceImpl implements UserService {
       @RequestHeader(value = "X-User-Id", required = false) Long callerId) {
     // 1. 保持调用者、主行缺失和foreign的原优先级，再证明主行字段。
     assertInternalCaller(userId, callerId);
+    Long primaryCount = balanceLedgerMapper.countOperationCandidates(operationKey);
+    if (Long.valueOf(0).equals(primaryCount)) {
+      throw new BizException(ErrorCodes.NOT_FOUND, "余额操作不存在", 404);
+    }
+    requireBalanceOperationEvidence(Long.valueOf(1).equals(primaryCount));
+    Set<String> uniqueOperationKeys = new HashSet<>();
+    uniqueOperationKeys.add(operationKey);
     BalanceLedgerPO ledger = balanceLedgerMapper.selectByOperationKey(operationKey);
     if (ledger == null || !Objects.equals(userId, ledger.userId)) {
       throw new BizException(ErrorCodes.NOT_FOUND, "余额操作不存在", 404);
@@ -248,6 +255,7 @@ public class UserServiceImpl implements UserService {
     // 2. REFUND必须观察实际原DEBIT；缺原来源不能伪装成主操作404。
     BalanceLedgerPO original = ledger;
     if ("REFUND".equals(ledger.operationType)) {
+      requireUniqueOperationKey(ledger.originalOperationKey, uniqueOperationKeys);
       original = balanceLedgerMapper.selectByOperationKey(ledger.originalOperationKey);
       requireBalanceOperationEvidence(
           original != null
@@ -304,7 +312,19 @@ public class UserServiceImpl implements UserService {
     } else if ("REJECTED".equals(original.state)) {
       requireRejectedDebitOwnership(original);
     }
+    // 6. 原各门均通过后，观察退款键的全局CI唯一性；复用primary/source证明不重复COUNT。
+    for (BalanceLedgerPO candidate : candidates)
+      requireUniqueOperationKey(candidate.operationKey, uniqueOperationKeys);
     return ApiResponse.ok(BalanceOperationVO.from(ledger, refundOperationKey));
+  }
+
+  /** 已证明字段的观察键仅成功COUNT1后记入集合，异常原样，不访问未观察键或写资金。 */
+  private void requireUniqueOperationKey(String operationKey, Set<String> uniqueOperationKeys) {
+    if (!uniqueOperationKeys.contains(operationKey)) {
+      requireBalanceOperationEvidence(
+          Long.valueOf(1).equals(balanceLedgerMapper.countOperationCandidates(operationKey)));
+      uniqueOperationKeys.add(operationKey);
+    }
   }
 
   /** 主行只证明不可变键/金额和已知终态快照；不推断当前钱包、全账户或TCC外部事实。 */
