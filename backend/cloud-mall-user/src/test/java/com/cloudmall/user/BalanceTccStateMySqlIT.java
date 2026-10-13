@@ -931,6 +931,144 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 本地TCC三资金动作及确认Try重放不能忽略多归属/冻结/其它pay同账本键，五表不写。 */
+  @Test
+  void localTccPointDuplicatesKeepBusinessFailures() {
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String sourceKind : List.of("owner", "freeze", "ledger")) {
+      for (String action : List.of("try", "confirm", "cancel", "try-confirmed")) {
+        if ("try-confirmed".equals(action) && !"ledger".equals(sourceKind)) continue;
+        for (boolean alias : List.of(false, true)) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                setEnabled(true);
+                var original =
+                    request("local-point-" + sourceKind + "-" + action + "-" + alias, 7L, "10.00");
+                boolean confirmed =
+                    "ledger".equals(sourceKind)
+                        && List.of("confirm", "try-confirmed").contains(action);
+                if (!"ledger".equals(sourceKind) || confirmed) service.tryDebit(original);
+                if (confirmed) service.confirmDebit(finalizeRequest(original));
+                String table =
+                    "owner".equals(sourceKind)
+                        ? "balance_debit_attempt"
+                        : "freeze".equals(sourceKind) ? "balance_tcc_debit" : "balance_ledger";
+                String column = "ledger".equals(sourceKind) ? "operation_key" : "pay_no";
+                var indexes =
+                    fixture.queryForList(
+                        "SHOW INDEX FROM "
+                            + table
+                            + " WHERE Column_name='"
+                            + column
+                            + "' AND Non_unique=0");
+                assertEquals(1, indexes.size());
+                String uniqueIndex = (String) indexes.get(0).get("Key_name");
+                assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+                fixture.execute("ALTER TABLE " + table + " DROP INDEX `" + uniqueIndex + "`");
+                try {
+                  for (int rowNumber = 1;
+                      rowNumber <= ("ledger".equals(sourceKind) && !confirmed ? 2 : 1);
+                      rowNumber++) {
+                    String payOrKey =
+                        alias && (rowNumber == 2 || !"ledger".equals(sourceKind) || confirmed)
+                            ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                            : original.payNo;
+                    long rowId = rowNumber == 1 ? -125L : -126L;
+                    if ("owner".equals(sourceKind))
+                      fixture.update(
+                          "INSERT INTO"
+                              + " balance_debit_attempt(id,pay_no,operation_key,mode,xid,ledger_key,branch_id,user_id,order_no,amount,state,created_at,updated_at)"
+                              + " VALUES(?,?,?,'TCC',?,?,1,8,?,1,'TRYING',NOW(3),NOW(3))",
+                          rowId,
+                          payOrKey,
+                          "extra-local-operation-" + rowNumber,
+                          "extra-local-xid-" + rowNumber,
+                          "extra-local-ledger-" + rowNumber,
+                          "extra-local-order-" + rowNumber);
+                    else if ("freeze".equals(sourceKind))
+                      fixture.update(
+                          "INSERT INTO"
+                              + " balance_tcc_debit(id,operation_key,xid,branch_id,user_id,pay_no,order_no,amount,state,balance_before,balance_after_try,created_at,updated_at)"
+                              + " VALUES(?,?,?,1,8,?,?,1,'TRYING',100,99,NOW(3),NOW(3))",
+                          rowId,
+                          "extra-local-operation-" + rowNumber,
+                          "extra-local-xid-" + rowNumber,
+                          payOrKey,
+                          "extra-local-order-" + rowNumber);
+                    else
+                      fixture.update(
+                          "INSERT INTO"
+                              + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                              + " VALUES(?,8,?,'DEBIT',NULL,?,?,1,'APPLIED',100,99,NOW(3))",
+                          rowId,
+                          payOrKey,
+                          "other-local-pay-" + rowNumber,
+                          "other-local-order-" + rowNumber);
+                  }
+                  var before = allFundsFacts();
+                  var receiptBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  boolean occupiedKey = "ledger".equals(sourceKind) && !confirmed;
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> {
+                                  switch (action) {
+                                    case "try", "try-confirmed" -> service.tryDebit(original);
+                                    case "confirm" ->
+                                        service.confirmDebit(finalizeRequest(original));
+                                    case "cancel" -> service.cancelDebit(finalizeRequest(original));
+                                    default ->
+                                        throw new AssertionError("Unexpected local TCC action");
+                                  }
+                                });
+                        assertEquals(
+                            occupiedKey ? "IDEMPOTENCY_CONFLICT" : "BALANCE_TCC_UNKNOWN",
+                            failure.getCode());
+                        assertEquals(
+                            occupiedKey ? "支付或账本键已有扣款事实" : "资金事实待核对", failure.getMessage());
+                        assertEquals(409, failure.getHttpStatus());
+                      },
+                      () -> assertEquals(before, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiptBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")));
+                } finally {
+                  fixture.update("DELETE FROM " + table + " WHERE id IN (-125,-126)");
+                  fixture.execute(
+                      "ALTER TABLE "
+                          + table
+                          + " ADD UNIQUE INDEX `"
+                          + uniqueIndex
+                          + "` ("
+                          + column
+                          + ")");
+                  assertEquals(
+                      1,
+                      fixture
+                          .queryForList(
+                              "SHOW INDEX FROM "
+                                  + table
+                                  + " WHERE Column_name='"
+                                  + column
+                                  + "' AND Non_unique=0")
+                          .size());
+                }
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+  }
+
   /** 冻结多结果不能当唯一确认或空范围，十七入口维持原业务拒绝并恢复索引。 */
   @Test
   void freezeDuplicateRowsKeepCallerBusinessFailures() {

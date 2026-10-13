@@ -856,6 +856,164 @@ class BalanceTccDebitServiceTest {
     verify(tccMapper, never()).cancelTrying(any(), any());
   }
 
+  /** 三动作的归属初读/锁读/冻结/固定键及确认重放账本精确多结果均按原证据规则拒绝。 */
+  @Test
+  void localPointMultipleResultsKeepOriginalBusinessFailures() {
+    for (String phase :
+        List.of("owner", "locked-owner", "freeze", "empty-ledger", "confirmed-ledger")) {
+      for (String action : List.of("try", "confirm", "cancel")) {
+        if ("confirmed-ledger".equals(phase) && "cancel".equals(action)) continue;
+        for (boolean wrapped : List.of(false, true)) {
+          installPointClassificationFacts(phase);
+          var duplicate =
+              new org.apache.ibatis.exceptions.TooManyResultsException("local-point-duplicate");
+          RuntimeException failure =
+              wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+          failPointRead(phase, failure);
+          var rejected = assertThrows(BizException.class, () -> invokeNoFundsEntry(action));
+          assertEquals(
+              "empty-ledger".equals(phase) ? "IDEMPOTENCY_CONFLICT" : "BALANCE_TCC_UNKNOWN",
+              rejected.getCode());
+          assertEquals(
+              "empty-ledger".equals(phase) ? "支付或账本键已有扣款事实" : "资金事实待核对", rejected.getMessage());
+          assertEquals(409, rejected.getHttpStatus());
+          verifyPointReadOnce(phase);
+          assertPointFailureHasNoWrites();
+        }
+      }
+    }
+  }
+
+  /** 非目标shape保持同一异常对象，已有关闭Try开关/禁用用户和坏owner载荷先拒。 */
+  @Test
+  void localPointClassificationKeepsOtherFaultsAndPriority() {
+    for (String phase :
+        List.of("owner", "locked-owner", "freeze", "empty-ledger", "confirmed-ledger")) {
+      for (String action : List.of("try", "confirm", "cancel")) {
+        if ("confirmed-ledger".equals(phase) && "cancel".equals(action)) continue;
+        for (String shape :
+            List.of(
+                "resource",
+                "sql-wrapper",
+                "nested-too-many",
+                "other-wrapper",
+                "runtime-cause",
+                "message-only")) {
+          installPointClassificationFacts(phase);
+          RuntimeException failure =
+              switch (shape) {
+                case "resource" ->
+                    new org.springframework.dao.DataAccessResourceFailureException(
+                        "local-point-jdbc-fault");
+                case "sql-wrapper" ->
+                    new org.mybatis.spring.MyBatisSystemException(
+                        new java.sql.SQLException("local-point-sql-fault"));
+                case "nested-too-many" ->
+                    new org.mybatis.spring.MyBatisSystemException(
+                        new org.apache.ibatis.exceptions.PersistenceException(
+                            "outer",
+                            new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+                case "other-wrapper" ->
+                    new org.apache.ibatis.exceptions.PersistenceException(
+                        "outer",
+                        new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+                case "runtime-cause" ->
+                    new IllegalArgumentException(
+                        "outer",
+                        new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+                default -> new IllegalArgumentException("TooManyResultsException is only text");
+              };
+          failPointRead(phase, failure);
+          org.junit.jupiter.api.Assertions.assertSame(
+              failure, assertThrows(RuntimeException.class, () -> invokeNoFundsEntry(action)));
+          verifyPointReadOnce(phase);
+          assertPointFailureHasNoWrites();
+        }
+      }
+    }
+    installPointClassificationFacts("owner");
+    failPointRead(
+        "owner", new org.apache.ibatis.exceptions.TooManyResultsException("owner-must-not-run"));
+    ReflectionTestUtils.setField(service, "enabled", false);
+    assertEquals(
+        "PAY_DEBIT_MODE_UNAVAILABLE",
+        assertThrows(BizException.class, () -> service.tryDebit(request())).getCode());
+    verifyNoInteractions(userMapper, attemptMapper, tccMapper, ledgerMapper);
+    installPointClassificationFacts("owner");
+    UserPO unavailable = account(new BigDecimal("100.00"), BigDecimal.ZERO);
+    unavailable.status = 0;
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(unavailable);
+    failPointRead(
+        "owner", new org.apache.ibatis.exceptions.TooManyResultsException("owner-must-not-run"));
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        assertThrows(BizException.class, () -> service.tryDebit(request())).getCode());
+    verifyNoInteractions(attemptMapper, tccMapper, ledgerMapper);
+    installPointClassificationFacts("locked-owner");
+    BalanceDebitAttemptPO invalidOwner = new BalanceDebitAttemptPO();
+    invalidOwner.mode = "LEGACY";
+    when(attemptMapper.selectByPayNo(request().payNo)).thenReturn(invalidOwner);
+    failPointRead(
+        "locked-owner",
+        new org.apache.ibatis.exceptions.TooManyResultsException("locked-owner-must-not-run"));
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        assertThrows(BizException.class, () -> service.confirmDebit(completion())).getCode());
+    verify(attemptMapper, never()).selectByPayNoForUpdate(any());
+    assertPointFailureHasNoWrites();
+  }
+
+  /** 完整载荷和资金事实保证目标point前的门均通过，不通过资金写替身伪造成功。 */
+  private void installPointClassificationFacts(String phase) {
+    setUp();
+    installFunds("confirmed-ledger".equals(phase) ? "CONFIRMED" : "TRYING", "none");
+  }
+
+  /** 只替换当前目标Mapper读，不改候选/锁/资金写调用。 */
+  private void failPointRead(String phase, RuntimeException failure) {
+    switch (phase) {
+      case "owner" ->
+          org.mockito.Mockito.doThrow(failure).when(attemptMapper).selectByPayNo(request().payNo);
+      case "locked-owner" ->
+          org.mockito.Mockito.doThrow(failure)
+              .when(attemptMapper)
+              .selectByPayNoForUpdate(request().payNo);
+      case "freeze" ->
+          org.mockito.Mockito.doThrow(failure).when(tccMapper).selectByPayNo(request().payNo);
+      case "empty-ledger", "confirmed-ledger" ->
+          org.mockito.Mockito.doThrow(failure)
+              .when(ledgerMapper)
+              .selectByOperationKey(request().ledgerKey);
+      default -> throw new AssertionError("Unexpected local point phase");
+    }
+  }
+
+  /** 目标点读恰一次；业务读取预算保持，不添加COUNT。 */
+  private void verifyPointReadOnce(String phase) {
+    switch (phase) {
+      case "owner" -> verify(attemptMapper).selectByPayNo(request().payNo);
+      case "locked-owner" -> verify(attemptMapper).selectByPayNoForUpdate(request().payNo);
+      case "freeze" -> verify(tccMapper).selectByPayNo(request().payNo);
+      case "empty-ledger", "confirmed-ledger" ->
+          verify(ledgerMapper).selectByOperationKey(request().ledgerKey);
+      default -> throw new AssertionError("Unexpected local point phase");
+    }
+    verify(ledgerMapper, never()).countOperationCandidates(any());
+  }
+
+  /** 错误point之后没有认领、资金变化、账本或两状态推进。 */
+  private void assertPointFailureHasNoWrites() {
+    verify(attemptMapper, never()).insert(any());
+    verify(attemptMapper, never()).transitionState(any(), any(), any(), any());
+    verify(userMapper, never()).freezeBalance(any(), any(), any());
+    verify(userMapper, never()).clearFrozenBalance(any(), any(), any());
+    verify(userMapper, never()).releaseFrozenBalance(any(), any(), any());
+    verify(ledgerMapper, never()).insert(any());
+    verify(tccMapper, never()).insert(any());
+    verify(tccMapper, never()).confirmTrying(any(), any());
+    verify(tccMapper, never()).cancelTrying(any(), any());
+  }
+
   private BalanceTccDebitTryDTO request() {
     BalanceTccDebitTryDTO request = new BalanceTccDebitTryDTO();
     request.userId = 7L;

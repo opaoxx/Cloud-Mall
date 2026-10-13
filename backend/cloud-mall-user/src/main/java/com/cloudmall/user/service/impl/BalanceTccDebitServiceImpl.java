@@ -20,6 +20,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
+import org.apache.ibatis.exceptions.TooManyResultsException;
+import org.mybatis.spring.MyBatisSystemException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -72,7 +75,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     UserPO user = lockUser(request.userId);
     if (!Objects.equals(user.status, 1)) throw conflict("用户不可用");
     BalanceDebitAttemptPO attempt = existingAttempt(request);
-    BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
+    BalanceTccDebitPO debit =
+        readTccCandidate(() -> tccMapper.selectByPayNo(request.payNo), this::unknown);
     if (attempt != null) {
       if (debit == null && "CANCELLED".equals(attempt.state)) {
         requireNoLedger(request);
@@ -120,7 +124,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     BalanceTccDebitTryDTO request = request(completion);
     UserPO user = lockUser(request.userId);
     BalanceDebitAttemptPO attempt = existingAttempt(request);
-    BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
+    BalanceTccDebitPO debit =
+        readTccCandidate(() -> tccMapper.selectByPayNo(request.payNo), this::unknown);
     requireConsistent(attempt, debit, request);
     if ("CONFIRMED".equals(debit.state)) {
       requireLedger(attempt, debit, request);
@@ -161,7 +166,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     BalanceTccDebitTryDTO request = request(completion);
     UserPO user = lockUser(request.userId);
     BalanceDebitAttemptPO attempt = existingAttempt(request);
-    BalanceTccDebitPO debit = tccMapper.selectByPayNo(request.payNo);
+    BalanceTccDebitPO debit =
+        readTccCandidate(() -> tccMapper.selectByPayNo(request.payNo), this::unknown);
     if (attempt == null) {
       if (debit != null) throw unknown();
       requireNoLedger(request);
@@ -191,12 +197,26 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
     return BalanceTccDebitVO.from(debit);
   }
 
+  /** 保持原点读与锁；仅精确多结果由当前证据门分类，其它异常/null/唯一候选原样。 */
+  private <Candidate> Candidate readTccCandidate(
+      Supplier<Candidate> candidateRead, Supplier<BizException> duplicateFailure) {
+    try {
+      return candidateRead.get();
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) throw duplicateFailure.get();
+      throw failure;
+    }
+  }
+
   /** 只对已存在且匹配的归属加锁，避免缺失唯一键的间隙锁升级。 */
   private BalanceDebitAttemptPO existingAttempt(BalanceTccDebitTryDTO request) {
-    BalanceDebitAttemptPO attempt = attemptMapper.selectByPayNo(request.payNo);
+    BalanceDebitAttemptPO attempt =
+        readTccCandidate(() -> attemptMapper.selectByPayNo(request.payNo), this::unknown);
     if (attempt == null) return null;
     validateAttempt(attempt, request);
-    attempt = attemptMapper.selectByPayNoForUpdate(request.payNo);
+    attempt =
+        readTccCandidate(() -> attemptMapper.selectByPayNoForUpdate(request.payNo), this::unknown);
     if (attempt == null) throw unknown();
     validateAttempt(attempt, request);
     return attempt;
@@ -264,8 +284,11 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   private void requireNoLedger(BalanceTccDebitTryDTO request) {
     List<BalanceLedgerPO> debitCandidates = ledgerMapper.findDebitCandidatesByPayNo(request.payNo);
     if (debitCandidates == null) throw unknown();
-    if (!debitCandidates.isEmpty() || ledgerMapper.selectByOperationKey(request.ledgerKey) != null)
-      throw conflict("支付或账本键已有扣款事实");
+    if (!debitCandidates.isEmpty()
+        || readTccCandidate(
+                () -> ledgerMapper.selectByOperationKey(request.ledgerKey),
+                () -> conflict("支付或账本键已有扣款事实"))
+            != null) throw conflict("支付或账本键已有扣款事实");
     List<BalanceLedgerPO> candidates = ledgerMapper.findPaymentLedgerCandidates(request.payNo);
     if (candidates == null) throw unknown();
     if (!candidates.isEmpty()) throw conflict("支付号已有资金账本事实");
@@ -274,7 +297,8 @@ public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   /** 已确认必须同时具备真实 APPLIED 账本，不能只凭状态返回成功。 */
   private void requireLedger(
       BalanceDebitAttemptPO attempt, BalanceTccDebitPO debit, BalanceTccDebitTryDTO request) {
-    BalanceLedgerPO ledger = ledgerMapper.selectByOperationKey(attempt.ledgerKey);
+    BalanceLedgerPO ledger =
+        readTccCandidate(() -> ledgerMapper.selectByOperationKey(attempt.ledgerKey), this::unknown);
     if (ledger == null
         || ledger.amount == null
         || !validDebitSnapshot(ledger.balanceBefore, ledger.balanceAfter, ledger.amount)
