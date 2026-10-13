@@ -143,11 +143,12 @@ public class PayTccExecutionStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 读取唯一执行事实，不创建记录。 */
+  /** 读取原支付号的唯一执行事实；查询别名行冲突，不创建或改绑记录。 */
   public PayTccExecutionPO read(String payNo) {
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
     if (execution == null)
       throw new BizException("PAY_TCC_EXECUTION_NOT_FOUND", "TCC execution 不存在", 404);
+    if (execution.payNo == null || !Objects.equals(execution.payNo, payNo)) throw conflict();
     return execution;
   }
 
@@ -156,10 +157,10 @@ public class PayTccExecutionStore {
     return Set.of("COMMITTED", "ROLLEDBACK", "CONFLICT").contains(state);
   }
 
-  /** 当前读串行化 XID、决议与观察结果；记录缺失不能补建新执行。 */
+  /** 当前读核对原支付号后串行化 XID、决议与观察；缺失或别名行不得补建/改绑。 */
   private PayTccExecutionPO locked(String payNo) {
     PayTccExecutionPO row = executions.selectForUpdate(payNo);
-    if (row == null) throw conflict();
+    if (row == null || row.payNo == null || !Objects.equals(row.payNo, payNo)) throw conflict();
     return row;
   }
 

@@ -4143,6 +4143,173 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 实际CI支付号查询读到另一原拼写终态，恢复不能直接返回该原行。 */
+  @Test
+  void executionLookupAliasCannotReturnAnotherTerminal() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("COMMITTED", "COMMIT", "t175-xid");
+    fixture.update("UPDATE pay_tcc_execution SET pay_no='PAY-1' WHERE id=1");
+    var returnedBySql = executionObservationMapper.selectByPayNo("pay-1");
+    assertNotNull(returnedBySql);
+    assertEquals("PAY-1", returnedBySql.payNo);
+    var before = ownedExecutionLookupFacts();
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(coordinator.recover("pay-1").payNo));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        },
+        () ->
+            assertNull(returned.get(), "alias execution must not be returned as requested payment"),
+        () -> assertEquals(before, ownedExecutionLookupFacts()),
+        () ->
+            org.mockito.Mockito.verifyNoInteractions(
+                bridge, receiptService, evidence, transactions));
+  }
+
+  /** 真实CI别名在读、绑定、决议、观察各早返回和CAS入口均拒绝，原三表不动。 */
+  @Test
+  void executionLookupAliasesCannotEnterLockedActions() {
+    var store = ownedExecutionObservationStore();
+    for (boolean uppercaseOriginal : List.of(false, true)) {
+      String original = uppercaseOriginal ? "PAY-1" : "pay-1";
+      String requested = uppercaseOriginal ? "pay-1" : "PAY-1";
+      for (String action :
+          List.of(
+              "read",
+              "bind-new",
+              "bind-same",
+              "decide-new",
+              "decide-same",
+              "observe-active",
+              "observe-terminal")) {
+        String state =
+            action.equals("bind-new")
+                ? "CLAIMED"
+                : action.equals("observe-terminal") || action.equals("read")
+                    ? "COMMITTED"
+                    : "RUNNING";
+        String decision =
+            action.equals("decide-same") || state.equals("COMMITTED") ? "COMMIT" : "NONE";
+        seedOwnedExecution(state, decision, action.equals("bind-new") ? null : "t175-xid");
+        fixture.update("UPDATE pay_tcc_execution SET pay_no=? WHERE id=1", original);
+        assertEquals(original, executionObservationMapper.selectByPayNo(requested).payNo);
+        assertEquals(
+            original,
+            executionTransaction(() -> executionObservationMapper.selectForUpdate(requested))
+                .payNo);
+        var before = ownedExecutionLookupFacts();
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () ->
+                    executionTransaction(
+                        () -> {
+                          switch (action) {
+                            case "read" -> {
+                              return store.read(requested);
+                            }
+                            case "bind-new", "bind-same" -> store.bindXid(requested, "t175-xid");
+                            case "decide-new", "decide-same" -> {
+                              return store.decide(requested, "t175-xid", "COMMIT");
+                            }
+                            default -> {
+                              return store.observe(requested, "UNKNOWN", "alias observation");
+                            }
+                          }
+                          return null;
+                        }),
+                action);
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(before, ownedExecutionLookupFacts());
+      }
+    }
+  }
+
+  /** 精确原支付号保持读/合法写/幂等与原缺失错误，不把终态清理或未知改成成功。 */
+  @Test
+  void exactExecutionLookupKeepsWritesTerminalsAndMissingSemantics() {
+    var store = ownedExecutionObservationStore();
+    for (String terminal : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+      seedOwnedExecution(terminal, "COMMIT", "t175-xid");
+      var before = ownedExecutionLookupFacts();
+      assertEquals(terminal, store.read("pay-1").state);
+      assertEquals(
+          terminal, executionTransaction(() -> store.observe("pay-1", "UNKNOWN", "late")).state);
+      assertEquals(before, ownedExecutionLookupFacts());
+    }
+    seedOwnedExecution("CLAIMED", "NONE", null);
+    var payBefore = rawIntentTimeFacts();
+    executionTransaction(
+        () -> {
+          store.bindXid("pay-1", "t175-xid");
+          return null;
+        });
+    assertEquals("RUNNING", store.read("pay-1").state);
+    assertEquals("t175-xid", store.read("pay-1").xid);
+    var bound = ownedExecutionLookupFacts();
+    executionTransaction(
+        () -> {
+          store.bindXid("pay-1", "t175-xid");
+          return null;
+        });
+    assertEquals(bound, ownedExecutionLookupFacts());
+    assertEquals(
+        "COMMIT_REQUESTED",
+        executionTransaction(() -> store.decide("pay-1", "t175-xid", "COMMIT")).state);
+    var decided = ownedExecutionLookupFacts();
+    assertEquals(
+        "COMMIT_REQUESTED",
+        executionTransaction(() -> store.decide("pay-1", "t175-xid", "COMMIT")).state);
+    assertEquals(decided, ownedExecutionLookupFacts());
+    var observed = executionTransaction(() -> store.observe("pay-1", "UNKNOWN", "owned-new-error"));
+    assertEquals("COMMIT_REQUESTED", observed.state);
+    assertEquals("COMMIT", observed.decision);
+    assertEquals("owned-new-error", observed.lastError);
+    assertEquals(payBefore, rawIntentTimeFacts());
+    var beforeMissing = ownedExecutionLookupFacts();
+    var absent =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class, () -> store.read("absent-pay"));
+    assertEquals("PAY_TCC_EXECUTION_NOT_FOUND", absent.getCode());
+    assertEquals(404, absent.getHttpStatus());
+    for (String action : List.of("bind", "decide", "observe")) {
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () ->
+                  executionTransaction(
+                      () -> {
+                        if (action.equals("bind")) {
+                          store.bindXid("absent-pay", "t175-xid");
+                          return null;
+                        }
+                        if (action.equals("decide"))
+                          return store.decide("absent-pay", "t175-xid", "COMMIT");
+                        return store.observe("absent-pay", "UNKNOWN", "absent");
+                      }));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      assertEquals(beforeMissing, ownedExecutionLookupFacts());
+    }
+  }
+
+  /** 原Pay/Intent与完整execution事实，只读或冲突不得改写。 */
+  private List<List<Map<String, Object>>> ownedExecutionLookupFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
+    facts.add(fixture.queryForList("SELECT * FROM pay_tcc_execution ORDER BY id"));
+    return facts;
+  }
+
   /** 实际CI查询读到另一拼写XID，不能据该Fence输出COMMITTED。 */
   @Test
   void alienFenceXidCannotProveCommittedFunds() {

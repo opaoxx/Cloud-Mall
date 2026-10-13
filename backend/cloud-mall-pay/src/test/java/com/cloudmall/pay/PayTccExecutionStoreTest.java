@@ -223,6 +223,109 @@ class PayTccExecutionStoreTest {
     verify(executions, never()).selectByPayNo(any());
   }
 
+  /** 读与锁定返回对象的错误/NULL原支付号必须在早返回或写入前拒绝。 */
+  @Test
+  void lookupRowIdentityIsRequiredBeforeReadOrLockedActions() {
+    for (String mutation : List.of("foreign", "case", "space", "null"))
+      for (String action : List.of("read", "bind", "decide", "observe")) {
+        org.mockito.Mockito.reset(executions);
+        var row =
+            execution(
+                action.equals("bind") ? "CLAIMED" : "RUNNING",
+                "NONE",
+                action.equals("bind") ? null : "xid-store-1");
+        row.payNo =
+            switch (mutation) {
+              case "foreign" -> "other-pay";
+              case "case" -> "PAY-STORE-1";
+              case "space" -> "pay-store-1 ";
+              default -> null;
+            };
+        when(executions.selectByPayNo("pay-store-1")).thenReturn(row);
+        when(executions.selectForUpdate("pay-store-1")).thenReturn(row);
+        when(executions.bindXid(any(), any(), any())).thenReturn(1);
+        when(executions.setDecision(any(), any(), any(), any(), any())).thenReturn(1);
+        when(executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+        var before =
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(row));
+        var failure =
+            assertThrows(
+                BizException.class,
+                () -> {
+                  switch (action) {
+                    case "read" -> store.read("pay-store-1");
+                    case "bind" -> store.bindXid("pay-store-1", "xid-store-1");
+                    case "decide" -> store.decide("pay-store-1", "xid-store-1", "COMMIT");
+                    default -> store.observe("pay-store-1", "UNKNOWN", "lookup mismatch");
+                  }
+                });
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        org.junit.jupiter.api.Assertions.assertEquals(
+            before,
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(row)));
+        verify(executions, never()).bindXid(any(), any(), any());
+        verify(executions, never()).setDecision(any(), any(), any(), any(), any());
+        verify(executions, never()).updateObservation(any(), any(), any(), any());
+        org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+      }
+  }
+
+  /** 精确行只读返回保持对象身份，缺行404/锁内409仍不写。 */
+  @Test
+  void canonicalAndMissingLookupSemanticsRemain() {
+    for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+      var row = execution(state, "COMMIT", "xid-store-1");
+      when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+      org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+    }
+    when(executions.selectByPayNo("absent-pay")).thenReturn(null);
+    var missing = assertThrows(BizException.class, () -> store.read("absent-pay"));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_EXECUTION_NOT_FOUND", missing.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(404, missing.getHttpStatus());
+    for (String action : List.of("bind", "decide", "observe")) {
+      var failure =
+          assertThrows(
+              BizException.class,
+              () -> {
+                if (action.equals("bind")) store.bindXid("absent-pay", "xid-store-1");
+                else if (action.equals("decide"))
+                  store.decide("absent-pay", "xid-store-1", "COMMIT");
+                else store.observe("absent-pay", "UNKNOWN", "missing");
+              });
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    }
+    verify(executions, never()).bindXid(any(), any(), any());
+    verify(executions, never()).setDecision(any(), any(), any(), any(), any());
+    verify(executions, never()).updateObservation(any(), any(), any(), any());
+  }
+
+  /** 真实Coordinator和Store拒绝异源终态，不能返回其支付号或触发桥/TC/观察。 */
+  @Test
+  void coordinatorRejectsAlienTerminalBeforeAnyRecoverySideEffect() {
+    for (String terminal : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+      var row = execution(terminal, "COMMIT", "xid-store-1");
+      row.payNo = "PAY-STORE-1";
+      when(executions.selectByPayNo("pay-store-1")).thenReturn(row);
+      var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+      var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+      var coordinator =
+          new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+              store, receiptService, bridge, evidence, transactions);
+      var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-store-1"));
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      verify(executions, never()).selectForUpdate(any());
+      verify(executions, never()).updateObservation(any(), any(), any(), any());
+      org.mockito.Mockito.verifyNoInteractions(bridge, receiptService, evidence, transactions);
+    }
+  }
+
   private PayTccDispatchDTO request() {
     PayTccDispatchDTO request = new PayTccDispatchDTO();
     request.payNo = "pay-store-1";
