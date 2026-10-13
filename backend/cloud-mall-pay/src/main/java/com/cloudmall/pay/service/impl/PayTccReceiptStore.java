@@ -56,13 +56,16 @@ public class PayTccReceiptStore {
   /** 只允许完整不可变载荷的首个请求成为 winner。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean claim(PayTccDispatchVO dispatch) {
-    // 1. 固定锁顺序：原支付→派发→receipt，避免并发首次认领的间隙锁升级。
+    // 1. 固定原支付→派发→取消gate→receipt锁序，核两来源原支付号后才能认领。
     List<PayRecordPO> records = payments.selectForUpdate(dispatch.payNo);
     PayTccDispatchPO anchor = dispatches.selectForUpdate(dispatch.payNo);
     if (records.size() != 1 || anchor == null) throw conflict();
     if (cancels.selectForUpdate(dispatch.payNo) != null) throw conflict();
     PayRecordPO payment = records.get(0);
     if (!"TCC".equals(payment.debitMode)
+        || dispatch.payNo == null
+        || !Objects.equals(payment.payNo, dispatch.payNo)
+        || !Objects.equals(anchor.payNo, dispatch.payNo)
         || !Objects.equals(payment.userId, dispatch.userId)
         || !Objects.equals(payment.orderNo, dispatch.orderNo)
         || payment.amount.compareTo(new BigDecimal(dispatch.amount)) != 0

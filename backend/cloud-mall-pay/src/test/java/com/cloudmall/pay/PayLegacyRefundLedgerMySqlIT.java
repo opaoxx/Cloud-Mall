@@ -4682,6 +4682,149 @@ class PayLegacyRefundLedgerMySqlIT {
         LocalDateTime.of(2026, 10, 1, 0, 0));
   }
 
+  /** 实际原支付CI别名不能证明receipt认领，更不能插入新CLAIMED并获得winner。 */
+  @Test
+  void receiptClaimCannotUseAnotherOriginalPayment() {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    fixture.update("UPDATE pay_record SET pay_no='PAY-1' WHERE pay_no='pay-1'");
+    assertEquals("PAY-1", records.selectByPayNo("pay-1").get(0).payNo);
+    var before = ownedReceiptClaimFacts();
+    var winner = new java.util.concurrent.atomic.AtomicReference<Boolean>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> winner.set(dispatchTransaction(() -> store.claim(dispatch))));
+          assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+        },
+        () -> assertNull(winner.get(), "alien source must not grant receipt claim winner"),
+        () -> assertEquals(before, ownedReceiptClaimFacts()));
+  }
+
+  /** 两个实际CI来源独立或同时别名，首次及四种既有receipt重放均拒绝且四表不动。 */
+  @Test
+  void receiptClaimRejectsAliasSourcesBeforeFirstOrReplay() {
+    var store = ownedReceiptClaimStore();
+    for (String phase : List.of("first", "CLAIMED", "TRYING", "CONFIRMED", "CANCELLED"))
+      for (String sourceKind : List.of("payment", "anchor", "both")) {
+        var dispatch = seedOwnedReceiptClaim();
+        if (!phase.equals("first")) {
+          assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+          fixture.update(
+              "UPDATE pay_tcc_receipt SET state=?,branch_id=?",
+              phase,
+              phase.equals("CLAIMED") ? null : 11L);
+        }
+        if (!sourceKind.equals("anchor"))
+          fixture.update("UPDATE pay_record SET pay_no='PAY-1' WHERE pay_no='pay-1'");
+        if (!sourceKind.equals("payment"))
+          fixture.update("UPDATE pay_tcc_dispatch SET pay_no='PAY-1' WHERE id=1");
+        assertEquals(
+            sourceKind.equals("anchor") ? "pay-1" : "PAY-1",
+            records.selectByPayNo("pay-1").get(0).payNo);
+        assertEquals(
+            sourceKind.equals("payment") ? "pay-1" : "PAY-1",
+            dispatchMirrorMapper.selectByPayNo("pay-1").payNo);
+        var before = ownedReceiptClaimFacts();
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> dispatchTransaction(() -> store.claim(dispatch)),
+                phase + "/" + sourceKind);
+        assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+        assertEquals(before, ownedReceiptClaimFacts());
+      }
+  }
+
+  /** 精确来源只插入一次CLAIMED，合法既有状态重放和原缺来源/模式拒绝保持。 */
+  @Test
+  void receiptClaimExactSourcesKeepWinnerReplayAndOriginalRejections() {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    var sourceBefore = ownedDispatchLookupFacts();
+    assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+    var claimed = fixture.queryForMap("SELECT * FROM pay_tcc_receipt");
+    assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_tcc_receipt", Integer.class));
+    assertEquals("pay-1", claimed.get("pay_no"));
+    assertEquals("t171-xid", claimed.get("xid"));
+    assertEquals("CLAIMED", claimed.get("state"));
+    assertNull(claimed.get("branch_id"));
+    assertEquals("tcc-debit:pay-1", claimed.get("operation_key"));
+    assertEquals("pay-1", claimed.get("ledger_key"));
+    assertEquals(0, new BigDecimal("10.00").compareTo((BigDecimal) claimed.get("amount")));
+    assertEquals(sourceBefore, ownedDispatchLookupFacts());
+    for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      fixture.update(
+          "UPDATE pay_tcc_receipt SET state=?,branch_id=?",
+          state,
+          state.equals("CLAIMED") ? null : 11L);
+      var before = ownedReceiptClaimFacts();
+      assertTrue(!dispatchTransaction(() -> store.claim(dispatch)));
+      assertEquals(before, ownedReceiptClaimFacts());
+    }
+    fixture.update("UPDATE pay_record SET status='SUCCESS' WHERE pay_no='pay-1'");
+    fixture.update("UPDATE pay_tcc_dispatch SET state='CONFIRMED' WHERE id=1");
+    var beforeReplay = ownedReceiptClaimFacts();
+    assertTrue(!dispatchTransaction(() -> store.claim(dispatch)));
+    assertEquals(beforeReplay, ownedReceiptClaimFacts());
+    for (String invalid : List.of("missing-payment", "missing-anchor", "legacy-mode")) {
+      var requested = seedOwnedReceiptClaim();
+      if (invalid.equals("missing-payment")) fixture.update("DELETE FROM pay_record");
+      else if (invalid.equals("missing-anchor")) fixture.update("DELETE FROM pay_tcc_dispatch");
+      else fixture.update("UPDATE pay_record SET debit_mode='LEGACY'");
+      var before = ownedReceiptClaimFacts();
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> dispatchTransaction(() -> store.claim(requested)));
+      assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+      assertEquals(before, ownedReceiptClaimFacts());
+    }
+  }
+
+  /** 原Pay/Dispatch/Receipt实际Mapper共享owned数据源；cancel gate仅为无取消替身。 */
+  private com.cloudmall.pay.service.impl.PayTccReceiptStore ownedReceiptClaimStore() {
+    ownedDispatchPersistence();
+    fixture.execute("DROP TABLE IF EXISTS pay_tcc_receipt");
+    fixture.execute(
+        (String) source.queryForMap("SHOW CREATE TABLE pay_tcc_receipt").get("Create Table"));
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      return new com.cloudmall.pay.service.impl.PayTccReceiptStore(
+          session.getMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class),
+          records,
+          dispatchMirrorMapper,
+          mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned receipt claim factory failed", failure);
+    }
+  }
+
+  /** 只在owned准备精确TCC/PENDING支付和PREPARED锚点，返回源变异前原dispatch视图。 */
+  private com.cloudmall.pay.domain.vo.PayTccDispatchVO seedOwnedReceiptClaim() {
+    seedOwnedDispatch("PREPARED", null);
+    fixture.update("UPDATE pay_record SET debit_mode='TCC' WHERE pay_no='pay-1'");
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    return com.cloudmall.pay.domain.vo.PayTccDispatchVO.from(
+        dispatchMirrorMapper.selectByPayNo("pay-1"));
+  }
+
+  /** 原Pay/Intent/Dispatch/Receipt四表完整facts，冲突和重放不改任意字段。 */
+  private List<List<Map<String, Object>>> ownedReceiptClaimFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(ownedDispatchLookupFacts());
+    facts.add(fixture.queryForList("SELECT * FROM pay_tcc_receipt ORDER BY id"));
+    return facts;
+  }
+
   /** 实际CI查询返回另一原支付号，不能由恢复入口输出该终态。 */
   @Test
   void dispatchAliasCannotBeReturnedByRecovery() {
