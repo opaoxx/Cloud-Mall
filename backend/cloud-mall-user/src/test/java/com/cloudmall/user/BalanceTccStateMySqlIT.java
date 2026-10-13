@@ -931,6 +931,200 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 接收锁读多结果按原业务拒绝，REQUIRES_NEW内实际insert/update全部回滚并恢复外层。 */
+  @Test
+  void receiveStoreDuplicatesRollbackIndependentMetadataWrites() {
+    context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
+    context.registerBean(
+        com.cloudmall.user.service.impl.UserTccReceiveStore.class,
+        () ->
+            new com.cloudmall.user.service.impl.UserTccReceiveStore(
+                context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class)));
+    var store = context.getBean(com.cloudmall.user.service.impl.UserTccReceiveStore.class);
+    Object storeTarget = AopTestUtils.getUltimateTargetObject(store);
+    Object actualMapper = ReflectionTestUtils.getField(storeTarget, "mapper");
+    var writeCounts = new ArrayList<Integer>();
+    var visibleRows = new ArrayList<Integer>();
+    var visibleBranches = new ArrayList<Long>();
+    var innerConnections = new java.util.HashSet<Integer>();
+    var txObservations = new ArrayList<String>();
+    Object instrumented =
+        java.lang.reflect.Proxy.newProxyInstance(
+            actualMapper.getClass().getClassLoader(),
+            new Class<?>[] {com.cloudmall.user.mapper.UserTccReceiveMapper.class},
+            (proxy, mapperMethod, arguments) -> {
+              if (List.of("claim", "bindBranch", "lockByPayNo").contains(mapperMethod.getName())) {
+                txObservations.add(
+                    mapperMethod.getName()
+                        + ":"
+                        + org.springframework.transaction.support.TransactionSynchronizationManager
+                            .isActualTransactionActive()
+                        + ":"
+                        + org.springframework.transaction.support.TransactionSynchronizationManager
+                            .isCurrentTransactionReadOnly());
+                java.sql.Connection observedConnection =
+                    org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                        testDataSource);
+                try {
+                  innerConnections.add(System.identityHashCode(observedConnection));
+                } finally {
+                  org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                      observedConnection, testDataSource);
+                }
+              }
+              Object result;
+              try {
+                result = mapperMethod.invoke(actualMapper, arguments);
+              } catch (java.lang.reflect.InvocationTargetException failure) {
+                throw failure.getCause();
+              }
+              if (List.of("claim", "bindBranch").contains(mapperMethod.getName())) {
+                writeCounts.add((Integer) result);
+                visibleRows.add(
+                    fixture.queryForObject("SELECT COUNT(*) FROM user_tcc_receive", Integer.class));
+                visibleBranches.add(
+                    fixture.queryForObject(
+                        "SELECT branch_id FROM user_tcc_receive WHERE id=-128", Long.class));
+              }
+              return result;
+            });
+    ReflectionTestUtils.setField(storeTarget, "mapper", instrumented);
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String action : List.of("replay", "fresh", "bind")) {
+        for (boolean alias : List.of(false, true)) {
+          checks.add(
+              () -> {
+                var request = new com.cloudmall.user.domain.dto.UserTccTryDTO();
+                request.payNo = "store-multi-" + action + "-" + alias;
+                request.orderNo = "order-" + request.payNo;
+                request.operationKey = "tcc-debit:" + request.payNo;
+                request.ledgerKey = request.payNo;
+                request.xid = "xid-" + request.payNo;
+                request.amount = new BigDecimal("10.00");
+                var indexes =
+                    fixture.queryForList(
+                        "SHOW INDEX FROM user_tcc_receive WHERE Column_name='pay_no' AND"
+                            + " Non_unique=0");
+                assertEquals(1, indexes.size());
+                String uniqueIndex = (String) indexes.get(0).get("Key_name");
+                assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+                fixture.execute("ALTER TABLE user_tcc_receive DROP INDEX `" + uniqueIndex + "`");
+                try {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-128,?,?,NULL,7,?,10,?,?,'CLAIMED',NOW(3),NOW(3))",
+                      request.payNo,
+                      "fresh".equals(action) ? "historical-store-xid-1" : request.xid,
+                      request.orderNo,
+                      "fresh".equals(action)
+                          ? "historical-store-operation-1"
+                          : request.operationKey,
+                      "fresh".equals(action) ? "historical-store-ledger-1" : request.ledgerKey);
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-129,?,'historical-store-xid-2',NULL,8,'other-store-order',1,'historical-store-operation-2','historical-store-ledger-2','CLAIMED',NOW(3),NOW(3))",
+                      alias ? request.payNo.toUpperCase(java.util.Locale.ROOT) : request.payNo);
+                  var before = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                  before.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                  before.add(
+                      fixture.queryForList(
+                          "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                  writeCounts.clear();
+                  visibleRows.clear();
+                  visibleBranches.clear();
+                  innerConnections.clear();
+                  txObservations.clear();
+                  var outerConnections = new java.util.HashSet<Integer>();
+                  var outerTemplate =
+                      new org.springframework.transaction.support.TransactionTemplate(
+                          context.getBean(PlatformTransactionManager.class));
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          outerTemplate.executeWithoutResult(
+                              transactionStatus -> {
+                                java.sql.Connection outerConnection =
+                                    org.springframework.jdbc.datasource.DataSourceUtils
+                                        .getConnection(testDataSource);
+                                try {
+                                  outerConnections.add(System.identityHashCode(outerConnection));
+                                } finally {
+                                  org.springframework.jdbc.datasource.DataSourceUtils
+                                      .releaseConnection(outerConnection, testDataSource);
+                                }
+                                var failure =
+                                    assertThrows(
+                                        BizException.class,
+                                        () -> {
+                                          if ("bind".equals(action))
+                                            store.bindBranch(request.payNo, request.xid, 11L);
+                                          else store.claim(7L, request);
+                                        });
+                                assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                                assertEquals("TCC 接收载荷不一致", failure.getMessage());
+                                assertEquals(409, failure.getHttpStatus());
+                                java.sql.Connection restored =
+                                    org.springframework.jdbc.datasource.DataSourceUtils
+                                        .getConnection(testDataSource);
+                                try {
+                                  assertEquals(
+                                      outerConnections.iterator().next(),
+                                      System.identityHashCode(restored));
+                                } finally {
+                                  org.springframework.jdbc.datasource.DataSourceUtils
+                                      .releaseConnection(restored, testDataSource);
+                                }
+                              }),
+                      () -> {
+                        assertEquals(List.of("replay".equals(action) ? 0 : 1), writeCounts);
+                        assertEquals(List.of("fresh".equals(action) ? 3 : 2), visibleRows);
+                        assertEquals(
+                            java.util.Collections.singletonList("bind".equals(action) ? 11L : null),
+                            visibleBranches);
+                        assertEquals(
+                            List.of(
+                                ("bind".equals(action) ? "bindBranch" : "claim") + ":true:false",
+                                "lockByPayNo:true:false"),
+                            txObservations);
+                        assertEquals(1, innerConnections.size());
+                        assertEquals(1, outerConnections.size());
+                        assertTrue(
+                            java.util.Collections.disjoint(innerConnections, outerConnections));
+                      },
+                      () -> {
+                        var after = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                        after.add(
+                            fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                        after.add(
+                            fixture.queryForList(
+                                "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                        assertEquals(before, after);
+                      });
+                } finally {
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id IN (-128,-129)");
+                  fixture.execute(
+                      "ALTER TABLE user_tcc_receive ADD UNIQUE INDEX `"
+                          + uniqueIndex
+                          + "` (pay_no)");
+                  assertEquals(
+                      1,
+                      fixture
+                          .queryForList(
+                              "SHOW INDEX FROM user_tcc_receive WHERE Column_name='pay_no' AND"
+                                  + " Non_unique=0")
+                          .size());
+                }
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      ReflectionTestUtils.setField(storeTarget, "mapper", actualMapper);
+    }
+  }
+
   /** 无归属UNKNOWN不能忽略同pay其它key账本，未绑定/已知接收分支都只读拒绝。 */
   @Test
   void unknownStateRejectsOtherPaymentLedgerWithoutWrites() {

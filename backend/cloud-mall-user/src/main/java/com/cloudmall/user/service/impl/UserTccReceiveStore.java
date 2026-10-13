@@ -8,6 +8,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Objects;
 import java.util.UUID;
+import org.apache.ibatis.exceptions.TooManyResultsException;
+import org.mybatis.spring.MyBatisSystemException;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,7 +40,7 @@ public class UserTccReceiveStore {
     receipt.updatedAt = receipt.createdAt;
     int inserted = mapper.claim(receipt);
     // 2. 唯一键冲突不得换用户、金额、事务或操作键。
-    UserTccReceivePO stored = mapper.lockByPayNo(request.payNo);
+    UserTccReceivePO stored = readLockedReceipt(request.payNo);
     if (stored == null
         || stored.amount == null
         || !Objects.equals(stored.userId, userId)
@@ -60,12 +62,23 @@ public class UserTccReceiveStore {
     if (branchId <= 0) throw conflict();
     // 2. 原候选更新与锁读留在同一个独立事务中。
     mapper.bindBranch(payNo, xid, branchId, LocalDateTime.now(ZoneId.of("Asia/Shanghai")));
-    UserTccReceivePO stored = mapper.lockByPayNo(payNo);
+    UserTccReceivePO stored = readLockedReceipt(payNo);
     // 3. 原支付/事务/分支不匹配时，整个元数据事务回滚。
     if (stored == null
         || !Objects.equals(stored.payNo, payNo)
         || !Objects.equals(stored.xid, xid)
         || !Objects.equals(stored.branchId, branchId)) throw conflict();
+  }
+
+  /** 保持原单次FOR UPDATE；仅精确多结果转载荷冲突，使当前独立事务写入回滚。 */
+  private UserTccReceivePO readLockedReceipt(String payNo) {
+    try {
+      return mapper.lockByPayNo(payNo);
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) throw conflict();
+      throw failure;
+    }
   }
 
   /** 冲突不改变原接收事实。 */

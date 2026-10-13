@@ -97,6 +97,89 @@ class UserTccReceiveStoreTest {
     verify(mapper).bindBranch(eq("pay1"), eq("private-xid"), eq(11L), any());
   }
 
+  /** 认领及绑定写后的精确多结果固定409，不能返回派发权或认定元数据成功。 */
+  @Test
+  void lockedReceiptMultipleResultsKeepBusinessConflict() {
+    for (String action : new String[] {"fresh", "replay", "bind"}) {
+      for (boolean wrapped : new boolean[] {false, true}) {
+        setup();
+        when(mapper.claim(any())).thenReturn("fresh".equals(action) ? 1 : 0);
+        var duplicate =
+            new org.apache.ibatis.exceptions.TooManyResultsException("receipt-lock-duplicate");
+        RuntimeException failure =
+            wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+        doThrow(failure).when(mapper).lockByPayNo("pay1");
+        var rejected = assertThrows(BizException.class, () -> invokeReceiptStoreAction(action));
+        assertEquals("IDEMPOTENCY_CONFLICT", rejected.getCode());
+        assertEquals("TCC 接收载荷不一致", rejected.getMessage());
+        assertEquals(409, rejected.getHttpStatus());
+        var ordered = inOrder(mapper);
+        if ("bind".equals(action))
+          ordered.verify(mapper).bindBranch(eq("pay1"), eq("private-xid"), eq(11L), any());
+        else ordered.verify(mapper).claim(any());
+        ordered.verify(mapper).lockByPayNo("pay1");
+        ordered.verifyNoMoreInteractions();
+      }
+    }
+  }
+
+  /** 其它异常原对象，前置branch guard与合法独立事务/派发权语义保持。 */
+  @Test
+  void receiptLockClassificationKeepsOtherFaultsAndBranchGuards() {
+    for (String action : new String[] {"fresh", "replay", "bind"}) {
+      for (String shape :
+          new String[] {
+            "resource",
+            "sql-wrapper",
+            "nested-too-many",
+            "other-wrapper",
+            "runtime-cause",
+            "message-only"
+          }) {
+        setup();
+        when(mapper.claim(any())).thenReturn("fresh".equals(action) ? 1 : 0);
+        RuntimeException failure =
+            switch (shape) {
+              case "resource" ->
+                  new org.springframework.dao.DataAccessResourceFailureException(
+                      "receipt-lock-jdbc-fault");
+              case "sql-wrapper" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new java.sql.SQLException("receipt-lock-sql-fault"));
+              case "nested-too-many" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new org.apache.ibatis.exceptions.PersistenceException(
+                          "outer",
+                          new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+              case "other-wrapper" ->
+                  new org.apache.ibatis.exceptions.PersistenceException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              case "runtime-cause" ->
+                  new IllegalArgumentException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              default -> new IllegalArgumentException("TooManyResultsException is only text");
+            };
+        doThrow(failure).when(mapper).lockByPayNo("pay1");
+        assertSame(
+            failure, assertThrows(RuntimeException.class, () -> invokeReceiptStoreAction(action)));
+        verify(mapper).lockByPayNo("pay1");
+      }
+    }
+    setup();
+    doThrow(new org.apache.ibatis.exceptions.TooManyResultsException("lock-must-not-run"))
+        .when(mapper)
+        .lockByPayNo("pay1");
+    store.bindBranch("pay1", "private-xid", null);
+    assertConflict(() -> store.bindBranch("pay1", "private-xid", 0L));
+    verifyNoInteractions(mapper);
+  }
+
+  /** 用原公开事务方法执行三种动作，回滚由owned真实SQL证明。 */
+  private void invokeReceiptStoreAction(String action) {
+    if ("bind".equals(action)) store.bindBranch("pay1", "private-xid", 11L);
+    else store.claim(7L, request());
+  }
+
   /** 固定原409不授权第二次Try或错误分支确认。 */
   private static void assertConflict(Runnable action) {
     BizException failure = assertThrows(BizException.class, action::run);
