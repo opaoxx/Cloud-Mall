@@ -380,8 +380,11 @@ public class PayConsistencyService {
       throw new IllegalStateException("原扣款账本未证明支付成功");
   }
 
-  /** 原扣款已退款时恢复支付记录终态，不再次增加余额。 */
+  /** 原扣款已退款时复核当前取消/库存证据，再恢复支付终态，不再次增加余额。 */
   private String finishRefunded(PayDebitIntentPO intent, String claimToken) {
+    OrderClient.OrderView current = readOrderState(intent);
+    if (!"CANCELLED".equals(current.status()) || !stockActionSucceeded(current))
+      throw new IllegalStateException("订单取消与库存回滚证据未证明退款完成");
     requireOwnedLegacyWrite(
         payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
     commitOwnedLegacyTerminal(intent, claimToken, "REFUNDED");

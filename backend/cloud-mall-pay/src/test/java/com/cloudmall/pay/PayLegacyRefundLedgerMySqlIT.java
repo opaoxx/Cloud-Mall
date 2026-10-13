@@ -1014,6 +1014,234 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
   }
 
+  /** 三类退款入口当前订单正确取消时保持原REFUNDED，Order GET在终态事务外。 */
+  @Test
+  void latestValidOrderKeepsHealthyRefundedPathsWithRealPay() {
+    for (String path : java.util.List.of("marker", "post-refund", "after-paid")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(
+          "marker".equals(path)
+              ? "refund-marker"
+              : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+          "order-1",
+          user,
+          orders);
+      var service = newService(user, orders);
+      var reads = new java.util.concurrent.atomic.AtomicInteger();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                int readNumber = reads.incrementAndGet();
+                return ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1",
+                        "after-paid".equals(path) && readNumber == 1
+                            ? "PENDING_PAYMENT"
+                            : "CANCELLED",
+                        new BigDecimal("10.000"),
+                        7L,
+                        "SUCCEEDED"));
+              })
+          .when(orders)
+          .paymentState("order-1", 7L);
+      assertEquals("REFUNDED", service.process("pay-1"));
+      assertEquals("after-paid".equals(path) ? 3 : 2, reads.get());
+      assertEquals("REFUNDED", intentStatus());
+      assertEquals("REFUNDED", paymentStatus());
+      assertEquals(1, intentAttempts());
+      assertNull(intentLeaseOwner());
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, org.mockito.Mockito.times("marker".equals(path) ? 0 : 1))
+          .refund(any(), any(), any());
+      verify(orders, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+          .paid(any(), any());
+      verify(user, org.mockito.Mockito.times(2)).operation(eq(7L), anyString(), eq(7L));
+    }
+  }
+
+  /** 退款已发或marker已证明后补最新取消证据，同pay恢复不再发退款。 */
+  @Test
+  void latestOrderProofCanResumeAfterEvidenceRepairWithRealPay() {
+    for (String path : java.util.List.of("marker", "post-refund", "after-paid")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(
+          "marker".equals(path)
+              ? "refund-marker"
+              : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+          "order-1",
+          user,
+          orders);
+      var service = newService(user, orders);
+      int expectedReads = "after-paid".equals(path) ? 3 : 2;
+      var reads = new java.util.concurrent.atomic.AtomicInteger();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                int readNumber = reads.incrementAndGet();
+                String status =
+                    readNumber < expectedReads
+                        ? "after-paid".equals(path) && readNumber == 1
+                            ? "PENDING_PAYMENT"
+                            : "CANCELLED"
+                        : "PAID";
+                return ApiResponse.ok(
+                    new OrderClient.OrderView("order-1", status, BigDecimal.TEN, 7L, "SUCCEEDED"));
+              })
+          .when(orders)
+          .paymentState("order-1", 7L);
+      String expectedRetry = "marker".equals(path) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+      assertEquals(expectedRetry, service.process("pay-1"));
+      assertEquals(expectedReads, reads.get());
+      assertEquals(expectedRetry, intentStatus());
+      assertEquals(expectedRetry, paymentStatus());
+      assertEquals(1, intentAttempts());
+      assertNull(intentLeaseOwner());
+      fixture.update(
+          "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 MINUTE WHERE"
+              + " pay_no='pay-1'");
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView(
+                      "pay-1", "DEBIT", "APPLIED", "10.000", "refund:pay-1")))
+          .when(user)
+          .operation(7L, "pay-1", 7L);
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", "CANCELLED", new BigDecimal("10.000"), 7L, "SUCCEEDED")))
+          .when(orders)
+          .paymentState("order-1", 7L);
+      assertEquals("REFUNDED", service.process("pay-1"));
+      assertEquals("REFUNDED", intentStatus());
+      assertEquals("REFUNDED", paymentStatus());
+      assertEquals(2, intentAttempts());
+      assertNull(intentLeaseOwner());
+      assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+      assertEquals("pay-1", fixture.queryForObject("SELECT pay_no FROM pay_record", String.class));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, org.mockito.Mockito.times("marker".equals(path) ? 0 : 1))
+          .refund(any(), any(), any());
+      verify(orders, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+          .paid(any(), any());
+    }
+  }
+
+  /** 退款终态前需当前取消/库存证据，不能沿用User退款操作前的旧Order。 */
+  @Test
+  void latestOrderProofIsRequiredBeforeRefundedWithRealPay() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : java.util.List.of("marker", "post-refund", "after-paid")) {
+      for (String variant :
+          java.util.List.of(
+              "pending",
+              "paid",
+              "completed",
+              "stock-pending",
+              "stock-unknown",
+              "stock-null",
+              "order-null",
+              "order-other",
+              "order-alias",
+              "user-other",
+              "amount-null",
+              "amount-other",
+              "null-body",
+              "fault",
+              "bad-envelope")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(
+                  "marker".equals(path)
+                      ? "refund-marker"
+                      : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+                  "order-1",
+                  user,
+                  orders);
+              var reads = new java.util.concurrent.atomic.AtomicInteger();
+              int expectedReads = "after-paid".equals(path) ? 3 : 2;
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        int readNumber = reads.incrementAndGet();
+                        if (readNumber < expectedReads)
+                          return ApiResponse.ok(
+                              new OrderClient.OrderView(
+                                  "order-1",
+                                  "after-paid".equals(path) && readNumber == 1
+                                      ? "PENDING_PAYMENT"
+                                      : "CANCELLED",
+                                  BigDecimal.TEN,
+                                  7L,
+                                  "SUCCEEDED"));
+                        if ("fault".equals(variant))
+                          throw new IllegalStateException("controlled-order-recheck-unavailable");
+                        if ("null-body".equals(variant)) return ApiResponse.ok(null);
+                        if ("bad-envelope".equals(variant))
+                          return ApiResponse.error("CONTROLLED_BAD_RESPONSE", "controlled");
+                        return ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-null".equals(variant)
+                                    ? null
+                                    : "order-other".equals(variant)
+                                        ? "order-other"
+                                        : "order-alias".equals(variant) ? "ORDER-1" : "order-1",
+                                "pending".equals(variant)
+                                    ? "PENDING_PAYMENT"
+                                    : "paid".equals(variant)
+                                        ? "PAID"
+                                        : "completed".equals(variant) ? "COMPLETED" : "CANCELLED",
+                                "amount-null".equals(variant)
+                                    ? null
+                                    : "amount-other".equals(variant)
+                                        ? new BigDecimal("11.00")
+                                        : new BigDecimal("10.000"),
+                                "user-other".equals(variant) ? 8L : 7L,
+                                "stock-pending".equals(variant)
+                                    ? "PENDING"
+                                    : "stock-unknown".equals(variant)
+                                        ? "UNKNOWN"
+                                        : "stock-null".equals(variant) ? null : "SUCCEEDED"));
+                      })
+                  .when(orders)
+                  .paymentState("order-1", 7L);
+              String expected = "marker".equals(path) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+              String result = newService(user, orders).process("pay-1");
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals(expected, result),
+                  () -> assertEquals(expectedReads, reads.get()),
+                  () ->
+                      verify(user, org.mockito.Mockito.times("marker".equals(path) ? 0 : 1))
+                          .refund(any(), any(), any()),
+                  () ->
+                      verify(orders, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+                          .paid(any(), any()),
+                  () -> verify(user, never()).debit(any(), any(), any()));
+              assertEquals(expected, intentStatus());
+              assertEquals(expected, paymentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertNotNull(intentNextRetry());
+              assertTrue(retryErrorPresent());
+              assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 三类成功路径须观察两次原账本，最新正确APPLIED且无退款标记才成功。 */
   @Test
   void latestValidDebitKeepsHealthySuccessPathsWithRealPay() {
