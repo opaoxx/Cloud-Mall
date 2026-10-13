@@ -83,6 +83,7 @@ class PayConsistencyServiceTest {
     when(payRecordMapper.selectByPayNo("pay-1")).thenReturn(java.util.List.of(payment));
     when(payRecordMapper.lockOwnedLegacyTerminalSource(any(), anyString(), any()))
         .thenReturn(payment);
+    when(payRecordMapper.lockOwnedLegacyStageSource(any(), anyString(), any())).thenReturn(payment);
     when(userClient.operation(7L, "pay-1", 7L)).thenReturn(ApiResponse.ok(appliedDebit()));
     when(userClient.operation(7L, "refund:pay-1", 7L))
         .thenReturn(ApiResponse.ok(refundFact("refund:pay-1", "10.00")));
@@ -3048,6 +3049,60 @@ class PayConsistencyServiceTest {
       } finally {
         io.seata.core.context.RootContext.unbind();
       }
+    }
+  }
+
+  /** 原阶段载荷或资格缺失时两写均不尝试，短事务回滚且无RPC。 */
+  @Test
+  void missingStageSourceRollsBackWithoutStageWrites() {
+    for (String stage : java.util.List.of("DEBITED", "REFUND_PENDING")) {
+      setUp();
+      when(payRecordMapper.lockOwnedLegacyStageSource(any(), anyString(), any())).thenReturn(null);
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              IllegalStateException.class,
+              () ->
+                  org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                      consistencyService,
+                      "commitOwnedLegacyStage",
+                      intent(),
+                      "owned-token",
+                      stage));
+      assertEquals("支付阶段原载荷或领取资格已变化", failure.getMessage());
+      verify(payRecordMapper, never()).markOwnedLegacyOrderUnknown(any(), any(), any());
+      verify(payRecordMapper, never()).markOwnedLegacyRefundPending(any(), any(), any());
+      verify(intentMapper, never()).updateOwnedLegacyStatus(any(), any(), any(), any());
+      verify(transactionManager).rollback(any());
+      verify(transactionManager, never()).commit(any());
+      org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+    }
+  }
+
+  /** 两个阶段都先按原快照和token核source，再按原顺序两写并独立提交。 */
+  @Test
+  void stageSourceLockPrecedesBothWritesAndCommit() {
+    for (String stage : java.util.List.of("DEBITED", "REFUND_PENDING")) {
+      setUp();
+      var expected = intent();
+      org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+          consistencyService, "commitOwnedLegacyStage", expected, "owned-token", stage);
+      var ordered = org.mockito.Mockito.inOrder(payRecordMapper, intentMapper, transactionManager);
+      ordered
+          .verify(payRecordMapper)
+          .lockOwnedLegacyStageSource(eq(expected), eq("owned-token"), any());
+      if ("DEBITED".equals(stage))
+        ordered
+            .verify(payRecordMapper)
+            .markOwnedLegacyOrderUnknown(eq("pay-1"), eq("owned-token"), any());
+      else
+        ordered
+            .verify(payRecordMapper)
+            .markOwnedLegacyRefundPending(eq("pay-1"), eq("owned-token"), any());
+      ordered
+          .verify(intentMapper)
+          .updateOwnedLegacyStatus(eq("pay-1"), eq("owned-token"), eq(stage), any());
+      ordered.verify(transactionManager).commit(any());
+      org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
     }
   }
 

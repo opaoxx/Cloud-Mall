@@ -480,7 +480,10 @@ public class PayConsistencyService {
     if (RootContext.getXID() != null) throw new IllegalStateException("Legacy阶段不得继承全局事务");
     stageTransactions.executeWithoutResult(
         transactionStatus -> {
-          // 1. 按原方向写支付记录，每次仍校验当前owner和未过期租约。
+          // 1. 先核并锁定两表原载荷，防止旧远端证据推进已变化的本地支付。
+          if (payRecordMapper.lockOwnedLegacyStageSource(intent, claimToken, now()) == null)
+            throw new IllegalStateException("支付阶段原载荷或领取资格已变化");
+          // 2. 按原方向写支付记录，每次仍校验当前owner和未过期租约。
           int changed =
               switch (stage) {
                 case "DEBITED" ->
@@ -490,7 +493,7 @@ public class PayConsistencyService {
                 default -> throw new IllegalArgumentException("未知Legacy支付阶段");
               };
           requireOwnedLegacyWrite(changed);
-          // 2. 同连接推进意图，任一写未满足条件时整体回滚，异常交回原重试链。
+          // 3. 同连接推进意图，任一写未满足条件时整体回滚，异常交回原重试链。
           requireOwnedLegacyWrite(
               payDebitIntentMapper.updateOwnedLegacyStatus(intent.payNo, claimToken, stage, now()));
         });

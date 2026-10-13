@@ -1655,6 +1655,331 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两阶段的原快照不得结算任一边或双边已变化的本地身份和金额。 */
+  @Test
+  void stageTransactionRejectsChangedOriginalTupleWithRealPay() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      for (String side : List.of("payment", "intent", "both")) {
+        for (String mutation : List.of("user", "order", "order-alias", "amount")) {
+          assertions.add(
+              () -> {
+                seedIntentAndPayment("PENDING", "INIT");
+                var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+                String token = "t144-owned-token";
+                assertEquals(
+                    1, intents.claim("pay-1", token, currentTime.plusSeconds(30), currentTime));
+                var expected = intents.findByPayNo("pay-1");
+                changeStageSourceTuple(side, mutation);
+                var before = payFacts();
+                var service = newService(mock(UserClient.class), mock(OrderClient.class));
+                var failure =
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                                service, "commitOwnedLegacyStage", expected, token, stage));
+                assertEquals("支付阶段原载荷或领取资格已变化", failure.getMessage());
+                assertEquals(before, payFacts());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 仅修改本类owned库两张表的固定字段，用于模拟route观察后的外部变更。 */
+  private void changeStageSourceTuple(String side, String mutation) {
+    String assignment =
+        switch (mutation) {
+          case "user" -> "user_id=8";
+          case "order" -> "order_no='order-other'";
+          case "order-alias" -> "order_no='ORDER-1'";
+          case "amount" -> "amount=11";
+          default -> throw new AssertionError(mutation);
+        };
+    if (!"intent".equals(side))
+      fixture.update("UPDATE pay_record SET " + assignment + " WHERE pay_no='pay-1'");
+    if (!"payment".equals(side))
+      fixture.update("UPDATE pay_debit_intent SET " + assignment + " WHERE pay_no='pay-1'");
+  }
+
+  /** 真正独立连接证明两表行锁保持到提交或回滚，失败时支付写也完整回滚。 */
+  @Test
+  void stageSourceLocksBothRowsUntilCommitOrRollback() throws Exception {
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      for (boolean rollback : List.of(false, true)) {
+        seedIntentAndPayment("PENDING", "INIT");
+        var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        String token = "t144-lock-token";
+        assertEquals(1, intents.claim("pay-1", token, currentTime.plusSeconds(30), currentTime));
+        var expected = intents.findByPayNo("pay-1");
+        var before = payFacts();
+        var startWriters = new java.util.concurrent.CountDownLatch(1);
+        var writersReady = new java.util.concurrent.CountDownLatch(2);
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var writers = new ArrayList<java.util.concurrent.Future<Integer>>();
+        PayRecordMapper actualRecords = records;
+        PayDebitIntentMapper actualIntents = intents;
+        UserClient user = mock(UserClient.class);
+        OrderClient orders = mock(OrderClient.class);
+        try {
+          for (String table : List.of("pay_record", "pay_debit_intent")) {
+            writers.add(
+                workers.submit(
+                    () -> {
+                      try (var connection = ownedPool.getConnection();
+                          var statement = connection.createStatement()) {
+                        statement.execute("SET SESSION innodb_lock_wait_timeout=10");
+                        writersReady.countDown();
+                        assertTrue(startWriters.await(10, java.util.concurrent.TimeUnit.SECONDS));
+                        return statement.executeUpdate(
+                            "UPDATE " + table + " SET amount=amount WHERE pay_no='pay-1'");
+                      }
+                    }));
+          }
+          records =
+              (PayRecordMapper)
+                  java.lang.reflect.Proxy.newProxyInstance(
+                      actualRecords.getClass().getClassLoader(),
+                      new Class<?>[] {PayRecordMapper.class},
+                      (proxy, method, arguments) -> {
+                        Object result;
+                        try {
+                          result = method.invoke(actualRecords, arguments);
+                        } catch (java.lang.reflect.InvocationTargetException failure) {
+                          throw failure.getCause();
+                        }
+                        if ("lockOwnedLegacyStageSource".equals(method.getName())) {
+                          assertNotNull(result);
+                          assertTrue(writersReady.await(10, java.util.concurrent.TimeUnit.SECONDS));
+                          startWriters.countDown();
+                          // 只读MySQL锁等待视图，按本类唯一owned库核两张实际阻塞表。
+                          var deadline =
+                              System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+                          List<String> waitingTables;
+                          do {
+                            waitingTables =
+                                source.queryForList(
+                                    "SELECT DISTINCT locks.OBJECT_NAME FROM"
+                                        + " performance_schema.data_lock_waits waits JOIN"
+                                        + " performance_schema.data_locks locks ON"
+                                        + " locks.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID"
+                                        + " AND locks.ENGINE=waits.ENGINE WHERE"
+                                        + " locks.OBJECT_SCHEMA=? ORDER BY locks.OBJECT_NAME",
+                                    String.class,
+                                    database);
+                            if (waitingTables.size() == 2) break;
+                            Thread.sleep(20);
+                          } while (System.nanoTime() < deadline);
+                          assertEquals(List.of("pay_debit_intent", "pay_record"), waitingTables);
+                          for (var writer : writers)
+                            org.junit.jupiter.api.Assertions.assertFalse(writer.isDone());
+                        }
+                        return result;
+                      });
+          if (rollback) {
+            var failingIntents = org.mockito.Mockito.spy(actualIntents);
+            org.mockito.Mockito.doAnswer(
+                    invocation -> {
+                      // 第二写失败时第一写已在同事务中发生，必须由服务整体回滚。
+                      assertEquals(
+                          "DEBITED".equals(stage) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING",
+                          paymentStatus());
+                      return 0;
+                    })
+                .when(failingIntents)
+                .updateOwnedLegacyStatus(eq("pay-1"), eq(token), eq(stage), any());
+            intents = failingIntents;
+          }
+          var service = newService(user, orders);
+          if (rollback) {
+            var failure =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalStateException.class,
+                    () ->
+                        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                            service, "commitOwnedLegacyStage", expected, token, stage));
+            assertEquals("支付终态写入未满足当前租约", failure.getMessage());
+          } else {
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                service, "commitOwnedLegacyStage", expected, token, stage);
+          }
+          for (var writer : writers)
+            assertEquals(1, writer.get(10, java.util.concurrent.TimeUnit.SECONDS));
+          if (rollback) assertEquals(before, payFacts());
+          else {
+            assertEquals(
+                "DEBITED".equals(stage) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING", paymentStatus());
+            assertEquals(stage, intentStatus());
+            assertEquals(7L, records.selectByPayNo("pay-1").get(0).userId);
+            assertEquals("order-1", records.selectByPayNo("pay-1").get(0).orderNo);
+            assertEquals(0, BigDecimal.TEN.compareTo(records.selectByPayNo("pay-1").get(0).amount));
+          }
+          org.mockito.Mockito.verifyNoInteractions(user, orders);
+        } finally {
+          records = actualRecords;
+          intents = actualIntents;
+          startWriters.countDown();
+          workers.shutdown();
+          assertTrue(workers.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS));
+        }
+      }
+    }
+  }
+
+  /** 实际Order查询期间tuple改变后，拒绝下一阶段/写RPC，原retry清理仍保留。 */
+  @Test
+  void changedStageSourceStopsNextWritingRpcWithRealPay() {
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      for (String mutation : List.of("user", "order", "order-alias", "amount")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        UserClient user = mock(UserClient.class);
+        OrderClient orders = mock(OrderClient.class);
+        configureRemoteOrderIdentityPath(
+            "DEBITED".equals(stage) ? "paid" : "applied-cancel", "order-1", user, orders);
+        var afterChange =
+            new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+        org.mockito.Mockito.doAnswer(
+                invocation -> {
+                  org.junit.jupiter.api.Assertions.assertFalse(
+                      org.springframework.transaction.support.TransactionSynchronizationManager
+                          .isActualTransactionActive());
+                  changeStageSourceTuple("both", mutation);
+                  afterChange.set(payFacts());
+                  return ApiResponse.ok(
+                      new OrderClient.OrderView(
+                          "order-1",
+                          "DEBITED".equals(stage) ? "PENDING_PAYMENT" : "CANCELLED",
+                          BigDecimal.TEN,
+                          7L,
+                          "SUCCEEDED"));
+                })
+            .when(orders)
+            .paymentState("order-1", 7L);
+        assertEquals("ORDER_SYNC_UNKNOWN", newService(user, orders).process("pay-1"));
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, never()).refund(any(), any(), any());
+        verify(orders, never()).paid(any(), any());
+        assertEquals("ORDER_SYNC_UNKNOWN", paymentStatus());
+        assertEquals("ORDER_SYNC_UNKNOWN", intentStatus());
+        assertEquals(1, intentAttempts());
+        assertNull(intentLeaseOwner());
+        assertNotNull(intentNextRetry());
+        assertTrue(
+            fixture
+                .queryForObject(
+                    "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'", String.class)
+                .contains("支付阶段原载荷或领取资格已变化"));
+        assertEquals(immutableRecoveryFacts(afterChange.get()), immutableRecoveryFacts(payFacts()));
+      }
+    }
+  }
+
+  /** 允许数值相同尾零、最小/最大原金额，健康source仍按原两写提交。 */
+  @Test
+  void healthyStageSourceKeepsNumericMoneyAndIdentity() {
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      for (String amount : List.of("10.000", "0.010", "9999999999999999.990")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        var expectedAmount = new BigDecimal(amount);
+        fixture.update("UPDATE pay_record SET amount=? WHERE pay_no='pay-1'", expectedAmount);
+        fixture.update("UPDATE pay_debit_intent SET amount=? WHERE pay_no='pay-1'", expectedAmount);
+        var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        String token = "t144-money-token";
+        assertEquals(1, intents.claim("pay-1", token, currentTime.plusSeconds(30), currentTime));
+        var expected = intents.findByPayNo("pay-1");
+        expected.amount = expectedAmount;
+        var before = payFacts();
+        var service = newService(mock(UserClient.class), mock(OrderClient.class));
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+            service, "commitOwnedLegacyStage", expected, token, stage);
+        assertEquals(
+            "DEBITED".equals(stage) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING", paymentStatus());
+        assertEquals(stage, intentStatus());
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+      }
+    }
+  }
+
+  /** 新source查询保原缺行/模式/status/精确owner/期限资格，不把零行改成无条件写。 */
+  @Test
+  void stageSourceRejectsLostEligibilityWithRealPay() {
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      for (String scenario :
+          List.of(
+              "payment-missing",
+              "intent-missing",
+              "owner-other",
+              "owner-alias",
+              "owner-null",
+              "lease-expired",
+              "lease-null",
+              "payment-tcc",
+              "intent-tcc",
+              "payment-mode-alias",
+              "intent-mode-alias",
+              "payment-terminal",
+              "intent-terminal",
+              "payment-pay-alias",
+              "intent-pay-alias")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        String token = "t144-eligible-token";
+        assertEquals(1, intents.claim("pay-1", token, currentTime.plusSeconds(30), currentTime));
+        var expected = intents.findByPayNo("pay-1");
+        switch (scenario) {
+          case "payment-missing" -> fixture.update("DELETE FROM pay_record WHERE pay_no='pay-1'");
+          case "intent-missing" ->
+              fixture.update("DELETE FROM pay_debit_intent WHERE pay_no='pay-1'");
+          case "owner-other" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET lease_owner='other-owner' WHERE pay_no='pay-1'");
+          case "owner-alias" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET lease_owner='T144-ELIGIBLE-TOKEN' WHERE"
+                      + " pay_no='pay-1'");
+          case "owner-null" ->
+              fixture.update("UPDATE pay_debit_intent SET lease_owner=NULL WHERE pay_no='pay-1'");
+          case "lease-expired" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'",
+                  currentTime.minusSeconds(1));
+          case "lease-null" ->
+              fixture.update("UPDATE pay_debit_intent SET lease_until=NULL WHERE pay_no='pay-1'");
+          case "payment-tcc" ->
+              fixture.update("UPDATE pay_record SET debit_mode='TCC' WHERE pay_no='pay-1'");
+          case "intent-tcc" ->
+              fixture.update("UPDATE pay_debit_intent SET debit_mode='TCC' WHERE pay_no='pay-1'");
+          case "payment-mode-alias" ->
+              fixture.update("UPDATE pay_record SET debit_mode='legacy' WHERE pay_no='pay-1'");
+          case "intent-mode-alias" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET debit_mode='legacy' WHERE pay_no='pay-1'");
+          case "payment-terminal" ->
+              fixture.update("UPDATE pay_record SET status='SUCCESS' WHERE pay_no='pay-1'");
+          case "intent-terminal" ->
+              fixture.update("UPDATE pay_debit_intent SET status='SUCCESS' WHERE pay_no='pay-1'");
+          case "payment-pay-alias" ->
+              fixture.update("UPDATE pay_record SET pay_no='PAY-1' WHERE pay_no='pay-1'");
+          case "intent-pay-alias" ->
+              fixture.update("UPDATE pay_debit_intent SET pay_no='PAY-1' WHERE pay_no='pay-1'");
+          default -> throw new AssertionError(scenario);
+        }
+        var before = payFacts();
+        var service = newService(mock(UserClient.class), mock(OrderClient.class));
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class,
+                () ->
+                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                        service, "commitOwnedLegacyStage", expected, token, stage));
+        assertEquals("支付阶段原载荷或领取资格已变化", failure.getMessage());
+        assertEquals(before, payFacts(), stage + ":" + scenario);
+      }
+    }
+  }
+
   /** 健康缺失和拒绝来源经两次User读取后仍可FAILED，读取在实际事务外。 */
   @Test
   void latestStableDebitKeepsHealthyFailurePathsWithRealPay() {

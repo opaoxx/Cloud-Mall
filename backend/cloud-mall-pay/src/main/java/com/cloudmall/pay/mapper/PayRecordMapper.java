@@ -108,6 +108,33 @@ public interface PayRecordMapper extends BaseMapper<PayRecordPO> {
       @Param("claimToken") String claimToken,
       @Param("now") java.time.LocalDateTime now);
 
+  /**
+   * 在中间阶段本地事务内核对原载荷与领取资格，锁定支付和意图两行至事务结束。
+   *
+   * @param expected 已核对远端事实所对应的原意图快照
+   * @param claimToken 当前领取令牌
+   * @param now 本次资格核对时间
+   * @return 匹配的支付记录；原载荷或资格变化时返回 null
+   */
+  @Select(
+      "SELECT payment.pay_no,payment.order_no,payment.user_id,payment.amount,payment.status,"
+          + " payment.debit_mode,payment.paid_at FROM pay_record payment JOIN pay_debit_intent"
+          + " intent ON BINARY payment.pay_no=BINARY intent.pay_no"
+          + " WHERE BINARY payment.pay_no=BINARY #{expected.payNo}"
+          + " AND payment.user_id=#{expected.userId} AND intent.user_id=#{expected.userId}"
+          + " AND BINARY payment.order_no=BINARY #{expected.orderNo}"
+          + " AND BINARY intent.order_no=BINARY #{expected.orderNo}"
+          + " AND payment.amount=#{expected.amount} AND intent.amount=#{expected.amount}"
+          + " AND BINARY payment.debit_mode='LEGACY' AND BINARY intent.debit_mode='LEGACY'"
+          + " AND payment.status IN ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
+          + " AND intent.status IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
+          + " AND BINARY intent.lease_owner=BINARY #{claimToken} AND intent.lease_until>#{now}"
+          + " FOR UPDATE")
+  PayRecordPO lockOwnedLegacyStageSource(
+      @Param("expected") PayDebitIntentPO expected,
+      @Param("claimToken") String claimToken,
+      @Param("now") java.time.LocalDateTime now);
+
   /** LegacySUCCESS终态仅由当前未过期owner原子推进，旧方法继续供其它调用者使用。 */
   @Update(
       "UPDATE pay_record payment JOIN pay_debit_intent intent ON BINARY payment.pay_no=BINARY"
