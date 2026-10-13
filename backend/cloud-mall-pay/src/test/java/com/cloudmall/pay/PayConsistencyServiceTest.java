@@ -803,6 +803,153 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** 原支付缺证后读到正确APPLIED账本可恢复成功，不再次发扣款。 */
+  @Test
+  void originalDebitProofCanResumeWithoutRepeatingFunds() {
+    for (String scenario : java.util.List.of("PAID", "COMPLETED", "bad-ack")) {
+      setUp();
+      configureOrderIdentityPath("fresh-debit", "order-1");
+      if ("bad-ack".equals(scenario))
+        when(userClient.debit(eq(7L), eq(7L), any()))
+            .thenReturn(
+                ApiResponse.ok(new UserClient.BalanceView("pay-other", "APPLIED", "90.00")));
+      else
+        when(orderClient.paymentState("order-1", 7L))
+            .thenReturn(
+                ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1", scenario, BigDecimal.TEN, 7L, "SUCCEEDED")));
+      assertEquals("INIT", consistencyService.process("pay-1"));
+
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView("pay-1", "DEBIT", "APPLIED", "10.000", null)))
+          .when(userClient)
+          .operation(7L, "pay-1", 7L);
+      when(orderClient.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1",
+                      "COMPLETED".equals(scenario) ? "COMPLETED" : "PAID",
+                      new BigDecimal("10.000"),
+                      7L,
+                      "SUCCEEDED")));
+      assertEquals("SUCCESS", consistencyService.process("pay-1"));
+      verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
+      verify(userClient, org.mockito.Mockito.times("bad-ack".equals(scenario) ? 1 : 0))
+          .debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+    }
+  }
+
+  /** 未观察当前支付扣款时，已支付订单不得借终态再触发新扣款。 */
+  @Test
+  void paidOrderWithoutDebitCannotStartNewFunds() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String orderStatus : java.util.List.of("PAID", "COMPLETED")) {
+      for (String stockAction : java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+        for (String originalStatus :
+            java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+          assertions.add(
+              () -> {
+                setUp();
+                configureOrderIdentityPath("fresh-debit", "order-1");
+                var originalIntent = intent();
+                originalIntent.status = originalStatus;
+                when(intentMapper.findByPayNo("pay-1")).thenReturn(originalIntent);
+                when(orderClient.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                orderStatus,
+                                new BigDecimal("10.000"),
+                                7L,
+                                stockAction)));
+                String expected =
+                    "REFUND_PENDING".equals(originalStatus)
+                        ? "REFUND_PENDING"
+                        : "INIT".equals(originalStatus) ? "INIT" : "ORDER_SYNC_UNKNOWN";
+                String errorMessage = "订单已支付但未观察到原扣款事实";
+                String result = consistencyService.process("pay-1");
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> assertEquals(expected, result),
+                    () ->
+                        verify(userClient, org.mockito.Mockito.times(0)).debit(any(), any(), any()),
+                    () -> verify(orderClient, never()).paid(any(), any()),
+                    () -> verify(userClient, never()).refund(any(), any(), any()));
+                verify(intentMapper, never()).updateOwnedLegacyStatus(any(), any(), any(), any());
+                verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+                verify(intentMapper)
+                    .recordRetryOwnedLegacy(
+                        eq("pay-1"),
+                        anyString(),
+                        eq(expected),
+                        org.mockito.ArgumentMatchers.contains(errorMessage),
+                        any(),
+                        any());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 扣款回执必须属于原支付，坏回执不能推进订单或本地终态。 */
+  @Test
+  void debitAcknowledgementMustNameOriginalPayment() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String acknowledgementKey :
+        java.util.Arrays.asList(
+            null, "", " ", "pay-other", "PAY-1", "páy-1", "pay-1 ", "refund:pay-1")) {
+      for (String originalStatus :
+          java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath("fresh-debit", "order-1");
+              var originalIntent = intent();
+              originalIntent.status = originalStatus;
+              when(intentMapper.findByPayNo("pay-1")).thenReturn(originalIntent);
+              when(userClient.debit(eq(7L), eq(7L), any()))
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new UserClient.BalanceView(acknowledgementKey, "APPLIED", "90.00")));
+              String expected =
+                  "REFUND_PENDING".equals(originalStatus)
+                      ? "REFUND_PENDING"
+                      : "INIT".equals(originalStatus) ? "INIT" : "ORDER_SYNC_UNKNOWN";
+              String errorMessage = "用户余额扣款未确认";
+              String result = consistencyService.process("pay-1");
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals(expected, result),
+                  () -> verify(userClient, org.mockito.Mockito.times(1)).debit(any(), any(), any()),
+                  () -> verify(orderClient, never()).paid(any(), any()),
+                  () -> verify(userClient, never()).refund(any(), any(), any()));
+              verify(intentMapper, never()).updateOwnedLegacyStatus(any(), any(), any(), any());
+              verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+              verify(intentMapper)
+                  .recordRetryOwnedLegacy(
+                      eq("pay-1"),
+                      anyString(),
+                      eq(expected),
+                      org.mockito.ArgumentMatchers.contains(errorMessage),
+                      any(),
+                      any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 未知订单状态在七条恢复决策中都不能触发新资金写或支付终态。 */
   @Test
   void unknownOrderStatusCannotStartFundsOrFinishPayment() {

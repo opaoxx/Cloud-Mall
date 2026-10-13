@@ -216,6 +216,9 @@ public class PayConsistencyService {
       if (operation == null && "CANCELLED".equals(order.status()))
         return failWithoutDebit(intent, claimToken);
       if (operation == null) {
+        // 已支付订单缺少本支付的账本时只能核对来源，不能追加一笔新扣款。
+        if (!"PENDING_PAYMENT".equals(order.status()))
+          throw new IllegalStateException("订单已支付但未观察到原扣款事实");
         requireOwnedLegacyLease(intent.payNo, claimToken);
         ApiResponse<UserClient.BalanceView> debit =
             userClient.debit(
@@ -226,7 +229,9 @@ public class PayConsistencyService {
         if (debit == null
             || !"0".equals(debit.code)
             || debit.data == null
-            || !"APPLIED".equals(debit.data.state())) throw new IllegalStateException("用户余额扣款未确认");
+            || !"APPLIED".equals(debit.data.state())
+            || !Objects.equals(intent.payNo, debit.data.operationKey()))
+          throw new IllegalStateException("用户余额扣款未确认");
         retryStatus = "ORDER_SYNC_UNKNOWN";
       }
 
