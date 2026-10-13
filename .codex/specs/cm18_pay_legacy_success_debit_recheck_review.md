@@ -14,7 +14,7 @@ GO。`finishSuccess` 当前只依赖流程早期 User GET 或 debit POST ACK；�
 - type DEBIT、state APPLIED；
 - refundOperationKey 精确 null。
 
-404/null body/非成功 envelope/错误 key/type/amount/state/已有退款 marker统一 Runtime “原扣款账本未证明支付成功”，沿现有 catch/retry，不 terminal、不猜退款、不撤回已发 debit/paid。其它 Feign/DAO fault 原样传播。
+readDebitOperation 已处理的 404/null result 也由 recheck helper 安全归入固定 Runtime “原扣款账本未证明支付成功”；已成功读取但 state 非 APPLIED 或 refundOperationKey 非 null 同样固定该 Runtime。结果 envelope/body null、非 0 response 仍由既有 read 异常语义；key/type/amount 仍由既有 `validateDebitOperation` 保持原 conflict、NPE/NumberFormat 等异常。上述结果均沿现有 catch/retry，不 terminal、不猜退款、不撤回已发 debit/paid；其它 Feign/DAO fault 原样传播。
 
 ## 3. 调用与保持项
 
