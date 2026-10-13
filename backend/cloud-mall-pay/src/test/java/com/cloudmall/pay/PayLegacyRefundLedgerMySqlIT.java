@@ -4114,6 +4114,252 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两表一致的非正用户或金额不能授权领取，保原租约/尝试/证据。 */
+  @Test
+  void recoveryClaimRejectsCoherentNonPositiveNumbers() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mutation :
+        List.of(
+            "user-zero",
+            "user-negative",
+            "user-min",
+            "amount-zero",
+            "amount-negative",
+            "amount-min")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            changeCoherentRecoveryNumber(mutation);
+            var before = payFacts();
+            var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+            assertEquals(
+                0,
+                intents.claim(
+                    "pay-1", "t160-domain-token", currentTime.plusSeconds(30), currentTime),
+                mutation);
+            assertEquals(before, payFacts());
+            assertEquals(0, intentAttempts());
+            assertNull(intentLeaseOwner());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 仅在owned两表同步设置固定非法数值，模拟一致性门之后仍缺数值域门。 */
+  private void changeCoherentRecoveryNumber(String mutation) {
+    for (String table : List.of("pay_record", "pay_debit_intent")) {
+      int changed =
+          switch (mutation) {
+            case "user-zero" -> fixture.update("UPDATE " + table + " SET user_id=? WHERE id=1", 0L);
+            case "user-negative" ->
+                fixture.update("UPDATE " + table + " SET user_id=? WHERE id=1", -1L);
+            case "user-min" ->
+                fixture.update("UPDATE " + table + " SET user_id=? WHERE id=1", Long.MIN_VALUE);
+            case "amount-zero" ->
+                fixture.update("UPDATE " + table + " SET amount=? WHERE id=1", BigDecimal.ZERO);
+            case "amount-negative" ->
+                fixture.update(
+                    "UPDATE " + table + " SET amount=? WHERE id=1", new BigDecimal("-0.01"));
+            case "amount-min" ->
+                fixture.update(
+                    "UPDATE " + table + " SET amount=? WHERE id=1",
+                    new BigDecimal("-9999999999999999.99"));
+            default -> throw new AssertionError(mutation);
+          };
+      assertEquals(1, changed);
+    }
+  }
+
+  /** 预route后双方一致变成非正数值，真实claim拒绝且原409不写metadata或远端。 */
+  @Test
+  void coherentNumericDriftBeforeClaimPreservesFactsAndRouteError() {
+    for (String mutation :
+        List.of(
+            "user-zero",
+            "user-negative",
+            "user-min",
+            "amount-zero",
+            "amount-negative",
+            "amount-min")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      fixture.update("UPDATE pay_debit_intent SET last_error='owned-existing-proof' WHERE id=1");
+      PayDebitIntentMapper actualIntents = intents;
+      var guardedIntents = org.mockito.Mockito.spy(actualIntents);
+      var afterChange =
+          new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                changeCoherentRecoveryNumber(mutation);
+                afterChange.set(payFacts());
+                assertEquals(0, invocation.callRealMethod());
+                return 0;
+              })
+          .when(guardedIntents)
+          .claim(eq("pay-1"), anyString(), any(), any());
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      intents = guardedIntents;
+      try {
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> newService(user, orders).process("pay-1"));
+        assertEquals("COMMON_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("支付意图与原支付记录不一致", failure.getMessage());
+        assertNotNull(afterChange.get());
+        assertEquals(afterChange.get(), payFacts());
+        assertEquals(0, intentAttempts());
+        assertNull(intentLeaseOwner());
+        org.mockito.Mockito.verifyNoInteractions(user, orders);
+      } finally {
+        intents = actualIntents;
+      }
+    }
+  }
+
+  /** 正用户及DECIMAL正边界保持，非正数值头先过滤，扫描只读排序/游标不变。 */
+  @Test
+  void positiveNumericBoundariesAndRecoveryScanRemainEligible() {
+    for (Long userId : List.of(1L, 7L, Long.MAX_VALUE)) {
+      for (String amountText : List.of("0.01", "10.000", "9999999999999999.99")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        for (String table : List.of("pay_record", "pay_debit_intent"))
+          fixture.update(
+              "UPDATE " + table + " SET user_id=?,amount=? WHERE id=1",
+              userId,
+              new BigDecimal(amountText));
+        var before = payFacts();
+        var currentTime =
+            LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        assertEquals(
+            List.of("pay-1"),
+            intents.findDue(currentTime, 1).stream().map(candidate -> candidate.payNo).toList());
+        assertEquals(
+            List.of("pay-1"),
+            intents.findDueAfter(currentTime, null, 1).stream()
+                .map(candidate -> candidate.payNo)
+                .toList());
+        assertEquals(before, payFacts());
+        assertEquals(
+            1,
+            intents.claim(
+                "pay-1", "t160-positive-token", currentTime.plusSeconds(30), currentTime));
+        assertEquals(
+            0,
+            intents.claim("pay-1", "t160-second-token", currentTime.plusSeconds(30), currentTime));
+        assertEquals(1, intentAttempts());
+        assertEquals("t160-positive-token", intentLeaseOwner());
+        assertEquals(before.get(0), payFacts().get(0));
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+      }
+    }
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    var mutations =
+        List.of(
+            "user-zero",
+            "user-negative",
+            "user-min",
+            "amount-zero",
+            "amount-negative",
+            "amount-min");
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      boolean broken = identifier <= 100;
+      String mutation =
+          broken ? mutations.get((int) ((identifier - 1) % mutations.size())) : "healthy";
+      long userId =
+          switch (mutation) {
+            case "user-zero" -> 0L;
+            case "user-negative" -> -1L;
+            case "user-min" -> Long.MIN_VALUE;
+            default -> identifier == 102 ? Long.MAX_VALUE : 1L;
+          };
+      BigDecimal amount =
+          switch (mutation) {
+            case "amount-zero" -> BigDecimal.ZERO;
+            case "amount-negative" -> new BigDecimal("-0.01");
+            case "amount-min" -> new BigDecimal("-9999999999999999.99");
+            default ->
+                new BigDecimal(
+                    identifier == 101
+                        ? "0.01"
+                        : identifier == 102 ? "9999999999999999.99" : "10.000");
+          };
+      String payNo = "t160-pay-" + identifier;
+      String orderNo = "t160-order-" + identifier;
+      var due =
+          broken
+              ? currentTime.minusDays(1)
+              : currentTime.minusSeconds(identifier == 101 ? 3 : identifier == 102 ? 5 : 4);
+      String paymentStage =
+          identifier == 102
+              ? "order_sync_unknown"
+              : identifier == 103 ? "REFUND_PENDING " : "PENDING";
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,?,?,?,'LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          userId,
+          amount,
+          paymentStage,
+          currentTime,
+          currentTime);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,last_error,created_at,updated_at)"
+              + " VALUES(?,?,?,?,?,'INIT','LEGACY',0,?,'owned-existing-proof',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          userId,
+          amount,
+          due,
+          currentTime,
+          currentTime);
+    }
+    var before = payFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(102L, 103L, 101L),
+        intents.findDue(currentTime, 50).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(101L),
+        intents.findDueAfter(currentTime, null, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(102L),
+        intents.findDueAfter(currentTime, 101L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(103L),
+        intents.findDueAfter(currentTime, 102L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertTrue(intents.findDueAfter(currentTime, 103L, 1).isEmpty());
+    assertEquals(before, payFacts());
+    assertEquals(
+        1,
+        intents.claim("t160-pay-102", "t160-tail-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id<=100 AND (attempts<>0 OR lease_owner IS"
+                + " NOT NULL OR last_error<>'owned-existing-proof')",
+            Integer.class));
+  }
+
   /** 两表基本tuple不一致或请求键为CI别名时，不得领取并修改原意图。 */
   @Test
   void recoveryClaimRejectsPairMismatchAndRequestedAliases() {
