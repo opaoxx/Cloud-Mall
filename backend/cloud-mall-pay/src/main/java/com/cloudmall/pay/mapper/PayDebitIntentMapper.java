@@ -159,7 +159,7 @@ public class PayDebitIntentMapper {
         owner);
   }
 
-  /** Legacy终态需当前未过期owner；已有退款意图只能结束为已退，调用者必须核一行。 */
+  /** Legacy终态需当前owner；FAILED仅初始意图、退款仅已退目标，调用者必须核一行。 */
   public int finishOwnedLegacy(String payNo, String claimToken, String status, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET"
@@ -167,13 +167,15 @@ public class PayDebitIntentMapper {
             + " WHERE BINARY pay_no=BINARY ? AND BINARY lease_owner=BINARY ? AND lease_until>? AND"
             + " BINARY debit_mode='LEGACY' AND status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-            + " (status<>'REFUND_PENDING' OR BINARY ?='REFUNDED')",
+            + " (status<>'REFUND_PENDING' OR BINARY ?='REFUNDED') AND (BINARY ?<>'FAILED' OR"
+            + " status='INIT')",
         status,
         now.plusYears(100),
         now,
         payNo,
         claimToken,
         now,
+        status,
         status);
   }
 
