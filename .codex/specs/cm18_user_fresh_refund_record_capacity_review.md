@@ -26,7 +26,7 @@ GO。T110 允许 fresh refund 在已有 100 条退款记录时再写第 101 条�
 ## 4. 验收
 
 - Unit/native：99/100/101 边界、三模式 POST/service、99→100 并发仅一次成功、100 条 facts/余额只加一次、成功第100条 replay/GET 200；count/state fault 与金额优先。
-- wallet 容量、DAO、source/owner 失败不被 capacity 门覆盖；查询预算保持 T110 双集合一次各读。
+- capacity 门位于 wallet 校验之前：count=100 且 wallet 同时坏时先返回容量错误；count<100 时保留原 wallet 错误语义。DAO、source/owner、坏集合与金额超额仍优先于 capacity；查询预算保持 T110 双集合一次各读。
 - 更新旧 T75 “已有100可新增”预期为新规则，T110 100 replay 继续通过；资源 finally 清理，不启动 RM/TC/App。
 - 不宣称完整历史/账户因果或自动修复。
 
