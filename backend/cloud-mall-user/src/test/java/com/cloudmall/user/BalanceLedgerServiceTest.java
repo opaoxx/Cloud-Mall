@@ -65,6 +65,7 @@ class BalanceLedgerServiceTest {
     userService = new UserServiceImpl();
     userMapper = mock(UserMapper.class);
     balanceLedgerMapper = mock(BalanceLedgerMapper.class);
+    when(balanceLedgerMapper.countOperationCandidates(any())).thenReturn(1L);
     balanceDebitAttemptMapper = mock(BalanceDebitAttemptMapper.class);
     balanceTccDebitMapper = mock(com.cloudmall.user.mapper.BalanceTccDebitMapper.class);
     when(balanceDebitAttemptMapper.insert(any())).thenReturn(1);
@@ -4123,6 +4124,130 @@ class BalanceLedgerServiceTest {
     var linked = new java.util.ArrayList<BalanceLedgerPO>();
     for (int index = 0; index < count; index++)
       linked.add(linkedRefund("capacity-prior-" + index, "0.01"));
+    var payment = new java.util.ArrayList<BalanceLedgerPO>(java.util.List.of(originalRefundDebit));
+    payment.addAll(linked);
+    when(balanceLedgerMapper.findLinkedRefundCandidates(request.originalOperationKey))
+        .thenReturn(linked);
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(request.payNo)).thenReturn(payment);
+    return request;
+  }
+
+  /** 新退款/重放观察到的source及prior键不得全局缺失、缺证或重复。 */
+  @Test
+  void refundGlobalKeysRejectUnreliableObservedCounts() {
+    for (String mode :
+        java.util.List.of("active-fresh", "disabled-fresh", "active-replay", "disabled-replay")) {
+      for (String scope : java.util.List.of("source", "prior")) {
+        for (Long count : java.util.Arrays.asList(null, -1L, 0L, 2L, Long.MAX_VALUE)) {
+          var request = installRefundGlobalEvidence(mode);
+          String countedKey =
+              "source".equals(scope) ? request.originalOperationKey : "global-prior";
+          when(balanceLedgerMapper.countOperationCandidates(countedKey)).thenReturn(count);
+          var failure =
+              assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> userService.refundInternal(7L, 7L, request));
+          assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals("退款累计证据不完整或不一致", failure.getMessage());
+          verify(balanceLedgerMapper).countOperationCandidates(countedKey);
+          verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        }
+      }
+    }
+  }
+
+  /** 全局count DAO原样，原证明/额度/容量优先，fresh99与replay100读取预算明确。 */
+  @Test
+  void refundGlobalKeysKeepDaoPriorityAndCapacityBudgets() {
+    for (String mode :
+        java.util.List.of("active-fresh", "disabled-fresh", "active-replay", "disabled-replay")) {
+      for (String scope : java.util.List.of("source", "prior")) {
+        var request = installRefundGlobalEvidence(mode);
+        String countedKey = "source".equals(scope) ? request.originalOperationKey : "global-prior";
+        var failure =
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "refund-global-count-fault");
+        org.mockito.Mockito.doThrow(failure)
+            .when(balanceLedgerMapper)
+            .countOperationCandidates(countedKey);
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure,
+            assertThrows(
+                RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+      }
+    }
+    for (String gate : java.util.List.of("collection", "amount", "capacity", "owner")) {
+      var request =
+          "capacity".equals(gate)
+              ? installFreshRefundCapacity("active-fresh", 100)
+              : installRefundGlobalEvidence("active-fresh");
+      org.mockito.Mockito.doThrow(new AssertionError("old refund proof must precede global count"))
+          .when(balanceLedgerMapper)
+          .countOperationCandidates(any());
+      if ("collection".equals(gate))
+        when(balanceLedgerMapper.findLinkedRefundCandidates(request.originalOperationKey))
+            .thenReturn(null);
+      else if ("amount".equals(gate)) request.amount = new BigDecimal("10.00");
+      else if ("owner".equals(gate)) originalRefundAttempt.state = "TRYING";
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> userService.refundInternal(7L, 7L, request));
+      assertEquals(
+          "amount".equals(gate) ? "BALANCE_REFUND_EXCEEDED" : "BALANCE_REFUND_INVALID",
+          failure.getCode());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).countOperationCandidates(any());
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    }
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      var request = installFreshRefundCapacity(mode, 99);
+      userService.refundInternal(7L, 7L, request);
+      verify(balanceLedgerMapper, times(100)).countOperationCandidates(any());
+      verify(balanceLedgerMapper).countOperationCandidates(request.originalOperationKey);
+      verify(userMapper).creditBalance(eq(7L), eq(request.amount), any());
+    }
+    for (String mode : java.util.List.of("active-tcc", "disabled-tcc")) {
+      var request = installRefundReplaySourceMode(mode);
+      request.amount = new BigDecimal("0.01");
+      var current = linkedRefund(request.refundOperationKey, "0.01");
+      installCompleteRefundReplay(current);
+      var linked = new java.util.ArrayList<BalanceLedgerPO>(java.util.List.of(current));
+      for (int index = 1; index < 100; index++)
+        linked.add(linkedRefund("global-budget-" + index, "0.01"));
+      var payment =
+          new java.util.ArrayList<BalanceLedgerPO>(java.util.List.of(originalRefundDebit));
+      payment.addAll(linked);
+      when(balanceLedgerMapper.findLinkedRefundCandidates(request.originalOperationKey))
+          .thenReturn(linked);
+      when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(request.payNo))
+          .thenReturn(payment);
+      when(userMapper.selectByIdForUpdate(7L))
+          .thenReturn(mode.startsWith("disabled") ? disabledUserWithoutWallet() : activeUser(null));
+      userService.refundInternal(7L, 7L, request);
+      verify(balanceLedgerMapper, times(101)).countOperationCandidates(any());
+      verify(balanceLedgerMapper).countOperationCandidates(request.originalOperationKey);
+      verify(balanceLedgerMapper).countOperationCandidates(request.refundOperationKey);
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+  }
+
+  /** 建立已证本地source/prior集合及可选current，避免金额/容量先挡住本批COUNT门。 */
+  private BalanceRefundRequestDTO installRefundGlobalEvidence(String mode) {
+    var request =
+        installRefundProofMode(mode.startsWith("disabled") ? "disabled-fresh" : "active-fresh");
+    request.amount = new BigDecimal("0.01");
+    var linked = new java.util.ArrayList<BalanceLedgerPO>();
+    if (mode.endsWith("replay")) {
+      var current = linkedRefund(request.refundOperationKey, "0.01");
+      installCompleteRefundReplay(current);
+      linked.add(current);
+    }
+    linked.add(linkedRefund("global-prior", "0.01"));
     var payment = new java.util.ArrayList<BalanceLedgerPO>(java.util.List.of(originalRefundDebit));
     payment.addAll(linked);
     when(balanceLedgerMapper.findLinkedRefundCandidates(request.originalOperationKey))

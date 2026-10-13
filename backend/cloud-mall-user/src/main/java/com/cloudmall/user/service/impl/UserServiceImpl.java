@@ -473,6 +473,19 @@ public class UserServiceImpl implements UserService {
     requireRefundMembership(
         containsRefundSnapshot(linkedRefunds, existing)
             && linkedTotal.compareTo(original.amount) <= 0);
+    requireRefundGlobalKeys(original, linkedRefunds);
+  }
+
+  /** 原source/双集合及额度已先证明；观察键全局COUNT1，不以局部范围掩盖其它pay重复。 */
+  private void requireRefundGlobalKeys(
+      BalanceLedgerPO original, List<BalanceLedgerPO> linkedRefunds) {
+    requireRefundMembership(
+        Long.valueOf(1)
+            .equals(balanceLedgerMapper.countOperationCandidates(original.operationKey)));
+    for (BalanceLedgerPO linked : linkedRefunds)
+      requireRefundMembership(
+          Long.valueOf(1)
+              .equals(balanceLedgerMapper.countOperationCandidates(linked.operationKey)));
   }
 
   /** 原扣款已证明；同pay有界DEBIT须唯一且复制原来源，DAO异常原样传播，不写资金。 */
@@ -626,6 +639,7 @@ public class UserServiceImpl implements UserService {
     if (linkedRefunds.size() >= MAX_REFUND_CANDIDATES) {
       throw new BizException("BALANCE_REFUND_INVALID", "退款记录数量已达上限", 409);
     }
+    requireRefundGlobalKeys(original, linkedRefunds);
   }
 
   /** linked已按原kernel证明；同一快照的pay集合必须完整复制来源及每条退款，不重复查询。 */
