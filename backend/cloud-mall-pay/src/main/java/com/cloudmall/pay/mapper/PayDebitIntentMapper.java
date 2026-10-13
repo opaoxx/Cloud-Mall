@@ -242,7 +242,7 @@ public class PayDebitIntentMapper {
         status);
   }
 
-  /** 保留扣款事实和原业务键，记录失败后按退避时间重试。 */
+  /** 保留扣款事实和原业务键，错误取512完整码点，按退避时间重试。 */
   public int recordRetry(
       String payNo,
       String owner,
@@ -254,7 +254,7 @@ public class PayDebitIntentMapper {
         "UPDATE pay_debit_intent SET status=?,last_error=?,next_retry_at=?,"
             + "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE pay_no=? AND lease_owner=?",
         status,
-        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        truncateRetryError(error),
         nextRetryAt,
         now,
         payNo,
@@ -279,7 +279,7 @@ public class PayDebitIntentMapper {
         status);
   }
 
-  /** Legacy重试需当前租约；INIT仅接受初始两表、退款方向不回退，拒绝时零行。 */
+  /** Legacy重试需当前租约；保原阶段门，错误取512完整码点，拒绝时零行。 */
   public int recordRetryOwnedLegacy(
       String payNo,
       String claimToken,
@@ -298,7 +298,7 @@ public class PayDebitIntentMapper {
             + " payment.status='PENDING')) AND (status<>'REFUND_PENDING' OR BINARY"
             + " ?='REFUND_PENDING') AND (BINARY ?<>'INIT' OR status='INIT')",
         status,
-        error == null ? null : error.substring(0, Math.min(512, error.length())),
+        truncateRetryError(error),
         nextRetryAt,
         now,
         payNo,
@@ -364,6 +364,14 @@ public class PayDebitIntentMapper {
             operation,
             operation);
     return Integer.valueOf(1).equals(matchingRows);
+  }
+
+  /** 按VARCHAR(512)字符容量取完整Unicode码点前缀，不拆合法代理对，不归一化或修复坏文本。 */
+  private static String truncateRetryError(String error) {
+    if (error == null) return null;
+    int retainedCodePoints = Math.min(512, error.codePointCount(0, error.length()));
+    int endIndex = error.offsetByCodePoints(0, retainedCodePoints);
+    return error.substring(0, endIndex);
   }
 
   /** 保留boxed及时间SQL NULL；typed时间读取保留合法DATETIME组件，避免混合历转换。 */

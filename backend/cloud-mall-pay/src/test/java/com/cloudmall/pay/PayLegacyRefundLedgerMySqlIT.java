@@ -4114,6 +4114,209 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两种实际重试写入应保留512码点边界上的完整补充字符，不能存为替换字符。 */
+  @Test
+  void retryErrorDoesNotSplitSupplementaryCharacter() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    String expected = "a".repeat(511) + "😀";
+    String error = expected + "tail";
+    for (boolean owned : List.of(false, true)) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            var currentTime =
+                LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                    .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+            assertEquals(
+                1, intents.claim("pay-1", "t169-owner", currentTime.plusSeconds(30), currentTime));
+            int changed =
+                owned
+                    ? intents.recordRetryOwnedLegacy(
+                        "pay-1",
+                        "t169-owner",
+                        "INIT",
+                        error,
+                        currentTime.plusSeconds(60),
+                        currentTime)
+                    : intents.recordRetry(
+                        "pay-1",
+                        "t169-owner",
+                        "INIT",
+                        error,
+                        currentTime.plusSeconds(60),
+                        currentTime);
+            assertEquals(1, changed);
+            assertEquals(
+                expected,
+                fixture.queryForObject(
+                    "SELECT last_error FROM pay_debit_intent WHERE id=1", String.class));
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 实际VARCHAR按字符数保存前缀，NULL/BMP/补充字符/组合码点及原重试事实保持。 */
+  @Test
+  void retryErrorPrefixesRespectDatabaseCharacterCapacity() {
+    String[][] examples = {
+      {null, null},
+      {"", ""},
+      {"a".repeat(511), "a".repeat(511)},
+      {"a".repeat(512), "a".repeat(512)},
+      {"a".repeat(513), "a".repeat(512)},
+      {"界".repeat(513), "界".repeat(512)},
+      {"😀".repeat(511), "😀".repeat(511)},
+      {"😀".repeat(512), "😀".repeat(512)},
+      {"😀".repeat(513), "😀".repeat(512)},
+      {"a".repeat(511) + "😀tail", "a".repeat(511) + "😀"},
+      {"😀".repeat(256) + "a".repeat(256) + "tail", "😀".repeat(256) + "a".repeat(256)},
+      {"错".repeat(255) + "😀".repeat(257) + "tail", "错".repeat(255) + "😀".repeat(257)},
+      {"é".repeat(257), "é".repeat(256)}
+    };
+    for (boolean owned : List.of(false, true)) {
+      for (String target : List.of("INIT", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+        for (String[] example : examples) {
+          seedIntentAndPayment(
+              target.equals("INIT") ? "PENDING" : target,
+              target.equals("ORDER_SYNC_UNKNOWN") ? "DEBITED" : target);
+          fixture.update(
+              "UPDATE pay_debit_intent SET last_error='owned-existing-proof' WHERE id=1");
+          var currentTime =
+              LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                  .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+          assertEquals(
+              1, intents.claim("pay-1", "t169-owner", currentTime.plusSeconds(30), currentTime));
+          var before = rawIntentTimeFacts();
+          int changed =
+              owned
+                  ? intents.recordRetryOwnedLegacy(
+                      "pay-1",
+                      "t169-owner",
+                      target,
+                      example[0],
+                      currentTime.plusSeconds(60),
+                      currentTime)
+                  : intents.recordRetry(
+                      "pay-1",
+                      "t169-owner",
+                      target,
+                      example[0],
+                      currentTime.plusSeconds(60),
+                      currentTime);
+          assertEquals(1, changed);
+          String stored =
+              fixture.queryForObject(
+                  "SELECT last_error FROM pay_debit_intent WHERE id=1", String.class);
+          assertEquals(example[1], stored);
+          assertEquals(
+              example[1] == null ? null : example[1].codePointCount(0, example[1].length()),
+              fixture.queryForObject(
+                  "SELECT CHAR_LENGTH(last_error) FROM pay_debit_intent WHERE id=1",
+                  Integer.class));
+          assertEquals(
+              example[1] == null ? null : example[1].getBytes(StandardCharsets.UTF_8).length,
+              fixture.queryForObject(
+                  "SELECT OCTET_LENGTH(last_error) FROM pay_debit_intent WHERE id=1",
+                  Integer.class));
+          if (stored != null)
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    StandardCharsets.UTF_8
+                        .newEncoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .encode(java.nio.CharBuffer.wrap(stored)));
+          assertEquals(target, intentStatus());
+          assertNull(intentLeaseOwner());
+          assertNull(intents.findByPayNo("pay-1").leaseUntil);
+          assertEquals(currentTime.plusSeconds(60), intentNextRetry());
+          assertEquals(1, intentAttempts());
+          assertEquals(before.get(0), rawIntentTimeFacts().get(0));
+          assertEquals(
+              immutableRecoveryFacts(before), immutableRecoveryFacts(rawIntentTimeFacts()));
+        }
+      }
+    }
+  }
+
+  /** 真实process保存完整诊断并按旧退避释放租约，拒绝资格不能被Unicode绑定改变。 */
+  @Test
+  void unicodeRetryErrorsKeepProcessAndRejectionRules() {
+    seedIntentAndPayment("PENDING", "INIT");
+    var before = rawIntentTimeFacts();
+    String exceptionPrefix = IllegalStateException.class.getName() + ": ";
+    String retainedMessage = "m".repeat(511 - exceptionPrefix.length()) + "😀";
+    var failure = new IllegalStateException(retainedMessage + "tail");
+    String expected = exceptionPrefix + retainedMessage;
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    when(user.operation(eq(7L), anyString(), eq(7L))).thenThrow(failure);
+    var service = newService(user, orders);
+    var started =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    assertEquals("INIT", service.process("pay-1"));
+    var finished =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    assertEquals(
+        expected,
+        fixture.queryForObject("SELECT last_error FROM pay_debit_intent WHERE id=1", String.class));
+    assertNull(intentLeaseOwner());
+    assertNull(intents.findByPayNo("pay-1").leaseUntil);
+    assertEquals(1, intentAttempts());
+    assertEquals("PENDING", paymentStatus());
+    assertEquals("INIT", intentStatus());
+    assertTrue(!intentNextRetry().isBefore(started.plusSeconds(5)));
+    assertTrue(!intentNextRetry().isAfter(finished.plusSeconds(5)));
+    assertTrue(intentNextRetry().isAfter(finished));
+    assertEquals(before.get(0), rawIntentTimeFacts().get(0));
+    assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(rawIntentTimeFacts()));
+    var after = rawIntentTimeFacts();
+    service.recoverDue();
+    assertEquals(after, rawIntentTimeFacts());
+    verify(user, times(1)).operation(eq(7L), anyString(), eq(7L));
+    verify(user, never()).debit(any(), any(), any());
+    verify(user, never()).refund(any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(orders);
+    for (String rejected :
+        List.of("other-owner", "expired", "record-mode", "intent-mode", "refund-direction")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      var currentTime =
+          LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+              .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      assertEquals(
+          1, intents.claim("pay-1", "t169-owner", currentTime.plusSeconds(30), currentTime));
+      fixture.update("UPDATE pay_debit_intent SET last_error='owned-existing-proof' WHERE id=1");
+      if (rejected.equals("expired"))
+        fixture.update("UPDATE pay_debit_intent SET lease_until=? WHERE id=1", currentTime);
+      if (rejected.equals("record-mode"))
+        fixture.update("UPDATE pay_record SET debit_mode='TCC' WHERE id=1");
+      if (rejected.equals("intent-mode"))
+        fixture.update("UPDATE pay_debit_intent SET debit_mode='TCC' WHERE id=1");
+      if (rejected.equals("refund-direction"))
+        fixture.update("UPDATE pay_debit_intent SET status='REFUND_PENDING' WHERE id=1");
+      var rejectedFacts = rawIntentTimeFacts();
+      String token = rejected.equals("other-owner") ? "t169-other" : "t169-owner";
+      assertEquals(
+          0,
+          intents.recordRetryOwnedLegacy(
+              "pay-1", token, "INIT", "😀".repeat(513), currentTime.plusSeconds(60), currentTime));
+      assertEquals(rejectedFacts, rawIntentTimeFacts());
+      if (rejected.equals("other-owner")) {
+        assertEquals(
+            0,
+            intents.recordRetry(
+                "pay-1",
+                token,
+                "INIT",
+                "😀".repeat(513),
+                currentTime.plusSeconds(60),
+                currentTime));
+        assertEquals(rejectedFacts, rawIntentTimeFacts());
+      }
+    }
+  }
+
   /** 合法切换日期在四读取入口必须保留数据库日期组件，而非Timestamp混合历失败。 */
   @Test
   void cutoverTimesReadThroughLookupAndCandidates() {
