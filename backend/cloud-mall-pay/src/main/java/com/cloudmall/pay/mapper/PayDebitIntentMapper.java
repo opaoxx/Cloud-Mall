@@ -85,12 +85,13 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 先筛选两表均为 LEGACY 的到期意图再限制批量，避免隔离记录占满恢复窗口。 */
+  /** 先筛选两表LEGACY且支付仍可恢复的到期意图再限制批量，避免无资格记录占满窗口。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
             + " payment.pay_no=intent.pay_no WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
-            + " payment.debit_mode='LEGACY' AND intent.status IN"
+            + " payment.debit_mode='LEGACY' AND payment.status IN"
+            + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
             + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
             + " ORDER BY intent.next_retry_at,intent.id LIMIT ?",
@@ -100,12 +101,13 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 恢复器有界主键轮转读取到期候选；null下界从头读，不改旧时间优先扫描。 */
+  /** 主键轮转仅读取支付仍可恢复的到期候选；null下界从头读，保原时间与批量语义。 */
   public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
             + " payment.pay_no=intent.pay_no WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
-            + " payment.debit_mode='LEGACY' AND intent.status IN"
+            + " payment.debit_mode='LEGACY' AND payment.status IN"
+            + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
             + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
             + " AND (? IS NULL OR intent.id>?) ORDER BY intent.id LIMIT ?",
@@ -117,14 +119,15 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 仅在支付单与意图均为 LEGACY 时条件领取恢复任务。 */
+  /** 仅在两表LEGACY且支付单当前仍可恢复时条件领取，拒绝时不改意图字段。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
             + " WHERE pay_no=? AND BINARY debit_mode='LEGACY'"
             + " AND EXISTS (SELECT 1 FROM pay_record"
             + " WHERE pay_record.pay_no=pay_debit_intent.pay_no"
-            + " AND BINARY pay_record.debit_mode='LEGACY') AND status IN"
+            + " AND BINARY pay_record.debit_mode='LEGACY' AND pay_record.status IN"
+            + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')) AND status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
             + " AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<=?)",
         owner,
