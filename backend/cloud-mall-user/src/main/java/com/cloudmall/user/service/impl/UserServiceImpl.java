@@ -362,23 +362,24 @@ public class UserServiceImpl implements UserService {
     // 2. 既有退款先保原proof/优先级；active核原DEBIT，disabled仍原TCC来源404。
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
     if (existing != null) {
-      BalanceLedgerPO disabledOriginal = null;
+      BalanceLedgerPO original = null;
       if (!Objects.equals(user.status, 1)) {
-        disabledOriginal = balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
-        requireDisabledTccRefund(disabledOriginal, request, userId);
+        original = balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        requireDisabledTccRefund(original, request, userId);
       }
       ensureRefundMatches(existing, userId, request);
       if (Objects.equals(user.status, 1)) {
-        BalanceLedgerPO original =
-            balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        original = balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
         if (!isProvenRefundOriginalDebit(original, request, userId)
             || existing.amount.compareTo(original.amount) > 0)
           throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
         requireActiveRefundOwnership(original, request);
-      } else if (existing.amount.compareTo(disabledOriginal.amount) > 0) {
+      } else if (existing.amount.compareTo(original.amount) > 0) {
         // disabled原source/TCC与退款行已先证明；复用已读原额，不新增查询或再次入账。
         throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
       }
+      // 原row/source/cap/owner已先证明，再核同pay唯一扣款；不重复读取source或入账。
+      requireRefundDebitScope(original, request, userId);
       return ApiResponse.ok(
           BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));
     }
@@ -390,12 +391,7 @@ public class UserServiceImpl implements UserService {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
     // 同pay唯一DEBIT候选须复制已证明原来源，不能忽略其它状态或CI别名扣款。
-    List<BalanceLedgerPO> debitCandidates =
-        balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo);
-    if (debitCandidates == null
-        || debitCandidates.size() != 1
-        || !matchesRefundDebitScope(original, debitCandidates.get(0), request, userId))
-      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+    requireRefundDebitScope(original, request, userId);
     // active原DEBIT已证明，再核同pay归属/冻结，不重复读取原source。
     if (Objects.equals(user.status, 1)) requireActiveRefundOwnership(original, request);
     // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
@@ -431,6 +427,17 @@ public class UserServiceImpl implements UserService {
     if (balanceLedgerMapper.insert(refund) != 1) throw new IllegalStateException("退款账本写入未影响唯一记录");
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** 原扣款已证明；同pay有界DEBIT须唯一且复制原来源，DAO异常原样传播，不写资金。 */
+  private void requireRefundDebitScope(
+      BalanceLedgerPO original, BalanceRefundRequestDTO request, Long userId) {
+    List<BalanceLedgerPO> debitCandidates =
+        balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo);
+    if (debitCandidates == null
+        || debitCandidates.size() != 1
+        || !matchesRefundDebitScope(original, debitCandidates.get(0), request, userId))
+      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
   /** active原DEBIT已先证明；同pay本地owner/freeze按原规则只读验证，DAO异常原样传播。 */

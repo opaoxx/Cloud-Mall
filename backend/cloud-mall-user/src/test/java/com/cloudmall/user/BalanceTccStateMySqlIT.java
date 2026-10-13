@@ -1189,6 +1189,103 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 已退款重放不能忽略同pay重复DEBIT，真实三模式HTTP/service不增资金。 */
+  @Test
+  void refundReplayRejectsDuplicateDebitSourcesWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+      for (String variant :
+          List.of(
+              "APPLIED", "REJECTED", "UNKNOWN", "type-alias", "pay-alias", "three", "other-pay")) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              setEnabled(true);
+              var original = request("refund-replay-source-" + mode + "-" + variant, 7L, "10.00");
+              String debitKey =
+                  "active-legacy".equals(mode) ? "legacy-original-key" : original.ledgerKey;
+              if ("active-legacy".equals(mode)) debitLegacy(original.payNo, debitKey, 7L, "10.00");
+              else {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              }
+              if ("disabled-tcc".equals(mode)) {
+                setEnabled(false);
+                fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+              }
+              var refund = refundRequest(original, "completed-refund-source-check", "1.00");
+              refund.originalOperationKey = debitKey;
+              legacy.refundInternal(7L, 7L, refund);
+              int extraCount = "three".equals(variant) ? 2 : 1;
+              for (int index = 1; index <= extraCount; index++) {
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_ledger(id,user_id,operation_key,operation_type,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                        + " VALUES(?,7,?,?,?,?,2,?,100,98,NOW(3))",
+                    -index,
+                    "additional-debit-source-" + index,
+                    "type-alias".equals(variant) ? "debit" : "DEBIT",
+                    "other-pay".equals(variant)
+                        ? "unrelated-refund-replay-pay"
+                        : "pay-alias".equals(variant)
+                            ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                            : original.payNo,
+                    original.orderNo,
+                    List.of("APPLIED", "REJECTED", "UNKNOWN").contains(variant)
+                        ? variant
+                        : "APPLIED");
+              }
+              var before = allFundsFacts();
+              var response =
+                  org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                          context.getBean(UserController.class))
+                      .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                      .build()
+                      .perform(
+                          org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                  "/api/internal/users/7/balance/refunds")
+                              .header("X-User-Id", "7")
+                              .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                              .content(
+                                  new com.fasterxml.jackson.databind.ObjectMapper()
+                                      .writeValueAsString(refund)))
+                      .andReturn();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () ->
+                      assertEquals(
+                          "other-pay".equals(variant) ? 200 : 409,
+                          response.getResponse().getStatus(),
+                          mode + ":" + variant),
+                  () ->
+                      assertHttpCode(
+                          response, "other-pay".equals(variant) ? "0" : "BALANCE_REFUND_INVALID"),
+                  () -> {
+                    if ("other-pay".equals(variant)) {
+                      assertEquals(
+                          "91.00",
+                          ((com.cloudmall.user.domain.vo.BalanceRefundVO)
+                                  legacy.refundInternal(7L, 7L, refund).data)
+                              .balance);
+                      return;
+                    }
+                    BizException failure =
+                        assertThrows(
+                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                    assertEquals(409, failure.getHttpStatus());
+                    assertEquals("原扣款不存在或未应用", failure.getMessage());
+                  },
+                  () -> assertEquals(before, allFundsFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 新退款不能只凭固定扣款键忽略同pay重复DEBIT，真实三模式HTTP/service不增资金。 */
   @Test
   void freshRefundRejectsDuplicateDebitSourcesWithoutWriting() {

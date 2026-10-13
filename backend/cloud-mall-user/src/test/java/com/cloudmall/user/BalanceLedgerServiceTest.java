@@ -1711,6 +1711,87 @@ class BalanceLedgerServiceTest {
     }
   }
 
+  /** 已退款重放候选须可靠唯一且复制原扣款，缺/多/错字段均在关联合计与资金写前拒绝。 */
+  @Test
+  void refundReplayRejectsMissingDuplicateOrMismatchedDebitScope() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : java.util.List.of("active-tcc", "active-legacy", "disabled-tcc")) {
+      for (String variant :
+          java.util.List.of(
+              "null-list",
+              "empty",
+              "null-row",
+              "two",
+              "three",
+              "id-null",
+              "id-other",
+              "key",
+              "user",
+              "pay",
+              "order",
+              "type",
+              "state",
+              "origin",
+              "amount",
+              "snapshot",
+              "before-null",
+              "after-null")) {
+        assertions.add(
+            () -> {
+              var request = installRefundReplaySourceMode(mode);
+              var candidate = copyRefundDebit(originalRefundDebit);
+              switch (variant) {
+                case "id-null" -> candidate.id = null;
+                case "id-other" -> candidate.id = 6L;
+                case "key" -> candidate.operationKey = "PAY-1";
+                case "user" -> candidate.userId = 8L;
+                case "pay" -> candidate.payNo = "PAY-1";
+                case "order" -> candidate.orderNo = "other-order";
+                case "type" -> candidate.operationType = "debit";
+                case "state" -> candidate.state = "UNKNOWN";
+                case "origin" -> candidate.originalOperationKey = "other-key";
+                case "amount" -> {
+                  candidate.amount = new BigDecimal("11.00");
+                  candidate.balanceAfter = new BigDecimal("89.00");
+                }
+                case "snapshot" -> {
+                  candidate.balanceBefore = new BigDecimal("110.00");
+                  candidate.balanceAfter = new BigDecimal("100.00");
+                }
+                case "before-null" -> candidate.balanceBefore = null;
+                case "after-null" -> candidate.balanceAfter = null;
+                default -> {}
+              }
+              java.util.List<BalanceLedgerPO> candidates =
+                  switch (variant) {
+                    case "null-list" -> null;
+                    case "empty" -> java.util.List.of();
+                    case "null-row" -> java.util.Collections.singletonList(null);
+                    case "two" -> java.util.List.of(candidate, new BalanceLedgerPO());
+                    case "three" ->
+                        java.util.List.of(candidate, new BalanceLedgerPO(), new BalanceLedgerPO());
+                    default -> java.util.List.of(candidate);
+                  };
+              when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
+                  .thenReturn(candidates);
+              var failure =
+                  assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> userService.refundInternal(7L, 7L, request));
+              assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+              assertEquals("原扣款不存在或未应用", failure.getMessage());
+              assertEquals(409, failure.getHttpStatus());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never())
+                  .findLinkedRefundCandidates(any());
+              verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+              verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+              org.mockito.Mockito.verifyNoInteractions(valueOperations);
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 新退款候选须可靠唯一且复制原扣款，缺/多/错字段均在关联合计与资金写前拒绝。 */
   @Test
   void freshRefundRejectsMissingDuplicateOrMismatchedDebitScope() {
@@ -1819,7 +1900,7 @@ class BalanceLedgerServiceTest {
     }
   }
 
-  /** 合法数值尾零复制通过；active/disabled已有退款replay不增加同pay来源查询。 */
+  /** 合法数值尾零复制通过；active/disabled已有退款replay各一次同pay来源查询。 */
   @Test
   void freshRefundScopeAcceptsValueCopiesAndKeepsExistingReplayIndependent() {
     for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
@@ -1836,16 +1917,77 @@ class BalanceLedgerServiceTest {
       var replayRequest = installRefundProofMode(mode);
       when(balanceLedgerMapper.selectByOperationKey(replayRequest.refundOperationKey))
           .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
-      org.mockito.Mockito.doThrow(
-              new org.springframework.dao.DataAccessResourceFailureException(
-                  "owned-replay-scope-must-not-run"))
-          .when(balanceLedgerMapper)
-          .findDebitCandidatesByPayNo(replayRequest.payNo);
       userService.refundInternal(7L, 7L, replayRequest);
-      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findDebitCandidatesByPayNo(any());
+      verify(balanceLedgerMapper).findDebitCandidatesByPayNo(replayRequest.payNo);
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     }
+  }
+
+  /** 归属/原源先级和DAO原对象保持，合法拷贝仍返回历史余额且不二次写。 */
+  @Test
+  void refundReplayDebitScopeFaultKeepsPriorityAndHealthyHistory() {
+    for (String mode : java.util.List.of("active-tcc", "active-legacy", "disabled-tcc")) {
+      var request = installRefundReplaySourceMode(mode);
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException("replay-scope-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceLedgerMapper)
+          .findDebitCandidatesByPayNo(request.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
+
+      var invalidRequest = installRefundReplaySourceMode(mode);
+      originalRefundAttempt.state = "TRYING";
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceLedgerMapper)
+          .findDebitCandidatesByPayNo(invalidRequest.payNo);
+      var rejected =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> userService.refundInternal(7L, 7L, invalidRequest));
+      assertEquals(
+          mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",
+          rejected.getCode());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findDebitCandidatesByPayNo(any());
+    }
+    for (String mode :
+        java.util.List.of("active-tcc", "active-legacy", "active-missing", "disabled-tcc")) {
+      var request = installRefundReplaySourceMode(mode);
+      var candidate = copyRefundDebit(originalRefundDebit);
+      candidate.amount = new BigDecimal("10.000");
+      candidate.balanceBefore = new BigDecimal("100.000");
+      candidate.balanceAfter = new BigDecimal("90.000");
+      when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
+          .thenReturn(java.util.List.of(candidate));
+      when(userMapper.selectByIdForUpdate(7L))
+          .thenReturn(mode.startsWith("disabled") ? disabledUserWithoutWallet() : activeUser(null));
+      assertEquals(
+          "100.00",
+          ((com.cloudmall.user.domain.vo.BalanceRefundVO)
+                  userService.refundInternal(7L, 7L, request).data)
+              .balance);
+      verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
+      verify(balanceLedgerMapper).findDebitCandidatesByPayNo(request.payNo);
+      verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
+      verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
+    }
+  }
+
+  /** 建立已有退款的三种本地来源；null归属历史仍要求无冻结。 */
+  private BalanceRefundRequestDTO installRefundReplaySourceMode(String mode) {
+    if ("disabled-tcc".equals(mode)) return installRefundProofMode("disabled-replay");
+    return installActiveRefundReplayOwner(
+        "active-legacy".equals(mode)
+            ? "LEGACY"
+            : "active-missing".equals(mode) ? "missing" : "TCC");
   }
 
   /** PO使用公开字段；测试显式复制原字段，确保每条坏值测试只改变目标证据。 */
@@ -2764,7 +2906,8 @@ class BalanceLedgerServiceTest {
       verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
       verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
-      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findDebitCandidatesByPayNo(any());
+      verify(balanceLedgerMapper, times(sourceAmount.compareTo(request.amount) < 0 ? 0 : 1))
+          .findDebitCandidatesByPayNo(request.payNo);
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     }
