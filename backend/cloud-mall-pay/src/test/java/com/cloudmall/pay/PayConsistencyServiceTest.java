@@ -2797,10 +2797,14 @@ class PayConsistencyServiceTest {
             ordered
                 .verify(payRecordMapper)
                 .markOwnedLegacySuccess(eq("pay-1"), eq("owned-token"), any(), any());
-        case "REFUNDED" ->
-            ordered
-                .verify(payRecordMapper)
-                .markOwnedLegacyRefunded(eq("pay-1"), eq("owned-token"), any());
+        case "REFUNDED" -> {
+          ordered
+              .verify(payRecordMapper)
+              .markOwnedLegacyRefundPending(eq("pay-1"), eq("owned-token"), any());
+          ordered
+              .verify(payRecordMapper)
+              .markOwnedLegacyRefunded(eq("pay-1"), eq("owned-token"), any());
+        }
         case "FAILED" ->
             ordered
                 .verify(payRecordMapper)
@@ -3253,6 +3257,59 @@ class PayConsistencyServiceTest {
       ordered.verify(transactionManager).commit(any());
       org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
     }
+  }
+
+  /** source通过后的准备写失败，不能尝试退款终态或intent finish，回滚同一事务。 */
+  @Test
+  void refundPreparationFailureStopsTerminalWrites() {
+    for (String failureMode : java.util.List.of("zero", "exception")) {
+      setUp();
+      if ("zero".equals(failureMode))
+        when(payRecordMapper.markOwnedLegacyRefundPending(any(), any(), any())).thenReturn(0);
+      else
+        when(payRecordMapper.markOwnedLegacyRefundPending(any(), any(), any()))
+            .thenThrow(new IllegalStateException("owned-refund-preparation-failure"));
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              IllegalStateException.class,
+              () ->
+                  org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                      consistencyService,
+                      "commitOwnedLegacyTerminal",
+                      intent(),
+                      "owned-token",
+                      "REFUNDED"));
+      assertEquals(
+          "zero".equals(failureMode) ? "支付终态写入未满足当前租约" : "owned-refund-preparation-failure",
+          failure.getMessage());
+      verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+      verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+      verify(transactionManager).rollback(any());
+      verify(transactionManager, never()).commit(any());
+      org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+    }
+  }
+
+  /** 退款统一source→准备→支付终态→intent终态→commit，不在事务内读远端。 */
+  @Test
+  void refundPreparationSharesTerminalSourceLockAndCommit() {
+    when(payRecordMapper.markOwnedLegacyRefunded(any(), any(), any())).thenReturn(1);
+    var expected = intent();
+    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+        consistencyService, "commitOwnedLegacyTerminal", expected, "owned-token", "REFUNDED");
+    var ordered = org.mockito.Mockito.inOrder(payRecordMapper, intentMapper, transactionManager);
+    ordered
+        .verify(payRecordMapper)
+        .lockOwnedLegacyTerminalSource(eq(expected), eq("owned-token"), any());
+    ordered
+        .verify(payRecordMapper)
+        .markOwnedLegacyRefundPending(eq("pay-1"), eq("owned-token"), any());
+    ordered.verify(payRecordMapper).markOwnedLegacyRefunded(eq("pay-1"), eq("owned-token"), any());
+    ordered
+        .verify(intentMapper)
+        .finishOwnedLegacy(eq("pay-1"), eq("owned-token"), eq("REFUNDED"), any());
+    ordered.verify(transactionManager).commit(any());
+    org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
   }
 
   private static PayDebitIntentPO intent() {

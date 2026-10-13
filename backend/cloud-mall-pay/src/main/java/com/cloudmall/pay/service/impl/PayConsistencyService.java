@@ -390,8 +390,6 @@ public class PayConsistencyService {
     OrderClient.OrderView current = readOrderState(intent);
     if (!"CANCELLED".equals(current.status()) || !stockActionSucceeded(current))
       throw new IllegalStateException("订单取消与库存回滚证据未证明退款完成");
-    requireOwnedLegacyWrite(
-        payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
     commitOwnedLegacyTerminal(intent, claimToken, "REFUNDED");
     return "REFUNDED";
   }
@@ -521,7 +519,7 @@ public class PayConsistencyService {
         });
   }
 
-  /** 同一Pay本地事务内提交两个终态写；任一缺证或异常均回滚，不继承全局上下文。 */
+  /** 同一Pay本地事务提交终态及退款收尾准备；任一缺证或异常均回滚，不继承全局上下文。 */
   private void commitOwnedLegacyTerminal(
       PayDebitIntentPO intent, String claimToken, String terminalState) {
     if (RootContext.getXID() != null) throw new IllegalStateException("Legacy终态不得继承全局事务");
@@ -531,7 +529,13 @@ public class PayConsistencyService {
           // 1. 锁定两表原载荷，避免较早远端证明被用于已变化的本地支付。
           if (payRecordMapper.lockOwnedLegacyTerminalSource(intent, claimToken, terminalTime)
               == null) throw new IllegalStateException("支付终态原载荷或领取资格已变化");
-          // 2. 在同一事务内执行原终态两写，任一写不满足资格则整体回滚。
+          // 2. 退款收尾准备也在原载荷锁内，失败不能留下事务外的REFUND_PENDING更新。
+          if ("REFUNDED".equals(terminalState)) {
+            requireOwnedLegacyWrite(
+                payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
+            terminalTime = now();
+          }
+          // 3. 同一事务内执行原终态两写，任一写不满足资格则整体回滚。
           int changed =
               switch (terminalState) {
                 case "SUCCESS" ->
