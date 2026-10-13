@@ -21,7 +21,7 @@ GO。fresh refund 已有 T97 bounded DEBIT source，但 active/disabled existing
 existing active/disabled 合法 replay 才进入 VO，不能 credit/insert；fresh、T75 aggregate、T98–T108 owner/freeze、disabled 404、SQL/锁/API/TCC/Redis 保持。
 
 - Unit：missing/multiple/copy/DAO/source/T73 priority/query count/current wallet NULL；active/disabled/replay budgets 正确。
-- Native：active Legacy/TCC/disabled TCC 已退款后插第二 DEBIT APPLIED/REJECTED/UNKNOWN/CI/3row，POST/GET 409 且四表 facts 不变；other-pay 正常，healthy replay/100 边界保持。
+- Native：active Legacy/TCC/disabled TCC 已退款后插第二 DEBIT APPLIED/REJECTED/UNKNOWN/CI/3row，退款 POST 与直接 service 调用均 409 且四表 facts 不变；不改 operations GET。other-pay 正常，healthy replay/100 边界保持。
 - 资源 finally 清理，不启动 RM/TC/App；旧 T97/T106 合法 replay 断言按新增一次 scope read 同步。
 
 ## 4. 交付边界
