@@ -1714,6 +1714,126 @@ class BalanceLedgerServiceTest {
     if (route.endsWith("get")) assertOperationReadOnly();
   }
 
+  /** 双Legacy入口fresh/成功/拒款重放的固定键精确多结果均409，无后置读取或写入。 */
+  @Test
+  void legacyDebitFixedKeyMultipleResultsKeepBusinessConflict() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String state : java.util.List.of("fresh", "APPLIED", "REJECTED")) {
+        for (boolean wrapped : java.util.List.of(false, true)) {
+          var request = installLegacyDebit(entry, "fresh".equals(state) ? null : state);
+          var duplicate =
+              new org.apache.ibatis.exceptions.TooManyResultsException(
+                  "legacy-fixed-key-duplicate");
+          RuntimeException failure =
+              wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+          org.mockito.Mockito.doThrow(failure)
+              .when(balanceLedgerMapper)
+              .selectByOperationKey(request.operationKey);
+          var rejected =
+              assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> invokeLegacyDebit(entry, request));
+          assertEquals("IDEMPOTENCY_CONFLICT", rejected.getCode());
+          assertEquals("扣款操作键存在重复账本记录", rejected.getMessage());
+          assertEquals(409, rejected.getHttpStatus());
+          verify(balanceLedgerMapper).selectByOperationKey(request.operationKey);
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).countOperationCandidates(any());
+          org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, userTccReceiveMapper);
+          assertLegacyNoMoneyOrCacheWrite();
+        }
+      }
+    }
+  }
+
+  /** 非目标异常原对象；原用户/归属/有界历史先级保持，不把多结果分类扩大到其它来源。 */
+  @Test
+  void legacyDebitFixedKeyClassificationPreservesOtherFaultsAndPriority() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String state : java.util.List.of("fresh", "APPLIED", "REJECTED")) {
+        for (String shape :
+            java.util.List.of(
+                "resource",
+                "sql-wrapper",
+                "nested-too-many",
+                "other-wrapper",
+                "runtime-cause",
+                "message-only")) {
+          var request = installLegacyDebit(entry, "fresh".equals(state) ? null : state);
+          RuntimeException failure =
+              switch (shape) {
+                case "resource" ->
+                    new org.springframework.dao.DataAccessResourceFailureException(
+                        "legacy-fixed-key-jdbc-fault");
+                case "sql-wrapper" ->
+                    new org.mybatis.spring.MyBatisSystemException(
+                        new java.sql.SQLException("legacy-fixed-key-sql-fault"));
+                case "nested-too-many" ->
+                    new org.mybatis.spring.MyBatisSystemException(
+                        new org.apache.ibatis.exceptions.PersistenceException(
+                            "outer",
+                            new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+                case "other-wrapper" ->
+                    new org.apache.ibatis.exceptions.PersistenceException(
+                        "outer",
+                        new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+                case "runtime-cause" ->
+                    new IllegalArgumentException(
+                        "outer",
+                        new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+                default -> new IllegalArgumentException("TooManyResultsException is only text");
+              };
+          org.mockito.Mockito.doThrow(failure)
+              .when(balanceLedgerMapper)
+              .selectByOperationKey(request.operationKey);
+          org.junit.jupiter.api.Assertions.assertSame(
+              failure,
+              assertThrows(RuntimeException.class, () -> invokeLegacyDebit(entry, request)));
+          verify(balanceLedgerMapper).selectByOperationKey(request.operationKey);
+          org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, userTccReceiveMapper);
+          assertLegacyNoMoneyOrCacheWrite();
+        }
+      }
+      for (String gate :
+          java.util.List.of(
+              "caller", "user", "owner", "history-null", "history-multiple", "history-key")) {
+        var request = installLegacyDebit(entry, "APPLIED");
+        org.mockito.Mockito.doThrow(
+                new org.apache.ibatis.exceptions.TooManyResultsException("fixed-key-must-not-run"))
+            .when(balanceLedgerMapper)
+            .selectByOperationKey(request.operationKey);
+        String expectedCode = "IDEMPOTENCY_CONFLICT";
+        switch (gate) {
+          case "caller" -> expectedCode = com.cloudmall.common.error.ErrorCodes.FORBIDDEN;
+          case "user" -> {
+            when(userMapper.selectActiveForUpdate(7L)).thenReturn(null);
+            expectedCode = com.cloudmall.common.error.ErrorCodes.NOT_FOUND;
+          }
+          case "owner" -> legacyDebitAttempt.mode = "TCC";
+          case "history-null" -> {
+            when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo)).thenReturn(null);
+            expectedCode = "BALANCE_DEBIT_UNKNOWN";
+          }
+          case "history-multiple" ->
+              when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
+                  .thenReturn(java.util.List.of(legacyDebitLedger, legacyDebitLedger));
+          case "history-key" -> legacyDebitLedger.operationKey = "foreign-key";
+          default -> throw new AssertionError("Unexpected Legacy gate");
+        }
+        var rejected =
+            assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> {
+                  if ("caller".equals(gate)) userService.debitInternal(7L, 8L, request);
+                  else invokeLegacyDebit(entry, request);
+                });
+        assertEquals(expectedCode, rejected.getCode());
+        verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectByOperationKey(any());
+        org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, userTccReceiveMapper);
+        assertLegacyNoMoneyOrCacheWrite();
+      }
+    }
+  }
+
   /** 九入口的直接/标准直接包装多结果均沿原错误分类，无额外读取或资金写入。 */
   @Test
   void receiveMultipleResultsKeepCallerConflictSemantics() {

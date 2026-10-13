@@ -570,6 +570,19 @@ public class UserServiceImpl implements UserService {
     requireBalanceOperationEvidence(!hasTccReceiveConflict(original.payNo));
   }
 
+  /** Legacy固定操作键保持原单次点读，仅直接多结果或其标准直接包装按幂等冲突拒绝。 */
+  private BalanceLedgerPO readLegacyDebitLedgerCandidate(String operationKey) {
+    try {
+      return balanceLedgerMapper.selectByOperationKey(operationKey);
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) {
+        throw new BizException("IDEMPOTENCY_CONFLICT", "扣款操作键存在重复账本记录", 409);
+      }
+      throw failure;
+    }
+  }
+
   /** 单次点读观察接收存在性；仅精确多结果及其直接MyBatis包装表示冲突，其它故障原样。 */
   private boolean hasTccReceiveConflict(String payNo) {
     try {
@@ -804,7 +817,7 @@ public class UserServiceImpl implements UserService {
         historicalCandidates.isEmpty() ? null : historicalCandidates.get(0);
     if (historical != null && !Objects.equals(historical.operationKey, request.operationKey))
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已绑定其他扣款操作", 409);
-    BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.operationKey);
+    BalanceLedgerPO existing = readLegacyDebitLedgerCandidate(request.operationKey);
     if (existing != null) {
       ensureDebitMatches(existing, userId, request);
       if (attempt != null && !Objects.equals(attempt.state, existing.state))

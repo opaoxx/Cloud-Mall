@@ -931,6 +931,111 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 当前pay候选不能隐藏其它pay同操作键，双Legacy入口多结果必须409且不写/cache。 */
+  @Test
+  void legacyDebitLedgerDuplicateKeysKeepBusinessConflicts() {
+    var indexes =
+        fixture.queryForList(
+            "SHOW INDEX FROM balance_ledger WHERE Column_name='operation_key' AND Non_unique=0");
+    assertEquals(1, indexes.size());
+    String uniqueIndex = (String) indexes.get(0).get("Key_name");
+    assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+    fixture.execute("ALTER TABLE balance_ledger DROP INDEX `" + uniqueIndex + "`");
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String entry : List.of("debits", "compat")) {
+        for (String state : List.of("fresh", "APPLIED", "REJECTED")) {
+          for (boolean alias : List.of(false, true)) {
+            checks.add(
+                () -> {
+                  for (String table :
+                      List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                    fixture.update("DELETE FROM " + table);
+                  fixture.update(
+                      "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                  var request = new BalanceDebitRequestDTO();
+                  request.payNo = "legacy-key-multi-" + entry + "-" + state + "-" + alias;
+                  request.operationKey =
+                      "compat".equals(entry) ? request.payNo : "legacy-key:" + request.payNo;
+                  request.orderNo =
+                      "compat".equals(entry) ? request.payNo : "order-" + request.payNo;
+                  request.amount = new BigDecimal("REJECTED".equals(state) ? "101.00" : "10.00");
+                  var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                  compatible.paymentKey = request.payNo;
+                  compatible.amount = request.amount;
+                  org.junit.jupiter.api.function.Executable debit =
+                      () -> {
+                        if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                        else legacy.debitInternal(7L, 7L, request);
+                      };
+                  if ("REJECTED".equals(state))
+                    assertEquals(
+                        "PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
+                  else if (!"fresh".equals(state)) debit.execute();
+                  try {
+                    for (int rowNumber = 1;
+                        rowNumber <= ("fresh".equals(state) ? 2 : 1);
+                        rowNumber++) {
+                      fixture.update(
+                          "INSERT INTO"
+                              + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                              + " VALUES(?,8,?,'DEBIT',NULL,?,?,1,'APPLIED',100,99,NOW(3))",
+                          rowNumber == 1 ? -122L : -123L,
+                          alias && (rowNumber == 2 || !"fresh".equals(state))
+                              ? request.operationKey.toUpperCase(java.util.Locale.ROOT)
+                              : request.operationKey,
+                          "other-key-pay-" + rowNumber,
+                          "other-key-order-" + rowNumber);
+                    }
+                    var before = allFundsFacts();
+                    var receiptBefore =
+                        fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                    var cache = context.getBean(StringRedisTemplate.class);
+                    org.mockito.Mockito.clearInvocations(cache);
+                    var response =
+                        "compat".equals(entry)
+                            ? postCompatibleLegacyDebit(compatible)
+                            : postLegacyDebit(request);
+                    org.junit.jupiter.api.Assertions.assertAll(
+                        () ->
+                            assertEquals(
+                                409,
+                                response.getResponse().getStatus(),
+                                entry + ":" + state + ":" + alias),
+                        () -> assertHttpCode(response, "IDEMPOTENCY_CONFLICT"),
+                        () -> {
+                          var failure = assertThrows(BizException.class, debit);
+                          assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                          assertEquals("扣款操作键存在重复账本记录", failure.getMessage());
+                        },
+                        () -> assertEquals(before, allFundsFacts()),
+                        () ->
+                            assertEquals(
+                                receiptBefore,
+                                fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")),
+                        () -> org.mockito.Mockito.verifyNoInteractions(cache));
+                  } finally {
+                    fixture.update("DELETE FROM balance_ledger WHERE id IN (-122,-123)");
+                  }
+                });
+          }
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      fixture.update("DELETE FROM balance_ledger WHERE id IN (-122,-123)");
+      fixture.execute(
+          "ALTER TABLE balance_ledger ADD UNIQUE INDEX `" + uniqueIndex + "` (operation_key)");
+      assertEquals(
+          1,
+          fixture
+              .queryForList(
+                  "SHOW INDEX FROM balance_ledger WHERE Column_name='operation_key' AND"
+                      + " Non_unique=0")
+              .size());
+    }
+  }
+
   /** 缺唯一索引的exact/CI重复接收事实须各入口原409，保护五表且finally恢复索引。 */
   @Test
   void receiveDuplicateRowsKeepOriginalBusinessConflicts() {
