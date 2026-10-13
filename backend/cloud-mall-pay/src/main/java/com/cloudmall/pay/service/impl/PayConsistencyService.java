@@ -238,7 +238,7 @@ public class PayConsistencyService {
       if (operation != null && operation.refundOperationKey() != null) {
         if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order)) {
           confirmRefundLedger(intent, operation.refundOperationKey());
-          return finishRefunded(intent, claimToken);
+          return finishRefunded(intent, claimToken, operation.refundOperationKey());
         }
         throw new IllegalStateException("余额已退款但订单不是已取消状态: " + order.status());
       }
@@ -385,11 +385,15 @@ public class PayConsistencyService {
       throw new IllegalStateException("原扣款账本未证明支付成功");
   }
 
-  /** 原扣款已退款时复核当前取消/库存证据，再恢复支付终态，不再次增加余额。 */
-  private String finishRefunded(PayDebitIntentPO intent, String claimToken) {
+  /** 复核当前取消/库存及原键全额退款账本，再恢复终态；两次远端读取均在事务外。 */
+  private String finishRefunded(PayDebitIntentPO intent, String claimToken, String refundKey) {
+    // 1. 保留取消及库存证据的原优先级，缺证时不追加退款账本读取。
     OrderClient.OrderView current = readOrderState(intent);
     if (!"CANCELLED".equals(current.status()) || !stockActionSucceeded(current))
       throw new IllegalStateException("订单取消与库存回滚证据未证明退款完成");
+    // 2. 订单读取之后再次确认同一退款键，不能用较早账本覆盖已经变化的退款事实。
+    confirmRefundLedger(intent, refundKey);
+    // 3. 本次证明通过后进入原终态事务；不撤回已发请求或新增退款。
     commitOwnedLegacyTerminal(intent, claimToken, "REFUNDED");
     return "REFUNDED";
   }
@@ -414,7 +418,7 @@ public class PayConsistencyService {
         || !Objects.equals("refund:" + intent.payNo, refund.data.operationKey())
         || !"APPLIED".equals(refund.data.state())) throw new IllegalStateException("用户余额退款未确认");
     confirmRefundLedger(intent, "refund:" + intent.payNo);
-    return finishRefunded(intent, claimToken);
+    return finishRefunded(intent, claimToken, "refund:" + intent.payNo);
   }
 
   /**

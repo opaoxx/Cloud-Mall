@@ -303,7 +303,7 @@ class PayConsistencyServiceTest {
         prepareRefundPath(marker, key);
         when(userClient.operation(7L, key, 7L)).thenReturn(ApiResponse.ok(refundFact(key, amount)));
         assertEquals("REFUNDED", consistencyService.process("pay-1"));
-        verify(userClient).operation(7L, key, 7L);
+        verify(userClient, org.mockito.Mockito.times(2)).operation(7L, key, 7L);
         verify(payRecordMapper).markOwnedLegacyRefunded(eq("pay-1"), anyString(), any());
         verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("REFUNDED"), any());
         verify(userClient, never()).debit(any(), any(), any());
@@ -1054,6 +1054,104 @@ class PayConsistencyServiceTest {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 早期退款证明后末次Order期间证据变化，原key最终GET拒绝终态且不增加资金写。 */
+  @Test
+  void latestRefundLedgerRejectsChangedProofAfterFinalOrder() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : java.util.List.of("marker", "post-refund", "after-paid")) {
+      for (String variant :
+          java.util.List.of(
+              "null-response",
+              "null-body",
+              "failed-envelope",
+              "key-null",
+              "key-alias",
+              "key-other",
+              "type-wrong",
+              "state-wrong",
+              "amount-null",
+              "amount-partial",
+              "amount-zero",
+              "amount-negative",
+              "amount-fraction",
+              "amount-overflow",
+              "amount-text",
+              "404",
+              "500",
+              "fault")) {
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath(
+                  "marker".equals(path)
+                      ? "refund-marker"
+                      : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+                  "order-1");
+              String key = "marker".equals(path) ? "custom-refund" : "refund:pay-1";
+              if ("marker".equals(path))
+                when(userClient.operation(7L, "pay-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "pay-1", "DEBIT", "APPLIED", "10.00", key)));
+              var originalIntent = intent();
+              var durableIntent = intent();
+              when(intentMapper.findByPayNo("pay-1"))
+                  .thenReturn(originalIntent, originalIntent, durableIntent);
+              when(intentMapper.updateOwnedLegacyStatus(
+                      anyString(), anyString(), anyString(), any()))
+                  .thenAnswer(
+                      invocation -> {
+                        durableIntent.status = invocation.getArgument(2);
+                        return 1;
+                      });
+              var finalOrderRead = new java.util.concurrent.atomic.AtomicBoolean();
+              var reads = new java.util.concurrent.atomic.AtomicInteger();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        if (!finalOrderRead.get()) return ApiResponse.ok(refundFact(key, "10.000"));
+                        if ("404".equals(variant) || "500".equals(variant))
+                          throw refundReadFault(Integer.parseInt(variant));
+                        if ("fault".equals(variant))
+                          throw new IllegalStateException("owned-final-refund-fault");
+                        return badRefundResponse(variant, key);
+                      })
+                  .when(userClient)
+                  .operation(7L, key, 7L);
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        int readNumber = reads.incrementAndGet();
+                        if (readNumber == ("after-paid".equals(path) ? 3 : 2))
+                          finalOrderRead.set(true);
+                        return ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                "after-paid".equals(path) && readNumber == 1
+                                    ? "PENDING_PAYMENT"
+                                    : "CANCELLED",
+                                BigDecimal.TEN,
+                                7L,
+                                "SUCCEEDED"));
+                      })
+                  .when(orderClient)
+                  .paymentState("order-1", 7L);
+              String retry = "marker".equals(path) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+              assertEquals(retry, consistencyService.process("pay-1"), path + ":" + variant);
+              verifyRefundNotFinished(retry);
+              verify(userClient, org.mockito.Mockito.times(2)).operation(7L, key, 7L);
+              verify(userClient, org.mockito.Mockito.times("marker".equals(path) ? 0 : 1))
+                  .refund(any(), any(), any());
+              verify(orderClient, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+                  .paid(any(), any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 三类退款入口当前订单正确取消时保持原REFUNDED，Order GET在终态事务外。 */
   @Test
   void latestValidOrderKeepsHealthyRefundedPaths() {
@@ -1101,7 +1199,7 @@ class PayConsistencyServiceTest {
           .refund(any(), any(), any());
       verify(orderClient, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
           .paid(any(), any());
-      verify(userClient, org.mockito.Mockito.times(2)).operation(eq(7L), anyString(), eq(7L));
+      verify(userClient, org.mockito.Mockito.times(3)).operation(eq(7L), anyString(), eq(7L));
     }
   }
 

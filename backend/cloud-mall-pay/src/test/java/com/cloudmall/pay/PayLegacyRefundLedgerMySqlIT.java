@@ -257,7 +257,7 @@ class PayLegacyRefundLedgerMySqlIT {
                     "custom-refund", "REFUND", "APPLIED", "10.000", null)));
     String markerResult = consistencyWith(markerUser, cancellingOrders()).process("pay-1");
     assertEquals("REFUNDED", markerResult);
-    verify(markerUser).operation(7L, "custom-refund", 7L);
+    verify(markerUser, times(2)).operation(7L, "custom-refund", 7L);
     assertEquals("REFUNDED", paymentStatus());
     assertEquals("REFUNDED", intentStatus());
     var markerFacts = payFacts();
@@ -277,8 +277,8 @@ class PayLegacyRefundLedgerMySqlIT {
         .thenReturn(
             ApiResponse.ok(new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00")));
     assertEquals("REFUNDED", consistencyWith(postUser, cancellingOrders()).process("pay-1"));
-    verify(postUser).operation(7L, "refund:pay-1", 7L);
-    assertEquals(2, postUserOperationCalls(postUser));
+    verify(postUser, times(2)).operation(7L, "refund:pay-1", 7L);
+    assertEquals(3, postUserOperationCalls(postUser));
     assertEquals("REFUNDED", paymentStatus());
     assertEquals("REFUNDED", intentStatus());
     verify(markerUser, never()).refund(any(), any(), any());
@@ -2589,13 +2589,15 @@ class PayLegacyRefundLedgerMySqlIT {
                         })
                     .when(orders)
                     .paymentState("order-1", 7L);
-                var service = newService(mock(UserClient.class), orders);
+                UserClient user = mock(UserClient.class);
+                stubRefundOperation(user, "healthy", "refund:pay-1", "10.00");
+                var service = newService(user, orders);
                 var failure =
                     org.junit.jupiter.api.Assertions.assertThrows(
                         IllegalStateException.class,
                         () ->
                             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                                service, "finishRefunded", expected, token));
+                                service, "finishRefunded", expected, token, "refund:pay-1"));
                 assertEquals("支付终态原载荷或领取资格已变化", failure.getMessage());
                 assertEquals(afterChange.get(), payFacts(), path + ":" + side + ":" + mutation);
               });
@@ -2662,14 +2664,16 @@ class PayLegacyRefundLedgerMySqlIT {
               "CREATE TRIGGER cm16t147_finish_failure BEFORE UPDATE ON pay_debit_intent FOR EACH"
                   + " ROW BEGIN IF NEW.status='REFUNDED' THEN SIGNAL SQLSTATE '45000' SET"
                   + " MESSAGE_TEXT='owned-refund-terminal-failure'; END IF; END");
-        var service = newService(mock(UserClient.class), orders);
+        UserClient user = mock(UserClient.class);
+        stubRefundOperation(user, "healthy", "refund:pay-1", "10.00");
+        var service = newService(user, orders);
         if ("intent-trigger".equals(failureMode)) {
           var failure =
               org.junit.jupiter.api.Assertions.assertThrows(
                   org.springframework.dao.DataAccessException.class,
                   () ->
                       org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                          service, "finishRefunded", expected, token));
+                          service, "finishRefunded", expected, token, "refund:pay-1"));
           assertTrue(failure.getMessage().contains("owned-refund-terminal-failure"));
         } else {
           var failure =
@@ -2677,7 +2681,7 @@ class PayLegacyRefundLedgerMySqlIT {
                   IllegalStateException.class,
                   () ->
                       org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                          service, "finishRefunded", expected, token));
+                          service, "finishRefunded", expected, token, "refund:pay-1"));
           assertEquals("支付终态写入未满足当前租约", failure.getMessage());
         }
         assertEquals(before, payFacts(), failureMode);
@@ -2704,6 +2708,17 @@ class PayLegacyRefundLedgerMySqlIT {
       var expected = intents.findByPayNo("pay-1");
       var before = payFacts();
       UserClient user = mock(UserClient.class);
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                return ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "refund:pay-1", "REFUND", "APPLIED", "10.000", null));
+              })
+          .when(user)
+          .operation(7L, "refund:pay-1", 7L);
       OrderClient orders = mock(OrderClient.class);
       when(orders.paymentState("order-1", 7L))
           .thenAnswer(
@@ -2777,7 +2792,7 @@ class PayLegacyRefundLedgerMySqlIT {
         assertEquals(
             "REFUNDED",
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                newService(user, orders), "finishRefunded", expected, token));
+                newService(user, orders), "finishRefunded", expected, token, "refund:pay-1"));
         assertEquals(List.of("prepare", "payment", "intent"), observed);
         assertEquals(1, connectionIds.size());
         assertEquals("REFUNDED", paymentStatus());
@@ -2790,7 +2805,9 @@ class PayLegacyRefundLedgerMySqlIT {
         org.junit.jupiter.api.Assertions.assertFalse(
             updatedAt.isBefore(
                 preparedTime.get().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)));
-        org.mockito.Mockito.verifyNoInteractions(user);
+        verify(user).operation(7L, "refund:pay-1", 7L);
+        verify(user, never()).refund(any(), any(), any());
+        verify(user, never()).debit(any(), any(), any());
       } finally {
         records = actualRecords;
         intents = actualIntents;
@@ -4365,6 +4382,164 @@ class PayLegacyRefundLedgerMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 末次Order读期间退款证据变坏，早期全额账本不能授权REFUNDED。 */
+  @Test
+  void latestRefundLedgerIsRequiredAfterFinalOrderReadWithRealPay() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : List.of("marker", "post-refund", "after-paid")) {
+      for (String variant :
+          List.of(
+              "partial", "wrong-state", "not-found", "null-body", "wrong-key", "server-error")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              UserClient user = mock(UserClient.class);
+              UserClient lateUser = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(
+                  "marker".equals(path)
+                      ? "refund-marker"
+                      : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+                  "order-1",
+                  user,
+                  orders);
+              stubRefundOperation(lateUser, variant, "refund:pay-1", "5.00");
+              var finalOrderRead = new java.util.concurrent.atomic.AtomicBoolean();
+              var orderReads = new java.util.concurrent.atomic.AtomicInteger();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        if (finalOrderRead.get()) return lateUser.operation(7L, "refund:pay-1", 7L);
+                        return ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "refund:pay-1", "REFUND", "APPLIED", "10.000", null));
+                      })
+                  .when(user)
+                  .operation(7L, "refund:pay-1", 7L);
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        int readNumber = orderReads.incrementAndGet();
+                        if (readNumber == ("after-paid".equals(path) ? 3 : 2))
+                          finalOrderRead.set(true);
+                        return ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                "after-paid".equals(path) && readNumber == 1
+                                    ? "PENDING_PAYMENT"
+                                    : "CANCELLED",
+                                BigDecimal.TEN,
+                                7L,
+                                "SUCCEEDED"));
+                      })
+                  .when(orders)
+                  .paymentState("order-1", 7L);
+              String expected = "marker".equals(path) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+              assertEquals(
+                  expected, newService(user, orders).process("pay-1"), path + ":" + variant);
+              assertEquals(expected, paymentStatus());
+              assertEquals(expected, intentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertTrue(retryErrorPresent());
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, times("marker".equals(path) ? 0 : 1)).refund(any(), any(), any());
+              verify(orders, times("after-paid".equals(path) ? 1 : 0)).paid(any(), any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 末次退款缺证保原等待，补同key原账本后同pay完成，不重复退款。 */
+  @Test
+  void latestRefundLedgerRepairResumesOriginalPaymentWithoutRefundReplay() {
+    for (String path : List.of("marker", "post-refund", "after-paid")) {
+      for (String variant : List.of("partial", "not-found")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        var before = payFacts();
+        UserClient user = mock(UserClient.class);
+        UserClient lateUser = mock(UserClient.class);
+        OrderClient orders = mock(OrderClient.class);
+        configureRemoteOrderIdentityPath(
+            "marker".equals(path)
+                ? "refund-marker"
+                : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+            "order-1",
+            user,
+            orders);
+        stubRefundOperation(lateUser, variant, "refund:pay-1", "5.00");
+        var finalOrderRead = new java.util.concurrent.atomic.AtomicBoolean();
+        var orderReads = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.doAnswer(
+                invocation -> {
+                  org.junit.jupiter.api.Assertions.assertFalse(
+                      org.springframework.transaction.support.TransactionSynchronizationManager
+                          .isActualTransactionActive());
+                  if (finalOrderRead.get()) return lateUser.operation(7L, "refund:pay-1", 7L);
+                  return ApiResponse.ok(
+                      new UserClient.BalanceOperationView(
+                          "refund:pay-1", "REFUND", "APPLIED", "10.00", null));
+                })
+            .when(user)
+            .operation(7L, "refund:pay-1", 7L);
+        org.mockito.Mockito.doAnswer(
+                invocation -> {
+                  int readNumber = orderReads.incrementAndGet();
+                  if (readNumber == ("after-paid".equals(path) ? 3 : 2)) finalOrderRead.set(true);
+                  return ApiResponse.ok(
+                      new OrderClient.OrderView(
+                          "order-1",
+                          "after-paid".equals(path) && readNumber == 1
+                              ? "PENDING_PAYMENT"
+                              : "CANCELLED",
+                          BigDecimal.TEN,
+                          7L,
+                          "SUCCEEDED"));
+                })
+            .when(orders)
+            .paymentState("order-1", 7L);
+        var service = newService(user, orders);
+        String retry = "marker".equals(path) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+        assertEquals(retry, service.process("pay-1"));
+        assertEquals(retry, paymentStatus());
+        assertEquals(retry, intentStatus());
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+        assertTrue(retryErrorPresent());
+        assertNull(intentLeaseOwner());
+        fixture.update(
+            "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 SECOND WHERE"
+                + " pay_no='pay-1'");
+        org.mockito.Mockito.doReturn(
+                ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "pay-1", "DEBIT", "APPLIED", "10.00", "refund:pay-1")))
+            .when(user)
+            .operation(7L, "pay-1", 7L);
+        org.mockito.Mockito.doReturn(
+                ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "refund:pay-1", "REFUND", "APPLIED", "1E+1", null)))
+            .when(user)
+            .operation(7L, "refund:pay-1", 7L);
+        assertEquals("REFUNDED", service.process("pay-1"));
+        assertEquals("REFUNDED", paymentStatus());
+        assertEquals("REFUNDED", intentStatus());
+        assertEquals(2, intentAttempts());
+        assertNull(intentLeaseOwner());
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+        assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+        assertEquals(
+            1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+        verify(user, times(4)).operation(7L, "refund:pay-1", 7L);
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, times("marker".equals(path) ? 0 : 1)).refund(any(), any(), any());
+        verify(orders, times("after-paid".equals(path) ? 1 : 0)).paid(any(), any());
+      }
+    }
+  }
+
   /** 三类退款入口当前订单正确取消时保持原REFUNDED，Order GET在终态事务外。 */
   @Test
   void latestValidOrderKeepsHealthyRefundedPathsWithRealPay() {
@@ -4410,7 +4585,7 @@ class PayLegacyRefundLedgerMySqlIT {
           .refund(any(), any(), any());
       verify(orders, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
           .paid(any(), any());
-      verify(user, org.mockito.Mockito.times(2)).operation(eq(7L), anyString(), eq(7L));
+      verify(user, org.mockito.Mockito.times(3)).operation(eq(7L), anyString(), eq(7L));
     }
   }
 
