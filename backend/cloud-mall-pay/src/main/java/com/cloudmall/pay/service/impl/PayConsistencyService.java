@@ -206,6 +206,10 @@ public class PayConsistencyService {
           OrderClient.OrderView rejectedOrder = readOrderState(intent);
           if ("PAID".equals(rejectedOrder.status()) || "COMPLETED".equals(rejectedOrder.status()))
             throw new IllegalStateException("订单已支付但用户余额扣款被拒绝");
+          if (!"INIT".equals(intent.status)
+              || !"PENDING".equals(observedPaymentStatus)
+              || operation.refundOperationKey() != null)
+            throw new IllegalStateException("扣款拒绝事实与资金恢复状态不一致");
           return failWithoutDebit(intent, claimToken);
         }
         if (!"APPLIED".equals(operation.state()))
