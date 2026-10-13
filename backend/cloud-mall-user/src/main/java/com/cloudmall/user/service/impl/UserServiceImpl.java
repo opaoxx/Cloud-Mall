@@ -37,8 +37,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 import javax.annotation.PostConstruct;
 import javax.validation.Valid;
+import org.apache.ibatis.exceptions.TooManyResultsException;
+import org.mybatis.spring.MyBatisSystemException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -393,16 +396,22 @@ public class UserServiceImpl implements UserService {
       throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
     }
     // 2. 既有退款先保原proof/优先级；active核原DEBIT，disabled仍原TCC来源404。
-    BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
+    BalanceLedgerPO existing =
+        readRefundLedgerCandidate(
+            () -> balanceLedgerMapper.selectByOperationKey(request.refundOperationKey));
     if (existing != null) {
       BalanceLedgerPO original = null;
       if (!Objects.equals(user.status, 1)) {
-        original = balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        original =
+            readRefundLedgerCandidate(
+                () -> balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey));
         requireDisabledTccRefund(original, request, userId);
       }
       ensureRefundMatches(existing, userId, request);
       if (Objects.equals(user.status, 1)) {
-        original = balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        original =
+            readRefundLedgerCandidate(
+                () -> balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey));
         if (!isProvenRefundOriginalDebit(original, request, userId)
             || existing.amount.compareTo(original.amount) > 0)
           throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
@@ -419,7 +428,8 @@ public class UserServiceImpl implements UserService {
     }
     // 3. 新退款必须先证明原扣款身份和资金快照，再计算合计或写余额。
     BalanceLedgerPO original =
-        balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        readRefundLedgerCandidate(
+            () -> balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey));
     if (!Objects.equals(user.status, 1)) requireDisabledTccRefund(original, request, userId);
     if (!isProvenRefundOriginalDebit(original, request, userId)) {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
@@ -458,6 +468,19 @@ public class UserServiceImpl implements UserService {
     if (balanceLedgerMapper.insert(refund) != 1) throw new IllegalStateException("退款账本写入未影响唯一记录");
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** 仅退款点读的直接多结果或标准直接包装转业务409，其它异常/nullable候选原样。 */
+  private BalanceLedgerPO readRefundLedgerCandidate(Supplier<BalanceLedgerPO> ledgerRead) {
+    try {
+      return ledgerRead.get();
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) {
+        throw new BizException("BALANCE_REFUND_INVALID", "退款累计证据不完整或不一致", 409);
+      }
+      throw failure;
+    }
   }
 
   /** 已有退款各门已先证明；当前退款须在一致双集合中且累计不超原额，不再次加请求金额。 */

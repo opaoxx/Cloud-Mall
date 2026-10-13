@@ -4256,6 +4256,124 @@ class BalanceLedgerServiceTest {
     return request;
   }
 
+  /** 退款current/source直接或标准包装的多结果均业务409，失败不写资金或跑后置COUNT。 */
+  @Test
+  void refundPointReadsClassifyOnlyPreciseMultiResultShapes() {
+    for (String mode :
+        java.util.List.of("active-fresh", "disabled-fresh", "active-replay", "disabled-replay")) {
+      for (String stage : java.util.List.of("current", "source")) {
+        for (boolean wrapped : java.util.List.of(false, true)) {
+          var request = installRefundGlobalEvidence(mode);
+          RuntimeException tooMany =
+              new org.apache.ibatis.exceptions.TooManyResultsException("owned-point-duplicate");
+          RuntimeException failure =
+              wrapped ? new org.mybatis.spring.MyBatisSystemException(tooMany) : tooMany;
+          if ("current".equals(stage))
+            org.mockito.Mockito.doThrow(failure)
+                .when(balanceLedgerMapper)
+                .selectByOperationKey(request.refundOperationKey);
+          else
+            org.mockito.Mockito.doThrow(failure)
+                .when(balanceLedgerMapper)
+                .selectDebitForUpdate(request.originalOperationKey);
+          var rejected =
+              assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> userService.refundInternal(7L, 7L, request));
+          assertEquals("BALANCE_REFUND_INVALID", rejected.getCode());
+          assertEquals(409, rejected.getHttpStatus());
+          assertEquals("退款累计证据不完整或不一致", rejected.getMessage());
+          verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).countOperationCandidates(any());
+        }
+      }
+    }
+  }
+
+  /** 非目标包装/DAO保持原对象，旧User404/行proof优先，null与唯一候选不被异常门改变。 */
+  @Test
+  void refundPointReadClassificationKeepsOtherFaultsAndLookupSemantics() {
+    for (String mode :
+        java.util.List.of("active-fresh", "disabled-fresh", "active-replay", "disabled-replay")) {
+      for (String stage : java.util.List.of("current", "source")) {
+        for (String shape :
+            java.util.List.of("resource", "sql-wrapper", "nested-too-many", "message-only")) {
+          var request = installRefundGlobalEvidence(mode);
+          RuntimeException failure =
+              switch (shape) {
+                case "resource" ->
+                    new org.springframework.dao.DataAccessResourceFailureException(
+                        "owned-jdbc-fault");
+                case "sql-wrapper" ->
+                    new org.mybatis.spring.MyBatisSystemException(
+                        new java.sql.SQLException("owned-sql-fault"));
+                case "nested-too-many" ->
+                    new org.mybatis.spring.MyBatisSystemException(
+                        new org.apache.ibatis.exceptions.PersistenceException(
+                            "outer",
+                            new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+                default -> new IllegalArgumentException("TooManyResultsException is only text");
+              };
+          if ("current".equals(stage))
+            org.mockito.Mockito.doThrow(failure)
+                .when(balanceLedgerMapper)
+                .selectByOperationKey(request.refundOperationKey);
+          else
+            org.mockito.Mockito.doThrow(failure)
+                .when(balanceLedgerMapper)
+                .selectDebitForUpdate(request.originalOperationKey);
+          org.junit.jupiter.api.Assertions.assertSame(
+              failure,
+              assertThrows(
+                  RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        }
+      }
+      var missingRequest = installRefundGlobalEvidence(mode);
+      when(balanceLedgerMapper.selectDebitForUpdate(missingRequest.originalOperationKey))
+          .thenReturn(null);
+      var missing =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> userService.refundInternal(7L, 7L, missingRequest));
+      assertEquals(
+          mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",
+          missing.getCode());
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      var healthy = installRefundGlobalEvidence(mode);
+      userService.refundInternal(7L, 7L, healthy);
+      verify(balanceLedgerMapper).selectByOperationKey(healthy.refundOperationKey);
+      verify(balanceLedgerMapper).selectDebitForUpdate(healthy.originalOperationKey);
+      verify(userMapper, times(mode.endsWith("replay") ? 0 : 1)).creditBalance(any(), any(), any());
+    }
+    var request = installRefundGlobalEvidence("active-replay");
+    var invalid = linkedRefund(request.refundOperationKey, "0.01");
+    invalid.state = "REJECTED";
+    when(balanceLedgerMapper.selectByOperationKey(request.refundOperationKey)).thenReturn(invalid);
+    org.mockito.Mockito.doThrow(
+            new org.apache.ibatis.exceptions.TooManyResultsException("source-must-not-run"))
+        .when(balanceLedgerMapper)
+        .selectDebitForUpdate(request.originalOperationKey);
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, request))
+            .getCode());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitForUpdate(any());
+    var userMissing = installRefundGlobalEvidence("active-fresh");
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(null);
+    assertEquals(
+        "COMMON_NOT_FOUND",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, userMissing))
+            .getCode());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectByOperationKey(any());
+  }
+
   /** 单行重放事实和两份独立列表均包含当前退款，避免旧空集合夹具伪造成功。 */
   private void installCompleteRefundReplay(BalanceLedgerPO refund) {
     when(balanceLedgerMapper.selectByOperationKey(refund.operationKey)).thenReturn(refund);

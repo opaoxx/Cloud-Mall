@@ -425,6 +425,109 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** current/source点读的历史多行必须稳定业务409，三模式新建/重放不写资金。 */
+  @Test
+  void refundPointReadsClassifyMultipleLedgerRowsWithoutWrites() {
+    var indexes =
+        fixture.queryForList(
+            "SHOW INDEX FROM balance_ledger WHERE Column_name='operation_key' AND Non_unique=0");
+    assertEquals(1, indexes.size());
+    String uniqueIndex = (String) indexes.get(0).get("Key_name");
+    assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+    fixture.execute("ALTER TABLE balance_ledger DROP INDEX `" + uniqueIndex + "`");
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+        for (String stage : List.of("current", "fresh-source", "replay-source")) {
+          for (boolean alias : List.of(false, true)) {
+            checks.add(
+                () -> {
+                  closeContext();
+                  createTransactionalServices();
+                  setEnabled(true);
+                  var original =
+                      request("point-multi-" + mode + "-" + stage + "-" + alias, 7L, "10.00");
+                  if ("active-legacy".equals(mode))
+                    debitLegacy(original.payNo, original.ledgerKey, 7L, "10.00");
+                  else {
+                    service.tryDebit(original);
+                    service.confirmDebit(finalizeRequest(original));
+                  }
+                  if ("disabled-tcc".equals(mode)) {
+                    setEnabled(false);
+                    fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+                  }
+                  var current = refundRequest(original, "point-current-refund", "2.00");
+                  if (!"fresh-source".equals(stage)) legacy.refundInternal(7L, 7L, current);
+                  String duplicatedKey =
+                      "current".equals(stage) ? current.refundOperationKey : original.ledgerKey;
+                  String duplicateAlias =
+                      alias ? duplicatedKey.toUpperCase(java.util.Locale.ROOT) : duplicatedKey;
+                  fixture.update(
+                      "INSERT INTO"
+                          + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                          + " SELECT -1,8,?,operation_type,CASE WHEN operation_type='REFUND' THEN"
+                          + " 'unrelated-point-origin' ELSE NULL"
+                          + " END,'unrelated-point-pay','unrelated-point-order',amount,state,balance_before,balance_after,created_at"
+                          + " FROM balance_ledger WHERE operation_key=?",
+                      duplicateAlias,
+                      duplicatedKey);
+                  assertEquals(
+                      2,
+                      fixture.queryForObject(
+                          "SELECT COUNT(*) FROM balance_ledger WHERE operation_key=?",
+                          Integer.class,
+                          duplicatedKey));
+                  var before = allFundsFacts();
+                  var response =
+                      org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                              context.getBean(UserController.class))
+                          .setControllerAdvice(
+                              new com.cloudmall.common.web.GlobalExceptionHandler())
+                          .build()
+                          .perform(
+                              org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                  .post("/api/internal/users/7/balance/refunds")
+                                  .header("X-User-Id", "7")
+                                  .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                                  .content(
+                                      new com.fasterxml.jackson.databind.ObjectMapper()
+                                          .writeValueAsString(current)))
+                          .andReturn();
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              409,
+                              response.getResponse().getStatus(),
+                              mode + ":" + stage + ":" + alias),
+                      () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class, () -> legacy.refundInternal(7L, 7L, current));
+                        assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                        assertEquals("退款累计证据不完整或不一致", failure.getMessage());
+                      },
+                      () -> assertEquals(before, allFundsFacts()));
+                });
+          }
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      fixture.update("DELETE FROM balance_ledger WHERE id=-1");
+      fixture.execute(
+          "ALTER TABLE balance_ledger ADD UNIQUE INDEX `" + uniqueIndex + "` (operation_key)");
+      assertEquals(
+          1,
+          fixture
+              .queryForList(
+                  "SHOW INDEX FROM balance_ledger WHERE Column_name='operation_key' AND"
+                      + " Non_unique=0")
+              .size());
+    }
+  }
+
   /** 退款不能忽略其它pay的同source非DEBIT或同prior退款键，三模式新建/重放不写资金。 */
   @Test
   void refundRejectsGloballyDuplicatedObservedKeysWithoutWrites() {
