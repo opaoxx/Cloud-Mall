@@ -62,6 +62,9 @@ public class PayConsistencyService {
   /** 仅包正向或退款的本地中间阶段两写；独立于终态，不包含RPC或重试清理。 */
   private final TransactionTemplate stageTransactions;
 
+  /** 仅包异常后的本地重试清理，与阶段和终态分别提交，不包含RPC。 */
+  private final TransactionTemplate retryTransactions;
+
   /** 仅代表本进程扫描进度；重启复位，不等于业务成功或持久完成。 */
   private final AtomicReference<Long> scanAfterId = new AtomicReference<>();
 
@@ -84,6 +87,8 @@ public class PayConsistencyService {
         TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     this.stageTransactions = new TransactionTemplate(transactionManager);
     this.stageTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    this.retryTransactions = new TransactionTemplate(transactionManager);
+    this.retryTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
   }
 
   /** 在无调用者事务上下文时保存意图并尝试支付同步；已有事务则在保存前拒绝。 */
@@ -295,15 +300,8 @@ public class PayConsistencyService {
       PayDebitIntentPO durableState = payDebitIntentMapper.findByPayNo(intent.payNo);
       if (durableState != null && "REFUND_PENDING".equals(durableState.status))
         retryStatus = "REFUND_PENDING";
-      if ("ORDER_SYNC_UNKNOWN".equals(retryStatus))
-        payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now());
-      payDebitIntentMapper.recordRetryOwnedLegacy(
-          intent.payNo,
-          claimToken,
-          retryStatus,
-          remoteOrPersistenceFailure.toString(),
-          now().plusSeconds(retryDelaySeconds(intent.attempts)),
-          now());
+      recordOwnedLegacyRetry(
+          intent, claimToken, retryStatus, remoteOrPersistenceFailure.toString());
       log.warn("支付结果待恢复，payNo={}，status={}", intent.payNo, retryStatus, remoteOrPersistenceFailure);
       return retryStatus;
     }
@@ -473,6 +471,28 @@ public class PayConsistencyService {
     // 2. 证明通过后仍使用原双表终态事务，保留owner/lease条件及整体回滚。
     commitOwnedLegacyTerminal(intent, claimToken, "FAILED");
     return "FAILED";
+  }
+
+  /** 重试清理独立提交；意图零行回滚并保原等待方向，数据库异常回滚后原样传播。 */
+  private void recordOwnedLegacyRetry(
+      PayDebitIntentPO intent, String claimToken, String retryStatus, String error) {
+    // 1. 不把异常后的清理写入caller全局事务，也不解绑caller的上下文。
+    if (RootContext.getXID() != null) return;
+    retryTransactions.executeWithoutResult(
+        transactionStatus -> {
+          // 2. 保原支付清理顺序与零行best-effort语义，不调用无owner旧方法。
+          if ("ORDER_SYNC_UNKNOWN".equals(retryStatus))
+            payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now());
+          // 3. 意图重试未落盘则撤回本次支付清理；原错误截断、退避和清租约由Mapper保持。
+          if (payDebitIntentMapper.recordRetryOwnedLegacy(
+                  intent.payNo,
+                  claimToken,
+                  retryStatus,
+                  error,
+                  now().plusSeconds(retryDelaySeconds(intent.attempts)),
+                  now())
+              != 1) transactionStatus.setRollbackOnly();
+        });
   }
 
   /** 中间阶段两写独立原子提交；任何零行或异常回滚该阶段，不包远端调用或后续终态。 */

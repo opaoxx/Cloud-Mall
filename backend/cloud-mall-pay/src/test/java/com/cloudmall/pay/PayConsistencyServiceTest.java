@@ -526,14 +526,15 @@ class PayConsistencyServiceTest {
       var definition =
           org.mockito.ArgumentCaptor.forClass(
               org.springframework.transaction.TransactionDefinition.class);
-      verify(transactionManager, org.mockito.Mockito.times(2)).getTransaction(definition.capture());
+      verify(transactionManager, org.mockito.Mockito.times(fail ? 3 : 2))
+          .getTransaction(definition.capture());
       for (var actualDefinition : definition.getAllValues()) {
         assertEquals(
             org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW,
             actualDefinition.getPropagationBehavior());
       }
-      // 前一stage独立提交，后一terminal失败只回滚terminal，不撤回stage。
-      verify(transactionManager, org.mockito.Mockito.times(fail ? 1 : 2)).commit(any());
+      // terminal失败只回滚terminal；已提交stage与后续retry分别独立提交。
+      verify(transactionManager, org.mockito.Mockito.times(2)).commit(any());
       verify(transactionManager, org.mockito.Mockito.times(fail ? 1 : 0)).rollback(any());
     }
   }
@@ -2908,8 +2909,8 @@ class PayConsistencyServiceTest {
                   .lockOwnedLegacyTerminalSource(any(), anyString(), any());
               verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
               verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
-              verify(transactionManager).getTransaction(any());
-              verify(transactionManager).commit(any());
+              verify(transactionManager, org.mockito.Mockito.times(2)).getTransaction(any());
+              verify(transactionManager, org.mockito.Mockito.times(2)).commit(any());
               verify(transactionManager, never()).rollback(any());
               verify(intentMapper)
                   .recordRetryOwnedLegacy(
@@ -3013,7 +3014,7 @@ class PayConsistencyServiceTest {
               .thenReturn(0);
         assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
         verify(transactionManager).rollback(any());
-        verify(transactionManager, never()).commit(any());
+        verify(transactionManager).commit(any()); // stage回滚后，retry独立提交。
         verify(userClient, never()).debit(any(), any(), any());
         verify(userClient, never()).refund(any(), any(), any());
         verify(orderClient, never()).paid(any(), any());
@@ -3102,6 +3103,105 @@ class PayConsistencyServiceTest {
           .verify(intentMapper)
           .updateOwnedLegacyStatus(eq("pay-1"), eq("owned-token"), eq(stage), any());
       ordered.verify(transactionManager).commit(any());
+      org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+    }
+  }
+
+  /** fake manager仅核零行rollbackOnly；异常保持原值并调用rollback，真实SQL另验。 */
+  @Test
+  void retryFailureMarksRollbackOrPropagatesOriginalError() {
+    for (String failureMode : java.util.List.of("zero", "exception")) {
+      setUp();
+      when(orderClient.paymentState("order-1", 7L))
+          .thenThrow(new IllegalStateException("owned-order-read-unavailable"));
+      if ("zero".equals(failureMode))
+        when(intentMapper.recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any()))
+            .thenReturn(0);
+      else
+        when(intentMapper.recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any()))
+            .thenThrow(new IllegalStateException("owned-retry-write-failure"));
+      if ("zero".equals(failureMode)) {
+        assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+        var status =
+            org.mockito.ArgumentCaptor.forClass(
+                org.springframework.transaction.TransactionStatus.class);
+        verify(transactionManager).commit(status.capture());
+        org.junit.jupiter.api.Assertions.assertTrue(status.getValue().isRollbackOnly());
+        // fake manager不会执行物理rollback；由native验证真实管理器的行为。
+        verify(transactionManager, never()).rollback(any());
+      } else {
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, () -> consistencyService.process("pay-1"));
+        assertEquals("owned-retry-write-failure", failure.getMessage());
+        verify(transactionManager).rollback(any());
+        verify(transactionManager, never()).commit(any());
+      }
+      var definition =
+          org.mockito.ArgumentCaptor.forClass(
+              org.springframework.transaction.TransactionDefinition.class);
+      verify(transactionManager).getTransaction(definition.capture());
+      assertEquals(
+          org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW,
+          definition.getValue().getPropagationBehavior());
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+      verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+    }
+  }
+
+  /** 三重试方向都不继承caller XID，也不解绑或误写caller事务。 */
+  @Test
+  void retryTransactionRejectsInheritedGlobalContextWithoutWrites() {
+    for (String status : java.util.List.of("INIT", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      setUp();
+      org.junit.jupiter.api.Assertions.assertNull(io.seata.core.context.RootContext.getXID());
+      io.seata.core.context.RootContext.bind("owned-retry-context");
+      try {
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+            consistencyService,
+            "recordOwnedLegacyRetry",
+            intent(),
+            "owned-token",
+            status,
+            "owned-error");
+        assertEquals("owned-retry-context", io.seata.core.context.RootContext.getXID());
+        org.mockito.Mockito.verifyNoInteractions(
+            transactionManager, intentMapper, payRecordMapper, userClient, orderClient);
+      } finally {
+        io.seata.core.context.RootContext.unbind();
+      }
+    }
+  }
+
+  /** 原三方向及两写顺序保持，单intent重试不追加payment或RPC。 */
+  @Test
+  void healthyRetryKeepsDirectionsAndWriteOrdering() {
+    for (String status : java.util.List.of("INIT", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      setUp();
+      org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+          consistencyService,
+          "recordOwnedLegacyRetry",
+          intent(),
+          "owned-token",
+          status,
+          "owned-error");
+      var ordered = org.mockito.Mockito.inOrder(payRecordMapper, intentMapper, transactionManager);
+      if ("ORDER_SYNC_UNKNOWN".equals(status))
+        ordered
+            .verify(payRecordMapper)
+            .markOwnedLegacyOrderUnknown(eq("pay-1"), eq("owned-token"), any());
+      else verify(payRecordMapper, never()).markOwnedLegacyOrderUnknown(any(), any(), any());
+      ordered
+          .verify(intentMapper)
+          .recordRetryOwnedLegacy(
+              eq("pay-1"), eq("owned-token"), eq(status), eq("owned-error"), any(), any());
+      var committed =
+          org.mockito.ArgumentCaptor.forClass(
+              org.springframework.transaction.TransactionStatus.class);
+      ordered.verify(transactionManager).commit(committed.capture());
+      org.junit.jupiter.api.Assertions.assertFalse(committed.getValue().isRollbackOnly());
       org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
     }
   }
