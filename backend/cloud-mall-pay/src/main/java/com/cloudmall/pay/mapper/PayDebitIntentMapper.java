@@ -85,11 +85,13 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 先筛选两表LEGACY且支付仍可恢复的到期意图再限制批量，避免无资格记录占满窗口。 */
+  /** 先筛选两表原键及基本载荷一致、LEGACY且支付可恢复的到期意图，再限制批量。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
-            + " payment.pay_no=intent.pay_no WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
+            + " BINARY payment.pay_no=BINARY intent.pay_no AND payment.user_id=intent.user_id AND"
+            + " BINARY payment.order_no=BINARY intent.order_no AND payment.amount=intent.amount"
+            + " WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
@@ -101,11 +103,13 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 主键轮转仅读取支付仍可恢复的到期候选；null下界从头读，保原时间与批量语义。 */
+  /** 主键轮转仅扫描两表基本载荷一致的恢复候选；null从头读，保原时间与批量语义。 */
   public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
-            + " payment.pay_no=intent.pay_no WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
+            + " BINARY payment.pay_no=BINARY intent.pay_no AND payment.user_id=intent.user_id AND"
+            + " BINARY payment.order_no=BINARY intent.order_no AND payment.amount=intent.amount"
+            + " WHERE BINARY intent.debit_mode='LEGACY' AND BINARY"
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
@@ -119,13 +123,16 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 仅在两表LEGACY且支付单当前仍可恢复时条件领取，拒绝时不改意图字段。 */
+  /** 精确请求键与两表基本载荷一致且可恢复时领取；拒绝时不改意图，不保证领取后稳定。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
-            + " WHERE pay_no=? AND BINARY debit_mode='LEGACY'"
+            + " WHERE BINARY pay_debit_intent.pay_no=BINARY ? AND BINARY debit_mode='LEGACY'"
             + " AND EXISTS (SELECT 1 FROM pay_record"
-            + " WHERE pay_record.pay_no=pay_debit_intent.pay_no"
+            + " WHERE BINARY pay_record.pay_no=BINARY pay_debit_intent.pay_no"
+            + " AND pay_record.user_id=pay_debit_intent.user_id AND BINARY"
+            + " pay_record.order_no=BINARY pay_debit_intent.order_no"
+            + " AND pay_record.amount=pay_debit_intent.amount"
             + " AND BINARY pay_record.debit_mode='LEGACY' AND pay_record.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')) AND status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"

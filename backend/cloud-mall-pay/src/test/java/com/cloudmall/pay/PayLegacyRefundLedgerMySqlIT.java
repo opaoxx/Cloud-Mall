@@ -4114,6 +4114,234 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两表基本tuple不一致或请求键为CI别名时，不得领取并修改原意图。 */
+  @Test
+  void recoveryClaimRejectsPairMismatchAndRequestedAliases() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String table : List.of("pay_record", "pay_debit_intent")) {
+      for (String mutation :
+          List.of("user", "order", "order-alias", "order-space", "amount", "pay-alias")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              changeRecoveryPairField(table, mutation);
+              var before = payFacts();
+              var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              assertEquals(
+                  0,
+                  intents.claim(
+                      "pay-1", "t159-pair-token", currentTime.plusSeconds(30), currentTime),
+                  table + ":" + mutation);
+              assertEquals(before, payFacts());
+              assertEquals(0, intentAttempts());
+              assertNull(intentLeaseOwner());
+            });
+      }
+    }
+    for (String requested : List.of("PAY-1", "páy-1", "pay-1 ")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            var before = payFacts();
+            var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+            assertEquals(
+                0,
+                intents.claim(
+                    requested, "t159-alias-token", currentTime.plusSeconds(30), currentTime),
+                requested);
+            assertEquals(before, payFacts());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 只修改owned两表的固定字段，模拟当前pair单边变化；禁止任意表/字段输入。 */
+  private void changeRecoveryPairField(String table, String mutation) {
+    assertTrue(List.of("pay_record", "pay_debit_intent").contains(table));
+    String assignment =
+        switch (mutation) {
+          case "user" -> "user_id=8";
+          case "order" -> "order_no='order-other'";
+          case "order-alias" -> "order_no='ORDER-1'";
+          case "order-space" -> "order_no='order-1 '";
+          case "amount" -> "amount=11";
+          case "pay-alias" -> "pay_no='PAY-1'";
+          default -> throw new AssertionError(mutation);
+        };
+    assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
+  }
+
+  /** 预route后单边变化必须由真实claim拒绝，不先修改lease/attempt再报原409。 */
+  @Test
+  void pairDriftBeforeClaimPreservesFactsAndOriginalRouteError() {
+    for (String table : List.of("pay_record", "pay_debit_intent")) {
+      for (String mutation :
+          List.of("user", "order", "order-alias", "order-space", "amount", "pay-alias")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        fixture.update("UPDATE pay_debit_intent SET last_error='owned-existing-proof' WHERE id=1");
+        PayDebitIntentMapper actualIntents = intents;
+        var guardedIntents = org.mockito.Mockito.spy(actualIntents);
+        var afterChange =
+            new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+        org.mockito.Mockito.doAnswer(
+                invocation -> {
+                  changeRecoveryPairField(table, mutation);
+                  afterChange.set(payFacts());
+                  assertEquals(0, invocation.callRealMethod());
+                  return 0;
+                })
+            .when(guardedIntents)
+            .claim(eq("pay-1"), anyString(), any(), any());
+        UserClient user = mock(UserClient.class);
+        OrderClient orders = mock(OrderClient.class);
+        intents = guardedIntents;
+        try {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> newService(user, orders).process("pay-1"));
+          assertEquals("COMMON_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals("支付意图与原支付记录不一致", failure.getMessage());
+          assertNotNull(afterChange.get());
+          assertEquals(afterChange.get(), payFacts());
+          assertEquals(0, intentAttempts());
+          assertNull(intentLeaseOwner());
+          org.mockito.Mockito.verifyNoInteractions(user, orders);
+        } finally {
+          intents = actualIntents;
+        }
+      }
+    }
+  }
+
+  /** 基本pair不一致的100头先过滤，健康相等数值/phaseCI及原扫描排序/游标保持。 */
+  @Test
+  void recoveryPairFilterPrecedesLimitAndKeepsCoherentClaims() {
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    var mutations = List.of("user", "order", "order-alias", "order-space", "amount", "pay-alias");
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      boolean broken = identifier <= 100;
+      String payNo = "t159-pay-" + identifier;
+      String orderNo = "t159-order-" + identifier;
+      var due =
+          broken
+              ? currentTime.minusDays(1)
+              : currentTime.minusSeconds(identifier == 101 ? 3 : identifier == 102 ? 5 : 4);
+      String paymentStage =
+          identifier == 102
+              ? "order_sync_unknown"
+              : identifier == 103 ? "REFUND_PENDING " : "PENDING";
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,?,'LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          paymentStage,
+          currentTime,
+          currentTime);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,last_error,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',0,?,'owned-existing-proof',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          due,
+          currentTime,
+          currentTime);
+      if (broken) {
+        String table =
+            ((identifier - 1) / mutations.size()) % 2 == 0 ? "pay_record" : "pay_debit_intent";
+        String mutation = mutations.get((int) ((identifier - 1) % mutations.size()));
+        assertTrue(List.of("pay_record", "pay_debit_intent").contains(table));
+        switch (mutation) {
+          case "user" ->
+              fixture.update("UPDATE " + table + " SET user_id=8 WHERE id=?", identifier);
+          case "order" ->
+              fixture.update(
+                  "UPDATE " + table + " SET order_no=? WHERE id=?", orderNo + "-other", identifier);
+          case "order-alias" ->
+              fixture.update(
+                  "UPDATE " + table + " SET order_no=? WHERE id=?",
+                  orderNo.toUpperCase(java.util.Locale.ROOT),
+                  identifier);
+          case "order-space" ->
+              fixture.update(
+                  "UPDATE " + table + " SET order_no=? WHERE id=?", orderNo + " ", identifier);
+          case "amount" ->
+              fixture.update("UPDATE " + table + " SET amount=11 WHERE id=?", identifier);
+          case "pay-alias" ->
+              fixture.update(
+                  "UPDATE " + table + " SET pay_no=? WHERE id=?",
+                  payNo.toUpperCase(java.util.Locale.ROOT),
+                  identifier);
+          default -> throw new AssertionError(mutation);
+        }
+      }
+    }
+    var before = payFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(102L, 103L, 101L),
+        intents.findDue(currentTime, 50).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(101L),
+        intents.findDueAfter(currentTime, null, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(102L),
+        intents.findDueAfter(currentTime, 101L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(103L),
+        intents.findDueAfter(currentTime, 102L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertTrue(intents.findDueAfter(currentTime, 103L, 1).isEmpty());
+    assertEquals(before, payFacts());
+    // 两边同步合法变化仍可匹配：本门不把旧快照或不可变字段保证加入claim。
+    for (String table : List.of("pay_record", "pay_debit_intent")) {
+      fixture.update(
+          "UPDATE " + table + " SET user_id=8,order_no='t159-coherent-order',amount=? WHERE id=102",
+          new BigDecimal("20.000"));
+    }
+    var coherentFacts = payFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(coherentFacts, payFacts());
+    assertEquals(
+        1,
+        intents.claim(
+            "t159-pay-102", "t159-coherent-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(
+        0,
+        intents.claim(
+            "t159-pay-102", "t159-second-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(coherentFacts.get(0), payFacts().get(0));
+    assertEquals(immutableRecoveryFacts(coherentFacts), immutableRecoveryFacts(payFacts()));
+    assertEquals(
+        List.of(103L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id<=100 AND (attempts<>0 OR lease_owner IS"
+                + " NOT NULL OR last_error<>'owned-existing-proof')",
+            Integer.class));
+  }
+
   /** 已终态和非可恢复PAY不得领取INIT意图，不能改原租约/尝试/恢复证据。 */
   @Test
   void inactivePaymentCannotClaimLegacyRecoveryWithRealPay() {
