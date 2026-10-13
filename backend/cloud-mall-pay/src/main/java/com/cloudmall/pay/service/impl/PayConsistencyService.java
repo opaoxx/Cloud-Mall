@@ -366,8 +366,18 @@ public class PayConsistencyService {
 
   /** 用户账本和订单都明确成功后才标记支付成功。 */
   private String finishSuccess(PayDebitIntentPO intent, String claimToken) {
+    requireLatestDebitProof(intent);
     commitOwnedLegacyTerminal(intent, claimToken, "SUCCESS");
     return "SUCCESS";
+  }
+
+  /** 在本地终态事务外复核原扣款；只证明本次观察，不保证读取后的来源稳定。 */
+  private void requireLatestDebitProof(PayDebitIntentPO intent) {
+    UserClient.BalanceOperationView latest = readDebitOperation(intent);
+    if (latest == null) throw new IllegalStateException("原扣款账本未证明支付成功");
+    validateDebitOperation(intent, latest);
+    if (!"APPLIED".equals(latest.state()) || latest.refundOperationKey() != null)
+      throw new IllegalStateException("原扣款账本未证明支付成功");
   }
 
   /** 原扣款已退款时恢复支付记录终态，不再次增加余额。 */

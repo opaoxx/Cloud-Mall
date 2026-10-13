@@ -41,12 +41,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /** Pay Legacy退款账本确认真实Mapper验收；User/Order仅使用受控远程替身。 */
 class PayLegacyRefundLedgerMySqlIT {
   /** 原cloudmall_pay只读连接。 */
   private static JdbcTemplate source;
+
+  /** 原库指纹与自有库DDL的有界连接池，避免逐SQL短连接耗尽客户端临时端口。 */
+  private static com.zaxxer.hikari.HikariDataSource sourcePool;
+
+  /** 全类复用的自有库连接池；并发租约演练最多六个连接，结束必须关闭。 */
+  private static com.zaxxer.hikari.HikariDataSource ownedPool;
 
   /** 原库完整表清单与checksum。 */
   private static List<Map<String, Object>> sourceFingerprint;
@@ -73,39 +78,67 @@ class PayLegacyRefundLedgerMySqlIT {
       throw new IllegalStateException("IT需要指向cloudmall_pay的cloudmall.pay.mysql.test.url");
     String username = System.getProperty("cloudmall.mysql.test.username", "root");
     String password = System.getProperty("cloudmall.mysql.test.password", "root");
-    source = new JdbcTemplate(new DriverManagerDataSource(url, username, password));
+    sourcePool = boundedPool(url, username, password, "cm16t138-source-", 2);
+    source = new JdbcTemplate(sourcePool);
     sourceFingerprint = fingerprint(source, "cloudmall_pay");
     database = "cm16t77_" + UUID.randomUUID().toString().replace("-", "");
     source.execute(
         "CREATE DATABASE " + database + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+    ownedPool =
+        boundedPool(
+            url.replace("/cloudmall_pay", "/" + database),
+            username,
+            password,
+            "cm16t138-owned-",
+            6);
   }
 
   @AfterAll
   static void cleanupDatabase() {
-    if (source == null || database == null || !database.matches("cm16t77_[0-9a-f]{32}")) return;
     try {
+      if (source == null || database == null || !database.matches("cm16t77_[0-9a-f]{32}")) return;
+      assertEquals(0, ownedPool.getHikariPoolMXBean().getActiveConnections());
+      assertEquals(0, sourcePool.getHikariPoolMXBean().getActiveConnections());
       assertEquals(sourceFingerprint, fingerprint(source, "cloudmall_pay"));
       System.out.println("CM16T77 original Pay tables/checksums unchanged");
     } finally {
-      source.execute("DROP DATABASE IF EXISTS " + database);
-      assertEquals(
-          0,
-          source.queryForObject(
-              "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?",
-              Integer.class,
-              database));
-      System.out.println("CM16T77 fixture dropped: " + database);
+      try {
+        if (ownedPool != null) ownedPool.close();
+        if (source != null && database != null && database.matches("cm16t77_[0-9a-f]{32}")) {
+          source.execute("DROP DATABASE IF EXISTS " + database);
+          assertEquals(
+              0,
+              source.queryForObject(
+                  "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?",
+                  Integer.class,
+                  database));
+          System.out.println("CM16T77 fixture dropped: " + database);
+        }
+      } finally {
+        if (sourcePool != null) sourcePool.close();
+        assertTrue(ownedPool == null || ownedPool.isClosed());
+        assertTrue(sourcePool == null || sourcePool.isClosed());
+        System.out.println("CM16T138 bounded Pay JDBC pools closed");
+      }
     }
+  }
+
+  /** 每类只创建两池，保原事务/数据源语义，不新增测试依赖或固定监听。 */
+  private static com.zaxxer.hikari.HikariDataSource boundedPool(
+      String url, String username, String password, String prefix, int maximumConnections) {
+    var configuration = new com.zaxxer.hikari.HikariConfig();
+    configuration.setJdbcUrl(url);
+    configuration.setUsername(username);
+    configuration.setPassword(password);
+    configuration.setMaximumPoolSize(maximumConnections);
+    configuration.setMinimumIdle(1);
+    configuration.setPoolName(prefix + UUID.randomUUID());
+    return new com.zaxxer.hikari.HikariDataSource(configuration);
   }
 
   @BeforeEach
   void prepareOwnedPay() {
-    String sourceUrl = System.getProperty("cloudmall.pay.mysql.test.url");
-    String username = System.getProperty("cloudmall.mysql.test.username", "root");
-    String password = System.getProperty("cloudmall.mysql.test.password", "root");
-    DataSource owned =
-        new DriverManagerDataSource(
-            sourceUrl.replace("/cloudmall_pay", "/" + database), username, password);
+    DataSource owned = ownedPool;
     fixture = new JdbcTemplate(owned);
     fixture.execute("DROP TABLE IF EXISTS pay_debit_intent");
     fixture.execute("DROP TABLE IF EXISTS pay_record");
@@ -979,6 +1012,257 @@ class PayLegacyRefundLedgerMySqlIT {
           default -> throw new AssertionError(variant);
         };
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
+  }
+
+  /** 三类成功路径须观察两次原账本，最新正确APPLIED且无退款标记才成功。 */
+  @Test
+  void latestValidDebitKeepsHealthySuccessPathsWithRealPay() {
+    for (String path : java.util.List.of("paid", "after-paid", "fresh-debit")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(path, "order-1", user, orders);
+      var service = newService(user, orders);
+      if (!"paid".equals(path))
+        when(orders.paymentState("order-1", 7L))
+            .thenReturn(
+                ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")),
+                ApiResponse.ok(
+                    new OrderClient.OrderView("order-1", "PAID", BigDecimal.TEN, 7L, "SUCCEEDED")));
+      var reads = new java.util.concurrent.atomic.AtomicInteger();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                if (reads.incrementAndGet() == 1 && "fresh-debit".equals(path))
+                  throw feign.FeignException.errorStatus(
+                      "operation",
+                      feign.Response.builder()
+                          .status(404)
+                          .reason("controlled-missing")
+                          .request(
+                              feign.Request.create(
+                                  feign.Request.HttpMethod.GET,
+                                  "http://cloud-mall-user/controlled-proof",
+                                  java.util.Map.of(),
+                                  null,
+                                  java.nio.charset.StandardCharsets.UTF_8))
+                          .headers(java.util.Map.of())
+                          .body(new byte[0])
+                          .build());
+                return ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "pay-1", "DEBIT", "APPLIED", "10.000", null));
+              })
+          .when(user)
+          .operation(7L, "pay-1", 7L);
+      assertEquals("SUCCESS", service.process("pay-1"));
+      assertEquals(2, reads.get());
+      assertEquals("SUCCESS", intentStatus());
+      assertEquals("SUCCESS", paymentStatus());
+      assertEquals(1, intentAttempts());
+      assertNull(intentLeaseOwner());
+      verify(user, org.mockito.Mockito.times("fresh-debit".equals(path) ? 1 : 0))
+          .debit(any(), any(), any());
+      verify(orders, org.mockito.Mockito.times("paid".equals(path) ? 0 : 1)).paid(any(), any());
+      verify(user, never()).refund(any(), any(), any());
+    }
+  }
+
+  /** 末次账本缺证后，同支付补正确账本再恢复，不重发此前扣款。 */
+  @Test
+  void latestDebitProofCanResumeAfterEvidenceRepairWithRealPay() {
+    String path = "fresh-debit";
+    seedIntentAndPayment("PENDING", "INIT");
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    configureRemoteOrderIdentityPath(path, "order-1", user, orders);
+    var service = newService(user, orders);
+    var reads = new java.util.concurrent.atomic.AtomicInteger();
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              reads.incrementAndGet();
+              throw feign.FeignException.errorStatus(
+                  "operation",
+                  feign.Response.builder()
+                      .status(404)
+                      .reason("controlled-missing")
+                      .request(
+                          feign.Request.create(
+                              feign.Request.HttpMethod.GET,
+                              "http://cloud-mall-user/controlled-proof",
+                              java.util.Map.of(),
+                              null,
+                              java.nio.charset.StandardCharsets.UTF_8))
+                      .headers(java.util.Map.of())
+                      .body(new byte[0])
+                      .build());
+            })
+        .when(user)
+        .operation(7L, "pay-1", 7L);
+    assertEquals("ORDER_SYNC_UNKNOWN", service.process("pay-1"));
+    assertEquals(2, reads.get());
+    assertEquals("ORDER_SYNC_UNKNOWN", intentStatus());
+    assertEquals("ORDER_SYNC_UNKNOWN", paymentStatus());
+    assertEquals(1, intentAttempts());
+    assertNull(intentLeaseOwner());
+    fixture.update(
+        "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 MINUTE WHERE pay_no='pay-1'");
+    org.mockito.Mockito.doReturn(
+            ApiResponse.ok(
+                new UserClient.BalanceOperationView("pay-1", "DEBIT", "APPLIED", "10.000", null)))
+        .when(user)
+        .operation(7L, "pay-1", 7L);
+    when(orders.paymentState("order-1", 7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new OrderClient.OrderView("order-1", "PAID", BigDecimal.TEN, 7L, "SUCCEEDED")));
+    assertEquals("SUCCESS", service.process("pay-1"));
+    assertEquals("SUCCESS", intentStatus());
+    assertEquals("SUCCESS", paymentStatus());
+    assertEquals(2, intentAttempts());
+    assertNull(intentLeaseOwner());
+    assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+    assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+    assertEquals("pay-1", fixture.queryForObject("SELECT pay_no FROM pay_record", String.class));
+    verify(user).debit(any(), any(), any());
+    verify(orders).paid(any(), any());
+    verify(user, org.mockito.Mockito.times(4)).operation(7L, "pay-1", 7L);
+    verify(user, never()).refund(any(), any(), any());
+  }
+
+  /** 成功前的最新原扣款缺证/矛盾不能被较早读或POST确认覆盖。 */
+  @Test
+  void latestDebitProofIsRequiredBeforeSuccessWithRealPay() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : java.util.List.of("paid", "after-paid", "fresh-debit")) {
+      for (String variant :
+          java.util.List.of(
+              "missing",
+              "null-envelope",
+              "null-body",
+              "bad-envelope",
+              "fault",
+              "key-null",
+              "key-other",
+              "key-alias",
+              "type",
+              "amount-null",
+              "amount-other",
+              "rejected",
+              "state-null",
+              "marker",
+              "marker-blank")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(path, "order-1", user, orders);
+              if (!"paid".equals(path))
+                when(orders.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")),
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1", "PAID", BigDecimal.TEN, 7L, "SUCCEEDED")));
+              var reads = new java.util.concurrent.atomic.AtomicInteger();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        if (reads.incrementAndGet() == 1) {
+                          if ("fresh-debit".equals(path))
+                            throw feign.FeignException.errorStatus(
+                                "operation",
+                                feign.Response.builder()
+                                    .status(404)
+                                    .reason("controlled-missing")
+                                    .request(
+                                        feign.Request.create(
+                                            feign.Request.HttpMethod.GET,
+                                            "http://cloud-mall-user/controlled-proof",
+                                            java.util.Map.of(),
+                                            null,
+                                            java.nio.charset.StandardCharsets.UTF_8))
+                                    .headers(java.util.Map.of())
+                                    .body(new byte[0])
+                                    .build());
+                          return ApiResponse.ok(
+                              new UserClient.BalanceOperationView(
+                                  "pay-1", "DEBIT", "APPLIED", "10.00", null));
+                        }
+                        if ("missing".equals(variant))
+                          throw feign.FeignException.errorStatus(
+                              "operation",
+                              feign.Response.builder()
+                                  .status(404)
+                                  .reason("controlled-missing")
+                                  .request(
+                                      feign.Request.create(
+                                          feign.Request.HttpMethod.GET,
+                                          "http://cloud-mall-user/controlled-proof",
+                                          java.util.Map.of(),
+                                          null,
+                                          java.nio.charset.StandardCharsets.UTF_8))
+                                  .headers(java.util.Map.of())
+                                  .body(new byte[0])
+                                  .build());
+                        if ("fault".equals(variant))
+                          throw new IllegalStateException("controlled-user-recheck-unavailable");
+                        if ("null-envelope".equals(variant)) return null;
+                        if ("null-body".equals(variant)) return ApiResponse.ok(null);
+                        if ("bad-envelope".equals(variant))
+                          return ApiResponse.error("CONTROLLED_BAD_RESPONSE", "controlled");
+                        return ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "key-null".equals(variant)
+                                    ? null
+                                    : "key-other".equals(variant)
+                                        ? "pay-other"
+                                        : "key-alias".equals(variant) ? "PAY-1" : "pay-1",
+                                "type".equals(variant) ? "REFUND" : "DEBIT",
+                                "rejected".equals(variant)
+                                    ? "REJECTED"
+                                    : "state-null".equals(variant) ? null : "APPLIED",
+                                "amount-null".equals(variant)
+                                    ? null
+                                    : "amount-other".equals(variant) ? "11.00" : "10.000",
+                                "marker".equals(variant)
+                                    ? "refund:pay-1"
+                                    : "marker-blank".equals(variant) ? "" : null));
+                      })
+                  .when(user)
+                  .operation(7L, "pay-1", 7L);
+              String result = newService(user, orders).process("pay-1");
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals("ORDER_SYNC_UNKNOWN", result),
+                  () -> assertEquals(2, reads.get()),
+                  () ->
+                      verify(user, org.mockito.Mockito.times("fresh-debit".equals(path) ? 1 : 0))
+                          .debit(any(), any(), any()),
+                  () ->
+                      verify(orders, org.mockito.Mockito.times("paid".equals(path) ? 0 : 1))
+                          .paid(any(), any()),
+                  () -> verify(user, never()).refund(any(), any(), any()));
+              assertEquals("ORDER_SYNC_UNKNOWN", intentStatus());
+              assertEquals("ORDER_SYNC_UNKNOWN", paymentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertNotNull(intentNextRetry());
+              assertTrue(retryErrorPresent());
+              assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
   /** 六组退款方向在取消和库存完成时保原退款或已退款marker恢复。 */
@@ -2035,9 +2319,31 @@ class PayLegacyRefundLedgerMySqlIT {
   /** Remote仅替身，真实PayMapper；只破坏订单号，正金额尾零和其它事实保持。 */
   private static void configureRemoteOrderIdentityPath(
       String path, String returnedOrderNo, UserClient user, OrderClient orders) {
-    if (List.of("no-debit-cancel", "fresh-debit").contains(path))
-      stubRefundOperation(user, "not-found", "pay-1", "10.00");
-    else
+    if (List.of("no-debit-cancel", "fresh-debit").contains(path)) {
+      Request request =
+          Request.create(
+              Request.HttpMethod.GET,
+              "http://cloud-mall-user/controlled-proof",
+              Map.of(),
+              null,
+              StandardCharsets.UTF_8);
+      var missing =
+          FeignException.errorStatus(
+              "operation",
+              feign.Response.builder()
+                  .status(404)
+                  .reason("controlled-missing")
+                  .request(request)
+                  .headers(Map.of())
+                  .body(new byte[0])
+                  .build());
+      when(user.operation(7L, "pay-1", 7L))
+          .thenThrow(missing)
+          .thenReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView(
+                      "pay-1", "DEBIT", "APPLIED", "10.000", null)));
+    } else
       when(user.operation(7L, "pay-1", 7L))
           .thenReturn(
               ApiResponse.ok(
