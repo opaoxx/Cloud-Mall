@@ -159,20 +159,22 @@ public class PayDebitIntentMapper {
         owner);
   }
 
-  /** Legacy终态只允许当前未过期owner完成并释放租约，调用者必须核恰好一行。 */
+  /** Legacy终态需当前未过期owner；已有退款意图只能结束为已退，调用者必须核一行。 */
   public int finishOwnedLegacy(String payNo, String claimToken, String status, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET"
             + " status=?,last_error=NULL,lease_owner=NULL,lease_until=NULL,next_retry_at=?,updated_at=?"
             + " WHERE BINARY pay_no=BINARY ? AND BINARY lease_owner=BINARY ? AND lease_until>? AND"
             + " BINARY debit_mode='LEGACY' AND status IN"
-            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')",
+            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
+            + " (status<>'REFUND_PENDING' OR BINARY ?='REFUNDED')",
         status,
         now.plusYears(100),
         now,
         payNo,
         claimToken,
-        now);
+        now,
+        status);
   }
 
   /** 保留扣款事实和原业务键，记录失败后按退避时间重试。 */
