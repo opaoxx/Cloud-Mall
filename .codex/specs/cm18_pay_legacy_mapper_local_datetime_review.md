@@ -21,6 +21,7 @@ GO。T165 的 Timestamp→LocalDateTime conversion 仍受 Java/Gregorian cutover
 
 - Owned native red/fix：1582-10-05/10/14 三样本 × 四字段，public find/ForUpdate/candidate 实际 typed 读取；100 合法历史头 + healthy tail recover；1000、1582-10-04/05/10/14/15、modern、9999、NULL projection 保原值/资格语义。
 - 独立 UTC test fork 仅改变测试 JVM timezone；受控 Feign/原 DB read-only/owned clone finally 清理，不改 OS/生产 JVM。
+- 已复现旧 `Timestamp` 基线测试在 UTC 下按时区换算得到 `0999-12-31T16:00`，而 typed/raw stored component 为 `1000-01-01T00:00`；该旧基线不再作为本批合同。测试应改名为 `nonNullTimeMappingPreservesStoredDateComponents`，直接按 raw stored 日期组件断言 1000/现代 789ms/9999 与 nullable lease，不保留旧 Timestamp 查询换算期望。默认 Asia focused 与独立 UTC 新增/更新方法均须分别记录，失败日志/XML、owned schema cleanup、原 fingerprint/pool evidence 保留。
 - 不承诺所有 calendar/driver 语义、时间先后、1582 前规则、主项 fencing；T165 NULL/业务域边界按本批 typed read 重新验证。
 
 ## 4. 交付边界
