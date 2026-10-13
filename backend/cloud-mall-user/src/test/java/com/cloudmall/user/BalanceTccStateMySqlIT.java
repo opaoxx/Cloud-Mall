@@ -931,6 +931,168 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 缺唯一索引的exact/CI重复接收事实须各入口原409，保护五表且finally恢复索引。 */
+  @Test
+  void receiveDuplicateRowsKeepOriginalBusinessConflicts() {
+    var indexes =
+        fixture.queryForList(
+            "SHOW INDEX FROM user_tcc_receive WHERE Column_name='pay_no' AND Non_unique=0");
+    assertEquals(1, indexes.size());
+    String uniqueIndex = (String) indexes.get(0).get("Key_name");
+    assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+    fixture.execute("ALTER TABLE user_tcc_receive DROP INDEX `" + uniqueIndex + "`");
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String route :
+          List.of(
+              "fresh-debits",
+              "fresh-compat",
+              "replay-debits",
+              "replay-compat",
+              "rejected-get",
+              "applied-debit-get",
+              "applied-refund-get",
+              "active-fresh",
+              "active-replay")) {
+        for (boolean alias : List.of(false, true)) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                boolean fresh = route.startsWith("fresh");
+                boolean getter = route.endsWith("get");
+                boolean refunding = route.startsWith("active");
+                var original =
+                    request(
+                        "receive-multi-" + route + "-" + alias,
+                        7L,
+                        "rejected-get".equals(route) ? "101.00" : "10.00");
+                var debit = new BalanceDebitRequestDTO();
+                debit.operationKey = original.payNo;
+                debit.payNo = original.payNo;
+                debit.orderNo = original.orderNo;
+                debit.amount = original.amount;
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = original.payNo;
+                compatible.amount = original.amount;
+                if (!fresh) {
+                  if ("rejected-get".equals(route))
+                    assertEquals(
+                        "PAYMENT_FAILED",
+                        assertThrows(
+                                BizException.class,
+                                () -> debitLegacy(original.payNo, original.payNo, 7L, "101.00"))
+                            .getCode());
+                  else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+                  if (route.endsWith("compat"))
+                    fixture.update("UPDATE balance_debit_attempt SET order_no=?", original.payNo);
+                  if (route.endsWith("compat"))
+                    fixture.update("UPDATE balance_ledger SET order_no=?", original.payNo);
+                }
+                var refund =
+                    refundRequest(original, "receive-multi-refund:" + original.payNo, "2.00");
+                if (List.of("applied-refund-get", "active-replay").contains(route))
+                  legacy.refundInternal(7L, 7L, refund);
+                String queryKey =
+                    "applied-refund-get".equals(route) ? refund.refundOperationKey : original.payNo;
+                try {
+                  for (int rowNumber : List.of(1, 2)) {
+                    fixture.update(
+                        "INSERT INTO"
+                            + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                            + " VALUES(?,?,?,NULL,7,?,10,?,?,'CLAIMED',NOW(3),NOW(3))",
+                        rowNumber == 1 ? -121L : -122L,
+                        alias && rowNumber == 2
+                            ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                            : original.payNo,
+                        "receive-multi-xid-" + rowNumber,
+                        original.orderNo,
+                        "receive-multi-operation-" + rowNumber,
+                        "receive-multi-ledger-" + rowNumber);
+                  }
+                  var before = allFundsFacts();
+                  var receiveBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  var response =
+                      getter
+                          ? operationHttp(queryKey)
+                          : refunding
+                              ? org.springframework.test.web.servlet.setup.MockMvcBuilders
+                                  .standaloneSetup(context.getBean(UserController.class))
+                                  .setControllerAdvice(
+                                      new com.cloudmall.common.web.GlobalExceptionHandler())
+                                  .build()
+                                  .perform(
+                                      org.springframework.test.web.servlet.request
+                                          .MockMvcRequestBuilders.post(
+                                              "/api/internal/users/7/balance/refunds")
+                                          .header("X-User-Id", "7")
+                                          .contentType(
+                                              org.springframework.http.MediaType.APPLICATION_JSON)
+                                          .content(
+                                              new com.fasterxml.jackson.databind.ObjectMapper()
+                                                  .writeValueAsString(refund)))
+                                  .andReturn()
+                              : route.endsWith("compat")
+                                  ? postCompatibleLegacyDebit(compatible)
+                                  : postLegacyDebit(debit);
+                  String expectedCode =
+                      fresh
+                          ? "IDEMPOTENCY_CONFLICT"
+                          : getter
+                              ? "COMMON_CONFLICT"
+                              : refunding ? "BALANCE_REFUND_INVALID" : "BALANCE_DEBIT_UNKNOWN";
+                  String expectedMessage =
+                      fresh
+                          ? "支付号已有 TCC 接收事实"
+                          : getter ? "余额账本事实待核对" : refunding ? "原扣款不存在或未应用" : "扣款来源存在 TCC 接收事实";
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              409, response.getResponse().getStatus(), route + ":" + alias),
+                      () -> assertHttpCode(response, expectedCode),
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> {
+                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
+                                  else if (refunding) legacy.refundInternal(7L, 7L, refund);
+                                  else if (route.endsWith("compat"))
+                                    legacy.debit(7L, 7L, compatible);
+                                  else legacy.debitInternal(7L, 7L, debit);
+                                });
+                        assertEquals(expectedCode, failure.getCode());
+                        assertEquals(expectedMessage, failure.getMessage());
+                      },
+                      () -> assertEquals(before, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiveBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")));
+                } finally {
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id IN (-121,-122)");
+                }
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      fixture.update("DELETE FROM user_tcc_receive WHERE id IN (-121,-122)");
+      fixture.execute(
+          "ALTER TABLE user_tcc_receive ADD UNIQUE INDEX `" + uniqueIndex + "` (pay_no)");
+      assertEquals(
+          1,
+          fixture
+              .queryForList(
+                  "SHOW INDEX FROM user_tcc_receive WHERE Column_name='pay_no' AND Non_unique=0")
+              .size());
+    }
+  }
+
   /** APPLIED Legacy/null来源的四入口均不得跨过接收事实，退款失败保留五表。 */
   @Test
   void appliedLegacySourcesRejectObservedReceiveWithoutWriting() throws Exception {

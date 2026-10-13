@@ -539,8 +539,7 @@ public class UserServiceImpl implements UserService {
         && balanceTccDebitMapper.selectByPayNo(original.payNo) != null)
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     // 原归属/冻结已先证明；Legacy或缺归属历史不得忽略独立接收事实，TCC保持原确认链。
-    if ((attempt == null || "LEGACY".equals(attempt.mode))
-        && userTccReceiveMapper.findByPayNo(original.payNo) != null)
+    if ((attempt == null || "LEGACY".equals(attempt.mode)) && hasTccReceiveConflict(original.payNo))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
@@ -568,7 +567,19 @@ public class UserServiceImpl implements UserService {
         attempt == null || isProvenLegacyDebitOwnership(original, attempt));
     requireBalanceOperationEvidence(balanceTccDebitMapper.selectByPayNo(original.payNo) == null);
     // 原账本/归属/冻结门已通过；拒款不能忽略独立接收事实或按其元数据过滤。
-    requireBalanceOperationEvidence(userTccReceiveMapper.findByPayNo(original.payNo) == null);
+    requireBalanceOperationEvidence(!hasTccReceiveConflict(original.payNo));
+  }
+
+  /** 单次点读观察接收存在性；仅精确多结果及其直接MyBatis包装表示冲突，其它故障原样。 */
+  private boolean hasTccReceiveConflict(String payNo) {
+    try {
+      return userTccReceiveMapper.findByPayNo(payNo) != null;
+    } catch (TooManyResultsException duplicate) {
+      return true;
+    } catch (MyBatisSystemException failure) {
+      if (failure.getCause() instanceof TooManyResultsException) return true;
+      throw failure;
+    }
   }
 
   /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */
@@ -806,7 +817,7 @@ public class UserServiceImpl implements UserService {
       if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款来源存在TCC冻结事实", 409);
       // 历史原来源/冻结门已通过；任意接收事实都要求核对，不缓存矛盾历史结果。
-      if (userTccReceiveMapper.findByPayNo(request.payNo) != null)
+      if (hasTccReceiveConflict(request.payNo))
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款来源存在 TCC 接收事实", 409);
       if ("REJECTED".equals(existing.state)) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
       cacheDebitResult(userId, existing);
@@ -827,7 +838,7 @@ public class UserServiceImpl implements UserService {
     if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有TCC冻结事实", 409);
     // 原账本/冻结门已通过；任意已观察receive均阻断，不用flag或元数据隐藏原来源。
-    if (userTccReceiveMapper.findByPayNo(request.payNo) != null)
+    if (hasTccReceiveConflict(request.payNo))
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有 TCC 接收事实", 409);
 
     // 3. 先核当前钱包域，再用唯一键认领最终账本键，避免坏余额或跨协议并发双扣。

@@ -1714,6 +1714,133 @@ class BalanceLedgerServiceTest {
     if (route.endsWith("get")) assertOperationReadOnly();
   }
 
+  /** 九入口的直接/标准直接包装多结果均沿原错误分类，无额外读取或资金写入。 */
+  @Test
+  void receiveMultipleResultsKeepCallerConflictSemantics() {
+    for (String route :
+        java.util.List.of(
+            "fresh-debits",
+            "fresh-compat",
+            "replay-debits",
+            "replay-compat",
+            "rejected-get",
+            "applied-debit-get",
+            "applied-refund-get",
+            "active-fresh",
+            "active-replay")) {
+      for (boolean wrapped : java.util.List.of(false, true)) {
+        var action = installReceiveClassificationRoute(route);
+        var duplicate =
+            new org.apache.ibatis.exceptions.TooManyResultsException("receive-duplicate");
+        RuntimeException failure =
+            wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+        org.mockito.Mockito.doThrow(failure).when(userTccReceiveMapper).findByPayNo("pay-1");
+        var rejected = assertThrows(com.cloudmall.common.error.BizException.class, action);
+        String expectedCode =
+            route.startsWith("fresh")
+                ? "IDEMPOTENCY_CONFLICT"
+                : route.endsWith("get")
+                    ? "COMMON_CONFLICT"
+                    : route.startsWith("active")
+                        ? "BALANCE_REFUND_INVALID"
+                        : "BALANCE_DEBIT_UNKNOWN";
+        String expectedMessage =
+            route.startsWith("fresh")
+                ? "支付号已有 TCC 接收事实"
+                : route.endsWith("get")
+                    ? "余额账本事实待核对"
+                    : route.startsWith("active") ? "原扣款不存在或未应用" : "扣款来源存在 TCC 接收事实";
+        assertEquals(expectedCode, rejected.getCode());
+        assertEquals(expectedMessage, rejected.getMessage());
+        assertEquals(409, rejected.getHttpStatus());
+        verify(userTccReceiveMapper).findByPayNo("pay-1");
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        assertLegacyNoMoneyOrCacheWrite();
+        if (route.endsWith("get")) assertOperationReadOnly();
+      }
+    }
+  }
+
+  /** 非目标cause、深层多结果或消息文字均保留原异常对象，不掩盖数据库故障。 */
+  @Test
+  void receiveClassificationPreservesUnrelatedExceptionObjects() {
+    for (String route :
+        java.util.List.of(
+            "fresh-debits",
+            "fresh-compat",
+            "replay-debits",
+            "replay-compat",
+            "rejected-get",
+            "applied-debit-get",
+            "applied-refund-get",
+            "active-fresh",
+            "active-replay")) {
+      for (String shape :
+          java.util.List.of(
+              "resource",
+              "sql-wrapper",
+              "nested-too-many",
+              "other-wrapper",
+              "runtime-cause",
+              "message-only")) {
+        var action = installReceiveClassificationRoute(route);
+        RuntimeException failure =
+            switch (shape) {
+              case "resource" ->
+                  new org.springframework.dao.DataAccessResourceFailureException(
+                      "receive-jdbc-fault");
+              case "sql-wrapper" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new java.sql.SQLException("receive-sql-fault"));
+              case "nested-too-many" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new org.apache.ibatis.exceptions.PersistenceException(
+                          "outer",
+                          new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+              case "other-wrapper" ->
+                  new org.apache.ibatis.exceptions.PersistenceException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              case "runtime-cause" ->
+                  new IllegalArgumentException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              default -> new IllegalArgumentException("TooManyResultsException is only text");
+            };
+        org.mockito.Mockito.doThrow(failure).when(userTccReceiveMapper).findByPayNo("pay-1");
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure, assertThrows(RuntimeException.class, action));
+        verify(userTccReceiveMapper).findByPayNo("pay-1");
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        assertLegacyNoMoneyOrCacheWrite();
+        if (route.endsWith("get")) assertOperationReadOnly();
+      }
+    }
+  }
+
+  /** 九入口共用既有完整夹具，经公开Service校验链调用，不绕过原读取优先级。 */
+  private org.junit.jupiter.api.function.Executable installReceiveClassificationRoute(
+      String route) {
+    if (route.startsWith("fresh") || route.startsWith("replay")) {
+      String entry = route.endsWith("compat") ? "compat" : "debits";
+      var request = installLegacyDebit(entry, route.startsWith("replay") ? "APPLIED" : null);
+      return () -> invokeLegacyDebit(entry, request);
+    }
+    if ("rejected-get".equals(route)) {
+      String key = installOperationQuery("REJECTED");
+      installRejectedOperationOwner(true);
+      return () -> userService.balanceOperation(7L, key, 7L);
+    }
+    String appliedRoute =
+        switch (route) {
+          case "applied-debit-get" -> "debit-get";
+          case "applied-refund-get" -> "refund-get";
+          case "active-fresh" -> "fresh-refund";
+          case "active-replay" -> "replay-refund";
+          default -> throw new AssertionError("Unexpected receive classification route");
+        };
+    var request = installAppliedReceiveRoute(appliedRoute, "LEGACY");
+    return () -> invokeAppliedReceiveRoute(appliedRoute, request);
+  }
+
   /** 构造与已证拒款账本同元组的Legacy归属，缺owner历史不伪造冻结。 */
   private BalanceDebitAttemptPO installRejectedOperationOwner(boolean present) {
     var owner = installAppliedOperationOwner("LEGACY");
