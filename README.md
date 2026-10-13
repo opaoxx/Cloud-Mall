@@ -2437,3 +2437,9 @@ public派发镜像入口在写入前将诊断限制为512个完整Unicode码点�
 receipt认领前，原支付记录与派发锚点的支付号必须精确对应原派发输入。CI查询命中另一种大小写的原记录时返回receipt冲突，不能创建CLAIMED或授予LocalTCC注册权限；已有receipt重放也先核来源。
 
 原锁序、取消gate、金额/载荷、claim与重放规则保持，不归一化或修历史。本批使用隔离实际Mapper与程序化本地短事务、Facade/资源替身验证；read/lock其它身份来源、真实TC和完整资金因果仍有剩余工作。
+
+### CM-18 Receipt读取与锁定的原支付号（16T179）
+
+receipt读取与锁定只返回支付号精确匹配的原记录，CI查询命中另一种大小写的原行时返回receipt冲突。缺行仍保持NULL，Facade缺失404和原回调缺失/终态语义保持。
+
+本批用隔离实际Mapper、真实Store/Facade及纯业务callback验证，不改SQL或注册资源，也不代表官方Fence/TC handler和完整资金因果验收。

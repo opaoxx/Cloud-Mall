@@ -4682,6 +4682,175 @@ class PayLegacyRefundLedgerMySqlIT {
         LocalDateTime.of(2026, 10, 1, 0, 0));
   }
 
+  /** 实际receipt CI查询读到另一原支付号，Facade不能返回其终态。 */
+  @Test
+  void receiptLookupAliasCannotReturnAnotherPayment() {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+    fixture.update("UPDATE pay_tcc_receipt SET pay_no='PAY-1',state='CONFIRMED',branch_id=11");
+    assertEquals(
+        "PAY-1",
+        fixture.queryForMap("SELECT * FROM pay_tcc_receipt WHERE pay_no='pay-1'").get("pay_no"));
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+    var facade =
+        new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+    var before = ownedReceiptClaimFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(facade.read("pay-1").payNo));
+          assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+        },
+        () -> assertNull(returned.get(), "alias receipt must not be returned as requested payment"),
+        () -> assertEquals(before, ownedReceiptClaimFacts()),
+        () -> org.mockito.Mockito.verifyNoInteractions(bridge, resource));
+  }
+
+  /** 真实CI双向别名四状态read/lock均拒绝，原callback拒绝仍无写。 */
+  @Test
+  void receiptLookupAliasesRejectAcrossAllPersistedStates() {
+    var store = ownedReceiptClaimStore();
+    var callback = new com.cloudmall.pay.service.impl.PayTccReceiptBusinessCallback(store);
+    for (boolean uppercaseOriginal : List.of(false, true)) {
+      String original = uppercaseOriginal ? "PAY-1" : "pay-1";
+      String requested = uppercaseOriginal ? "pay-1" : "PAY-1";
+      for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+        var dispatch = seedOwnedReceiptClaim();
+        assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+        fixture.update(
+            "UPDATE pay_tcc_receipt SET pay_no=?,state=?,branch_id=?",
+            original,
+            state,
+            state.equals("CLAIMED") ? null : 11L);
+        assertEquals(
+            original,
+            fixture
+                .queryForMap("SELECT * FROM pay_tcc_receipt WHERE pay_no=?", requested)
+                .get("pay_no"));
+        var before = ownedReceiptClaimFacts();
+        var readFailure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class, () -> store.read(requested));
+        assertEquals("PAY_TCC_RECEIPT_CONFLICT", readFailure.getCode());
+        var lockFailure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () ->
+                    dispatchTransaction(
+                        () -> {
+                          store.lock(requested);
+                          return true;
+                        }));
+        assertEquals("PAY_TCC_RECEIPT_CONFLICT", lockFailure.getCode());
+        for (String action : List.of("try", "confirm", "cancel")) {
+          var context = receiptLookupContext(requested);
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      dispatchTransaction(
+                          () -> {
+                            if (action.equals("try")) return callback.tryBusiness(context);
+                            if (action.equals("confirm")) return callback.confirmBusiness(context);
+                            return callback.cancelBusiness(context);
+                          }));
+          assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+        }
+        assertEquals(before, ownedReceiptClaimFacts());
+      }
+    }
+  }
+
+  /** 精确读取/锁定/VO保持原字段，终态和缺失callback控制仍只读、不注册资源。 */
+  @Test
+  void exactReceiptLookupsKeepNullAndCallbackSemantics() {
+    var store = ownedReceiptClaimStore();
+    var callback = new com.cloudmall.pay.service.impl.PayTccReceiptBusinessCallback(store);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+    var facade =
+        new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+    var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+    for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      var dispatch = seedOwnedReceiptClaim();
+      assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+      fixture.update(
+          "UPDATE pay_tcc_receipt SET state=?,branch_id=?",
+          state,
+          state.equals("CLAIMED") ? null : 11L);
+      var before = ownedReceiptClaimFacts();
+      var read = store.read("pay-1");
+      assertEquals("pay-1", read.payNo);
+      assertEquals(state, read.state);
+      assertTrue(
+          dispatchTransaction(
+              () -> {
+                assertEquals(json.valueToTree(read), json.valueToTree(store.lock("pay-1")));
+                return true;
+              }));
+      var view = facade.read("pay-1");
+      assertEquals(read.payNo, view.payNo);
+      assertEquals(read.xid, view.xid);
+      assertEquals(read.branchId, view.branchId);
+      assertEquals(read.state, view.state);
+      assertEquals(read.operationKey, view.operationKey);
+      assertEquals(read.ledgerKey, view.ledgerKey);
+      if (state.equals("CONFIRMED") || state.equals("CANCELLED")) {
+        assertEquals(
+            state.equals("CONFIRMED"),
+            dispatchTransaction(() -> callback.confirmBusiness(receiptLookupContext("pay-1"))));
+        assertEquals(
+            state.equals("CANCELLED"),
+            dispatchTransaction(() -> callback.cancelBusiness(receiptLookupContext("pay-1"))));
+      }
+      assertEquals(before, ownedReceiptClaimFacts());
+    }
+    var before = ownedReceiptClaimFacts();
+    assertNull(store.read("absent-pay"));
+    assertTrue(
+        dispatchTransaction(
+            () -> {
+              assertNull(store.lock("absent-pay"));
+              return true;
+            }));
+    var missing =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class, () -> facade.read("absent-pay"));
+    assertEquals("PAY_TCC_RECEIPT_NOT_FOUND", missing.getCode());
+    assertEquals(404, missing.getHttpStatus());
+    assertTrue(
+        !dispatchTransaction(() -> callback.confirmBusiness(receiptLookupContext("absent-pay"))));
+    assertTrue(
+        !dispatchTransaction(() -> callback.cancelBusiness(receiptLookupContext("absent-pay"))));
+    var missingTry =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () ->
+                dispatchTransaction(
+                    () -> callback.tryBusiness(receiptLookupContext("absent-pay"))));
+    assertEquals("PAY_TCC_RECEIPT_CONFLICT", missingTry.getCode());
+    assertEquals(before, ownedReceiptClaimFacts());
+    org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+  }
+
+  /** 原callback载荷的受控context，只调用纯业务callback而非官方Fence/TC handler。 */
+  private io.seata.rm.tcc.api.BusinessActionContext receiptLookupContext(String payNo) {
+    var request = new com.cloudmall.pay.domain.dto.PayTccDispatchDTO();
+    request.payNo = payNo;
+    request.userId = 7L;
+    request.orderNo = "order-1";
+    request.amount = BigDecimal.TEN;
+    var context =
+        new io.seata.rm.tcc.api.BusinessActionContext("t171-xid", "11", Map.of("request", request));
+    context.setActionName(com.cloudmall.pay.service.PayTccReceiptLocalResource.ACTION_NAME);
+    return context;
+  }
+
   /** 实际原支付CI别名不能证明receipt认领，更不能插入新CLAIMED并获得winner。 */
   @Test
   void receiptClaimCannotUseAnotherOriginalPayment() {

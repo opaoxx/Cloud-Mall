@@ -91,14 +91,20 @@ public class PayTccReceiptStore {
     return inserted == 1;
   }
 
-  /** 返回当前 receipt 的最新状态。 */
+  /** 返回原支付号receipt的最新状态；缺失保持NULL，查询别名不能作为本次事实。 */
   public PayTccReceiptPO read(String payNo) {
-    return receiptMapper.selectByPayNo(payNo);
+    PayTccReceiptPO receipt = receiptMapper.selectByPayNo(payNo);
+    if (receipt != null && (receipt.payNo == null || !Objects.equals(receipt.payNo, payNo)))
+      throw conflict();
+    return receipt;
   }
 
-  /** 锁定当前 receipt，供 Fence callback 做完整载荷核验。 */
+  /** 锁定原支付号receipt供callback完整核验；缺失保持NULL，不返回查询别名行。 */
   public PayTccReceiptPO lock(String payNo) {
-    return receiptMapper.selectByPayNoForUpdate(payNo);
+    PayTccReceiptPO receipt = receiptMapper.selectByPayNoForUpdate(payNo);
+    if (receipt != null && (receipt.payNo == null || !Objects.equals(receipt.payNo, payNo)))
+      throw conflict();
+    return receipt;
   }
 
   /** 将 CLAIMED receipt 绑定首个 Pay branch 并推进目标状态。 */

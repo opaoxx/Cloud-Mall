@@ -205,6 +205,99 @@ class PayTccReceiptServiceTest {
     verify(cancelled.receiptRows, never()).claim(any());
   }
 
+  /** 非空返回行原键不精确时，四状态read/lock均拒绝且对象不变。 */
+  @Test
+  void receiptLookupsRejectForeignReturnedIdentity() {
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED"))
+      for (String mutation : java.util.List.of("foreign", "case", "space", "null")) {
+        var fixture = new ReceiptClaimFixture();
+        fixture.seedExisting();
+        fixture.stored.state = state;
+        fixture.stored.payNo =
+            switch (mutation) {
+              case "foreign" -> "other-pay";
+              case "case" -> "PAY-RECEIPT-TEST";
+              case "space" -> "pay-receipt-test ";
+              default -> null;
+            };
+        var before = fixture.snapshot();
+        assertEquals(
+            "PAY_TCC_RECEIPT_CONFLICT",
+            assertThrows(BizException.class, () -> fixture.store.read("pay-receipt-test"))
+                .getCode());
+        assertEquals(
+            "PAY_TCC_RECEIPT_CONFLICT",
+            assertThrows(BizException.class, () -> fixture.store.lock("pay-receipt-test"))
+                .getCode());
+        assertEquals(before, fixture.snapshot());
+        verify(fixture.receiptRows, never()).claim(any());
+        org.mockito.Mockito.verifyNoInteractions(
+            fixture.paymentRows, fixture.anchorRows, fixture.cancelRows);
+      }
+    var missingKeys = new ReceiptClaimFixture();
+    missingKeys.seedExisting();
+    missingKeys.stored.payNo = null;
+    assertEquals(
+        "PAY_TCC_RECEIPT_CONFLICT",
+        assertThrows(BizException.class, () -> missingKeys.store.read(null)).getCode());
+    assertEquals(
+        "PAY_TCC_RECEIPT_CONFLICT",
+        assertThrows(BizException.class, () -> missingKeys.store.lock(null)).getCode());
+  }
+
+  /** 真实Facade/Store读到别名receipt必须冲突，不调用bridge或LocalTCC。 */
+  @Test
+  void facadeRejectsAliasedReceiptWithoutBridgeOrLocalTcc() {
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      var fixture = new ReceiptClaimFixture();
+      fixture.seedExisting();
+      fixture.stored.state = state;
+      fixture.stored.payNo = "PAY-RECEIPT-TEST";
+      var facade = new PayTccReceiptServiceImpl(bridge, fixture.store, resource);
+      var before = fixture.snapshot();
+      assertEquals(
+          "PAY_TCC_RECEIPT_CONFLICT",
+          assertThrows(BizException.class, () -> facade.read("pay-receipt-test")).getCode());
+      assertEquals(before, fixture.snapshot());
+      org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+      verify(fixture.receiptRows, never()).claim(any());
+    }
+  }
+
+  /** 精确getter返回原对象及VO字段，缺失仍NULL/Facade404，不新增认领或资源。 */
+  @Test
+  void receiptLookupExactAndMissingKeepOriginalSemantics() {
+    var fixture = new ReceiptClaimFixture();
+    fixture.seedExisting();
+    var facade = new PayTccReceiptServiceImpl(bridge, fixture.store, resource);
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      fixture.stored.state = state;
+      fixture.stored.branchId = state.equals("CLAIMED") ? null : 11L;
+      var before = fixture.snapshot();
+      org.junit.jupiter.api.Assertions.assertSame(
+          fixture.stored, fixture.store.read("pay-receipt-test"));
+      org.junit.jupiter.api.Assertions.assertSame(
+          fixture.stored, fixture.store.lock("pay-receipt-test"));
+      var result = facade.read("pay-receipt-test");
+      assertEquals(fixture.stored.payNo, result.payNo);
+      assertEquals(fixture.stored.xid, result.xid);
+      assertEquals(fixture.stored.branchId, result.branchId);
+      assertEquals(state, result.state);
+      assertEquals(fixture.stored.operationKey, result.operationKey);
+      assertEquals(fixture.stored.ledgerKey, result.ledgerKey);
+      assertEquals(before, fixture.snapshot());
+    }
+    fixture.stored = null;
+    org.junit.jupiter.api.Assertions.assertNull(fixture.store.read("absent-pay"));
+    org.junit.jupiter.api.Assertions.assertNull(fixture.store.lock("absent-pay"));
+    var missing = assertThrows(BizException.class, () -> facade.read("absent-pay"));
+    assertEquals("PAY_TCC_RECEIPT_NOT_FOUND", missing.getCode());
+    assertEquals(404, missing.getHttpStatus());
+    verify(fixture.receiptRows, never()).claim(any());
+    org.mockito.Mockito.verifyNoInteractions(
+        bridge, resource, fixture.paymentRows, fixture.anchorRows, fixture.cancelRows);
+  }
+
   /** 真实Store及可独立变异来源；Mapper均为替身，不模拟数据库列可NULL。 */
   private static final class ReceiptClaimFixture {
     /** 已冻结的原派发输入。 */
@@ -265,6 +358,7 @@ class PayTccReceiptServiceTest {
       anchor.state = "PREPARED";
       when(paymentRows.selectForUpdate(any())).thenReturn(java.util.List.of(payment));
       when(anchorRows.selectForUpdate(any())).thenReturn(anchor);
+      when(receiptRows.selectByPayNo(any())).thenAnswer(invocation -> stored);
       when(receiptRows.selectByPayNoForUpdate(any())).thenAnswer(invocation -> stored);
       when(receiptRows.claim(any()))
           .thenAnswer(
