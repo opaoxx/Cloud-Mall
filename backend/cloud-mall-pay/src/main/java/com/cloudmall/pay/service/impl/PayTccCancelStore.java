@@ -10,6 +10,7 @@ import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
+import com.cloudmall.pay.util.PayErrorMessages;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
@@ -208,7 +209,7 @@ public class PayTccCancelStore {
   }
 
   private static String truncate(String error) {
-    return error == null ? null : error.substring(0, Math.min(512, error.length()));
+    return PayErrorMessages.truncate(error);
   }
 
   private static LocalDateTime now() {

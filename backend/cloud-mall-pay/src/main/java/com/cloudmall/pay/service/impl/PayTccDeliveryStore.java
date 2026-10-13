@@ -10,6 +10,7 @@ import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccDeliveryMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
+import com.cloudmall.pay.util.PayErrorMessages;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
@@ -168,7 +169,7 @@ public class PayTccDeliveryStore {
   /** 只更新当前 lease 的恢复元数据，不覆写终态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void finish(String payNo, String token, int attempts, String error) {
-    if (error != null && error.length() > 512) error = error.substring(0, 512);
+    error = PayErrorMessages.truncate(error);
     LocalDateTime now = now();
     deliveries.finishAttempt(
         payNo,

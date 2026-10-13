@@ -9,6 +9,7 @@ import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
+import com.cloudmall.pay.util.PayErrorMessages;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -137,7 +138,7 @@ public class PayTccExecutionStore {
           current.xid == null
               ? "BEGIN_UNKNOWN"
               : "NONE".equals(current.decision) ? "UNKNOWN" : current.decision + "_REQUESTED";
-    if (error != null && error.length() > 512) error = error.substring(0, 512);
+    error = PayErrorMessages.truncate(error);
     executions.updateObservation(payNo, target, error, now());
     return executions.selectByPayNo(payNo);
   }
