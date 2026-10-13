@@ -10,7 +10,7 @@ GO。catch retry 当前 ORDER_SYNC_UNKNOWN 先写 PayRecord，再写 intent retr
 
 - RootContext XID 非 null 时 helper 直接返回，不写、不解绑 caller XID；
 - ORDER_SYNC_UNKNOWN：先执行原 `markOwnedLegacyOrderUnknown`，再 `recordRetryOwnedLegacy`；第一写返回 0 仍保原 best-effort 语义，不阻止第二写；
-- 第二写必须返回 1；若为 0，设置 rollbackOnly，回滚第一写，helper 返回原 retryStatus，不 fallback/抛新业务异常；
+- 第二写必须返回 1；若为 0，设置 rollbackOnly，回滚第一写，helper 正常返回、由 caller 返回原 retryStatus，不 fallback/抛新业务异常；
 - 第二写 Runtime 原样传播并整体 rollback；
 - 非 ORDER_SYNC_UNKNOWN：仅原 `recordRetryOwnedLegacy` 也在同一短事务内执行。
 
