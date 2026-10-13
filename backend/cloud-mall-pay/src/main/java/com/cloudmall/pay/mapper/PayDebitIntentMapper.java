@@ -216,7 +216,7 @@ public class PayDebitIntentMapper {
         status);
   }
 
-  /** Legacy重试需当前租约；INIT不覆盖已推进阶段、退款方向不回退，拒绝时零行。 */
+  /** Legacy重试需当前租约；INIT仅接受初始两表、退款方向不回退，拒绝时零行。 */
   public int recordRetryOwnedLegacy(
       String payNo,
       String claimToken,
@@ -231,7 +231,8 @@ public class PayDebitIntentMapper {
             + " BINARY debit_mode='LEGACY' AND status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND EXISTS (SELECT 1 FROM"
             + " pay_record payment WHERE BINARY payment.pay_no=BINARY pay_debit_intent.pay_no AND"
-            + " BINARY payment.debit_mode='LEGACY') AND (status<>'REFUND_PENDING' OR BINARY"
+            + " BINARY payment.debit_mode='LEGACY' AND (BINARY ?<>'INIT' OR"
+            + " payment.status='PENDING')) AND (status<>'REFUND_PENDING' OR BINARY"
             + " ?='REFUND_PENDING') AND (BINARY ?<>'INIT' OR status='INIT')",
         status,
         error == null ? null : error.substring(0, Math.min(512, error.length())),
@@ -240,6 +241,7 @@ public class PayDebitIntentMapper {
         payNo,
         claimToken,
         now,
+        status,
         status,
         status);
   }
