@@ -74,6 +74,9 @@ class PayLegacyRefundLedgerMySqlIT {
   /** 仅派发镜像验收使用的owned真实Mapper。 */
   private com.cloudmall.pay.mapper.PayTccDispatchMapper dispatchMirrorMapper;
 
+  /** execution观察验收专用owned真实Mapper。 */
+  private com.cloudmall.pay.mapper.PayTccExecutionMapper executionObservationMapper;
+
   @BeforeAll
   static void setupDatabase() {
     String url = System.getProperty("cloudmall.pay.mysql.test.url");
@@ -4135,6 +4138,202 @@ class PayLegacyRefundLedgerMySqlIT {
       verify(user).refund(any(), any(), any());
       verify(orders, never()).paid(any(), any());
     }
+  }
+
+  /** Java未识别而原SQL已保护的CI/PAD终态，实际写零行必须明确冲突而非静默readback。 */
+  @Test
+  void executionObservationZeroRowsDoNotReturnStaleRecord() {
+    ownedExecutionObservationStore();
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String state :
+        List.of("committed", "COMMITTED ", "rolledback", "ROLLEDBACK ", "conflict", "CONFLICT ")) {
+      assertions.add(
+          () -> {
+            seedOwnedExecution(state, "COMMIT", "t172-xid");
+            var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+            var payBefore = rawIntentTimeFacts();
+            var actual = executionObservationMapper;
+            var guarded =
+                mock(
+                    com.cloudmall.pay.mapper.PayTccExecutionMapper.class,
+                    org.mockito.AdditionalAnswers.delegatesTo(actual));
+            var affectedRows = new java.util.concurrent.atomic.AtomicInteger(-99);
+            org.mockito.Mockito.doAnswer(
+                    invocation -> {
+                      int changed =
+                          actual.updateObservation(
+                              invocation.getArgument(0),
+                              invocation.getArgument(1),
+                              invocation.getArgument(2),
+                              invocation.getArgument(3));
+                      affectedRows.set(changed);
+                      return changed;
+                    })
+                .when(guarded)
+                .updateObservation(any(), any(), any(), any());
+            var store = executionObservationStore(guarded);
+            var failure =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () ->
+                        executionTransaction(
+                            () -> store.observe("pay-1", "UNKNOWN", "owned-new-observation")),
+                    state);
+            assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            assertEquals(0, affectedRows.get());
+            assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1"));
+            assertEquals(payBefore, rawIntentTimeFacts());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 合法观察按原方向提交并返回最新字段，canonical终态重复观察仍全事实不动。 */
+  @Test
+  void executionObservationHealthyWritesAndTerminalsKeepFacts() {
+    var store = ownedExecutionObservationStore();
+    String[][] examples = {
+      {"CLAIMED", "NONE", null, "UNKNOWN", "BEGIN_UNKNOWN"},
+      {"RUNNING", "NONE", "t172-xid", "UNKNOWN", "UNKNOWN"},
+      {"COMMIT_REQUESTED", "COMMIT", "t172-xid", "UNKNOWN", "COMMIT_REQUESTED"},
+      {"ROLLBACK_REQUESTED", "ROLLBACK", "t172-xid", "UNKNOWN", "ROLLBACK_REQUESTED"},
+      {"RUNNING", "NONE", "t172-xid", "COMMITTED", "COMMITTED"},
+      {"RUNNING", "NONE", "t172-xid", "ROLLEDBACK", "ROLLEDBACK"},
+      {"RUNNING", "NONE", "t172-xid", "CONFLICT", "CONFLICT"}
+    };
+    for (String[] example : examples) {
+      seedOwnedExecution(example[0], example[1], example[2]);
+      var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+      var payBefore = rawIntentTimeFacts();
+      var observed =
+          executionTransaction(() -> store.observe("pay-1", example[3], "😀".repeat(513)));
+      var after = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+      assertEquals(example[4], observed.state);
+      assertEquals(example[4], after.get("state"));
+      assertEquals("😀".repeat(512), observed.lastError);
+      assertEquals("😀".repeat(512), after.get("last_error"));
+      assertEquals(after.get("updated_at"), observed.updatedAt);
+      assertEquals(0, observed.updatedAt.getNano() % 1_000_000);
+      for (String changed : List.of("state", "last_error", "updated_at")) {
+        before.remove(changed);
+        after.remove(changed);
+      }
+      assertEquals(before, after);
+      assertEquals(payBefore, rawIntentTimeFacts());
+    }
+    for (String terminal : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+      seedOwnedExecution(terminal, "COMMIT", "t172-xid");
+      var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+      assertEquals(
+          terminal,
+          executionTransaction(() -> store.observe("pay-1", "UNKNOWN", "new observation")).state);
+      assertEquals(
+          terminal,
+          executionTransaction(() -> store.observe("pay-1", terminal, "new observation")).state);
+      assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1"));
+      String opposite = terminal.equals("COMMITTED") ? "ROLLEDBACK" : "COMMITTED";
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () ->
+                  executionTransaction(() -> store.observe("pay-1", opposite, "new observation")));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1"));
+    }
+  }
+
+  /** 同事务内受控终态变化使真实UPDATE零行，必须冲突且回滚全部受控变化。 */
+  @Test
+  void executionObservationSqlZeroRollsBackWithoutReadback() {
+    ownedExecutionObservationStore();
+    seedOwnedExecution("RUNNING", "NONE", "t172-xid");
+    var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+    var payBefore = rawIntentTimeFacts();
+    var actual = executionObservationMapper;
+    var guarded =
+        mock(
+            com.cloudmall.pay.mapper.PayTccExecutionMapper.class,
+            org.mockito.AdditionalAnswers.delegatesTo(actual));
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              fixture.update("UPDATE pay_tcc_execution SET state='COMMITTED' WHERE id=1");
+              int changed =
+                  actual.updateObservation(
+                      invocation.getArgument(0),
+                      invocation.getArgument(1),
+                      invocation.getArgument(2),
+                      invocation.getArgument(3));
+              assertEquals(0, changed);
+              return changed;
+            })
+        .when(guarded)
+        .updateObservation(any(), any(), any(), any());
+    var store = executionObservationStore(guarded);
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> executionTransaction(() -> store.observe("pay-1", "UNKNOWN", "new observation")));
+    assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    verify(guarded, never()).selectByPayNo(any());
+    assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1"));
+    assertEquals(payBefore, rawIntentTimeFacts());
+  }
+
+  /** owned库克隆原execution DDL，不启动应用或TC，只建立实际MyBatis读取和写入入口。 */
+  private com.cloudmall.pay.service.impl.PayTccExecutionStore ownedExecutionObservationStore() {
+    fixture.execute("DROP TABLE IF EXISTS pay_tcc_execution");
+    fixture.execute(
+        (String) source.queryForMap("SHOW CREATE TABLE pay_tcc_execution").get("Create Table"));
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      executionObservationMapper =
+          session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class);
+      return executionObservationStore(executionObservationMapper);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned execution factory failed", failure);
+    }
+  }
+
+  /** observe只使用execution，未使用的其他资源为替身，无远端调用。 */
+  private com.cloudmall.pay.service.impl.PayTccExecutionStore executionObservationStore(
+      com.cloudmall.pay.mapper.PayTccExecutionMapper mapper) {
+    return new com.cloudmall.pay.service.impl.PayTccExecutionStore(
+        mapper,
+        records,
+        mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),
+        mock(com.cloudmall.pay.mapper.PayTccReceiptMapper.class),
+        mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
+  }
+
+  /** 在同owned数据源的短事务中调用真实Store及Mapper，异常必须传播并回滚。 */
+  private com.cloudmall.pay.domain.po.PayTccExecutionPO executionTransaction(
+      java.util.function.Supplier<com.cloudmall.pay.domain.po.PayTccExecutionPO> action) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    return template.execute(transactionStatus -> action.get());
+  }
+
+  /** 生成原execution不可变身份及已有诊断，只写owned克隆表。 */
+  private void seedOwnedExecution(String state, String decision, String xid) {
+    seedIntentAndPayment("PENDING", "INIT");
+    fixture.update("DELETE FROM pay_tcc_execution");
+    fixture.update(
+        "INSERT INTO"
+            + " pay_tcc_execution(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,state,decision,last_error,created_at,updated_at)"
+            + " VALUES(1,'pay-1',?,7,'order-1',10,'tcc-debit:pay-1','pay-1',?,?,'owned-old-error',?,?)",
+        xid,
+        state,
+        decision,
+        LocalDateTime.of(2026, 10, 1, 0, 0),
+        LocalDateTime.of(2026, 10, 1, 0, 0));
   }
 
   /** public镜像面对长诊断应正常提交512字符前缀，而不是数据库DataTooLong。 */

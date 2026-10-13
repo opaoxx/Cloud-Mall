@@ -124,7 +124,7 @@ public class PayTccExecutionStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 观察结果锁内合并，迟到未知/相反终态不能覆盖既有终态。 */
+  /** 观察结果锁内合并，写入须恰好一行；迟到未知/相反终态不能覆盖既有终态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO observe(String payNo, String state, String error) {
     PayTccExecutionPO current = locked(payNo);
@@ -139,7 +139,7 @@ public class PayTccExecutionStore {
               ? "BEGIN_UNKNOWN"
               : "NONE".equals(current.decision) ? "UNKNOWN" : current.decision + "_REQUESTED";
     error = PayErrorMessages.truncate(error);
-    executions.updateObservation(payNo, target, error, now());
+    if (executions.updateObservation(payNo, target, error, now()) != 1) throw conflict();
     return executions.selectByPayNo(payNo);
   }
 
