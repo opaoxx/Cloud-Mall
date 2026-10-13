@@ -231,7 +231,7 @@ public class UserServiceImpl implements UserService {
     return debitFromLedger(userId, callerId, request);
   }
 
-  /** 在同一只读快照证明主账本、原扣款与有界关联退款，供支付恢复判断事实。 */
+  /** 在同一只读快照证明主账本、原扣款及关联/pay双集合，供支付恢复判断事实。 */
   @GetMapping("/internal/users/{userId}/balance/operations/{operationKey}")
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public ApiResponse<?> balanceOperation(
@@ -257,12 +257,18 @@ public class UserServiceImpl implements UserService {
               && Objects.equals(original.payNo, ledger.payNo)
               && Objects.equals(original.orderNo, ledger.orderNo));
     }
-    // 3. 复用T75原逐行kernel，并在该快照内核累计及当前退款membership。
+    // 3. 复用关联kernel和同pay完整集合证明，再核累计及当前退款membership。
     List<BalanceLedgerPO> candidates =
         balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
     BigDecimal refundedAmount;
     try {
       refundedAmount = provenRefundedAmount(original, candidates);
+      refundedAmount =
+          provenRefundPaymentMembership(
+              original,
+              candidates,
+              refundedAmount,
+              balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo));
     } catch (BizException invalidRefundEvidence) {
       if ("BALANCE_REFUND_INVALID".equals(invalidRefundEvidence.getCode())) {
         throw new BizException(ErrorCodes.CONFLICT, "余额账本事实待核对", 409);
@@ -536,8 +542,19 @@ public class UserServiceImpl implements UserService {
     List<BalanceLedgerPO> linkedRefunds =
         balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
     BigDecimal linkedTotal = provenRefundedAmount(original, linkedRefunds);
-    List<BalanceLedgerPO> paymentRows =
-        balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo);
+    return provenRefundPaymentMembership(
+        original,
+        linkedRefunds,
+        linkedTotal,
+        balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo));
+  }
+
+  /** linked已按原kernel证明；同一快照的pay集合必须完整复制来源及每条退款，不重复查询。 */
+  private static BigDecimal provenRefundPaymentMembership(
+      BalanceLedgerPO original,
+      List<BalanceLedgerPO> linkedRefunds,
+      BigDecimal linkedTotal,
+      List<BalanceLedgerPO> paymentRows) {
     requireRefundMembership(paymentRows != null && paymentRows.size() <= MAX_REFUND_CANDIDATES + 1);
     List<BalanceLedgerPO> paymentRefunds = new java.util.ArrayList<>();
     boolean originalObserved = false;
@@ -562,7 +579,7 @@ public class UserServiceImpl implements UserService {
     return candidate.id != null
         && Objects.equals(candidate.id, original.id)
         && "DEBIT".equals(candidate.operationType)
-        && "APPLIED".equals(candidate.state)
+        && Objects.equals(candidate.state, original.state)
         && isProvenBalanceOperationRow(candidate, original.userId, original.operationKey)
         && Objects.equals(candidate.payNo, original.payNo)
         && Objects.equals(candidate.orderNo, original.orderNo)

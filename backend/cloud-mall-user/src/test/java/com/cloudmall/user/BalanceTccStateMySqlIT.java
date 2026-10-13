@@ -409,6 +409,80 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** operation GET不能忽略同pay未/错关联记录，正常扣款/退款/拒款查询都保持只读。 */
+  @Test
+  void operationQueriesRejectOrphanPaymentFactsWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String scenario :
+        List.of("legacy-debit", "tcc-debit", "legacy-refund", "tcc-refund", "rejected")) {
+      for (String variant :
+          List.of(
+              "orphan", "wrong-origin", "unknown-type", "unknown-state", "pay-alias", "foreign")) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              setEnabled(true);
+              var original =
+                  request(
+                      "operation-membership-" + scenario + "-" + variant,
+                      7L,
+                      "rejected".equals(scenario) ? "101.00" : "10.00");
+              if ("rejected".equals(scenario))
+                assertEquals(
+                    "PAYMENT_FAILED",
+                    assertThrows(
+                            BizException.class,
+                            () -> debitLegacy(original.payNo, original.payNo, 7L, "101.00"))
+                        .getCode());
+              else if (scenario.startsWith("tcc")) {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+              String queryKey = original.payNo;
+              if (scenario.endsWith("refund")) {
+                var refund = refundRequest(original, "valid-operation-refund", "2.00");
+                legacy.refundInternal(7L, 7L, refund);
+                queryKey = refund.refundOperationKey;
+              }
+              fixture.update(
+                  "INSERT INTO"
+                      + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                      + " VALUES(-1,?,'orphan-operation-query',?,?,?,?,2,?,90,92,NOW(3))",
+                  "foreign".equals(variant) ? 8L : 7L,
+                  "unknown-type".equals(variant) ? "UNKNOWN" : "REFUND",
+                  "wrong-origin".equals(variant) ? "absent-original" : null,
+                  "pay-alias".equals(variant)
+                      ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                      : original.payNo,
+                  original.orderNo,
+                  "unknown-state".equals(variant) ? "PENDING" : "APPLIED");
+              var before = allFundsFacts();
+              var response = operationHttp(queryKey);
+              String operationKey = queryKey;
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () ->
+                      assertEquals(
+                          409, response.getResponse().getStatus(), scenario + ":" + variant),
+                  () -> assertHttpCode(response, "COMMON_CONFLICT"),
+                  () -> {
+                    var failure =
+                        assertThrows(
+                            BizException.class,
+                            () -> legacy.balanceOperation(7L, operationKey, 7L));
+                    assertEquals("COMMON_CONFLICT", failure.getCode());
+                    assertEquals("余额账本事实待核对", failure.getMessage());
+                  },
+                  () -> assertEquals(before, allFundsFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 实际Mapper须102行哨兵、按id保留全type/state/CI/foreign候选，不过滤坏历史。 */
   @Test
   void refundPaymentCandidateQueryPreservesAllRowsAndLimit102() {

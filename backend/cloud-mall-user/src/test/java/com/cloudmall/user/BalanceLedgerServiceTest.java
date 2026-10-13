@@ -1020,6 +1020,11 @@ class BalanceLedgerServiceTest {
                 default -> throw new AssertionError(scenario);
               }
               when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(candidates);
+              var paymentRows = new java.util.ArrayList<BalanceLedgerPO>();
+              paymentRows.add(operationSource);
+              if (candidates != null) paymentRows.addAll(candidates);
+              when(balanceLedgerMapper.findRefundPaymentLedgerCandidates("pay-1"))
+                  .thenReturn(paymentRows);
               when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1"))
                   .thenReturn("outside-refund");
               assertOperationConflict(key);
@@ -1040,8 +1045,11 @@ class BalanceLedgerServiceTest {
           () -> {
             String key =
                 installOperationQuery("rejected-refund".equals(scenario) ? "REJECTED" : "DEBIT");
+            var priorRefund = linkedRefund("prior-refund", "2.00");
             when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
-                .thenReturn(java.util.List.of(linkedRefund("prior-refund", "2.00")));
+                .thenReturn(java.util.List.of(priorRefund));
+            when(balanceLedgerMapper.findRefundPaymentLedgerCandidates("pay-1"))
+                .thenReturn(java.util.List.of(operationSource, priorRefund));
             String markerKey =
                 switch (scenario) {
                   case "null-marker" -> null;
@@ -1143,6 +1151,10 @@ class BalanceLedgerServiceTest {
       for (int index = 0; index < count; index++)
         candidates.add(linkedRefund("prior-" + index, "0.010"));
       when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(candidates);
+      var paymentRows = new java.util.ArrayList<BalanceLedgerPO>();
+      paymentRows.add(operationSource);
+      if (candidates != null) paymentRows.addAll(candidates);
+      when(balanceLedgerMapper.findRefundPaymentLedgerCandidates("pay-1")).thenReturn(paymentRows);
       when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1")).thenReturn("prior-0");
       var response =
           (com.cloudmall.user.domain.vo.BalanceOperationVO)
@@ -1171,6 +1183,11 @@ class BalanceLedgerServiceTest {
     when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
         .thenReturn(
             "REFUND".equals(mode) ? java.util.List.of(operationLedger) : java.util.List.of());
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(operationSource.payNo))
+        .thenReturn(
+            "REFUND".equals(mode)
+                ? java.util.List.of(operationSource, operationLedger)
+                : java.util.List.of(operationSource));
     return key;
   }
 
@@ -2389,6 +2406,119 @@ class BalanceLedgerServiceTest {
     verify(balanceLedgerMapper, org.mockito.Mockito.never())
         .findRefundPaymentLedgerCandidates(any());
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+  }
+
+  /** GET同pay额外/缺证/错source候选不能冒充完整操作证明，三种主行均固定只读409。 */
+  @Test
+  void operationQueryRejectsMissingAndOrphanPaymentMembership() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : java.util.List.of("DEBIT", "REFUND", "REJECTED")) {
+      for (String variant :
+          java.util.List.of(
+              "null",
+              "empty",
+              "null-row",
+              "orphan",
+              "wrong-origin",
+              "extra-debit",
+              "source-id",
+              "limit102")) {
+        assertions.add(
+            () -> {
+              String key = installOperationQuery(mode);
+              var source = copyRefundDebit(operationSource);
+              if ("source-id".equals(variant)) source.id = 99L;
+              var rows = new java.util.ArrayList<BalanceLedgerPO>();
+              rows.add(source);
+              if ("REFUND".equals(mode)) rows.add(operationLedger);
+              var extra = linkedRefund("unlinked-operation", "1.00");
+              extra.originalOperationKey = "wrong-origin".equals(variant) ? "other-key" : null;
+              if ("extra-debit".equals(variant)) extra.operationType = "DEBIT";
+              java.util.List<BalanceLedgerPO> paymentRows =
+                  switch (variant) {
+                    case "null" -> null;
+                    case "empty" -> java.util.List.of();
+                    case "null-row" -> {
+                      rows.add(null);
+                      yield rows;
+                    }
+                    case "source-id" -> rows;
+                    case "limit102" -> {
+                      rows.addAll(java.util.Collections.nCopies(102, extra));
+                      yield rows;
+                    }
+                    default -> {
+                      rows.add(extra);
+                      yield rows;
+                    }
+                  };
+              when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(operationSource.payNo))
+                  .thenReturn(paymentRows);
+              assertOperationConflict(key);
+              verify(balanceLedgerMapper, org.mockito.Mockito.never())
+                  .selectFirstRefundOperationKey(any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 新payment DAO错误原对象传播，linked坏证/主行缺失仍先拒绝，不把错误转404或冲突。 */
+  @Test
+  void operationPaymentReadFaultKeepsLinkedAndMissingPriority() {
+    String key = installOperationQuery("DEBIT");
+    var failure =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "owned-operation-payment-fault");
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .findRefundPaymentLedgerCandidates("pay-1");
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+    assertOperationReadOnly();
+    String invalidKey = installOperationQuery("DEBIT");
+    when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
+        .thenReturn(java.util.List.of(new BalanceLedgerPO()));
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .findRefundPaymentLedgerCandidates("pay-1");
+    assertOperationConflict(invalidKey);
+    verify(balanceLedgerMapper, org.mockito.Mockito.never())
+        .findRefundPaymentLedgerCandidates(any());
+    String missingKey = installOperationQuery("DEBIT");
+    when(balanceLedgerMapper.selectByOperationKey(missingKey)).thenReturn(null);
+    assertEquals(
+        "COMMON_NOT_FOUND",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.balanceOperation(7L, missingKey, 7L))
+            .getCode());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never())
+        .findRefundPaymentLedgerCandidates(any());
+  }
+
+  /** 健康DEBIT/REFUND/REJECTED均一次linked+一次pay读，保RR只读及字段/marker语义。 */
+  @Test
+  void healthyOperationMembershipKeepsReadBudgetAndRejectedState() throws Exception {
+    for (String mode : java.util.List.of("DEBIT", "REFUND", "REJECTED")) {
+      String key = installOperationQuery(mode);
+      var response =
+          (com.cloudmall.user.domain.vo.BalanceOperationVO)
+              userService.balanceOperation(7L, key, 7L).data;
+      assertEquals("REJECTED".equals(mode) ? "REJECTED" : "APPLIED", response.state);
+      verify(balanceLedgerMapper).findLinkedRefundCandidates("pay-1");
+      verify(balanceLedgerMapper).findRefundPaymentLedgerCandidates("pay-1");
+      assertOperationReadOnly();
+    }
+    var annotation =
+        UserServiceImpl.class
+            .getMethod("balanceOperation", Long.class, String.class, Long.class)
+            .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+    org.junit.jupiter.api.Assertions.assertTrue(annotation.readOnly());
+    assertEquals(
+        org.springframework.transaction.annotation.Isolation.REPEATABLE_READ,
+        annotation.isolation());
   }
 
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
