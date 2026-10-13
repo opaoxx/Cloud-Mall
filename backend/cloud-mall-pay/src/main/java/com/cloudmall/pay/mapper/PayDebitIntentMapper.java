@@ -90,7 +90,7 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 先筛选非空白原键、载荷一致及正数值的LEGACY恢复候选，再限制批量。 */
+  /** 先筛选计数非负、非空白原键及原载荷资格均符合的LEGACY候选，再限制批量。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
@@ -102,7 +102,8 @@ public class PayDebitIntentMapper {
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-            + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
+            + " intent.attempts>=0 AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
+            + " intent.lease_until<=?)"
             + " ORDER BY intent.next_retry_at,intent.id LIMIT ?",
         ROW_MAPPER,
         NON_BLANK_RECOVERY_KEY_PATTERN,
@@ -112,7 +113,7 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 主键轮转扫描非空白原键且载荷合法的恢复候选；null从头读，保原时间与批量语义。 */
+  /** 主键轮转仅扫描计数非负及原键载荷资格符合的候选；null从头读，保原时间与批量。 */
   public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
@@ -124,7 +125,8 @@ public class PayDebitIntentMapper {
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-            + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
+            + " intent.attempts>=0 AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
+            + " intent.lease_until<=?)"
             + " AND (? IS NULL OR intent.id>?) ORDER BY intent.id LIMIT ?",
         ROW_MAPPER,
         NON_BLANK_RECOVERY_KEY_PATTERN,
@@ -136,12 +138,13 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 原资格通过才领取，尝试数到INT上限后饱和；拒绝不改意图，不保证领取后稳定。 */
+  /** 计数非负及原资格通过才领取，INT上限饱和；拒绝不改意图，不保证领取后稳定。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=CASE WHEN"
             + " attempts<2147483647 THEN attempts+1 ELSE attempts END,updated_at=?"
-            + " WHERE BINARY pay_debit_intent.pay_no=BINARY ? AND BINARY debit_mode='LEGACY'"
+            + " WHERE BINARY pay_debit_intent.pay_no=BINARY ? AND attempts>=0 AND BINARY"
+            + " debit_mode='LEGACY'"
             + " AND EXISTS (SELECT 1 FROM pay_record"
             + " WHERE BINARY pay_record.pay_no=BINARY pay_debit_intent.pay_no"
             + " AND pay_record.user_id=pay_debit_intent.user_id AND BINARY"

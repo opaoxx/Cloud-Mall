@@ -13,13 +13,16 @@ public class PayDebitIntentPO {
   @TableId public Long id;
 
   /** 全局唯一的支付操作键。 */
-  @TableField("pay_no") public String payNo;
+  @TableField("pay_no")
+  public String payNo;
 
   /** 关联订单号。 */
-  @TableField("order_no") public String orderNo;
+  @TableField("order_no")
+  public String orderNo;
 
   /** 支付用户主键。 */
-  @TableField("user_id") public Long userId;
+  @TableField("user_id")
+  public Long userId;
 
   /** 与订单应付金额一致的正数金额。 */
   public BigDecimal amount;
@@ -31,26 +34,32 @@ public class PayDebitIntentPO {
   @TableField("debit_mode")
   public String debitMode;
 
-  /** 已执行的恢复次数。 */
+  /** 累计领取的恢复尝试次数，非负且达到INT上限后饱和。 */
   public Integer attempts;
 
   /** 下次允许恢复的时间。 */
-  @TableField("next_retry_at") public LocalDateTime nextRetryAt;
+  @TableField("next_retry_at")
+  public LocalDateTime nextRetryAt;
 
   /** 当前恢复任务实例标识。 */
-  @TableField("lease_owner") public String leaseOwner;
+  @TableField("lease_owner")
+  public String leaseOwner;
 
   /** 租约失效时间。 */
-  @TableField("lease_until") public LocalDateTime leaseUntil;
+  @TableField("lease_until")
+  public LocalDateTime leaseUntil;
 
   /** 最近一次远程调用或结果核对失败原因。 */
-  @TableField("last_error") public String lastError;
+  @TableField("last_error")
+  public String lastError;
 
   /** 意图创建时间。 */
-  @TableField("created_at") public LocalDateTime createdAt;
+  @TableField("created_at")
+  public LocalDateTime createdAt;
 
   /** 意图更新时间。 */
-  @TableField("updated_at") public LocalDateTime updatedAt;
+  @TableField("updated_at")
+  public LocalDateTime updatedAt;
 
   /** 创建空的支付扣款意图对象。 */
   public PayDebitIntentPO() {}

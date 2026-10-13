@@ -4114,6 +4114,175 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 负恢复计数不能被领取时递增修写，原坏事实和metadata须保持。 */
+  @Test
+  void negativeAttemptsCannotClaimRecovery() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (int attempts : List.of(-1, -7, Integer.MIN_VALUE)) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            fixture.update(
+                "UPDATE pay_debit_intent SET attempts=?,last_error='owned-existing-proof' WHERE"
+                    + " id=1",
+                attempts);
+            var before = payFacts();
+            var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+            assertEquals(
+                0,
+                intents.claim(
+                    "pay-1", "t163-negative-token", currentTime.plusSeconds(30), currentTime),
+                "attempts=" + attempts);
+            assertEquals(before, payFacts());
+            assertEquals(attempts, intentAttempts());
+            assertNull(intentLeaseOwner());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 实际process拒绝负计数，包含预route后计数变化，无任何远端调用或metadata写。 */
+  @Test
+  void negativeAttemptEligibilityPreservesServiceFactsAndPreClaimDrift() {
+    for (int attempts : List.of(-1, -7, Integer.MIN_VALUE)) {
+      for (String paymentStage : List.of("PENDING", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+        for (String intentStage :
+            List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+          seedIntentAndPayment(paymentStage, intentStage);
+          fixture.update(
+              "UPDATE pay_debit_intent SET attempts=?,last_error='owned-existing-proof' WHERE id=1",
+              attempts);
+          var before = payFacts();
+          UserClient user = mock(UserClient.class);
+          OrderClient orders = mock(OrderClient.class);
+          assertEquals(intentStage, newService(user, orders).process("pay-1"));
+          assertEquals(before, payFacts());
+          assertEquals(attempts, intentAttempts());
+          assertNull(intentLeaseOwner());
+          org.mockito.Mockito.verifyNoInteractions(user, orders);
+        }
+      }
+      seedIntentAndPayment("PENDING", "INIT");
+      fixture.update("UPDATE pay_debit_intent SET last_error='owned-existing-proof' WHERE id=1");
+      PayDebitIntentMapper actualIntents = intents;
+      var guardedIntents = org.mockito.Mockito.spy(actualIntents);
+      var afterChange =
+          new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                fixture.update("UPDATE pay_debit_intent SET attempts=? WHERE id=1", attempts);
+                afterChange.set(payFacts());
+                assertEquals(0, invocation.callRealMethod());
+                return 0;
+              })
+          .when(guardedIntents)
+          .claim(eq("pay-1"), anyString(), any(), any());
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      intents = guardedIntents;
+      try {
+        assertEquals("INIT", newService(user, orders).process("pay-1"));
+        assertNotNull(afterChange.get());
+        assertEquals(afterChange.get(), payFacts());
+        assertEquals(attempts, intentAttempts());
+        assertNull(intentLeaseOwner());
+        org.mockito.Mockito.verifyNoInteractions(user, orders);
+      } finally {
+        intents = actualIntents;
+      }
+    }
+  }
+
+  /** 100负计数头先过滤，合法0/7/MAX尾按原顺序扫描，MAX仍能饱和领取。 */
+  @Test
+  void recoveryScanFiltersNegativeAttemptsBeforeLimit() {
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    var negatives = List.of(-1, -7, Integer.MIN_VALUE);
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      boolean negative = identifier <= 100;
+      int attempts =
+          negative
+              ? negatives.get((int) ((identifier - 1) % negatives.size()))
+              : identifier == 101 ? 0 : identifier == 102 ? Integer.MAX_VALUE : 7;
+      String payNo = "t163-pay-" + identifier;
+      String orderNo = "t163-order-" + identifier;
+      var due =
+          negative
+              ? currentTime.minusDays(1)
+              : currentTime.minusSeconds(identifier == 101 ? 3 : identifier == 102 ? 5 : 4);
+      String paymentStage =
+          identifier == 102
+              ? "order_sync_unknown"
+              : identifier == 103 ? "REFUND_PENDING " : "PENDING";
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,?,'LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          paymentStage,
+          currentTime,
+          currentTime);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,last_error,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',?,?,'owned-existing-proof',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          attempts,
+          due,
+          currentTime,
+          currentTime);
+    }
+    var before = payFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(102L, 103L, 101L),
+        intents.findDue(currentTime, 50).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(101L),
+        intents.findDueAfter(currentTime, null, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(102L),
+        intents.findDueAfter(currentTime, 101L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(103L),
+        intents.findDueAfter(currentTime, 102L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertTrue(intents.findDueAfter(currentTime, 103L, 1).isEmpty());
+    assertEquals(before, payFacts());
+    assertEquals(
+        1,
+        intents.claim("t163-pay-102", "t163-max-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(
+        Integer.MAX_VALUE,
+        fixture.queryForObject(
+            "SELECT attempts FROM pay_debit_intent WHERE id=102", Integer.class));
+    assertEquals(
+        0, intents.claim("t163-pay-1", "t163-bad-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(before.get(0), payFacts().get(0));
+    assertEquals(before.get(1).subList(0, 100), payFacts().get(1).subList(0, 100));
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id<=100 AND (attempts>=0 OR lease_owner IS"
+                + " NOT NULL OR last_error<>'owned-existing-proof')",
+            Integer.class));
+  }
+
   /** INT最大尝试数仍可合法领取，不因UPDATE范围错误阻断恢复。 */
   @Test
   void maximumAttemptsCanClaimWithoutOverflow() {
