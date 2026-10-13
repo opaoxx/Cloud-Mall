@@ -479,6 +479,10 @@ public class PayConsistencyService {
     terminalTransactions.executeWithoutResult(
         transactionStatus -> {
           LocalDateTime terminalTime = now();
+          // 1. 锁定两表原载荷，避免较早远端证明被用于已变化的本地支付。
+          if (payRecordMapper.lockOwnedLegacyTerminalSource(intent, claimToken, terminalTime)
+              == null) throw new IllegalStateException("支付终态原载荷或领取资格已变化");
+          // 2. 在同一事务内执行原终态两写，任一写不满足资格则整体回滚。
           int changed =
               switch (terminalState) {
                 case "SUCCESS" ->

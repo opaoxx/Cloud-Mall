@@ -81,6 +81,8 @@ class PayConsistencyServiceTest {
     payment.status = "PENDING";
     payment.debitMode = "LEGACY";
     when(payRecordMapper.selectByPayNo("pay-1")).thenReturn(java.util.List.of(payment));
+    when(payRecordMapper.lockOwnedLegacyTerminalSource(any(), anyString(), any()))
+        .thenReturn(payment);
     when(userClient.operation(7L, "pay-1", 7L)).thenReturn(ApiResponse.ok(appliedDebit()));
     when(userClient.operation(7L, "refund:pay-1", 7L))
         .thenReturn(ApiResponse.ok(refundFact("refund:pay-1", "10.00")));
@@ -2743,6 +2745,69 @@ class PayConsistencyServiceTest {
             .headers(Map.of())
             .body(new byte[0])
             .build());
+  }
+
+  /** 缺失原载荷时先拒绝，再由事务管理器回滚，不能尝试任何终态写。 */
+  @Test
+  void missingTerminalSourceRollsBackWithoutWrites() {
+    when(payRecordMapper.lockOwnedLegacyTerminalSource(any(), anyString(), any())).thenReturn(null);
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class,
+            () ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    consistencyService,
+                    "commitOwnedLegacyTerminal",
+                    intent(),
+                    "owned-token",
+                    "SUCCESS"));
+    assertEquals("支付终态原载荷或领取资格已变化", failure.getMessage());
+    verify(payRecordMapper, never()).markOwnedLegacySuccess(anyString(), anyString(), any(), any());
+    verify(payRecordMapper, never()).markOwnedLegacyFailed(anyString(), anyString(), any());
+    verify(payRecordMapper, never()).markOwnedLegacyRefunded(anyString(), anyString(), any());
+    verify(intentMapper, never()).finishOwnedLegacy(anyString(), anyString(), anyString(), any());
+    verify(transactionManager).rollback(any());
+    verify(transactionManager, never()).commit(any());
+    org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+  }
+
+  /** 三终态都先核原快照，再依次执行两写并提交，不在短事务内调用远端。 */
+  @Test
+  void terminalSourceLockPrecedesBothWritesAndCommit() {
+    when(payRecordMapper.markOwnedLegacySuccess(anyString(), anyString(), any(), any()))
+        .thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyFailed(anyString(), anyString(), any())).thenReturn(1);
+    when(payRecordMapper.markOwnedLegacyRefunded(anyString(), anyString(), any())).thenReturn(1);
+    for (String terminal : java.util.List.of("SUCCESS", "REFUNDED", "FAILED")) {
+      var expected = intent();
+      org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+          consistencyService, "commitOwnedLegacyTerminal", expected, "owned-token", terminal);
+      var ordered = org.mockito.Mockito.inOrder(payRecordMapper, intentMapper, transactionManager);
+      ordered
+          .verify(payRecordMapper)
+          .lockOwnedLegacyTerminalSource(eq(expected), eq("owned-token"), any());
+      switch (terminal) {
+        case "SUCCESS" ->
+            ordered
+                .verify(payRecordMapper)
+                .markOwnedLegacySuccess(eq("pay-1"), eq("owned-token"), any(), any());
+        case "REFUNDED" ->
+            ordered
+                .verify(payRecordMapper)
+                .markOwnedLegacyRefunded(eq("pay-1"), eq("owned-token"), any());
+        case "FAILED" ->
+            ordered
+                .verify(payRecordMapper)
+                .markOwnedLegacyFailed(eq("pay-1"), eq("owned-token"), any());
+        default -> throw new AssertionError(terminal);
+      }
+      ordered
+          .verify(intentMapper)
+          .finishOwnedLegacy(eq("pay-1"), eq("owned-token"), eq(terminal), any());
+      ordered.verify(transactionManager).commit(any());
+      org.mockito.Mockito.clearInvocations(payRecordMapper, intentMapper, transactionManager);
+    }
+    org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
   }
 
   private static PayDebitIntentPO intent() {
