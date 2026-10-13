@@ -931,6 +931,163 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 无归属UNKNOWN不能忽略同pay其它key账本，未绑定/已知接收分支都只读拒绝。 */
+  @Test
+  void unknownStateRejectsOtherPaymentLedgerWithoutWrites() {
+    context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
+    context.registerBean(
+        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        () ->
+            new com.cloudmall.user.service.impl.UserTccStateQuery(
+                context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
+                context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
+    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    Object queryTarget = AopTestUtils.getUltimateTargetObject(query);
+    Object actualLedgerMapper = ReflectionTestUtils.getField(queryTarget, "ledgers");
+    var observations = new ArrayList<String>();
+    var connectionIds = new java.util.HashSet<Integer>();
+    Object instrumented =
+        java.lang.reflect.Proxy.newProxyInstance(
+            actualLedgerMapper.getClass().getClassLoader(),
+            new Class<?>[] {com.cloudmall.user.mapper.BalanceLedgerMapper.class},
+            (proxy, mapperMethod, arguments) -> {
+              if (List.of(
+                      "selectByOperationKey",
+                      "findDebitCandidatesByPayNo",
+                      "findPaymentLedgerCandidates")
+                  .contains(mapperMethod.getName())) {
+                observations.add(
+                    mapperMethod.getName()
+                        + ":"
+                        + org.springframework.transaction.support.TransactionSynchronizationManager
+                            .isActualTransactionActive()
+                        + ":"
+                        + org.springframework.transaction.support.TransactionSynchronizationManager
+                            .isCurrentTransactionReadOnly()
+                        + ":"
+                        + org.springframework.transaction.support.TransactionSynchronizationManager
+                            .getCurrentTransactionIsolationLevel());
+                java.sql.Connection observedConnection =
+                    org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                        testDataSource);
+                try {
+                  connectionIds.add(System.identityHashCode(observedConnection));
+                } finally {
+                  org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                      observedConnection, testDataSource);
+                }
+              }
+              try {
+                return mapperMethod.invoke(actualLedgerMapper, arguments);
+              } catch (java.lang.reflect.InvocationTargetException failure) {
+                throw failure.getCause();
+              }
+            });
+    ReflectionTestUtils.setField(queryTarget, "ledgers", instrumented);
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (boolean branchKnown : List.of(false, true)) {
+        for (String variant :
+            List.of(
+                "debit-applied",
+                "debit-pending",
+                "debit-rejected",
+                "refund",
+                "unknown-type",
+                "unknown-state",
+                "other-user",
+                "pay-alias")) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                var original = request("unknown-scope-" + branchKnown + "-" + variant, 7L, "10.00");
+                try {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-127,?,?,?,?,?,10,?,?,'CLAIMED',NOW(3),NOW(3))",
+                      original.payNo,
+                      original.xid,
+                      branchKnown ? original.branchId : null,
+                      original.userId,
+                      original.orderNo,
+                      original.operationKey,
+                      original.ledgerKey);
+                  assertEquals(
+                      "UNKNOWN", query.read(7L, original.operationKey, original.xid).state);
+                  boolean debitRow = variant.startsWith("debit");
+                  fixture.update(
+                      "INSERT INTO"
+                          + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                          + " VALUES(-127,?,?,?,?,?,?,1,?,100,?,NOW(3))",
+                      "other-user".equals(variant) ? 8L : 7L,
+                      "other-unknown-key:" + original.payNo,
+                      debitRow ? "DEBIT" : "unknown-type".equals(variant) ? "UNKNOWN" : "REFUND",
+                      debitRow ? null : "unlinked-source",
+                      "pay-alias".equals(variant)
+                          ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : original.payNo,
+                      original.orderNo,
+                      "debit-pending".equals(variant)
+                          ? "PENDING"
+                          : "debit-rejected".equals(variant)
+                              ? "REJECTED"
+                              : "unknown-state".equals(variant) ? "UNKNOWN" : "APPLIED",
+                      "debit-rejected".equals(variant) ? 100 : debitRow ? 99 : 101);
+                  var before = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                  before.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                  before.add(
+                      fixture.queryForList(
+                          "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                  observations.clear();
+                  connectionIds.clear();
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> query.read(7L, original.operationKey, original.xid));
+                        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+                        assertEquals("TCC 持久事实不一致", failure.getMessage());
+                        assertEquals(409, failure.getHttpStatus());
+                      },
+                      () -> {
+                        var after = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                        after.add(
+                            fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                        after.add(
+                            fixture.queryForList(
+                                "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                        assertEquals(before, after);
+                      },
+                      () -> {
+                        var expected =
+                            new ArrayList<String>(
+                                List.of(
+                                    "selectByOperationKey:true:true:4",
+                                    "findDebitCandidatesByPayNo:true:true:4"));
+                        if (!debitRow) expected.add("findPaymentLedgerCandidates:true:true:4");
+                        assertEquals(expected, observations);
+                        assertEquals(1, connectionIds.size());
+                      });
+                } finally {
+                  fixture.update("DELETE FROM balance_ledger WHERE id=-127");
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id=-127");
+                }
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      ReflectionTestUtils.setField(queryTarget, "ledgers", actualLedgerMapper);
+    }
+  }
+
   /** 五类持久点读重复均为状态冲突，真实只读RR不写六表且恢复UNIQUE/Fence主键。 */
   @Test
   void tccStatePointDuplicatesKeepReadOnlyBusinessConflict() {

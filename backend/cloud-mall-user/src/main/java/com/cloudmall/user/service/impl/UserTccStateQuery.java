@@ -83,6 +83,9 @@ public class UserTccStateQuery {
         readStateCandidate(() -> ledgers.selectByOperationKey(receive.ledgerKey));
     if (attempt == null) {
       require(debit == null && ledger == null);
+      // 原固定来源均为空后，同pay其它键账本仍须可靠为空，不能用UNKNOWN隐藏混合资金事实。
+      requireEmptyDebitScope(receive.payNo);
+      requireEmptyPaymentLedger(receive.payNo);
       return view;
     }
     // 2. 接收、归属和已知分支必须描述同一笔资金。

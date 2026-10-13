@@ -402,7 +402,7 @@ class UserTccStateQueryTest {
     }
   }
 
-  /** 固定键冲突与UNKNOWN仍先短路，其他已知状态按当前scope协议读取。 */
+  /** 固定键冲突仍先短路，UNKNOWN可靠空范围与已知状态按各自scope协议读取。 */
   @Test
   void fixedLedgerConflictAndUnknownStateKeepScopeQueryPriority() {
     setUp();
@@ -418,12 +418,11 @@ class UserTccStateQueryTest {
         when(receives.findByOperationKey("tcc-debit:pay-query-1")).thenReturn(receive(null));
       else installKnownState(state);
       assertEquals(state, query.read(7L, "tcc-debit:pay-query-1", "xid-query-1").state);
-      if ("UNKNOWN".equals(state))
-        org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-            .findDebitCandidatesByPayNo(org.mockito.ArgumentMatchers.any());
-      else if ("CONFIRMED".equals(state))
-        org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo("pay-query-1");
-      else org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo("pay-query-1");
+      org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo("pay-query-1");
+      if ("UNKNOWN".equals(state)) {
+        org.mockito.Mockito.verify(ledgers).findPaymentLedgerCandidates("pay-query-1");
+        verifyNoInteractions(fences);
+      }
     }
   }
 
@@ -698,7 +697,7 @@ class UserTccStateQueryTest {
     }
   }
 
-  /** 健康empty保持状态，UNKNOWN并不提供无资金证明，CONFIRMED沿原DEBIT范围而非全type门。 */
+  /** 健康empty保持状态，UNKNOWN核同pay空范围但不证明全账户，CONFIRMED沿原DEBIT范围。 */
   @Test
   void emptyScopeKeepsKnownStatesAndUncertainOrConfirmedReadBoundaries() {
     for (String state : List.of("TRYING", "CANCELLED", "empty-cancel")) {
@@ -713,9 +712,13 @@ class UserTccStateQueryTest {
     var receive = receive(null);
     when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
     when(ledgers.findPaymentLedgerCandidates(receive.payNo)).thenReturn(List.of(ledger()));
-    assertEquals("UNKNOWN", query.read(7L, receive.operationKey, receive.xid).state);
-    org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
-        .findPaymentLedgerCandidates(org.mockito.ArgumentMatchers.any());
+    assertEquals(
+        "USER_TCC_STATE_CONFLICT",
+        assertThrows(BizException.class, () -> query.read(7L, receive.operationKey, receive.xid))
+            .getCode());
+    org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo(receive.payNo);
+    org.mockito.Mockito.verify(ledgers).findPaymentLedgerCandidates(receive.payNo);
+    verifyNoInteractions(fences);
     setUp();
     installKnownState("CONFIRMED");
     when(ledgers.findPaymentLedgerCandidates("pay-query-1")).thenReturn(List.of(ledger()));
@@ -803,6 +806,126 @@ class UserTccStateQueryTest {
         fence("TRYING".equals(state) ? 1 : "CONFIRMED".equals(state) ? 2 : 3, 12L);
     when(fences.findByBranch(receive.xid, 12L)).thenReturn(observed);
     return observed;
+  }
+
+  /** 无归属的两个接收分支形态均拒绝缺证或任意账本候选，不按类型/状态/身份过滤。 */
+  @Test
+  void unknownStateRequiresReliableEmptyPaymentLedgerScopes() {
+    for (boolean branchKnown : List.of(false, true)) {
+      for (String phase : List.of("debit", "payment")) {
+        for (String variant :
+            List.of(
+                "missing",
+                "null-row",
+                "debit-applied",
+                "debit-pending",
+                "debit-rejected",
+                "refund",
+                "unknown-type",
+                "unknown-state",
+                "foreign",
+                "alias",
+                "two")) {
+          setUp();
+          UserTccReceivePO receive = receive(branchKnown ? 12L : null);
+          when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
+          var row = ledger();
+          row.operationKey = "other-operation-key";
+          if ("debit-pending".equals(variant)) row.state = "PENDING";
+          if ("debit-rejected".equals(variant)) row.state = "REJECTED";
+          if ("refund".equals(variant)) row.operationType = "REFUND";
+          if ("unknown-type".equals(variant)) row.operationType = "UNKNOWN";
+          if ("unknown-state".equals(variant)) row.state = "UNKNOWN";
+          if ("foreign".equals(variant)) row.userId = 8L;
+          if ("alias".equals(variant)) row.payNo = "PAY-QUERY-1";
+          List<BalanceLedgerPO> candidates =
+              "missing".equals(variant)
+                  ? null
+                  : "null-row".equals(variant)
+                      ? java.util.Collections.singletonList(null)
+                      : "two".equals(variant) ? List.of(row, row) : List.of(row);
+          if ("debit".equals(phase))
+            when(ledgers.findDebitCandidatesByPayNo(receive.payNo)).thenReturn(candidates);
+          else when(ledgers.findPaymentLedgerCandidates(receive.payNo)).thenReturn(candidates);
+          var failure =
+              assertThrows(
+                  BizException.class, () -> query.read(7L, receive.operationKey, receive.xid));
+          assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+          assertEquals("TCC 持久事实不一致", failure.getMessage());
+          assertEquals(409, failure.getHttpStatus());
+          org.mockito.Mockito.verify(ledgers).findDebitCandidatesByPayNo(receive.payNo);
+          org.mockito.Mockito.verify(
+                  ledgers, org.mockito.Mockito.times("payment".equals(phase) ? 1 : 0))
+              .findPaymentLedgerCandidates(receive.payNo);
+          verifyNoInteractions(fences);
+          assertStatePointReadsOnly();
+        }
+      }
+    }
+  }
+
+  /** UNKNOWN两范围DAO原对象，合法empty顺序/预算与旧固定来源空门优先保持。 */
+  @Test
+  void unknownLedgerScopesKeepHealthySemanticsAndOldPriority() {
+    for (boolean branchKnown : List.of(false, true)) {
+      for (String phase : List.of("debit", "payment")) {
+        setUp();
+        UserTccReceivePO receive = receive(branchKnown ? 12L : null);
+        when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
+        var failure =
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "unknown-scope-jdbc-fault");
+        if ("debit".equals(phase))
+          org.mockito.Mockito.doThrow(failure)
+              .when(ledgers)
+              .findDebitCandidatesByPayNo(receive.payNo);
+        else
+          org.mockito.Mockito.doThrow(failure)
+              .when(ledgers)
+              .findPaymentLedgerCandidates(receive.payNo);
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure,
+            assertThrows(
+                RuntimeException.class, () -> query.read(7L, receive.operationKey, receive.xid)));
+        verifyNoInteractions(fences);
+        assertStatePointReadsOnly();
+      }
+      setUp();
+      UserTccReceivePO receive = receive(branchKnown ? 12L : null);
+      when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
+      var view = query.read(7L, receive.operationKey, receive.xid);
+      assertEquals("UNKNOWN", view.state);
+      assertEquals(null, view.branchId);
+      org.junit.jupiter.api.Assertions.assertFalse(view.ledgerApplied);
+      var ordered = org.mockito.Mockito.inOrder(ledgers);
+      ordered.verify(ledgers).selectByOperationKey(receive.ledgerKey);
+      ordered.verify(ledgers).findDebitCandidatesByPayNo(receive.payNo);
+      ordered.verify(ledgers).findPaymentLedgerCandidates(receive.payNo);
+      ordered.verifyNoMoreInteractions();
+      verifyNoInteractions(fences);
+      assertStatePointReadsOnly();
+    }
+    for (String originalConflict : List.of("freeze", "fixed-key")) {
+      setUp();
+      UserTccReceivePO receive = receive(null);
+      when(receives.findByOperationKey(receive.operationKey)).thenReturn(receive);
+      if ("freeze".equals(originalConflict))
+        when(debits.selectByPayNo(receive.payNo)).thenReturn(debit("TRYING", 12L));
+      else when(ledgers.selectByOperationKey(receive.ledgerKey)).thenReturn(ledger());
+      org.mockito.Mockito.doThrow(new AssertionError("old source conflict must precede scopes"))
+          .when(ledgers)
+          .findDebitCandidatesByPayNo(receive.payNo);
+      assertEquals(
+          "USER_TCC_STATE_CONFLICT",
+          assertThrows(BizException.class, () -> query.read(7L, receive.operationKey, receive.xid))
+              .getCode());
+      org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+          .findDebitCandidatesByPayNo(org.mockito.ArgumentMatchers.any());
+      org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+          .findPaymentLedgerCandidates(org.mockito.ArgumentMatchers.any());
+      verifyNoInteractions(fences);
+      assertStatePointReadsOnly();
+    }
   }
 
   /** 五类点读直接/标准直接包装多结果均固定事实冲突，不猜missing/UNKNOWN或终态。 */
