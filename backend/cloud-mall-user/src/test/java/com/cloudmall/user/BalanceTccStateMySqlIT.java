@@ -425,6 +425,113 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 首次Legacy不能跨过同pay receive，双接口足额/不足额都不写五表事实。 */
+  @Test
+  void legacyFreshDebitRejectsObservedTccReceiveWithoutWrites() {
+    assertEquals(
+        1,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND"
+                + " table_name='user_tcc_receive'",
+            Integer.class));
+    assertEquals(false, context.containsBean("userTccReceiveStore"));
+    context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class).ensureTable();
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : List.of("debits", "compat")) {
+      for (boolean sufficient : List.of(true, false)) {
+        for (String variant :
+            List.of(
+                "branch-null",
+                "branch-known",
+                "unknown-state",
+                "pay-alias",
+                "foreign-user",
+                "bad-keys")) {
+          checks.add(
+              () -> {
+                closeContext();
+                createTransactionalServices();
+                String payNo = "legacy-receive-" + entry + "-" + sufficient + "-" + variant;
+                fixture.update(
+                    "UPDATE mall_user SET balance=?,frozen_balance=0,status=1 WHERE id=7",
+                    sufficient ? new BigDecimal("100.00") : BigDecimal.ONE);
+                var request = new BalanceDebitRequestDTO();
+                request.operationKey = "legacy-key:" + payNo;
+                request.payNo = payNo;
+                request.orderNo = "order-" + payNo;
+                request.amount = new BigDecimal("10.00");
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = payNo;
+                compatible.amount = request.amount;
+                try {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-117,?,'legacy-claimed-xid',?,?,?,10,?,?,?,NOW(3),NOW(3))",
+                      "pay-alias".equals(variant)
+                          ? payNo.toUpperCase(java.util.Locale.ROOT)
+                          : payNo,
+                      "branch-known".equals(variant) ? 1L : null,
+                      "foreign-user".equals(variant) ? 8L : 7L,
+                      "compat".equals(entry) ? payNo : request.orderNo,
+                      "bad-keys".equals(variant) ? "wrong-receive-operation" : "tcc-debit:" + payNo,
+                      "bad-keys".equals(variant) ? "wrong-receive-ledger" : payNo,
+                      "unknown-state".equals(variant) ? "UNKNOWN" : "CLAIMED");
+                  var bankBefore = allFundsFacts();
+                  var receiveBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  var response =
+                      org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                              context.getBean(UserController.class))
+                          .setControllerAdvice(
+                              new com.cloudmall.common.web.GlobalExceptionHandler())
+                          .build()
+                          .perform(
+                              org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                  .post(
+                                      "compat".equals(entry)
+                                          ? "/api/internal/users/7/balance/debit"
+                                          : "/api/internal/users/7/balance/debits")
+                                  .header("X-User-Id", "7")
+                                  .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                                  .content(
+                                      new com.fasterxml.jackson.databind.ObjectMapper()
+                                          .writeValueAsString(
+                                              "compat".equals(entry) ? compatible : request)))
+                          .andReturn();
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              409,
+                              response.getResponse().getStatus(),
+                              entry + ":" + sufficient + ":" + variant),
+                      () -> assertHttpCode(response, "IDEMPOTENCY_CONFLICT"),
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> {
+                                  if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                                  else legacy.debitInternal(7L, 7L, request);
+                                });
+                        assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                        assertEquals("支付号已有 TCC 接收事实", failure.getMessage());
+                      },
+                      () -> assertEquals(bankBefore, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiveBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")));
+                } finally {
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id=-117");
+                }
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+  }
+
   /** current/source点读的历史多行必须稳定业务409，三模式新建/重放不写资金。 */
   @Test
   void refundPointReadsClassifyMultipleLedgerRowsWithoutWrites() {

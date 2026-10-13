@@ -27,6 +27,7 @@ import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.BalanceTccDebitMapper;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
+import com.cloudmall.user.mapper.UserTccReceiveMapper;
 import com.cloudmall.user.service.UserService;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -56,6 +57,9 @@ import org.springframework.web.bind.annotation.*;
 /** 用户领域业务实现，负责用户、地址、登录态和余额业务。 */
 @RequestMapping("/api")
 public class UserServiceImpl implements UserService {
+  /** 同库TCC接收来源读取，首次Legacy不得跨协议占用已接收支付号。 */
+  @Autowired private UserTccReceiveMapper userTccReceiveMapper;
+
   /** 记录可选 Redis 加速缓存的写入失败。 */
   private static final Logger log = LoggerFactory.getLogger(UserServiceImpl.class);
 
@@ -813,6 +817,9 @@ public class UserServiceImpl implements UserService {
     // 原归属/账本门已先核；首次Legacy不得与同pay残留TCC冻结并存，不按state过滤。
     if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有TCC冻结事实", 409);
+    // 原账本/冻结门已通过；任意已观察receive均阻断，不用flag或元数据隐藏原来源。
+    if (userTccReceiveMapper.findByPayNo(request.payNo) != null)
+      throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有 TCC 接收事实", 409);
 
     // 3. 先核当前钱包域，再用唯一键认领最终账本键，避免坏余额或跨协议并发双扣。
     if (!validBalanceMoney(user.balance))
