@@ -811,6 +811,88 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** User失败证明之后当前Order必须仍允许该失败来源，不使用更早取消快照。 */
+  @Test
+  void latestOrderProofIsRequiredBeforeFailure() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : java.util.List.of("absence", "rejected")) {
+      for (String variant :
+          java.util.List.of(
+              "pending",
+              "paid",
+              "completed",
+              "status-null",
+              "status-unknown",
+              "order-null",
+              "order-other",
+              "order-alias",
+              "user-null",
+              "user-other",
+              "amount-null",
+              "amount-other",
+              "null-response",
+              "null-body",
+              "bad-envelope",
+              "fault")) {
+        if ("rejected".equals(path) && "pending".equals(variant)) continue;
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath(
+                  "absence".equals(path) ? "no-debit-cancel" : "rejected", "order-1");
+              var changed = new java.util.concurrent.atomic.AtomicBoolean();
+              var userReads = new java.util.concurrent.atomic.AtomicInteger();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        if (userReads.incrementAndGet() == 2) changed.set(true);
+                        if ("absence".equals(path)) throw refundReadFault(404);
+                        return ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "pay-1", "DEBIT", "REJECTED", "10.000", null));
+                      })
+                  .when(userClient)
+                  .operation(7L, "pay-1", 7L);
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        return successOrderProofResponse(changed.get() ? variant : "cancelled");
+                      })
+                  .when(orderClient)
+                  .paymentState("order-1", 7L);
+              assertEquals("INIT", consistencyService.process("pay-1"), path + ":" + variant);
+              assertEquals(2, userReads.get());
+              verify(orderClient, org.mockito.Mockito.times(2)).paymentState("order-1", 7L);
+              verify(payRecordMapper, never())
+                  .markOwnedLegacyFailed(anyString(), anyString(), any());
+              verify(intentMapper, never())
+                  .finishOwnedLegacy(anyString(), anyString(), anyString(), any());
+              verify(intentMapper)
+                  .recordRetryOwnedLegacy(
+                      eq("pay-1"), anyString(), eq("INIT"), anyString(), any(), any());
+              if (java.util.List.of("pending", "paid", "completed").contains(variant)) {
+                var capturedError = org.mockito.ArgumentCaptor.forClass(String.class);
+                verify(intentMapper)
+                    .recordRetryOwnedLegacy(
+                        eq("pay-1"),
+                        anyString(),
+                        eq("INIT"),
+                        capturedError.capture(),
+                        any(),
+                        any());
+                org.junit.jupiter.api.Assertions.assertTrue(
+                    capturedError.getValue().contains("订单当前状态未证明支付失败"));
+              }
+              verify(userClient, never()).debit(any(), any(), any());
+              verify(userClient, never()).refund(any(), any(), any());
+              verify(orderClient, never()).paid(any(), any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 健康缺失和拒绝来源经两次User读取后仍可FAILED，读取在实际事务外。 */
   @Test
   void latestStableDebitKeepsHealthyFailurePaths() {
@@ -824,7 +906,7 @@ class PayConsistencyServiceTest {
             .thenReturn(
                 ApiResponse.ok(
                     new OrderClient.OrderView(
-                        "order-1", orderStatus, new BigDecimal("10.000"), 7L, "SUCCEEDED")));
+                        "order-1", orderStatus, new BigDecimal("10.000"), 7L, "UNKNOWN")));
         var reads = new java.util.concurrent.atomic.AtomicInteger();
         org.mockito.Mockito.doAnswer(
                 invocation -> {
@@ -856,6 +938,7 @@ class PayConsistencyServiceTest {
             .operation(7L, "pay-1", 7L);
         assertEquals("FAILED", consistencyService.process("pay-1"));
         assertEquals(2, reads.get());
+        verify(orderClient, org.mockito.Mockito.times(2)).paymentState("order-1", 7L);
         verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("FAILED"), any());
         verify(userClient, never()).debit(any(), any(), any());
         verify(userClient, never()).refund(any(), any(), any());
@@ -1035,6 +1118,7 @@ class PayConsistencyServiceTest {
                   .when(userClient)
                   .operation(7L, "pay-1", 7L);
               String result = consistencyService.process("pay-1");
+              verify(orderClient, org.mockito.Mockito.times(1)).paymentState("order-1", 7L);
               org.junit.jupiter.api.Assertions.assertAll(
                   () -> assertEquals("INIT", result),
                   () -> assertEquals(2, reads.get()),

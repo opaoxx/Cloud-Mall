@@ -4114,6 +4114,153 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 末次User复核期间订单变化，旧未扣款/拒绝来源不能授权当前FAILED。 */
+  @Test
+  void latestOrderProofIsRequiredBeforeFailureWithRealPay() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : List.of("absence", "rejected")) {
+      for (String variant :
+          List.of(
+              "pending",
+              "paid",
+              "completed",
+              "status-null",
+              "status-unknown",
+              "order-other",
+              "order-alias",
+              "user-other",
+              "amount-other",
+              "null-response",
+              "null-body",
+              "bad-envelope",
+              "fault")) {
+        if ("rejected".equals(path) && "pending".equals(variant)) continue;
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              UserClient missingUser = mock(UserClient.class);
+              stubRefundOperation(missingUser, "not-found", "pay-1", "10.00");
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(
+                  "absence".equals(path) ? "no-debit-cancel" : "rejected", "order-1", user, orders);
+              var changed = new java.util.concurrent.atomic.AtomicBoolean();
+              var userReads = new java.util.concurrent.atomic.AtomicInteger();
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        if (userReads.incrementAndGet() == 2) changed.set(true);
+                        if ("absence".equals(path)) return missingUser.operation(7L, "pay-1", 7L);
+                        return ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "pay-1", "DEBIT", "REJECTED", "10.000", null));
+                      })
+                  .when(user)
+                  .operation(7L, "pay-1", 7L);
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        org.junit.jupiter.api.Assertions.assertFalse(
+                            org.springframework.transaction.support
+                                .TransactionSynchronizationManager.isActualTransactionActive());
+                        return successOrderProofResponse(changed.get() ? variant : "cancelled");
+                      })
+                  .when(orders)
+                  .paymentState("order-1", 7L);
+              assertEquals("INIT", newService(user, orders).process("pay-1"), path + ":" + variant);
+              assertEquals(2, userReads.get());
+              assertEquals("INIT", intentStatus());
+              assertEquals("PENDING", paymentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertTrue(retryErrorPresent());
+              assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+              verify(orders, times(2)).paymentState("order-1", 7L);
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, never()).refund(any(), any(), any());
+              verify(orders, never()).paid(any(), any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 失败末次Order缺证可补取消或原扣款成功证据，同pay恢复不追加远端写。 */
+  @Test
+  void latestFailureOrderRepairResumesOriginalPayment() {
+    for (String path : List.of("absence", "rejected")) {
+      for (String repaired : List.of("cancelled", "applied-paid")) {
+        if ("rejected".equals(path) && "applied-paid".equals(repaired)) continue;
+        seedIntentAndPayment("PENDING", "INIT");
+        var before = payFacts();
+        UserClient user = mock(UserClient.class);
+        UserClient missingUser = mock(UserClient.class);
+        stubRefundOperation(missingUser, "not-found", "pay-1", "10.00");
+        OrderClient orders = mock(OrderClient.class);
+        configureRemoteOrderIdentityPath(
+            "absence".equals(path) ? "no-debit-cancel" : "rejected", "order-1", user, orders);
+        var changed = new java.util.concurrent.atomic.AtomicBoolean();
+        var userReads = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.doAnswer(
+                invocation -> {
+                  if (userReads.incrementAndGet() == 2) changed.set(true);
+                  if ("absence".equals(path)) return missingUser.operation(7L, "pay-1", 7L);
+                  return ApiResponse.ok(
+                      new UserClient.BalanceOperationView(
+                          "pay-1", "DEBIT", "REJECTED", "10.00", null));
+                })
+            .when(user)
+            .operation(7L, "pay-1", 7L);
+        org.mockito.Mockito.doAnswer(
+                invocation -> successOrderProofResponse(changed.get() ? "paid" : "cancelled"))
+            .when(orders)
+            .paymentState("order-1", 7L);
+        var service = newService(user, orders);
+        assertEquals("INIT", service.process("pay-1"));
+        assertEquals("PENDING", paymentStatus());
+        assertEquals("INIT", intentStatus());
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+        assertEquals(1, intentAttempts());
+        assertNull(intentLeaseOwner());
+        assertTrue(retryErrorPresent());
+        fixture.update(
+            "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 SECOND WHERE"
+                + " pay_no='pay-1'");
+        boolean successful = "applied-paid".equals(repaired);
+        if (successful)
+          org.mockito.Mockito.doReturn(
+                  ApiResponse.ok(
+                      new UserClient.BalanceOperationView(
+                          "pay-1", "DEBIT", "APPLIED", "10.000", null)))
+              .when(user)
+              .operation(7L, "pay-1", 7L);
+        org.mockito.Mockito.doReturn(successOrderProofResponse(successful ? "paid" : "cancelled"))
+            .when(orders)
+            .paymentState("order-1", 7L);
+        String terminal = successful ? "SUCCESS" : "FAILED";
+        assertEquals(terminal, service.process("pay-1"));
+        assertEquals(terminal, paymentStatus());
+        assertEquals(terminal, intentStatus());
+        assertEquals(2, intentAttempts());
+        assertNull(intentLeaseOwner());
+        if (!successful)
+          assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+        else assertNotNull(records.selectByPayNo("pay-1").get(0).paidAt);
+        assertEquals(7L, records.selectByPayNo("pay-1").get(0).userId);
+        assertEquals("order-1", records.selectByPayNo("pay-1").get(0).orderNo);
+        assertEquals(0, BigDecimal.TEN.compareTo(records.selectByPayNo("pay-1").get(0).amount));
+        assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+        assertEquals(
+            1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, never()).refund(any(), any(), any());
+        verify(orders, never()).paid(any(), any());
+      }
+    }
+  }
+
   /** 健康缺失和拒绝来源经两次User读取后仍可FAILED，读取在实际事务外。 */
   @Test
   void latestStableDebitKeepsHealthyFailurePathsWithRealPay() {
@@ -4130,7 +4277,7 @@ class PayLegacyRefundLedgerMySqlIT {
             .thenReturn(
                 ApiResponse.ok(
                     new OrderClient.OrderView(
-                        "order-1", orderStatus, new BigDecimal("10.000"), 7L, "SUCCEEDED")));
+                        "order-1", orderStatus, new BigDecimal("10.000"), 7L, "UNKNOWN")));
         var reads = new java.util.concurrent.atomic.AtomicInteger();
         org.mockito.Mockito.doAnswer(
                 invocation -> {
@@ -4162,6 +4309,7 @@ class PayLegacyRefundLedgerMySqlIT {
             .operation(7L, "pay-1", 7L);
         assertEquals("FAILED", service.process("pay-1"));
         assertEquals(2, reads.get());
+        verify(orders, times(2)).paymentState("order-1", 7L);
         assertEquals("FAILED", intentStatus());
         assertEquals("FAILED", paymentStatus());
         assertEquals(1, intentAttempts());

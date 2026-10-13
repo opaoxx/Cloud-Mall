@@ -454,7 +454,7 @@ public class PayConsistencyService {
   }
 
   /**
-   * 在终态事务外复核原无扣款或拒绝来源，再按原短事务标记失败。
+   * 在终态事务外复核原无扣款或拒绝来源及当前订单，再按原短事务标记失败。
    *
    * @param expectedRejected 原流程已观察拒绝来源；false表示已取消订单的账本缺失来源
    */
@@ -468,7 +468,12 @@ public class PayConsistencyService {
       if (!"REJECTED".equals(latest.state()) || latest.refundOperationKey() != null)
         throw new IllegalStateException("原扣款账本未证明支付失败");
     } else if (latest != null) throw new IllegalStateException("原扣款账本未证明支付失败");
-    // 2. 证明通过后仍使用原双表终态事务，保留owner/lease条件及整体回滚。
+    // 2. 原扣款证明通过后复核当前订单；缺失来源仅取消可失败，拒绝来源也允许待支付。
+    OrderClient.OrderView current = readOrderState(intent);
+    if (!("CANCELLED".equals(current.status())
+        || (expectedRejected && "PENDING_PAYMENT".equals(current.status()))))
+      throw new IllegalStateException("订单当前状态未证明支付失败");
+    // 3. 本次来源和订单证明通过后使用原双表终态事务，保留owner/lease条件及整体回滚。
     commitOwnedLegacyTerminal(intent, claimToken, "FAILED");
     return "FAILED";
   }
