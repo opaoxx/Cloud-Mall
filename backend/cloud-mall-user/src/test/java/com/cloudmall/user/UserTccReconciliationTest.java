@@ -384,6 +384,90 @@ class UserTccReconciliationTest {
     assertTrue(report.identifiers.get("xidSha256").matches("[0-9a-f]{64}"));
   }
 
+  /** 三个原点读只把直接或标准直接包装的多结果分类为持久事实409。 */
+  @Test
+  void baselineDuplicatePointsHaveFixedConflictAndOriginalReadOrder() {
+    for (String point : List.of("receive", "account", "refund")) {
+      for (boolean wrapped : List.of(false, true)) {
+        var fixture = new Fixture("CONFIRMED");
+        RuntimeException duplicate =
+            new org.apache.ibatis.exceptions.TooManyResultsException("private-duplicate");
+        if (wrapped) duplicate = new org.mybatis.spring.MyBatisSystemException(duplicate);
+        throwAtBaselinePoint(fixture, point, duplicate);
+        clearInvocations(
+            fixture.receives,
+            fixture.attempts,
+            fixture.debits,
+            fixture.ledgers,
+            fixture.fences,
+            fixture.users);
+        var failure = assertThrows(BizException.class, fixture::inspect);
+        assertEquals("USER_TCC_RECONCILIATION_CONFLICT", failure.getCode());
+        assertEquals("本地User资金证据不唯一", failure.getMessage());
+        assertEquals(409, failure.getHttpStatus());
+        verify(fixture.receives).findByPayNo("pay-query-1");
+        if ("receive".equals(point)) {
+          verifyNoMoreInteractions(fixture.receives);
+          verifyNoInteractions(
+              fixture.users, fixture.attempts, fixture.debits, fixture.ledgers, fixture.fences);
+        } else {
+          verify(fixture.users).selectBalanceEvidenceById(7L);
+          if ("account".equals(point)) {
+            verify(fixture.debits, never()).selectFrozenEvidence(any());
+            verify(fixture.ledgers, never()).selectByOperationKey("refund:pay-query-1");
+          } else {
+            verify(fixture.debits).selectFrozenEvidence(7L);
+            verify(fixture.ledgers).selectByOperationKey("refund:pay-query-1");
+          }
+        }
+      }
+    }
+  }
+
+  /** 深包装、其它DAO/Runtime仍按原对象传播，外层数据库503语义不变。 */
+  @Test
+  void otherBaselinePointFailuresRemainUnchanged() {
+    for (String point : List.of("receive", "account", "refund")) {
+      var duplicate = new org.apache.ibatis.exceptions.TooManyResultsException("private-duplicate");
+      for (RuntimeException original :
+          List.of(
+              new org.mybatis.spring.MyBatisSystemException(new IllegalStateException(duplicate)),
+              new org.mybatis.spring.MyBatisSystemException(
+                  new IllegalStateException("private-other")),
+              new DataAccessResourceFailureException("private-database"),
+              new IllegalStateException("private-runtime"))) {
+        var fixture = new Fixture("CONFIRMED");
+        throwAtBaselinePoint(fixture, point, original);
+        assertSame(original, assertThrows(RuntimeException.class, fixture::inspect));
+        var guarded = new UserTccReconciliationService(fixture.reader, true, "ops-secret");
+        if (original instanceof org.springframework.dao.DataAccessException) {
+          var failure =
+              assertThrows(
+                  BizException.class,
+                  () -> guarded.inspect(7L, "pay-query-1", "cm18-reconciliation", "ops-secret"));
+          assertEquals("USER_TCC_RECONCILIATION_UNAVAILABLE", failure.getCode());
+          assertEquals(503, failure.getHttpStatus());
+        } else
+          assertSame(
+              original,
+              assertThrows(
+                  RuntimeException.class,
+                  () -> guarded.inspect(7L, "pay-query-1", "cm18-reconciliation", "ops-secret")));
+      }
+    }
+  }
+
+  /** 在固定的原点读注入同一异常，不影响前面的真实校验器替身。 */
+  private void throwAtBaselinePoint(Fixture fixture, String point, RuntimeException failure) {
+    switch (point) {
+      case "receive" -> doThrow(failure).when(fixture.receives).findByPayNo("pay-query-1");
+      case "account" -> doThrow(failure).when(fixture.users).selectBalanceEvidenceById(7L);
+      case "refund" ->
+          doThrow(failure).when(fixture.ledgers).selectByOperationKey("refund:pay-query-1");
+      default -> throw new AssertionError(point);
+    }
+  }
+
   /** 固定原TCC请求的完整替身，只允许由实际读服务调用SELECT。 */
   private final class Fixture {
     /** 接收来源。 */

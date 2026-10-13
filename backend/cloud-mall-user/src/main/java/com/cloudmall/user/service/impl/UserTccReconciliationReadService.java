@@ -23,6 +23,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
+import org.apache.ibatis.exceptions.TooManyResultsException;
+import org.mybatis.spring.MyBatisSystemException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -67,14 +70,15 @@ public class UserTccReconciliationReadService {
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public UserTccReconciliationVO inspect(Long userId, String payNo) {
     // 1. 保留CI候选并精确核身份，原XID/键只取自数据库，不取HTTP覆盖值。
-    UserTccReceivePO receive = receives.findByPayNo(payNo);
+    UserTccReceivePO receive = readEvidenceCandidate(() -> receives.findByPayNo(payNo));
     if (receive == null) throw new BizException("COMMON_NOT_FOUND", "未观察到原TCC接收事实", 404);
     requireReceive(receive, userId, payNo);
     var state = stateQuery.read(userId, receive.operationKey, receive.xid);
     // 2. 在同一个快照中观察账户资金字段、所有该用户冻结行与固定退款键。
-    var account = users.selectBalanceEvidenceById(userId);
+    var account = readEvidenceCandidate(() -> users.selectBalanceEvidenceById(userId));
     Map<String, Object> aggregate = debits.selectFrozenEvidence(userId);
-    BalanceLedgerPO refund = ledgers.selectByOperationKey("refund:" + payNo);
+    BalanceLedgerPO refund =
+        readEvidenceCandidate(() -> ledgers.selectByOperationKey("refund:" + payNo));
     List<String> conflicts = new ArrayList<>();
     List<String> missing = new ArrayList<>();
     if ("UNKNOWN".equals(state.state)) missing.add("USER_TCC_FUNDS_EVIDENCE_MISSING");
@@ -174,6 +178,18 @@ public class UserTccReconciliationReadService {
                 hash(refund.operationKey),
                 hash(refund.originalOperationKey)),
         identifiers);
+  }
+
+  /** 保持原单次点读和RR快照；只分类明确多结果，不改变其它故障或缺行语义。 */
+  private <Candidate> Candidate readEvidenceCandidate(Supplier<Candidate> candidateRead) {
+    try {
+      return candidateRead.get();
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException)
+        throw new BizException("USER_TCC_RECONCILIATION_CONFLICT", "本地User资金证据不唯一", 409);
+      throw failure;
+    }
   }
 
   /** 接收标识严格匹配原资金协议，坏数据不成为查询锚点。 */

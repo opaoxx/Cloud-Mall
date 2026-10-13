@@ -195,6 +195,122 @@ class UserTccReconciliationMySqlIT {
     }
   }
 
+  /** 三类基线点读的真实重复记录应分类409，不把确定冲突报成数据库暂不可用。 */
+  @Test
+  void duplicateBaselinePointFactsAreConflicts() throws Exception {
+    var mvc =
+        MockMvcBuilders.standaloneSetup(new UserTccReconciliationController(service))
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String point : List.of("receive", "account", "refund")) {
+      for (boolean alias : "account".equals(point) ? List.of(false) : List.of(false, true)) {
+        checks.add(
+            () -> {
+              seed("CONFIRMED");
+              String table =
+                  "receive".equals(point)
+                      ? "user_tcc_receive"
+                      : "account".equals(point) ? "mall_user" : "balance_ledger";
+              String index =
+                  "receive".equals(point)
+                      ? "uk_user_tcc_receive_pay"
+                      : "account".equals(point) ? "PRIMARY" : "operation_key";
+              if ("account".equals(point))
+                fixture.execute(
+                    "ALTER TABLE mall_user ADD INDEX t131_owned_id (id), DROP PRIMARY KEY");
+              else fixture.execute("ALTER TABLE " + table + " DROP INDEX " + index);
+              try {
+                if ("receive".equals(point))
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-131,?,'t131-other-xid',7,'202610order1',10,'tcc-debit:t131-other','t131-other','CLAIMED','2026-10-11','2026-10-11')",
+                      alias ? "PAY1" : "pay1");
+                else if ("account".equals(point))
+                  fixture.update(
+                      "INSERT INTO"
+                          + " mall_user(id,username,password_hash,role,balance,frozen_balance,status,created_at,updated_at)"
+                          + " VALUES(7,'t131-duplicate-user','unused','USER',90,0,1,'2026-10-11','2026-10-11')");
+                else {
+                  seedRefund("10.00");
+                  fixture.update(
+                      "INSERT INTO"
+                          + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                          + " VALUES(-131,7,?,'REFUND','pay1','pay1','202610order1',10,'APPLIED',100,110,'2026-10-11')",
+                      alias ? "REFUND:PAY1" : "refund:pay1");
+                }
+                var before = facts();
+                int expectedReads = "receive".equals(point) ? 1 : "account".equals(point) ? 8 : 10;
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> {
+                      tracked.reset();
+                      tracked.checking = true;
+                      var failure = assertThrows(BizException.class, this::inspect);
+                      assertEquals("USER_TCC_RECONCILIATION_CONFLICT", failure.getCode());
+                      assertEquals("本地User资金证据不唯一", failure.getMessage());
+                      assertEquals(409, failure.getHttpStatus());
+                      assertEquals(expectedReads, tracked.statements.size());
+                      assertEquals(1, tracked.connections);
+                    },
+                    () -> {
+                      tracked.reset();
+                      tracked.checking = true;
+                      mvc.perform(
+                              get("/api/internal/users/7/balance/tcc-reconciliation/pay1")
+                                  .header("X-Internal-Service", "cm18-reconciliation")
+                                  .header("X-Internal-Callback-Token", "ops-secret"))
+                          .andExpect(status().isConflict())
+                          .andExpect(header().string("Cache-Control", "no-store"))
+                          .andExpect(jsonPath("$.code").value("USER_TCC_RECONCILIATION_CONFLICT"));
+                      assertEquals(expectedReads, tracked.statements.size());
+                      assertEquals(1, tracked.connections);
+                    },
+                    () -> assertEquals(before, facts()));
+              } finally {
+                tracked.checking = false;
+                if ("account".equals(point)) {
+                  fixture.update("DELETE FROM mall_user WHERE username='t131-duplicate-user'");
+                  fixture.execute(
+                      "ALTER TABLE mall_user ADD PRIMARY KEY (id), DROP INDEX t131_owned_id");
+                } else {
+                  fixture.update("DELETE FROM " + table + " WHERE id=-131");
+                  fixture.execute(
+                      "ALTER TABLE "
+                          + table
+                          + " ADD UNIQUE INDEX "
+                          + index
+                          + " ("
+                          + ("receive".equals(point) ? "pay_no" : "operation_key")
+                          + ")");
+                }
+                assertTrue(
+                    fixture
+                            .queryForList(
+                                "SHOW INDEX FROM "
+                                    + table
+                                    + " WHERE Key_name='"
+                                    + index
+                                    + "' AND Non_unique=0")
+                            .size()
+                        > 0);
+              }
+              // 恢复约束后的正常唯一样本继续按原预算观察。
+              seed("CONFIRMED");
+              var before = facts();
+              tracked.reset();
+              tracked.checking = true;
+              assertEquals("BLOCKED_EXTERNAL_EVIDENCE", inspect().classification);
+              assertEquals(10, tracked.statements.size());
+              assertEquals(1, tracked.connections);
+              assertEquals(before, facts());
+              tracked.checking = false;
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+  }
+
   /** 未确认的多DEBIT同样是明确冲突，不能在raw no-funds门前变成500/503。 */
   @Test
   void unconfirmedDuplicateDebitsReturnConflictWithoutChangingFacts() throws Exception {
@@ -806,7 +922,7 @@ class UserTccReconciliationMySqlIT {
     tracked.checking = true;
     var report = inspect();
     assertEquals("BLOCKED_LOCAL_EVIDENCE", report.classification);
-    assertEquals(8, tracked.statements.size());
+    assertEquals(10, tracked.statements.size());
     assertEquals(before, facts());
     seed("CANCELLED");
     fixture.update("DELETE FROM balance_tcc_debit");
@@ -1184,7 +1300,7 @@ class UserTccReconciliationMySqlIT {
           assertEquals(state, query.read(7L, "tcc-debit:pay1", "private-tc:8091:original").state);
           assertEquals(1, tracked.connections);
           assertEquals(
-              "UNKNOWN".equals(state) ? 4 : "CONFIRMED".equals(state) ? 6 : 7,
+              "UNKNOWN".equals(state) ? 6 : "CONFIRMED".equals(state) ? 6 : 7,
               tracked.statements.size());
           assertEquals(before, facts());
         }
@@ -1542,7 +1658,7 @@ class UserTccReconciliationMySqlIT {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data.state").value(state));
         assertEquals(
-            "UNKNOWN".equals(state) ? 4 : "CONFIRMED".equals(state) ? 6 : 7,
+            "UNKNOWN".equals(state) ? 6 : "CONFIRMED".equals(state) ? 6 : 7,
             tracked.statements.size());
         assertEquals(1, tracked.connections);
         assertEquals(before, facts());
@@ -1560,7 +1676,7 @@ class UserTccReconciliationMySqlIT {
                             ? "BLOCKED_LOCAL_EVIDENCE"
                             : "BLOCKED_EXTERNAL_EVIDENCE"));
         assertEquals(
-            "UNKNOWN".equals(state) ? 8 : "CONFIRMED".equals(state) ? 10 : 11,
+            "UNKNOWN".equals(state) ? 10 : "CONFIRMED".equals(state) ? 10 : 11,
             tracked.statements.size());
         assertEquals(1, tracked.connections);
         assertEquals(before, facts());
