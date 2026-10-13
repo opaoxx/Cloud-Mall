@@ -12,6 +12,11 @@ import org.springframework.stereotype.Repository;
 /** 支付扣款意图、恢复租约和状态的唯一数据库访问入口。 */
 @Repository
 public class PayDebitIntentMapper {
+  /** 匹配至少一个非Java17空白码点；精确复用isBlank集合，保留NBSP等非blank字符。 */
+  private static final String NON_BLANK_RECOVERY_KEY_PATTERN =
+      "[^\\x{0009}-\\x{000D}\\x{001C}-\\x{0020}\\x{1680}\\x{2000}-\\x{2006}"
+          + "\\x{2008}-\\x{200A}\\x{2028}-\\x{2029}\\x{205F}\\x{3000}]";
+
   /** 执行参数化 MySQL SQL 的模板。 */
   private final JdbcTemplate jdbcTemplate;
 
@@ -85,13 +90,14 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 先筛选原键载荷一致、用户和金额为正且LEGACY可恢复的到期意图，再限制批量。 */
+  /** 先筛选非空白原键、载荷一致及正数值的LEGACY恢复候选，再限制批量。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
             + " BINARY payment.pay_no=BINARY intent.pay_no AND payment.user_id=intent.user_id AND"
             + " BINARY payment.order_no=BINARY intent.order_no AND payment.amount=intent.amount"
-            + " WHERE payment.user_id>0 AND payment.amount>0 AND BINARY"
+            + " WHERE REGEXP_LIKE(payment.pay_no,?,'c') AND REGEXP_LIKE(payment.order_no,?,'c')"
+            + " AND payment.user_id>0 AND payment.amount>0 AND BINARY"
             + " intent.debit_mode='LEGACY' AND BINARY"
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
@@ -99,18 +105,21 @@ public class PayDebitIntentMapper {
             + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
             + " ORDER BY intent.next_retry_at,intent.id LIMIT ?",
         ROW_MAPPER,
+        NON_BLANK_RECOVERY_KEY_PATTERN,
+        NON_BLANK_RECOVERY_KEY_PATTERN,
         now,
         now,
         Math.max(1, limit));
   }
 
-  /** 主键轮转扫描载荷一致且用户/金额为正的恢复候选；null从头读，保原时间与批量语义。 */
+  /** 主键轮转扫描非空白原键且载荷合法的恢复候选；null从头读，保原时间与批量语义。 */
   public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
             + " BINARY payment.pay_no=BINARY intent.pay_no AND payment.user_id=intent.user_id AND"
             + " BINARY payment.order_no=BINARY intent.order_no AND payment.amount=intent.amount"
-            + " WHERE payment.user_id>0 AND payment.amount>0 AND BINARY"
+            + " WHERE REGEXP_LIKE(payment.pay_no,?,'c') AND REGEXP_LIKE(payment.order_no,?,'c')"
+            + " AND payment.user_id>0 AND payment.amount>0 AND BINARY"
             + " intent.debit_mode='LEGACY' AND BINARY"
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
@@ -118,6 +127,8 @@ public class PayDebitIntentMapper {
             + " intent.next_retry_at<=? AND (intent.lease_until IS NULL OR intent.lease_until<=?)"
             + " AND (? IS NULL OR intent.id>?) ORDER BY intent.id LIMIT ?",
         ROW_MAPPER,
+        NON_BLANK_RECOVERY_KEY_PATTERN,
+        NON_BLANK_RECOVERY_KEY_PATTERN,
         now,
         now,
         afterId,
@@ -125,7 +136,7 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 精确请求键、载荷一致且用户/金额为正时领取；拒绝不改意图，不保证领取后稳定。 */
+  /** 非空白精确请求键、载荷一致且正数值时领取；拒绝不改意图，不保证领取后稳定。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
@@ -136,6 +147,7 @@ public class PayDebitIntentMapper {
             + " pay_record.order_no=BINARY pay_debit_intent.order_no"
             + " AND pay_record.amount=pay_debit_intent.amount"
             + " AND pay_record.user_id>0 AND pay_record.amount>0"
+            + " AND REGEXP_LIKE(pay_record.pay_no,?,'c') AND REGEXP_LIKE(pay_record.order_no,?,'c')"
             + " AND BINARY pay_record.debit_mode='LEGACY' AND pay_record.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')) AND status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
@@ -144,6 +156,8 @@ public class PayDebitIntentMapper {
         leaseUntil,
         now,
         payNo,
+        NON_BLANK_RECOVERY_KEY_PATTERN,
+        NON_BLANK_RECOVERY_KEY_PATTERN,
         now,
         now);
   }

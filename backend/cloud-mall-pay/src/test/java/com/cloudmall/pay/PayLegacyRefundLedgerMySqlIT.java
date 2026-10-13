@@ -4114,6 +4114,237 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两表共同Java空白pay/order key不能授权领取，空白种类不按SQL trim缩窄。 */
+  @Test
+  void recoveryClaimRejectsJavaBlankKeys() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String field : List.of("pay_no", "order_no")) {
+      for (String value : javaBlankRecoveryKeys()) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              changeCoherentRecoveryKey(field, value);
+              var before = payFacts();
+              var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              String requested = "pay_no".equals(field) ? value : "pay-1";
+              String description =
+                  field + ":" + value.codePoints().mapToObj(Integer::toHexString).toList();
+              assertEquals(
+                  0,
+                  intents.claim(
+                      requested, "t161-blank-token", currentTime.plusSeconds(30), currentTime),
+                  description);
+              assertEquals(before, payFacts());
+              assertEquals(
+                  0,
+                  fixture.queryForObject(
+                      "SELECT attempts FROM pay_debit_intent WHERE id=1", Integer.class));
+              assertNull(
+                  fixture.queryForObject(
+                      "SELECT lease_owner FROM pay_debit_intent WHERE id=1", String.class));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 本机Java17已枚举25空白码点；覆盖空串、混合空白及每个单独码点。 */
+  private static List<String> javaBlankRecoveryKeys() {
+    var values = new ArrayList<String>(List.of("", "\t \n", "\u1680\u2000\u3000"));
+    for (int codePoint = 0; codePoint <= 0x3000; codePoint++) {
+      if (Character.isWhitespace(codePoint)) values.add(new String(Character.toChars(codePoint)));
+    }
+    assertEquals(28, values.size());
+    assertTrue(values.stream().allMatch(String::isBlank));
+    return values;
+  }
+
+  /** 只允许owned两表同步设置固定key字段，不改变模式、数值或恢复metadata。 */
+  private void changeCoherentRecoveryKey(String field, String value) {
+    assertTrue(List.of("pay_no", "order_no").contains(field));
+    for (String table : List.of("pay_record", "pay_debit_intent")) {
+      assertEquals(1, fixture.update("UPDATE " + table + " SET " + field + "=? WHERE id=1", value));
+    }
+  }
+
+  /** 预route后双方订单号同变Java空白，真实claim拒绝而不先写metadata。 */
+  @Test
+  void blankOrderDriftBeforeClaimPreservesFactsAndRouteError() {
+    for (String value : javaBlankRecoveryKeys()) {
+      seedIntentAndPayment("PENDING", "INIT");
+      fixture.update("UPDATE pay_debit_intent SET last_error='owned-existing-proof' WHERE id=1");
+      PayDebitIntentMapper actualIntents = intents;
+      var guardedIntents = org.mockito.Mockito.spy(actualIntents);
+      var afterChange =
+          new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                changeCoherentRecoveryKey("order_no", value);
+                afterChange.set(payFacts());
+                assertEquals(0, invocation.callRealMethod());
+                return 0;
+              })
+          .when(guardedIntents)
+          .claim(eq("pay-1"), anyString(), any(), any());
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      intents = guardedIntents;
+      try {
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> newService(user, orders).process("pay-1"));
+        assertEquals("COMMON_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals("支付意图与原支付记录不一致", failure.getMessage());
+        assertNotNull(afterChange.get());
+        assertEquals(afterChange.get(), payFacts());
+        assertEquals(0, intentAttempts());
+        assertNull(intentLeaseOwner());
+        org.mockito.Mockito.verifyNoInteractions(user, orders);
+      } finally {
+        intents = actualIntents;
+      }
+    }
+  }
+
+  /** Java非blank特殊字符与混合key保持，原DDL唯一性下100空白头先过滤再LIMIT。 */
+  @Test
+  void nonBlankKeySemanticsAndBlankHeadScanRemainCorrect() {
+    var nonblankValues =
+        List.of(
+            new String(Character.toChars(0)),
+            "\u0085",
+            "\u00a0",
+            "\u2007",
+            "\u202f",
+            "\u180e",
+            "\u200b",
+            "\ufeff",
+            " \tpay-1\n",
+            "订单",
+            "😀");
+    for (String field : List.of("pay_no", "order_no")) {
+      for (String value : nonblankValues) {
+        assertTrue(!value.isBlank());
+        seedIntentAndPayment("PENDING", "INIT");
+        changeCoherentRecoveryKey(field, value);
+        var before = payFacts();
+        var currentTime =
+            LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        String requested = "pay_no".equals(field) ? value : "pay-1";
+        assertEquals(
+            List.of(requested),
+            intents.findDue(currentTime, 1).stream().map(candidate -> candidate.payNo).toList());
+        assertEquals(
+            List.of(requested),
+            intents.findDueAfter(currentTime, null, 1).stream()
+                .map(candidate -> candidate.payNo)
+                .toList());
+        assertEquals(before, payFacts());
+        assertEquals(
+            0, intents.claim(null, "t161-null-token", currentTime.plusSeconds(30), currentTime));
+        assertEquals(before, payFacts());
+        assertEquals(
+            1,
+            intents.claim(requested, "t161-valid-token", currentTime.plusSeconds(30), currentTime));
+        assertEquals(
+            0,
+            intents.claim(
+                requested, "t161-second-token", currentTime.plusSeconds(30), currentTime));
+        assertEquals(
+            1,
+            fixture.queryForObject(
+                "SELECT attempts FROM pay_debit_intent WHERE id=1", Integer.class));
+        assertEquals(
+            "t161-valid-token",
+            fixture.queryForObject(
+                "SELECT lease_owner FROM pay_debit_intent WHERE id=1", String.class));
+        assertEquals(before.get(0), payFacts().get(0));
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+      }
+    }
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      boolean blank = identifier <= 100;
+      String payNo = "t161-pay-" + identifier;
+      // 只读collation探针已证明这100个Java空白key互异，保原两表unique索引及VARCHAR64。
+      String orderNo =
+          blank
+              ? (identifier <= 50
+                  ? "\t".repeat((int) identifier)
+                  : "\n".repeat((int) identifier - 50))
+              : "t161-order-" + identifier;
+      if (blank) assertTrue(orderNo.isBlank());
+      var due =
+          blank
+              ? currentTime.minusDays(1)
+              : currentTime.minusSeconds(identifier == 101 ? 3 : identifier == 102 ? 5 : 4);
+      String paymentStage =
+          identifier == 102
+              ? "order_sync_unknown"
+              : identifier == 103 ? "REFUND_PENDING " : "PENDING";
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,?,'LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          paymentStage,
+          currentTime,
+          currentTime);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,last_error,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',0,?,'owned-existing-proof',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          due,
+          currentTime,
+          currentTime);
+    }
+    var before = payFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(102L, 103L, 101L),
+        intents.findDue(currentTime, 50).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(101L),
+        intents.findDueAfter(currentTime, null, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(102L),
+        intents.findDueAfter(currentTime, 101L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(103L),
+        intents.findDueAfter(currentTime, 102L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertTrue(intents.findDueAfter(currentTime, 103L, 1).isEmpty());
+    assertEquals(before, payFacts());
+    assertEquals(
+        1,
+        intents.claim("t161-pay-102", "t161-tail-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(
+        0,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id<=100 AND (attempts<>0 OR lease_owner IS"
+                + " NOT NULL OR last_error<>'owned-existing-proof')",
+            Integer.class));
+  }
+
   /** 两表一致的非正用户或金额不能授权领取，保原租约/尝试/证据。 */
   @Test
   void recoveryClaimRejectsCoherentNonPositiveNumbers() {
