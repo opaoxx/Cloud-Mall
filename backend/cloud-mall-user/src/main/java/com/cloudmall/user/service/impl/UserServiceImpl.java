@@ -382,13 +382,14 @@ public class UserServiceImpl implements UserService {
     // active新退款观察原归属；Legacy须复制原扣款，TCC须确认冻结，未知模式不作来源。
     if (Objects.equals(user.status, 1)) {
       BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
-      // 缺归属只有同pay也无冻结才兼容历史Legacy；不按冻结state/身份过滤矛盾来源。
-      if (attempt == null && balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
-        throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
       if (attempt != null
           && !("LEGACY".equals(attempt.mode)
               ? isProvenLegacyRefundAttempt(original, attempt)
               : confirmedTccRefund(original, request, attempt)))
+        throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+      // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
+      if ((attempt == null || "LEGACY".equals(attempt.mode))
+          && balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
         throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     }
     // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
