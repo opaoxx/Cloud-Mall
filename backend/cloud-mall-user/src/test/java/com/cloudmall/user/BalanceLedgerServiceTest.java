@@ -2731,6 +2731,94 @@ class BalanceLedgerServiceTest {
     org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
   }
 
+  /** disabled已证TCC原额不得小于单笔退款，等额/尾零和合法部分重放仍无二次入账。 */
+  @Test
+  void disabledRefundReplayChecksSingleAmountWithoutExtraReads() {
+    for (String amount : java.util.List.of("9.00", "10.000", "11.00")) {
+      var request = installRefundProofMode("disabled-replay");
+      BigDecimal sourceAmount = new BigDecimal(amount);
+      originalRefundDebit.amount = sourceAmount;
+      originalRefundDebit.balanceAfter = originalRefundDebit.balanceBefore.subtract(sourceAmount);
+      originalRefundAttempt.amount = sourceAmount;
+      originalRefundFreeze.amount = sourceAmount;
+      originalRefundFreeze.balanceAfterTry = originalRefundDebit.balanceAfter;
+      when(userMapper.selectByIdForUpdate(7L)).thenReturn(disabledUserWithoutWallet());
+      if (sourceAmount.compareTo(request.amount) < 0) {
+        var failure =
+            assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, request));
+        assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+        assertEquals("原扣款不存在或未应用", failure.getMessage());
+        assertEquals(409, failure.getHttpStatus());
+      } else {
+        var response =
+            (com.cloudmall.user.domain.vo.BalanceRefundVO)
+                userService.refundInternal(7L, 7L, request).data;
+        assertEquals("100.00", response.balance);
+      }
+      verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
+      verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
+      verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).findDebitCandidatesByPayNo(any());
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
+  }
+
+  /** source404与T73错误仍先于新金额门；原DAO异常不变，失败不写资金。 */
+  @Test
+  void disabledReplayAmountCapKeepsSourceAndRowPriority() {
+    var request = installRefundProofMode("disabled-replay");
+    originalRefundDebit.originalOperationKey = "bad-source";
+    var badRefund = appliedRefund("refund-1", new BigDecimal("100.00"));
+    badRefund.amount = null;
+    when(balanceLedgerMapper.selectByOperationKey(request.refundOperationKey))
+        .thenReturn(badRefund);
+    assertEquals(
+        "COMMON_NOT_FOUND",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, request))
+            .getCode());
+    var rowRequest = installRefundProofMode("disabled-replay");
+    originalRefundDebit.amount = new BigDecimal("9.00");
+    originalRefundDebit.balanceAfter = new BigDecimal("91.00");
+    originalRefundAttempt.amount = originalRefundDebit.amount;
+    originalRefundFreeze.amount = originalRefundDebit.amount;
+    originalRefundFreeze.balanceAfterTry = originalRefundDebit.balanceAfter;
+    var wrong = appliedRefund("refund-1", new BigDecimal("100.00"));
+    wrong.state = "REJECTED";
+    when(balanceLedgerMapper.selectByOperationKey(rowRequest.refundOperationKey)).thenReturn(wrong);
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, rowRequest))
+            .getCode());
+    var faultRequest = installRefundProofMode("disabled-replay");
+    var failure =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "owned-disabled-replay-source-fault");
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .selectDebitForUpdate(faultRequest.originalOperationKey);
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        assertThrows(
+            RuntimeException.class, () -> userService.refundInternal(7L, 7L, faultRequest)));
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+  }
+
+  /** 禁用用户NULL当前钱包不应影响合法历史退款快照。 */
+  private UserPO disabledUserWithoutWallet() {
+    UserPO user = activeUser(null);
+    user.status = 0;
+    return user;
+  }
+
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
   private BalanceDebitRequestDTO installLegacyDebit(String entry, String state) {
     setUp();

@@ -362,10 +362,10 @@ public class UserServiceImpl implements UserService {
     // 2. 既有退款先保原proof/优先级；active核原DEBIT，disabled仍原TCC来源404。
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
     if (existing != null) {
+      BalanceLedgerPO disabledOriginal = null;
       if (!Objects.equals(user.status, 1)) {
-        BalanceLedgerPO original =
-            balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
-        requireDisabledTccRefund(original, request, userId);
+        disabledOriginal = balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        requireDisabledTccRefund(disabledOriginal, request, userId);
       }
       ensureRefundMatches(existing, userId, request);
       if (Objects.equals(user.status, 1)) {
@@ -374,6 +374,9 @@ public class UserServiceImpl implements UserService {
         if (!isProvenRefundOriginalDebit(original, request, userId)
             || existing.amount.compareTo(original.amount) > 0)
           throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+      } else if (existing.amount.compareTo(disabledOriginal.amount) > 0) {
+        // disabled原source/TCC与退款行已先证明；复用已读原额，不新增查询或再次入账。
+        throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
       }
       return ApiResponse.ok(
           BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));

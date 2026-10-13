@@ -409,6 +409,71 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** disabled既有退款单笔不得超过已证原额，真正等额/部分退款仍正常重放且不二次入账。 */
+  @Test
+  void disabledRefundReplayKeepsOriginalAmountCapAndHealthyBoundaries() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String sourceAmount : List.of("1.00", "2.00", "3.00")) {
+      assertions.add(
+          () -> {
+            for (String table :
+                List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+              fixture.update("DELETE FROM " + table);
+            fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+            setEnabled(true);
+            var original =
+                request(
+                    "disabled-replay-cap-" + sourceAmount.replace('.', '-'),
+                    7L,
+                    "1.00".equals(sourceAmount) ? "10.00" : sourceAmount);
+            service.tryDebit(original);
+            service.confirmDebit(finalizeRequest(original));
+            var refund = refundRequest(original, "completed-disabled-cap", "2.00");
+            legacy.refundInternal(7L, 7L, refund);
+            if ("1.00".equals(sourceAmount)) {
+              fixture.update(
+                  "UPDATE balance_ledger SET amount=1,balance_after=99 WHERE operation_key=?",
+                  original.ledgerKey);
+              fixture.update("UPDATE balance_debit_attempt SET amount=1");
+              fixture.update("UPDATE balance_tcc_debit SET amount=1,balance_after_try=99");
+            }
+            fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+            var before = allFundsFacts();
+            var response =
+                org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                        context.getBean(UserController.class))
+                    .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                    .build()
+                    .perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                "/api/internal/users/7/balance/refunds")
+                            .header("X-User-Id", "7")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content(
+                                new com.fasterxml.jackson.databind.ObjectMapper()
+                                    .writeValueAsString(refund)))
+                    .andReturn();
+            if ("1.00".equals(sourceAmount)) {
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals(409, response.getResponse().getStatus()),
+                  () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                  () -> {
+                    var failure =
+                        assertThrows(
+                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                  },
+                  () -> assertEquals(before, allFundsFacts()));
+            } else {
+              assertEquals(200, response.getResponse().getStatus());
+              legacy.refundInternal(7L, 7L, refund);
+              assertEquals(before, allFundsFacts());
+            }
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 已完成active退款重放不得只凭REFUND行忽略原DEBIT已缺失或矛盾，两模式不二次入账。 */
   @Test
   void activeRefundReplayRejectsMissingOrCorruptOriginalDebitWithoutWriting() {
