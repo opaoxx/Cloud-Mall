@@ -395,11 +395,8 @@ public class UserServiceImpl implements UserService {
     requireRefundDebitScope(original, request, userId);
     // active原DEBIT已证明，再核同pay归属/冻结，不重复读取原source。
     if (Objects.equals(user.status, 1)) requireActiveRefundOwnership(original, request);
-    // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
-    BigDecimal refundedAmount = provenRefundedAmount(original);
-    if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
-      throw new BizException("BALANCE_REFUND_EXCEEDED", "退款金额超过原扣款", 409);
-    }
+    // 4. 逐行证明集合及金额额度，再核新增后的记录容量，避免创建无法恢复的第101条。
+    requireFreshRefundCollection(original, request.amount);
     LocalDateTime currentTime = LocalDateTime.now();
     BigDecimal balanceBefore = user.balance;
     if (!validBalanceMoney(balanceBefore)) {
@@ -575,16 +572,22 @@ public class UserServiceImpl implements UserService {
         && candidate.balanceAfter.compareTo(original.balanceAfter) == 0;
   }
 
-  /** 新退款先保原关联集合错误优先，再证明同pay全账本集合与其membership一致，不推断其它pay。 */
-  private BigDecimal provenRefundedAmount(BalanceLedgerPO original) {
+  /** 新退款先证明双集合与原金额额度，再限制新增后至多100条；复用已读集合，不新增查询。 */
+  private void requireFreshRefundCollection(BalanceLedgerPO original, BigDecimal requestAmount) {
     List<BalanceLedgerPO> linkedRefunds =
         balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
     BigDecimal linkedTotal = provenRefundedAmount(original, linkedRefunds);
-    return provenRefundPaymentMembership(
+    provenRefundPaymentMembership(
         original,
         linkedRefunds,
         linkedTotal,
         balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo));
+    if (linkedTotal.add(requestAmount).compareTo(original.amount) > 0) {
+      throw new BizException("BALANCE_REFUND_EXCEEDED", "退款金额超过原扣款", 409);
+    }
+    if (linkedRefunds.size() >= MAX_REFUND_CANDIDATES) {
+      throw new BizException("BALANCE_REFUND_INVALID", "退款记录数量已达上限", 409);
+    }
   }
 
   /** linked已按原kernel证明；同一快照的pay集合必须完整复制来源及每条退款，不重复查询。 */

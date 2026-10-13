@@ -3376,9 +3376,9 @@ class BalanceLedgerServiceTest {
       paymentRows.add(originalRefundDebit);
       paymentRows.addAll(candidates);
       when(balanceLedgerMapper.findRefundPaymentLedgerCandidates("pay-1")).thenReturn(paymentRows);
-      if ("exceeded".equals(scenario)) {
+      if (java.util.List.of("exceeded", "100-rows").contains(scenario)) {
         assertEquals(
-            "BALANCE_REFUND_EXCEEDED",
+            "exceeded".equals(scenario) ? "BALANCE_REFUND_EXCEEDED" : "BALANCE_REFUND_INVALID",
             assertThrows(
                     com.cloudmall.common.error.BizException.class,
                     () -> userService.refundInternal(7L, 7L, request))
@@ -3619,6 +3619,117 @@ class BalanceLedgerServiceTest {
         verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
       }
     }
+  }
+
+  /** 新退款写后最多100条；边界不会增加查询，100/101拒绝都在资金写前。 */
+  @Test
+  void freshRefundCapacityStopsBeforeUnrecoverableHistory() {
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      for (int count : java.util.List.of(0, 99, 100, 101)) {
+        var request = installFreshRefundCapacity(mode, count);
+        if (count < 100) {
+          userService.refundInternal(7L, 7L, request);
+          verify(userMapper).creditBalance(eq(7L), eq(request.amount), any());
+          verify(balanceLedgerMapper).insert(any());
+        } else {
+          var failure =
+              assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> userService.refundInternal(7L, 7L, request));
+          assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals(count == 100 ? "退款记录数量已达上限" : "退款累计证据不完整或不一致", failure.getMessage());
+          verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        }
+        verify(balanceLedgerMapper).findLinkedRefundCandidates(request.originalOperationKey);
+        verify(balanceLedgerMapper, times(count > 100 ? 0 : 1))
+            .findRefundPaymentLedgerCandidates(request.payNo);
+        verify(balanceLedgerMapper).findDebitCandidatesByPayNo(request.payNo);
+      }
+    }
+  }
+
+  /** 坏集合/DAO/金额超额仍优先；容量在wallet前，未满时保持原钱包失败。 */
+  @Test
+  void freshRefundCapacityKeepsProofAmountAndWalletPriority() {
+    for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
+      for (String scenario :
+          java.util.List.of(
+              "bad-linked", "bad-payment", "over-amount", "wallet-full", "wallet-slot")) {
+        var request = installFreshRefundCapacity(mode, "wallet-slot".equals(scenario) ? 99 : 100);
+        switch (scenario) {
+          case "bad-linked" ->
+              when(balanceLedgerMapper.findLinkedRefundCandidates(request.originalOperationKey))
+                  .thenReturn(java.util.Collections.nCopies(100, new BalanceLedgerPO()));
+          case "bad-payment" ->
+              when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(request.payNo))
+                  .thenReturn(java.util.List.of(originalRefundDebit));
+          case "over-amount" -> request.amount = new BigDecimal("10.00");
+          default ->
+              when(userMapper.selectByIdForUpdate(7L))
+                  .thenReturn(
+                      mode.startsWith("disabled") ? disabledUserWithoutWallet() : activeUser(null));
+        }
+        var failure =
+            assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, request));
+        assertEquals(
+            "over-amount".equals(scenario)
+                ? "BALANCE_REFUND_EXCEEDED"
+                : "wallet-slot".equals(scenario)
+                    ? "BALANCE_REFUND_FAILED"
+                    : "BALANCE_REFUND_INVALID",
+            failure.getCode());
+        assertEquals(
+            "wallet-full".equals(scenario)
+                ? "退款记录数量已达上限"
+                : "wallet-slot".equals(scenario)
+                    ? "余额退款失败"
+                    : "over-amount".equals(scenario) ? "退款金额超过原扣款" : "退款累计证据不完整或不一致",
+            failure.getMessage());
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        if ("bad-linked".equals(scenario))
+          verify(balanceLedgerMapper, org.mockito.Mockito.never())
+              .findRefundPaymentLedgerCandidates(any());
+      }
+      for (String phase : java.util.List.of("linked", "payment")) {
+        var request = installFreshRefundCapacity(mode, 100);
+        var failure =
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "refund-capacity-proof-fault");
+        if ("linked".equals(phase))
+          org.mockito.Mockito.doThrow(failure)
+              .when(balanceLedgerMapper)
+              .findLinkedRefundCandidates(request.originalOperationKey);
+        else
+          org.mockito.Mockito.doThrow(failure)
+              .when(balanceLedgerMapper)
+              .findRefundPaymentLedgerCandidates(request.payNo);
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure,
+            assertThrows(
+                RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      }
+    }
+  }
+
+  /** 合法已有退款及同pay集合，count不隐藏坏证据，不连接真实数据库。 */
+  private BalanceRefundRequestDTO installFreshRefundCapacity(String mode, int count) {
+    var request = installRefundProofMode(mode);
+    request.amount = new BigDecimal("0.01");
+    var linked = new java.util.ArrayList<BalanceLedgerPO>();
+    for (int index = 0; index < count; index++)
+      linked.add(linkedRefund("capacity-prior-" + index, "0.01"));
+    var payment = new java.util.ArrayList<BalanceLedgerPO>(java.util.List.of(originalRefundDebit));
+    payment.addAll(linked);
+    when(balanceLedgerMapper.findLinkedRefundCandidates(request.originalOperationKey))
+        .thenReturn(linked);
+    when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(request.payNo)).thenReturn(payment);
+    return request;
   }
 
   /** 单行重放事实和两份独立列表均包含当前退款，避免旧空集合夹具伪造成功。 */

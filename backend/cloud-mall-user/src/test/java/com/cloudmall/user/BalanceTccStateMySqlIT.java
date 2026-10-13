@@ -4425,10 +4425,137 @@ class BalanceTccStateMySqlIT {
     }
   }
 
-  /** 真实有界集合覆盖100/101行，100行可完成，101行在candidate limit前拒绝。 */
+  /** 99条可受理第100次并恢复，已有100条不得写第101次，三模式资金边界一致。 */
+  @Test
+  void freshRefundPreservesRecoverableRecordCapacity() throws Exception {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+      for (int count : List.of(99, 100, 101)) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              setEnabled(true);
+              var original = request("refund-capacity-" + mode + "-" + count, 7L, "10.00");
+              if ("active-legacy".equals(mode))
+                debitLegacy(original.payNo, original.ledgerKey, 7L, "10.00");
+              else {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              }
+              for (int index = 0; index < count; index++)
+                seedLinkedRefundCandidate(
+                    -1L - index, original.ledgerKey, original, "capacity-prior-" + index, "0.01");
+              if ("disabled-tcc".equals(mode)) {
+                setEnabled(false);
+                fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+              }
+              var refund = refundRequest(original, "capacity-next-refund", "0.01");
+              var before = allFundsFacts();
+              var response =
+                  org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                          context.getBean(UserController.class))
+                      .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                      .build()
+                      .perform(
+                          org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                  "/api/internal/users/7/balance/refunds")
+                              .header("X-User-Id", "7")
+                              .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                              .content(
+                                  new com.fasterxml.jackson.databind.ObjectMapper()
+                                      .writeValueAsString(refund)))
+                      .andReturn();
+              if (count == 99) {
+                assertEquals(200, response.getResponse().getStatus());
+                assertEquals(101, ledgerCount());
+                assertFunds(7L, "90.01", "0.00");
+                var accepted = allFundsFacts();
+                assertEquals(
+                    "90.01",
+                    ((com.cloudmall.user.domain.vo.BalanceRefundVO)
+                            legacy.refundInternal(7L, 7L, refund).data)
+                        .balance);
+                assertEquals(
+                    200, operationHttp(refund.refundOperationKey).getResponse().getStatus());
+                assertEquals(accepted, allFundsFacts());
+              } else {
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> assertEquals(409, response.getResponse().getStatus(), mode + ":" + count),
+                    () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                    () -> {
+                      var failure =
+                          assertThrows(
+                              BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertEquals(
+                          count == 100 ? "退款记录数量已达上限" : "退款累计证据不完整或不一致", failure.getMessage());
+                    },
+                    () -> assertEquals(before, allFundsFacts()));
+              }
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 同一用户行锁序列化两个第100条候选，只有一个可写，胜者仍可重放和查询。 */
+  @Test
+  void concurrentFreshRefundCannotCrossRecordCapacity() throws Exception {
+    for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+      for (String table : List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+        fixture.update("DELETE FROM " + table);
+      fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+      setEnabled(true);
+      var original = request("refund-capacity-race-" + mode, 7L, "10.00");
+      if ("active-legacy".equals(mode))
+        debitLegacy(original.payNo, original.ledgerKey, 7L, "10.00");
+      else {
+        service.tryDebit(original);
+        service.confirmDebit(finalizeRequest(original));
+      }
+      for (int index = 0; index < 99; index++)
+        seedLinkedRefundCandidate(
+            -1L - index, original.ledgerKey, original, "race-prior-" + index, "0.01");
+      if ("disabled-tcc".equals(mode)) {
+        setEnabled(false);
+        fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+      }
+      var first = refundRequest(original, "capacity-race-first", "0.01");
+      var second = refundRequest(original, "capacity-race-second", "0.01");
+      var outcomes = race(() -> refundAtCapacity(first), () -> refundAtCapacity(second));
+      assertEquals(1, outcomes.stream().filter(Boolean::booleanValue).count());
+      assertEquals(101, ledgerCount());
+      assertFunds(7L, "90.01", "0.00");
+      var accepted = outcomes.get(0) ? first : second;
+      var beforeReplay = allFundsFacts();
+      assertEquals(
+          "90.01",
+          ((com.cloudmall.user.domain.vo.BalanceRefundVO)
+                  legacy.refundInternal(7L, 7L, accepted).data)
+              .balance);
+      assertEquals(200, operationHttp(accepted.refundOperationKey).getResponse().getStatus());
+      assertEquals(beforeReplay, allFundsFacts());
+    }
+  }
+
+  /** 并发失败必须是容量409，SQL异常或其它业务错误不能被race归为正常竞争。 */
+  private Object refundAtCapacity(BalanceRefundRequestDTO request) {
+    try {
+      return legacy.refundInternal(7L, 7L, request);
+    } catch (BizException failure) {
+      assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+      assertEquals("退款记录数量已达上限", failure.getMessage());
+      throw failure;
+    }
+  }
+
+  /** 真实99条可新增到100，已有100容量拒绝，101仍按历史缺证拒绝。 */
   @Test
   void refundCandidateLimitStopsAtOneHundredRows() {
-    for (int candidateCount : List.of(100, 101)) {
+    for (int candidateCount : List.of(99, 100, 101)) {
       closeContext();
       createTransactionalServices();
       BalanceTccDebitTryDTO original = request("refund-limit", 7L, "2.00");
@@ -4439,8 +4566,8 @@ class BalanceTccStateMySqlIT {
             2L + index, original.ledgerKey, original, "refund-limit-" + index, "0.01");
       var before = allFundsFacts();
       BalanceRefundRequestDTO refund =
-          refundRequest(original, "refund-limit-request", candidateCount == 100 ? "1.00" : "0.01");
-      if (candidateCount == 100) {
+          refundRequest(original, "refund-limit-request", candidateCount == 99 ? "1.00" : "0.01");
+      if (candidateCount == 99) {
         int beforeLedgerCount = ledgerCount();
         legacy.refundInternal(7L, 7L, refund);
         assertEquals(beforeLedgerCount + 1, ledgerCount());
