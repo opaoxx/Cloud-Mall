@@ -74,7 +74,7 @@ public class UserServiceImpl implements UserService {
   /** LEGACY/TCC 共享扣款归属，所有扣款入口必须核对该事实。 */
   @Autowired private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
 
-  /** 原TCC冻结/确认事实，用于新退款来源与禁用用户本地确认证明。 */
+  /** 原TCC冻结/确认事实，用于首次扣款互斥与退款来源证明。 */
   @Autowired private BalanceTccDebitMapper balanceTccDebitMapper;
 
   /** 用户地址数据 Mapper。 */
@@ -691,6 +691,9 @@ public class UserServiceImpl implements UserService {
       throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款归属缺少对应账本事实", 409);
     if (!paymentLedgerCandidates.isEmpty())
       throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有资金账本事实", 409);
+    // 原归属/账本门已先核；首次Legacy不得与同pay残留TCC冻结并存，不按state过滤。
+    if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
+      throw new BizException("IDEMPOTENCY_CONFLICT", "支付号已有TCC冻结事实", 409);
 
     // 3. 先核当前钱包域，再用唯一键认领最终账本键，避免坏余额或跨协议并发双扣。
     if (!validBalanceMoney(user.balance))

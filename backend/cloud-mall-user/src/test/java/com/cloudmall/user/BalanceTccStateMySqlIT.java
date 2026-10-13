@@ -409,6 +409,79 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 首次Legacy不能忽略残留TCC冻结，正常/不足金额的双入口都不能新增归属或资金行。 */
+  @Test
+  void freshLegacyDebitRejectsObservedTccFreezeWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : List.of("debits", "compat")) {
+      for (boolean insufficient : List.of(false, true)) {
+        for (String variant :
+            List.of("TRYING", "CANCELLED", "CONFIRMED-ghost", "UNKNOWN", "pay-alias", "foreign")) {
+          assertions.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                setEnabled(true);
+                var original = request("legacy-freeze-" + entry + "-" + variant, 7L, "10.00");
+                service.tryDebit(original);
+                if ("CANCELLED".equals(variant)) service.cancelDebit(finalizeRequest(original));
+                if ("CONFIRMED-ghost".equals(variant)) {
+                  service.confirmDebit(finalizeRequest(original));
+                  fixture.update("DELETE FROM balance_ledger");
+                }
+                if ("UNKNOWN".equals(variant))
+                  fixture.update("UPDATE balance_tcc_debit SET state='UNKNOWN'");
+                if ("pay-alias".equals(variant))
+                  fixture.update("UPDATE balance_tcc_debit SET pay_no=UPPER(pay_no)");
+                if ("foreign".equals(variant))
+                  fixture.update("UPDATE balance_tcc_debit SET user_id=8");
+                fixture.update("DELETE FROM balance_debit_attempt");
+                var request = new BalanceDebitRequestDTO();
+                request.payNo = original.payNo;
+                request.operationKey =
+                    "compat".equals(entry) ? request.payNo : "custom-" + request.payNo;
+                request.orderNo = "compat".equals(entry) ? request.payNo : original.orderNo;
+                request.amount = new BigDecimal(insufficient ? "101.00" : "10.00");
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = request.payNo;
+                compatible.amount = request.amount;
+                var before = allFundsFacts();
+                var cache = context.getBean(StringRedisTemplate.class);
+                org.mockito.Mockito.clearInvocations(cache);
+                var response =
+                    "compat".equals(entry)
+                        ? postCompatibleLegacyDebit(compatible)
+                        : postLegacyDebit(request);
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () ->
+                        assertEquals(
+                            409,
+                            response.getResponse().getStatus(),
+                            entry + ":" + insufficient + ":" + variant),
+                    () -> assertHttpCode(response, "IDEMPOTENCY_CONFLICT"),
+                    () -> {
+                      var failure =
+                          assertThrows(
+                              BizException.class,
+                              () -> {
+                                if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                                else legacy.debitInternal(7L, 7L, request);
+                              });
+                      assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+                      assertEquals("支付号已有TCC冻结事实", failure.getMessage());
+                    },
+                    () -> assertEquals(before, allFundsFacts()),
+                    () -> org.mockito.Mockito.verifyNoInteractions(cache));
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** operation GET不能忽略同pay未/错关联记录，正常扣款/退款/拒款查询都保持只读。 */
   @Test
   void operationQueriesRejectOrphanPaymentFactsWithoutWriting() {
