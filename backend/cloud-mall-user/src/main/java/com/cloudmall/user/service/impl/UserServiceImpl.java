@@ -359,7 +359,7 @@ public class UserServiceImpl implements UserService {
     if (user == null) {
       throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
     }
-    // 2. 既有退款按原重放协议核验，禁用用户仍需证明原TCC扣款。
+    // 2. 既有退款先保原proof/优先级；active核原DEBIT，disabled仍原TCC来源404。
     BalanceLedgerPO existing = balanceLedgerMapper.selectByOperationKey(request.refundOperationKey);
     if (existing != null) {
       if (!Objects.equals(user.status, 1)) {
@@ -368,6 +368,13 @@ public class UserServiceImpl implements UserService {
         requireDisabledTccRefund(original, request, userId);
       }
       ensureRefundMatches(existing, userId, request);
+      if (Objects.equals(user.status, 1)) {
+        BalanceLedgerPO original =
+            balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey);
+        if (!isProvenRefundOriginalDebit(original, request, userId)
+            || existing.amount.compareTo(original.amount) > 0)
+          throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+      }
       return ApiResponse.ok(
           BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));
     }

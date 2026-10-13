@@ -300,7 +300,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
-  /** 纯字段门保零余额/无损尾零，不改变active已有退款重放不读source的原边界。 */
+  /** 纯字段门保零余额/无损尾零，active已有退款增加原source点读但不二次credit。 */
   @Test
   void validOriginalRefundProofKeepsZeroBalanceTailZerosAndReplayBoundaries() {
     for (String mode : java.util.List.of("active-fresh", "disabled-fresh", "disabled-replay")) {
@@ -318,9 +318,9 @@ class BalanceLedgerServiceTest {
     var request = installRefundProofMode("active-fresh");
     when(balanceLedgerMapper.selectByOperationKey("refund-1"))
         .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
-    when(balanceLedgerMapper.selectDebitForUpdate("pay-1"))
-        .thenThrow(new AssertionError("active replay不得扩大原source读取范围"));
+
     userService.refundInternal(7L, 7L, request);
+    verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
   }
 
@@ -671,7 +671,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
-  /** 历史快照0/尾零/MAX不和当前wallet比较，不新source query或重新credit。 */
+  /** 历史快照0/尾零/MAX不和当前wallet比较，active一次source读但不重新credit。 */
   @Test
   void persistedRefundReplayKeepsHealthySnapshotBoundsAndCurrentWalletIndependence() {
     for (boolean disabled : java.util.List.of(false, true)) {
@@ -693,7 +693,7 @@ class BalanceLedgerServiceTest {
         verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
         verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
         if (!disabled)
-          verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitForUpdate(any());
+          verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
       }
     }
   }
@@ -2612,6 +2612,123 @@ class BalanceLedgerServiceTest {
         verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
       }
     }
+  }
+
+  /** active已退款重放仍须可靠原APPLIED DEBIT与单笔额度，坏source不作为已成功证明。 */
+  @Test
+  void activeRefundReplayRejectsMissingOrMalformedOriginalSource() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String variant :
+        java.util.List.of(
+            "missing",
+            "key",
+            "user",
+            "pay",
+            "order",
+            "type",
+            "state",
+            "origin",
+            "amount-null",
+            "amount-zero",
+            "amount-negative",
+            "amount-scale",
+            "amount-capacity",
+            "amount-smaller",
+            "before-null",
+            "after-null",
+            "snapshot")) {
+      assertions.add(
+          () -> {
+            var request = installRefundProofMode("active-fresh");
+            when(balanceLedgerMapper.selectByOperationKey(request.refundOperationKey))
+                .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+            switch (variant) {
+              case "missing" ->
+                  when(balanceLedgerMapper.selectDebitForUpdate(request.originalOperationKey))
+                      .thenReturn(null);
+              case "key" -> originalRefundDebit.operationKey = "PAY-1";
+              case "user" -> originalRefundDebit.userId = 8L;
+              case "pay" -> originalRefundDebit.payNo = "PAY-1";
+              case "order" -> originalRefundDebit.orderNo = "other-order";
+              case "type" -> originalRefundDebit.operationType = "REFUND";
+              case "state" -> originalRefundDebit.state = "REJECTED";
+              case "origin" -> originalRefundDebit.originalOperationKey = "other-origin";
+              case "amount-null" -> originalRefundDebit.amount = null;
+              case "amount-zero" -> originalRefundDebit.amount = BigDecimal.ZERO;
+              case "amount-negative" -> originalRefundDebit.amount = new BigDecimal("-1.00");
+              case "amount-scale" -> originalRefundDebit.amount = new BigDecimal("10.001");
+              case "amount-capacity" ->
+                  originalRefundDebit.amount = new BigDecimal("10000000000000000.00");
+              case "amount-smaller" -> {
+                originalRefundDebit.amount = new BigDecimal("9.00");
+                originalRefundDebit.balanceAfter = new BigDecimal("91.00");
+              }
+              case "before-null" -> originalRefundDebit.balanceBefore = null;
+              case "after-null" -> originalRefundDebit.balanceAfter = null;
+              case "snapshot" -> originalRefundDebit.balanceAfter = new BigDecimal("95.00");
+              default -> throw new AssertionError(variant);
+            }
+            var failure =
+                assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> userService.refundInternal(7L, 7L, request));
+            assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+            assertEquals("原扣款不存在或未应用", failure.getMessage());
+            verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+            verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+            verify(balanceLedgerMapper, org.mockito.Mockito.never())
+                .findLinkedRefundCandidates(any());
+            org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, valueOperations);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** source DAO原对象传播；T73坏退款行先于新source，健康active旧快照不核当前wallet。 */
+  @Test
+  void activeRefundReplaySourceFaultKeepsRowPriorityAndWalletIndependence() {
+    var request = installRefundProofMode("active-fresh");
+    when(balanceLedgerMapper.selectByOperationKey(request.refundOperationKey))
+        .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+    var failure =
+        new org.springframework.dao.DataAccessResourceFailureException(
+            "owned-replay-original-source-fault");
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .selectDebitForUpdate(request.originalOperationKey);
+    org.junit.jupiter.api.Assertions.assertSame(
+        failure,
+        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    var invalidRequest = installRefundProofMode("active-fresh");
+    var invalid = appliedRefund("refund-1", new BigDecimal("100.00"));
+    invalid.state = "REJECTED";
+    when(balanceLedgerMapper.selectByOperationKey(invalidRequest.refundOperationKey))
+        .thenReturn(invalid);
+    org.mockito.Mockito.doThrow(failure)
+        .when(balanceLedgerMapper)
+        .selectDebitForUpdate(invalidRequest.originalOperationKey);
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> userService.refundInternal(7L, 7L, invalidRequest))
+            .getCode());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitForUpdate(any());
+    var healthyRequest = installRefundProofMode("active-fresh");
+    when(balanceLedgerMapper.selectByOperationKey(healthyRequest.refundOperationKey))
+        .thenReturn(appliedRefund("refund-1", new BigDecimal("100.00")));
+    when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(null));
+    assertEquals(
+        "100.00",
+        ((com.cloudmall.user.domain.vo.BalanceRefundVO)
+                userService.refundInternal(7L, 7L, healthyRequest).data)
+            .balance);
+    verify(balanceLedgerMapper).selectDebitForUpdate(healthyRequest.originalOperationKey);
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
   }
 
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */

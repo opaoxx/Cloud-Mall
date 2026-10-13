@@ -409,6 +409,90 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 已完成active退款重放不得只凭REFUND行忽略原DEBIT已缺失或矛盾，两模式不二次入账。 */
+  @Test
+  void activeRefundReplayRejectsMissingOrCorruptOriginalDebitWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("legacy", "tcc")) {
+      for (String variant :
+          List.of("missing", "state", "user", "pay", "order", "snapshot", "amount-smaller")) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              setEnabled(true);
+              var original = request("replay-source-" + mode + "-" + variant, 7L, "10.00");
+              if ("tcc".equals(mode)) {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+              var refund = refundRequest(original, "completed-refund-source", "2.00");
+              legacy.refundInternal(7L, 7L, refund);
+              switch (variant) {
+                case "missing" ->
+                    fixture.update(
+                        "DELETE FROM balance_ledger WHERE operation_key=?", original.ledgerKey);
+                case "state" ->
+                    fixture.update(
+                        "UPDATE balance_ledger SET state='REJECTED' WHERE operation_key=?",
+                        original.ledgerKey);
+                case "user" ->
+                    fixture.update(
+                        "UPDATE balance_ledger SET user_id=8 WHERE operation_key=?",
+                        original.ledgerKey);
+                case "pay" ->
+                    fixture.update(
+                        "UPDATE balance_ledger SET pay_no=UPPER(pay_no) WHERE operation_key=?",
+                        original.ledgerKey);
+                case "order" ->
+                    fixture.update(
+                        "UPDATE balance_ledger SET order_no='other-order' WHERE operation_key=?",
+                        original.ledgerKey);
+                case "snapshot" ->
+                    fixture.update(
+                        "UPDATE balance_ledger SET balance_after=95 WHERE operation_key=?",
+                        original.ledgerKey);
+                case "amount-smaller" ->
+                    fixture.update(
+                        "UPDATE balance_ledger SET amount=1,balance_after=99 WHERE operation_key=?",
+                        original.ledgerKey);
+                default -> throw new AssertionError(variant);
+              }
+              var before = allFundsFacts();
+              var response =
+                  org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                          context.getBean(UserController.class))
+                      .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                      .build()
+                      .perform(
+                          org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                  "/api/internal/users/7/balance/refunds")
+                              .header("X-User-Id", "7")
+                              .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                              .content(
+                                  new com.fasterxml.jackson.databind.ObjectMapper()
+                                      .writeValueAsString(refund)))
+                      .andReturn();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals(409, response.getResponse().getStatus(), mode + ":" + variant),
+                  () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
+                  () -> {
+                    var failure =
+                        assertThrows(
+                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                    assertEquals("原扣款不存在或未应用", failure.getMessage());
+                  },
+                  () -> assertEquals(before, allFundsFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 首次Legacy不能忽略残留TCC冻结，正常/不足金额的双入口都不能新增归属或资金行。 */
   @Test
   void freshLegacyDebitRejectsObservedTccFreezeWithoutWriting() {
