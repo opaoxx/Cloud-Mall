@@ -421,10 +421,7 @@ public class PayConsistencyService {
     return finishRefunded(intent, claimToken, "refund:" + intent.payNo);
   }
 
-  /**
-   * 退款终态前复用User查询证明单笔完整金额；404和缺证沿原恢复链重试，不转换为无扣款。
-   * 只核Pay可见字段，不把POST响应、marker或部分金额当作全额退款，也不推断User完整资金来源。
-   */
+  /** 退款终态前复用User查询证明单笔完整金额；404和缺证沿原恢复链重试，不转换为无扣款。 REFUND响应的关联退款键必须为NULL；只核Pay可见字段，不推断User完整资金来源。 */
   private void confirmRefundLedger(PayDebitIntentPO intent, String refundKey) {
     if (refundKey == null || refundKey.isBlank()) {
       throw new IllegalStateException("退款账本操作键缺失");
@@ -438,6 +435,7 @@ public class PayConsistencyService {
     if (!Objects.equals(refundKey, refund.operationKey())
         || !"REFUND".equals(refund.type())
         || !"APPLIED".equals(refund.state())
+        || refund.refundOperationKey() != null
         || refund.amount() == null) {
       throw new BizException(ErrorCodes.CONFLICT, "退款账本与支付记录不一致", 409);
     }

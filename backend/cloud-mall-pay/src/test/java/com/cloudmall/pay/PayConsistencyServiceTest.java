@@ -1054,6 +1054,83 @@ class PayConsistencyServiceTest {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** REFUND非NULL关联字段违反既有协议，early/latest共用原CONFLICT门及查询预算。 */
+  @Test
+  void nonNullRefundMarkerIsRejectedAtBothProofs() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : java.util.List.of("marker", "post-refund", "after-paid")) {
+      for (String timing : java.util.List.of("early", "latest")) {
+        for (String marker :
+            java.util.List.of("", " ", "refund:pay-1", "other-refund", "pay-1", "REFUND:PAY-1")) {
+          assertions.add(
+              () -> {
+                setUp();
+                configureOrderIdentityPath(
+                    "marker".equals(path)
+                        ? "refund-marker"
+                        : "after-paid".equals(path) ? "after-paid" : "applied-cancel",
+                    "order-1");
+                String key = "marker".equals(path) ? "custom-refund" : "refund:pay-1";
+                if ("marker".equals(path))
+                  when(userClient.operation(7L, "pay-1", 7L))
+                      .thenReturn(
+                          ApiResponse.ok(
+                              new UserClient.BalanceOperationView(
+                                  "pay-1", "DEBIT", "APPLIED", "10.00", key)));
+                var originalIntent = intent();
+                var durableIntent = intent();
+                when(intentMapper.findByPayNo("pay-1"))
+                    .thenReturn(originalIntent, originalIntent, durableIntent);
+                when(intentMapper.updateOwnedLegacyStatus(
+                        anyString(), anyString(), anyString(), any()))
+                    .thenAnswer(
+                        invocation -> {
+                          durableIntent.status = invocation.getArgument(2);
+                          return 1;
+                        });
+                var reads = new java.util.concurrent.atomic.AtomicInteger();
+                org.mockito.Mockito.doAnswer(
+                        invocation -> {
+                          int readNumber = reads.incrementAndGet();
+                          return ApiResponse.ok(
+                              new UserClient.BalanceOperationView(
+                                  key,
+                                  "REFUND",
+                                  "APPLIED",
+                                  "10.000",
+                                  "early".equals(timing) || readNumber > 1 ? marker : null));
+                        })
+                    .when(userClient)
+                    .operation(7L, key, 7L);
+                String retry = "marker".equals(path) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+                assertEquals(
+                    retry, consistencyService.process("pay-1"), path + ":" + timing + ":" + marker);
+                verifyRefundNotFinished(retry);
+                int expectedRefundReads = "early".equals(timing) ? 1 : 2;
+                assertEquals(expectedRefundReads, reads.get());
+                verify(userClient, org.mockito.Mockito.times(expectedRefundReads))
+                    .operation(7L, key, 7L);
+                int expectedOrderReads =
+                    ("after-paid".equals(path) ? 2 : 1) + ("latest".equals(timing) ? 1 : 0);
+                verify(orderClient, org.mockito.Mockito.times(expectedOrderReads))
+                    .paymentState("order-1", 7L);
+                var capturedError = org.mockito.ArgumentCaptor.forClass(String.class);
+                verify(intentMapper)
+                    .recordRetryOwnedLegacy(
+                        eq("pay-1"), anyString(), eq(retry), capturedError.capture(), any(), any());
+                org.junit.jupiter.api.Assertions.assertTrue(
+                    capturedError.getValue().contains("退款账本与支付记录不一致"));
+                verify(userClient, org.mockito.Mockito.times("marker".equals(path) ? 0 : 1))
+                    .refund(any(), any(), any());
+                verify(orderClient, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+                    .paid(any(), any());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 早期退款证明后末次Order期间证据变化，原key最终GET拒绝终态且不增加资金写。 */
   @Test
   void latestRefundLedgerRejectsChangedProofAfterFinalOrder() {
