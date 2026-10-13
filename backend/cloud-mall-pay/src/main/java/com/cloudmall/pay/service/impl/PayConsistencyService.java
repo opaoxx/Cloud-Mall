@@ -366,7 +366,12 @@ public class PayConsistencyService {
 
   /** 用户账本和订单都明确成功后才标记支付成功。 */
   private String finishSuccess(PayDebitIntentPO intent, String claimToken) {
+    // 1. 先保留原扣款复核优先级，再在本地事务外复核当前订单和库存确认。
     requireLatestDebitProof(intent);
+    OrderClient.OrderView current = readOrderState(intent);
+    if (!("PAID".equals(current.status()) || "COMPLETED".equals(current.status()))
+        || !stockActionSucceeded(current)) throw new IllegalStateException("订单支付与库存确认证据未证明支付成功");
+    // 2. 两端本次观察均有成功证据后，进入原本地双表终态事务。
     commitOwnedLegacyTerminal(intent, claimToken, "SUCCESS");
     return "SUCCESS";
   }

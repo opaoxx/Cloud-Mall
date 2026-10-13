@@ -2810,6 +2810,185 @@ class PayConsistencyServiceTest {
     org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
   }
 
+  /** 受控末次Order事实；原接口异常语义仍由被测服务处理。 */
+  private static ApiResponse<OrderClient.OrderView> successOrderProofResponse(String variant) {
+    if ("fault".equals(variant))
+      throw new IllegalStateException("controlled-success-order-unavailable");
+    if ("null-response".equals(variant)) return null;
+    if ("null-body".equals(variant)) return ApiResponse.ok(null);
+    if ("bad-envelope".equals(variant))
+      return ApiResponse.error("CONTROLLED_BAD_RESPONSE", "controlled");
+    return ApiResponse.ok(
+        new OrderClient.OrderView(
+            "order-null".equals(variant)
+                ? null
+                : "order-other".equals(variant)
+                    ? "other-order"
+                    : "order-alias".equals(variant) ? "ORDER-1" : "order-1",
+            "pending".equals(variant)
+                ? "PENDING_PAYMENT"
+                : "cancelled".equals(variant)
+                    ? "CANCELLED"
+                    : "status-null".equals(variant)
+                        ? null
+                        : "status-unknown".equals(variant)
+                            ? "UNKNOWN"
+                            : "completed".equals(variant) ? "COMPLETED" : "PAID",
+            "amount-null".equals(variant)
+                ? null
+                : "amount-other".equals(variant)
+                    ? new BigDecimal("11.00")
+                    : new BigDecimal("10.000"),
+            "user-null".equals(variant) ? null : "user-other".equals(variant) ? 8L : 7L,
+            "stock-pending".equals(variant)
+                ? "PENDING"
+                : "stock-unknown".equals(variant)
+                    ? "UNKNOWN"
+                    : "stock-null".equals(variant)
+                        ? null
+                        : "stock-alias".equals(variant) ? "succeeded" : "SUCCEEDED"));
+  }
+
+  /** 三成功来源的末次订单缺证均等待，不进入本地终态事务或猜测退款。 */
+  @Test
+  void latestOrderProofIsRequiredBeforeSuccess() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path : java.util.List.of("paid", "after-paid", "fresh-debit")) {
+      for (String variant :
+          java.util.List.of(
+              "pending",
+              "cancelled",
+              "status-null",
+              "status-unknown",
+              "stock-pending",
+              "stock-unknown",
+              "stock-null",
+              "stock-alias",
+              "order-null",
+              "order-other",
+              "order-alias",
+              "user-null",
+              "user-other",
+              "amount-null",
+              "amount-other",
+              "null-response",
+              "null-body",
+              "bad-envelope",
+              "fault")) {
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath(path, "order-1");
+              var reads = new java.util.concurrent.atomic.AtomicInteger();
+              int expectedReads = "paid".equals(path) ? 2 : 3;
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        int readNumber = reads.incrementAndGet();
+                        if (readNumber < expectedReads)
+                          return successOrderProofResponse(
+                              !"paid".equals(path) && readNumber == 1 ? "pending" : "paid");
+                        verify(userClient, org.mockito.Mockito.times(2)).operation(7L, "pay-1", 7L);
+                        return successOrderProofResponse(variant);
+                      })
+                  .when(orderClient)
+                  .paymentState("order-1", 7L);
+              assertEquals(
+                  "ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"), path + ":" + variant);
+              assertEquals(expectedReads, reads.get());
+              verify(userClient, org.mockito.Mockito.times("fresh-debit".equals(path) ? 1 : 0))
+                  .debit(any(), any(), any());
+              verify(orderClient, org.mockito.Mockito.times("paid".equals(path) ? 0 : 1))
+                  .paid(any(), any());
+              verify(userClient, never()).refund(any(), any(), any());
+              verify(payRecordMapper, never())
+                  .lockOwnedLegacyTerminalSource(any(), anyString(), any());
+              verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+              verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+              verify(transactionManager, never()).getTransaction(any());
+              verify(intentMapper)
+                  .recordRetryOwnedLegacy(
+                      eq("pay-1"),
+                      anyString(),
+                      eq("ORDER_SYNC_UNKNOWN"),
+                      anyString(),
+                      any(),
+                      any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 正确PAID或COMPLETED末次证明可成功；只增加一次Order GET。 */
+  @Test
+  void latestValidOrderKeepsHealthySuccessPaths() {
+    for (String path : java.util.List.of("paid", "after-paid", "fresh-debit")) {
+      for (String terminalOrder : java.util.List.of("paid", "completed")) {
+        setUp();
+        configureOrderIdentityPath(path, "order-1");
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        int expectedReads = "paid".equals(path) ? 2 : 3;
+        org.mockito.Mockito.doAnswer(
+                invocation -> {
+                  int readNumber = reads.incrementAndGet();
+                  return successOrderProofResponse(
+                      readNumber == expectedReads
+                          ? terminalOrder
+                          : !"paid".equals(path) && readNumber == 1 ? "pending" : "paid");
+                })
+            .when(orderClient)
+            .paymentState("order-1", 7L);
+        assertEquals("SUCCESS", consistencyService.process("pay-1"));
+        assertEquals(expectedReads, reads.get());
+        verify(userClient, org.mockito.Mockito.times(2)).operation(7L, "pay-1", 7L);
+        verify(userClient, org.mockito.Mockito.times("fresh-debit".equals(path) ? 1 : 0))
+            .debit(any(), any(), any());
+        verify(orderClient, org.mockito.Mockito.times("paid".equals(path) ? 0 : 1))
+            .paid(any(), any());
+        verify(userClient, never()).refund(any(), any(), any());
+        verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
+      }
+    }
+  }
+
+  /** 最新原扣款错误优先；该错误不触发新增Order查询或终态锁。 */
+  @Test
+  void latestDebitFailurePrecedesSuccessOrderRecheck() {
+    for (String path : java.util.List.of("paid", "after-paid", "fresh-debit")) {
+      setUp();
+      configureOrderIdentityPath(path, "order-1");
+      var userReads = new java.util.concurrent.atomic.AtomicInteger();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                int readNumber = userReads.incrementAndGet();
+                if (readNumber == 1 && "fresh-debit".equals(path)) throw refundReadFault(404);
+                return ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "pay-1", "DEBIT", readNumber == 1 ? "APPLIED" : "REJECTED", "10.00", null));
+              })
+          .when(userClient)
+          .operation(7L, "pay-1", 7L);
+      if (!"paid".equals(path))
+        when(orderClient.paymentState("order-1", 7L))
+            .thenReturn(successOrderProofResponse("pending"), successOrderProofResponse("paid"));
+      assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+      assertEquals(2, userReads.get());
+      verify(orderClient, org.mockito.Mockito.times("paid".equals(path) ? 1 : 2))
+          .paymentState("order-1", 7L);
+      verify(payRecordMapper, never()).lockOwnedLegacyTerminalSource(any(), anyString(), any());
+      verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+      verify(intentMapper)
+          .recordRetryOwnedLegacy(
+              eq("pay-1"),
+              anyString(),
+              eq("ORDER_SYNC_UNKNOWN"),
+              org.mockito.ArgumentMatchers.contains("原扣款账本未证明支付成功"),
+              any(),
+              any());
+      verify(userClient, never()).refund(any(), any(), any());
+    }
+  }
+
   private static PayDebitIntentPO intent() {
     PayDebitIntentPO intent = new PayDebitIntentPO();
     intent.payNo = "pay-1";
