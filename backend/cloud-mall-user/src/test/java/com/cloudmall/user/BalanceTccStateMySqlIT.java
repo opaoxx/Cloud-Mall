@@ -409,6 +409,81 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 正常Legacy历史旁的同pay TCC冻结不能被重放忽略，双入口不cache/写资金。 */
+  @Test
+  void legacyDebitReplayRejectsObservedTccFreezeWithoutWriting() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : List.of("debits", "compat")) {
+      for (String state : List.of("APPLIED", "REJECTED", "history-no-attempt")) {
+        for (String variant :
+            List.of("TRYING", "CONFIRMED", "CANCELLED", "UNKNOWN", "pay-alias", "foreign")) {
+          assertions.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var request = new BalanceDebitRequestDTO();
+                request.payNo = "legacy-replay-freeze-" + entry + "-" + state + "-" + variant;
+                request.operationKey =
+                    "compat".equals(entry) ? request.payNo : "custom-" + request.payNo;
+                request.orderNo = "compat".equals(entry) ? request.payNo : "order-" + request.payNo;
+                request.amount = new BigDecimal("REJECTED".equals(state) ? "101.00" : "10.00");
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = request.payNo;
+                compatible.amount = request.amount;
+                org.junit.jupiter.api.function.Executable debit =
+                    () -> {
+                      if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                      else legacy.debitInternal(7L, 7L, request);
+                    };
+                if ("REJECTED".equals(state))
+                  assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
+                else debit.execute();
+                if ("history-no-attempt".equals(state))
+                  fixture.update("DELETE FROM balance_debit_attempt");
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_tcc_debit(id,operation_key,xid,branch_id,user_id,pay_no,order_no,amount,state,balance_before,balance_after_try,created_at,updated_at)"
+                        + " VALUES(-1,?,'replay-ghost-xid',1,?,?,?,10,?,100,90,NOW(3),NOW(3))",
+                    "tcc-debit:" + request.payNo,
+                    "foreign".equals(variant) ? 8L : 7L,
+                    "pay-alias".equals(variant)
+                        ? request.payNo.toUpperCase(java.util.Locale.ROOT)
+                        : request.payNo,
+                    request.orderNo,
+                    List.of("TRYING", "CONFIRMED", "CANCELLED", "UNKNOWN").contains(variant)
+                        ? variant
+                        : "TRYING");
+                var before = allFundsFacts();
+                var cache = context.getBean(StringRedisTemplate.class);
+                org.mockito.Mockito.clearInvocations(cache);
+                var response =
+                    "compat".equals(entry)
+                        ? postCompatibleLegacyDebit(compatible)
+                        : postLegacyDebit(request);
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () ->
+                        assertEquals(
+                            409,
+                            response.getResponse().getStatus(),
+                            entry + ":" + state + ":" + variant),
+                    () -> assertHttpCode(response, "BALANCE_DEBIT_UNKNOWN"),
+                    () -> {
+                      var failure = assertThrows(BizException.class, debit);
+                      assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+                      assertEquals("扣款来源存在TCC冻结事实", failure.getMessage());
+                    },
+                    () -> assertEquals(before, allFundsFacts()),
+                    () -> org.mockito.Mockito.verifyNoInteractions(cache));
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** disabled既有退款单笔不得超过已证原额，真正等额/部分退款仍正常重放且不二次入账。 */
   @Test
   void disabledRefundReplayKeepsOriginalAmountCapAndHealthyBoundaries() {

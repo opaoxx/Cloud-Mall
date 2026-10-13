@@ -101,7 +101,7 @@ class BalanceLedgerServiceTest {
     verify(userMapper, times(1))
         .debitBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
     verify(balanceLedgerMapper, times(1)).findPaymentLedgerCandidates(request.payNo);
-    verify(balanceTccDebitMapper, times(1)).selectByPayNo(request.payNo);
+    verify(balanceTccDebitMapper, times(2)).selectByPayNo(request.payNo);
   }
 
   @Test
@@ -2560,7 +2560,7 @@ class BalanceLedgerServiceTest {
     }
   }
 
-  /** 新freeze DAO原对象传播，账本候选先拒；已有APPLIED/REJECTED/historyreplay不读新门。 */
+  /** 新freeze DAO原对象传播，账本候选先拒；合法历史重放也须可靠无冻结。 */
   @Test
   void freshLegacyFreezeFaultKeepsLedgerPriorityAndHistoricalReplay() {
     for (String entry : java.util.List.of("debits", "compat")) {
@@ -2591,9 +2591,7 @@ class BalanceLedgerServiceTest {
             installLegacyDebit(entry, "history-no-attempt".equals(state) ? "APPLIED" : state);
         if ("history-no-attempt".equals(state))
           when(balanceDebitAttemptMapper.selectByPayNo(replayRequest.payNo)).thenReturn(null);
-        org.mockito.Mockito.doThrow(failure)
-            .when(balanceTccDebitMapper)
-            .selectByPayNo(replayRequest.payNo);
+        when(balanceTccDebitMapper.selectByPayNo(replayRequest.payNo)).thenReturn(null);
         if ("REJECTED".equals(state)) {
           assertEquals(
               "PAYMENT_FAILED",
@@ -2608,7 +2606,7 @@ class BalanceLedgerServiceTest {
               ((com.cloudmall.user.domain.vo.BalanceDebitVO)
                       invokeLegacyDebit(entry, replayRequest).data)
                   .balance);
-        org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
+        verify(balanceTccDebitMapper).selectByPayNo(replayRequest.payNo);
         verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
       }
     }
@@ -2817,6 +2815,90 @@ class BalanceLedgerServiceTest {
     UserPO user = activeUser(null);
     user.status = 0;
     return user;
+  }
+
+  /** 三种合法Legacy历史的任意冻结候选都必须待核，双入口不二次扣款或更新缓存。 */
+  @Test
+  void legacyDebitReplayRejectsAnyObservedFreezeAfterOriginalProof() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String state : java.util.List.of("APPLIED", "REJECTED", "history-no-attempt")) {
+        for (String variant :
+            java.util.List.of(
+                "TRYING",
+                "CONFIRMED",
+                "CANCELLED",
+                "UNKNOWN",
+                "missing-fields",
+                "alias",
+                "foreign")) {
+          assertions.add(
+              () -> {
+                var request =
+                    installLegacyDebit(
+                        entry, "history-no-attempt".equals(state) ? "APPLIED" : state);
+                if ("history-no-attempt".equals(state))
+                  when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+                var freeze = new com.cloudmall.user.domain.po.BalanceTccDebitPO();
+                if (!"missing-fields".equals(variant)) {
+                  freeze.state = variant;
+                  freeze.payNo = "alias".equals(variant) ? "PAY-1" : request.payNo;
+                  freeze.userId = "foreign".equals(variant) ? 8L : 7L;
+                }
+                when(balanceTccDebitMapper.selectByPayNo(request.payNo)).thenReturn(freeze);
+                var failure =
+                    assertThrows(
+                        com.cloudmall.common.error.BizException.class,
+                        () -> invokeLegacyDebit(entry, request));
+                assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+                assertEquals(409, failure.getHttpStatus());
+                assertEquals("扣款来源存在TCC冻结事实", failure.getMessage());
+                verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
+                assertLegacyNoMoneyOrCacheWrite();
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 冻结DAO错误原样，坏snapshot先拒不读冻结；正常replay不比较当前wallet。 */
+  @Test
+  void legacyReplayFreezeFaultKeepsSnapshotPriorityAndWalletIndependence() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      var request = installLegacyDebit(entry, "APPLIED");
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "owned-legacy-replay-freeze-fault");
+      org.mockito.Mockito.doThrow(failure).when(balanceTccDebitMapper).selectByPayNo(request.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure, assertThrows(RuntimeException.class, () -> invokeLegacyDebit(entry, request)));
+      assertLegacyNoMoneyOrCacheWrite();
+      var invalidRequest = installLegacyDebit(entry, "APPLIED");
+      legacyDebitLedger.balanceAfter = null;
+      org.mockito.Mockito.doThrow(failure)
+          .when(balanceTccDebitMapper)
+          .selectByPayNo(invalidRequest.payNo);
+      assertEquals(
+          "BALANCE_DEBIT_UNKNOWN",
+          assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> invokeLegacyDebit(entry, invalidRequest))
+              .getCode());
+      org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
+      assertLegacyNoMoneyOrCacheWrite();
+      var healthyRequest = installLegacyDebit(entry, "APPLIED");
+      when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(null));
+      when(balanceTccDebitMapper.selectByPayNo(healthyRequest.payNo)).thenReturn(null);
+      assertEquals(
+          "90.00",
+          ((com.cloudmall.user.domain.vo.BalanceDebitVO)
+                  invokeLegacyDebit(entry, healthyRequest).data)
+              .balance);
+      verify(balanceTccDebitMapper).selectByPayNo(healthyRequest.payNo);
+      verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+      verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    }
   }
 
   /** 重置Legacy替身；无state表示fresh，否则建立真实状态的完整历史快照。 */
