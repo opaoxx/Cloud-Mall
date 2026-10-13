@@ -18,9 +18,9 @@ SUCCESS/FAILED 不增加 Order GET；RPC 与本地 terminal transaction 分离�
 
 ## 4. 验收
 
-- Unit/native：marker 与 post-refund 两路径 ×末次 state/stock/envelope/identity/money/fault，非法不 REFUNDED；正确末次 read 与同 pay 补证可恢复，稳定 refund key 不重复退款。
+- Unit/native：marker 与 post-refund 两路径 ×末次 state/stock/envelope/identity/money/fault，非法不 REFUNDED；正确末次 read 与同 pay 补证可恢复，稳定 refund key 不重复退款。覆盖 after-paid→二次 GET 取消→refund→finishRefunded 末次第三次 Order GET，以及 marker/post-refund 各自末次第二次 GET。
 - Owned Pay 两表 + controlled Order/User Feign，原 Pay checksum/pool cleanup，不启动业务/RM/TC；断言已发 RPC 不回滚。
 
 ## 5. 交付边界
 
-实现仅允许在 `finishRefunded` stage 后增加末次 `readOrderState`/stock gate、必要 JavaDoc/测试；不得修改 refund RPC、commitOwned terminal、SUCCESS/FAILED 或 Order API。
+实现仅允许在 `finishRefunded` stage 前增加末次 `readOrderState`/stock gate、必要 JavaDoc/测试；不得修改 refund RPC、commitOwned terminal、SUCCESS/FAILED 或 Order API。
