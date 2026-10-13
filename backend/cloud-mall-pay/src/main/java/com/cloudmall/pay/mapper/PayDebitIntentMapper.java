@@ -334,18 +334,18 @@ public class PayDebitIntentMapper {
     return Integer.valueOf(1).equals(matchingRows);
   }
 
-  /** 将 JDBC 行映射为准确的支付意图持久化对象。 */
+  /** 将JDBC行映射为支付意图，boxed标识/计数保留SQL NULL，其余字段保持原读取语义。 */
   private static final RowMapper<PayDebitIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {
         PayDebitIntentPO intent = new PayDebitIntentPO();
-        intent.id = resultSet.getLong("id");
+        intent.id = resultSet.getObject("id", Long.class);
         intent.payNo = resultSet.getString("pay_no");
         intent.orderNo = resultSet.getString("order_no");
-        intent.userId = resultSet.getLong("user_id");
+        intent.userId = resultSet.getObject("user_id", Long.class);
         intent.amount = resultSet.getObject("amount", BigDecimal.class);
         intent.status = resultSet.getString("status");
         intent.debitMode = resultSet.getString("debit_mode");
-        intent.attempts = resultSet.getInt("attempts");
+        intent.attempts = resultSet.getObject("attempts", Integer.class);
         intent.nextRetryAt = resultSet.getTimestamp("next_retry_at").toLocalDateTime();
         intent.leaseOwner = resultSet.getString("lease_owner");
         Timestamp leaseUntil = resultSet.getTimestamp("lease_until");

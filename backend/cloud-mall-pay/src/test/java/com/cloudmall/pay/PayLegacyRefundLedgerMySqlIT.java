@@ -4114,6 +4114,172 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 实际JDBC NULL投影应保持三个boxed缺失值，不能伪造成0，读取不改存储事实。 */
+  @Test
+  void boxedIntentMappingPreservesSqlNullFacts() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String missing : List.of("id", "user_id", "attempts", "all")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment("PENDING", "INIT");
+            var before = payFacts();
+            var projected = projectedIntentMapper(missing);
+            var observed = projected.findByPayNo("pay-1");
+            assertNotNull(observed);
+            if (List.of("id", "all").contains(missing)) assertNull(observed.id, missing + ":id");
+            else assertEquals(1L, observed.id);
+            if (List.of("user_id", "all").contains(missing))
+              assertNull(observed.userId, missing + ":user");
+            else assertEquals(7L, observed.userId);
+            if (List.of("attempts", "all").contains(missing))
+              assertNull(observed.attempts, missing + ":attempts");
+            else assertEquals(0, observed.attempts);
+            assertEquals("pay-1", observed.payNo);
+            assertEquals("order-1", observed.orderNo);
+            assertEquals(new BigDecimal("10.00"), observed.amount);
+            assertEquals(before, payFacts());
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 只替换固定查找SQL的SELECT数值投影，走生产ROW_MAPPER/真实driver，不ALTER schema。 */
+  private PayDebitIntentMapper projectedIntentMapper(String missing) {
+    assertTrue(List.of("id", "user_id", "attempts", "all").contains(missing));
+    var columns =
+        List.of(
+            "id",
+            "pay_no",
+            "order_no",
+            "user_id",
+            "amount",
+            "status",
+            "debit_mode",
+            "attempts",
+            "next_retry_at",
+            "lease_owner",
+            "lease_until",
+            "last_error",
+            "created_at",
+            "updated_at");
+    String projection =
+        columns.stream()
+            .map(
+                column ->
+                    (column.equals(missing)
+                            || ("all".equals(missing)
+                                && List.of("id", "user_id", "attempts").contains(column)))
+                        ? "NULL AS " + column
+                        : column)
+            .collect(java.util.stream.Collectors.joining(","));
+    var projectedFixture =
+        new JdbcTemplate(fixture.getDataSource()) {
+          /** 实际读取本测试owned行，仅固定非锁定/锁定查找可使用NULL投影。 */
+          @Override
+          public <RowType> List<RowType> query(
+              String queryText,
+              org.springframework.jdbc.core.RowMapper<RowType> rowMapper,
+              Object... bindings) {
+            assertTrue(
+                List.of(
+                        "SELECT * FROM pay_debit_intent WHERE pay_no=?",
+                        "SELECT * FROM pay_debit_intent WHERE pay_no=? FOR UPDATE")
+                    .contains(queryText));
+            String suffix = queryText.endsWith(" FOR UPDATE") ? " FOR UPDATE" : "";
+            return super.query(
+                "SELECT " + projection + " FROM pay_debit_intent WHERE pay_no=?" + suffix,
+                rowMapper,
+                bindings);
+          }
+        };
+    return new PayDebitIntentMapper(projectedFixture);
+  }
+
+  /** 非NULL真实Long/Integer值含0/负值/边界均原样，不因boxed读取调整数值或写入。 */
+  @Test
+  void boxedIntentMappingKeepsNumericBoundariesAndReadOnlyFacts() {
+    for (long numeric : List.of(Long.MIN_VALUE, 0L, 1L, 7L, Long.MAX_VALUE)) {
+      seedIntentAndPayment("PENDING", "INIT");
+      int attempts =
+          numeric == Long.MIN_VALUE
+              ? Integer.MIN_VALUE
+              : numeric == Long.MAX_VALUE ? Integer.MAX_VALUE : (int) numeric;
+      fixture.update(
+          "UPDATE pay_debit_intent SET id=?,user_id=?,attempts=?,last_error='owned-existing-proof'"
+              + " WHERE pay_no='pay-1'",
+          numeric,
+          numeric,
+          attempts);
+      var before = payFacts();
+      var observed = intents.findByPayNo("pay-1");
+      var locked = intents.findByPayNoForUpdate("pay-1");
+      for (var result : List.of(observed, locked)) {
+        assertEquals(numeric, result.id);
+        assertEquals(numeric, result.userId);
+        assertEquals(attempts, result.attempts);
+        assertEquals("pay-1", result.payNo);
+        assertEquals("order-1", result.orderNo);
+        assertEquals(new BigDecimal("10.00"), result.amount);
+        assertEquals("owned-existing-proof", result.lastError);
+      }
+      assertEquals(before, payFacts());
+      assertNull(intents.findByPayNo("owned-missing-pay"));
+      assertNull(intents.findByPayNoForUpdate("owned-missing-pay"));
+      assertEquals(before, payFacts());
+    }
+  }
+
+  /** 两查找使用同一生产ROW_MAPPER，NULL与其余完整字段/日期/金额保持，schema未迁移。 */
+  @Test
+  void boxedNullProjectionKeepsOtherFieldsAndLookupVariants() {
+    seedIntentAndPayment("PENDING", "INIT");
+    fixture.update(
+        "UPDATE pay_debit_intent SET"
+            + " attempts=7,lease_owner='owned-observation-only',lease_until=NOW(3)+INTERVAL 10"
+            + " MINUTE,last_error='owned-existing-proof' WHERE id=1");
+    var before = payFacts();
+    var expected = intents.findByPayNo("pay-1");
+    for (String missing : List.of("id", "user_id", "attempts", "all")) {
+      var projected = projectedIntentMapper(missing);
+      for (var result :
+          List.of(projected.findByPayNo("pay-1"), projected.findByPayNoForUpdate("pay-1"))) {
+        assertEquals(List.of("id", "all").contains(missing) ? null : expected.id, result.id);
+        assertEquals(
+            List.of("user_id", "all").contains(missing) ? null : expected.userId, result.userId);
+        assertEquals(
+            List.of("attempts", "all").contains(missing) ? null : expected.attempts,
+            result.attempts);
+        assertSameNonBoxedIntentFacts(expected, result);
+      }
+      assertNull(projected.findByPayNo("owned-missing-pay"));
+      assertNull(projected.findByPayNoForUpdate("owned-missing-pay"));
+      assertEquals(before, payFacts());
+    }
+    var stored = intents.findByPayNo("pay-1");
+    assertEquals(1L, stored.id);
+    assertEquals(7L, stored.userId);
+    assertEquals(7, stored.attempts);
+    assertSameNonBoxedIntentFacts(expected, stored);
+    assertEquals(before, payFacts());
+  }
+
+  /** 只比较本批不改的字段，包含NULL租约/错误和原日期/金额数值语义。 */
+  private static void assertSameNonBoxedIntentFacts(
+      com.cloudmall.pay.domain.po.PayDebitIntentPO expected,
+      com.cloudmall.pay.domain.po.PayDebitIntentPO observed) {
+    assertEquals(expected.payNo, observed.payNo);
+    assertEquals(expected.orderNo, observed.orderNo);
+    assertEquals(expected.amount, observed.amount);
+    assertEquals(expected.status, observed.status);
+    assertEquals(expected.debitMode, observed.debitMode);
+    assertEquals(expected.nextRetryAt, observed.nextRetryAt);
+    assertEquals(expected.leaseOwner, observed.leaseOwner);
+    assertEquals(expected.leaseUntil, observed.leaseUntil);
+    assertEquals(expected.lastError, observed.lastError);
+    assertEquals(expected.createdAt, observed.createdAt);
+    assertEquals(expected.updatedAt, observed.updatedAt);
+  }
+
   /** 负恢复计数不能被领取时递增修写，原坏事实和metadata须保持。 */
   @Test
   void negativeAttemptsCannotClaimRecovery() {
