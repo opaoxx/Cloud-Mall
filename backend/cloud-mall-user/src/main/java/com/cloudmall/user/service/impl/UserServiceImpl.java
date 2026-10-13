@@ -380,6 +380,7 @@ public class UserServiceImpl implements UserService {
       }
       // 原row/source/cap/owner已先证明，再核同pay唯一扣款；不重复读取source或入账。
       requireRefundDebitScope(original, request, userId);
+      requireRefundReplayCollection(original, existing);
       return ApiResponse.ok(
           BalanceRefundVO.from(existing.operationKey, existing.state, existing.balanceAfter));
     }
@@ -427,6 +428,21 @@ public class UserServiceImpl implements UserService {
     if (balanceLedgerMapper.insert(refund) != 1) throw new IllegalStateException("退款账本写入未影响唯一记录");
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** 已有退款各门已先证明；当前退款须在一致双集合中且累计不超原额，不再次加请求金额。 */
+  private void requireRefundReplayCollection(BalanceLedgerPO original, BalanceLedgerPO existing) {
+    List<BalanceLedgerPO> linkedRefunds =
+        balanceLedgerMapper.findLinkedRefundCandidates(original.operationKey);
+    BigDecimal linkedTotal = provenRefundedAmount(original, linkedRefunds);
+    provenRefundPaymentMembership(
+        original,
+        linkedRefunds,
+        linkedTotal,
+        balanceLedgerMapper.findRefundPaymentLedgerCandidates(original.payNo));
+    requireRefundMembership(
+        containsRefundSnapshot(linkedRefunds, existing)
+            && linkedTotal.compareTo(original.amount) <= 0);
   }
 
   /** 原扣款已证明；同pay有界DEBIT须唯一且复制原来源，DAO异常原样传播，不写资金。 */

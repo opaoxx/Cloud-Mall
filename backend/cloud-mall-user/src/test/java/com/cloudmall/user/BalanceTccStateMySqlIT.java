@@ -1189,6 +1189,131 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 已退款重放核完整当前pay集合，错误累计不写资金，合法分笔仍返回原快照。 */
+  @Test
+  void refundReplayRejectsContradictoryCollectionWithoutWriting() throws Exception {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mode : List.of("active-legacy", "active-tcc", "disabled-tcc")) {
+      for (String variant :
+          List.of(
+              "over-cap",
+              "orphan",
+              "wrong-origin",
+              "state",
+              "user",
+              "pay-alias",
+              "type-unknown",
+              "limit101",
+              "limit100",
+              "partial",
+              "full")) {
+        assertions.add(
+            () -> {
+              for (String table :
+                  List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                fixture.update("DELETE FROM " + table);
+              fixture.update(
+                  "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+              setEnabled(true);
+              var original =
+                  request("refund-replay-collection-" + mode + "-" + variant, 7L, "10.00");
+              if ("active-legacy".equals(mode))
+                debitLegacy(original.payNo, original.ledgerKey, 7L, "10.00");
+              else {
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+              }
+              var refund = refundRequest(original, "completed-collection-refund", "2.00");
+              legacy.refundInternal(7L, 7L, refund);
+              boolean healthy = List.of("partial", "full", "limit100").contains(variant);
+              if (healthy && !"limit100".equals(variant)) {
+                legacy.refundInternal(
+                    7L,
+                    7L,
+                    refundRequest(
+                        original,
+                        "other-healthy-refund",
+                        "full".equals(variant) ? "8.00" : "1.00"));
+              } else {
+                BigDecimal extraAmount =
+                    new BigDecimal(
+                        "over-cap".equals(variant)
+                            ? "9.00"
+                            : variant.startsWith("limit") ? "0.01" : "1.00");
+                for (int index = 1;
+                    index
+                        <= ("limit101".equals(variant) ? 100 : "limit100".equals(variant) ? 99 : 1);
+                    index++) {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                          + " VALUES(?,?,?,?,?,?,?,?,?,92,?,NOW(3))",
+                      -index,
+                      "user".equals(variant) ? 8L : 7L,
+                      "extra-collection-refund-" + index,
+                      "type-unknown".equals(variant) ? "UNKNOWN" : "REFUND",
+                      "orphan".equals(variant)
+                          ? null
+                          : "wrong-origin".equals(variant)
+                              ? "unrelated-source"
+                              : original.ledgerKey,
+                      "pay-alias".equals(variant)
+                          ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : original.payNo,
+                      original.orderNo,
+                      extraAmount,
+                      "state".equals(variant) ? "UNKNOWN" : "APPLIED",
+                      new BigDecimal("92.00").add(extraAmount));
+                }
+              }
+              if ("disabled-tcc".equals(mode)) {
+                setEnabled(false);
+                fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+              }
+              var before = allFundsFacts();
+              var response =
+                  org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                          context.getBean(UserController.class))
+                      .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+                      .build()
+                      .perform(
+                          org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                  "/api/internal/users/7/balance/refunds")
+                              .header("X-User-Id", "7")
+                              .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                              .content(
+                                  new com.fasterxml.jackson.databind.ObjectMapper()
+                                      .writeValueAsString(refund)))
+                      .andReturn();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () ->
+                      assertEquals(
+                          healthy ? 200 : 409,
+                          response.getResponse().getStatus(),
+                          mode + ":" + variant),
+                  () -> assertHttpCode(response, healthy ? "0" : "BALANCE_REFUND_INVALID"),
+                  () -> {
+                    if (healthy)
+                      assertEquals(
+                          "92.00",
+                          ((com.cloudmall.user.domain.vo.BalanceRefundVO)
+                                  legacy.refundInternal(7L, 7L, refund).data)
+                              .balance);
+                    else {
+                      var failure =
+                          assertThrows(
+                              BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
+                      assertEquals("退款累计证据不完整或不一致", failure.getMessage());
+                    }
+                  },
+                  () -> assertEquals(before, allFundsFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 已退款重放不能忽略同pay重复DEBIT，真实三模式HTTP/service不增资金。 */
   @Test
   void refundReplayRejectsDuplicateDebitSourcesWithoutWriting() {
