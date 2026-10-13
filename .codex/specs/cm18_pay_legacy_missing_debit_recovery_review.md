@@ -22,6 +22,7 @@ GO。intent 已进入 DEBITED/ORDER_SYNC_UNKNOWN/REFUND_PENDING 后，User opera
 
 - Unit/native：DEBITED/ORDER_SYNC_UNKNOWN/REFUND_PENDING × Order 四态 × Stock 四形态，operation 404 不发新 debit/paid/refund/terminal；INIT controls 保持。
 - Owned Pay 两表 + controlled User/Order Feign：补入原账本 APPLIED 后下一次恢复成功/退款 pending；source checksum/资源清理，不启动完整服务/RM/TC。
+- 既有 T133 paidOrderWithoutDebit 的 INIT 与三个推进意图样本，非 INIT 现按本批 missing-source Runtime 优先，旧 error message 断言需同步；其它状态/租约/预算断言保持。T133 ACK-bad-key 专项只保留 INIT 的八种 ACK 变体可进入 debit gate；DEBITED/ORDER_SYNC_UNKNOWN/REFUND_PENDING 的 ACK 行为由本批新增 48 状态矩阵覆盖，不削弱既有合同。
 - 不宣称全资金因果、历史修复或 source fencing。
 
 ## 4. 交付边界
