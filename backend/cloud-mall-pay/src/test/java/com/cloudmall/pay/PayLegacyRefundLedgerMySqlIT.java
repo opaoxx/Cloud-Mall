@@ -1394,6 +1394,267 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 两组阶段第二写失败时，catch清理之前必须看见第一写已整体回滚。 */
+  @Test
+  void intermediatePairRollsBackBeforeRetryReadbackWithRealPay() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      for (String failureMode : List.of("zero", "exception")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(
+                  "DEBITED".equals(stage) ? "paid" : "applied-cancel", "order-1", user, orders);
+              PayRecordMapper actualRecords = records;
+              PayDebitIntentMapper actualIntents = intents;
+              var beforeStage =
+                  new java.util.concurrent.atomic.AtomicReference<
+                      List<List<Map<String, Object>>>>();
+              var retryReadback =
+                  new java.util.concurrent.atomic.AtomicReference<
+                      List<List<Map<String, Object>>>>();
+              var stageFailed = new java.util.concurrent.atomic.AtomicBoolean();
+              String paymentMethod =
+                  "DEBITED".equals(stage)
+                      ? "markOwnedLegacyOrderUnknown"
+                      : "markOwnedLegacyRefundPending";
+              records =
+                  (PayRecordMapper)
+                      java.lang.reflect.Proxy.newProxyInstance(
+                          actualRecords.getClass().getClassLoader(),
+                          new Class<?>[] {PayRecordMapper.class},
+                          (proxy, method, arguments) -> {
+                            if (paymentMethod.equals(method.getName()) && beforeStage.get() == null)
+                              beforeStage.set(payFacts());
+                            try {
+                              return method.invoke(actualRecords, arguments);
+                            } catch (java.lang.reflect.InvocationTargetException failure) {
+                              throw failure.getCause();
+                            }
+                          });
+              var failingIntents = org.mockito.Mockito.spy(actualIntents);
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        assertEquals(
+                            "DEBITED".equals(stage) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING",
+                            paymentStatus());
+                        stageFailed.set(true);
+                        if ("exception".equals(failureMode))
+                          throw new IllegalStateException("controlled-stage-intent-write-failure");
+                        return 0;
+                      })
+                  .when(failingIntents)
+                  .updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq(stage), any());
+              org.mockito.Mockito.doAnswer(
+                      invocation -> {
+                        if (stageFailed.get() && retryReadback.get() == null) {
+                          org.junit.jupiter.api.Assertions.assertFalse(
+                              org.springframework.transaction.support
+                                  .TransactionSynchronizationManager.isActualTransactionActive());
+                          retryReadback.set(payFacts());
+                        }
+                        return invocation.callRealMethod();
+                      })
+                  .when(failingIntents)
+                  .findByPayNo("pay-1");
+              intents = failingIntents;
+              try {
+                assertEquals("ORDER_SYNC_UNKNOWN", newService(user, orders).process("pay-1"));
+                assertNotNull(beforeStage.get());
+                assertNotNull(retryReadback.get());
+                assertEquals(beforeStage.get(), retryReadback.get(), stage + ":" + failureMode);
+                assertEquals("ORDER_SYNC_UNKNOWN", paymentStatus());
+                assertEquals("ORDER_SYNC_UNKNOWN", intentStatus());
+                assertEquals(1, intentAttempts());
+                assertNull(intentLeaseOwner());
+                assertNotNull(intentNextRetry());
+                assertTrue(retryErrorPresent());
+                verify(user, never()).debit(any(), any(), any());
+                verify(user, never()).refund(any(), any(), any());
+                verify(orders, never()).paid(any(), any());
+              } finally {
+                records = actualRecords;
+                intents = actualIntents;
+              }
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 两组正常阶段原SQL在同一实际连接/事务提交，所有远端调用均在事务外。 */
+  @Test
+  void healthyIntermediatePairUsesOneConnectionWithRpcOutside() {
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                String key = invocation.getArgument(1);
+                return ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        key, "pay-1".equals(key) ? "DEBIT" : "REFUND", "APPLIED", "10.00", null));
+              })
+          .when(user)
+          .operation(eq(7L), anyString(), eq(7L));
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                return ApiResponse.ok(
+                    new UserClient.BalanceView("refund:pay-1", "APPLIED", "100.00"));
+              })
+          .when(user)
+          .refund(eq(7L), eq(7L), any());
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                return ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1",
+                        "DEBITED".equals(stage) ? "PAID" : "CANCELLED",
+                        BigDecimal.TEN,
+                        7L,
+                        "SUCCEEDED"));
+              })
+          .when(orders)
+          .paymentState("order-1", 7L);
+      PayRecordMapper actualRecords = records;
+      PayDebitIntentMapper actualIntents = intents;
+      var connectionIds = new java.util.HashSet<Integer>();
+      var observed = new ArrayList<String>();
+      var completedStage = new java.util.concurrent.atomic.AtomicBoolean();
+      String paymentMethod =
+          "DEBITED".equals(stage) ? "markOwnedLegacyOrderUnknown" : "markOwnedLegacyRefundPending";
+      records =
+          (PayRecordMapper)
+              java.lang.reflect.Proxy.newProxyInstance(
+                  actualRecords.getClass().getClassLoader(),
+                  new Class<?>[] {PayRecordMapper.class},
+                  (proxy, method, arguments) -> {
+                    if (paymentMethod.equals(method.getName()) && !completedStage.get()) {
+                      assertTrue(
+                          org.springframework.transaction.support.TransactionSynchronizationManager
+                              .isActualTransactionActive());
+                      observed.add("payment");
+                      var connection =
+                          org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                              fixture.getDataSource());
+                      try {
+                        connectionIds.add(System.identityHashCode(connection));
+                      } finally {
+                        org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                            connection, fixture.getDataSource());
+                      }
+                    }
+                    try {
+                      return method.invoke(actualRecords, arguments);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                      throw failure.getCause();
+                    }
+                  });
+      var instrumentedIntents = org.mockito.Mockito.spy(actualIntents);
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                assertTrue(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                assertEquals(
+                    "DEBITED".equals(stage) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING",
+                    paymentStatus());
+                observed.add("intent");
+                var connection =
+                    org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                        fixture.getDataSource());
+                try {
+                  connectionIds.add(System.identityHashCode(connection));
+                } finally {
+                  org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                      connection, fixture.getDataSource());
+                }
+                Object result = invocation.callRealMethod();
+                completedStage.set(true);
+                return result;
+              })
+          .when(instrumentedIntents)
+          .updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq(stage), any());
+      intents = instrumentedIntents;
+      try {
+        String terminal = "DEBITED".equals(stage) ? "SUCCESS" : "REFUNDED";
+        assertEquals(terminal, newService(user, orders).process("pay-1"));
+        assertEquals(List.of("payment", "intent"), observed);
+        assertEquals(1, connectionIds.size());
+        assertEquals(terminal, paymentStatus());
+        assertEquals(terminal, intentStatus());
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, times("DEBITED".equals(stage) ? 0 : 1)).refund(any(), any(), any());
+        verify(orders, never()).paid(any(), any());
+      } finally {
+        records = actualRecords;
+        intents = actualIntents;
+      }
+    }
+  }
+
+  /** 阶段第二写失败后修复DAO，同一支付继续恢复，保原号、单记录和远端写预算。 */
+  @Test
+  void failedIntermediatePairResumesOnSamePaymentWithRealPay() {
+    for (String stage : List.of("DEBITED", "REFUND_PENDING")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(
+          "DEBITED".equals(stage) ? "paid" : "applied-cancel", "order-1", user, orders);
+      PayDebitIntentMapper actualIntents = intents;
+      var recoveringIntents = org.mockito.Mockito.spy(actualIntents);
+      org.mockito.Mockito.doReturn(0)
+          .when(recoveringIntents)
+          .updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq(stage), any());
+      intents = recoveringIntents;
+      try {
+        var service = newService(user, orders);
+        assertEquals("ORDER_SYNC_UNKNOWN", service.process("pay-1"));
+        assertEquals("ORDER_SYNC_UNKNOWN", paymentStatus());
+        assertEquals("ORDER_SYNC_UNKNOWN", intentStatus());
+        assertEquals(1, intentAttempts());
+        assertNull(intentLeaseOwner());
+        verify(user, never()).refund(any(), any(), any());
+        fixture.update(
+            "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 MINUTE WHERE"
+                + " pay_no='pay-1'");
+        org.mockito.Mockito.doCallRealMethod()
+            .when(recoveringIntents)
+            .updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq(stage), any());
+        String terminal = "DEBITED".equals(stage) ? "SUCCESS" : "REFUNDED";
+        assertEquals(terminal, service.process("pay-1"));
+        assertEquals(terminal, paymentStatus());
+        assertEquals(terminal, intentStatus());
+        assertEquals(2, intentAttempts());
+        assertNull(intentLeaseOwner());
+        assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+        assertEquals(
+            1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+        assertEquals("pay-1", records.selectByPayNo("pay-1").get(0).payNo);
+        assertEquals("order-1", records.selectByPayNo("pay-1").get(0).orderNo);
+        assertEquals(new BigDecimal("10.00"), records.selectByPayNo("pay-1").get(0).amount);
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, times("DEBITED".equals(stage) ? 0 : 1)).refund(any(), any(), any());
+        verify(orders, never()).paid(any(), any());
+      } finally {
+        intents = actualIntents;
+      }
+    }
+  }
+
   /** 健康缺失和拒绝来源经两次User读取后仍可FAILED，读取在实际事务外。 */
   @Test
   void latestStableDebitKeepsHealthyFailurePathsWithRealPay() {

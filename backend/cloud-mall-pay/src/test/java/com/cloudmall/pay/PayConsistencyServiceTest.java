@@ -513,7 +513,7 @@ class PayConsistencyServiceTest {
     verify(userClient, never()).refund(any(), any(), any());
   }
 
-  /** 本地终态定义必须REQUIRES_NEW，成功提交与零行回滚仅在fake manager层验证。 */
+  /** stage和terminal分别REQUIRES_NEW；终态失败不撤回已提交阶段，仅核fake manager。 */
   @Test
   void terminalTransactionDefinitionCommitsOrRollsBackAsOneUnit() {
     for (boolean fail : java.util.List.of(false, true)) {
@@ -525,11 +525,14 @@ class PayConsistencyServiceTest {
       var definition =
           org.mockito.ArgumentCaptor.forClass(
               org.springframework.transaction.TransactionDefinition.class);
-      verify(transactionManager).getTransaction(definition.capture());
-      assertEquals(
-          org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW,
-          definition.getValue().getPropagationBehavior());
-      verify(transactionManager, org.mockito.Mockito.times(fail ? 0 : 1)).commit(any());
+      verify(transactionManager, org.mockito.Mockito.times(2)).getTransaction(definition.capture());
+      for (var actualDefinition : definition.getAllValues()) {
+        assertEquals(
+            org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW,
+            actualDefinition.getPropagationBehavior());
+      }
+      // 前一stage独立提交，后一terminal失败只回滚terminal，不撤回stage。
+      verify(transactionManager, org.mockito.Mockito.times(fail ? 1 : 2)).commit(any());
       verify(transactionManager, org.mockito.Mockito.times(fail ? 1 : 0)).rollback(any());
     }
   }
@@ -2904,7 +2907,9 @@ class PayConsistencyServiceTest {
                   .lockOwnedLegacyTerminalSource(any(), anyString(), any());
               verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
               verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
-              verify(transactionManager, never()).getTransaction(any());
+              verify(transactionManager).getTransaction(any());
+              verify(transactionManager).commit(any());
+              verify(transactionManager, never()).rollback(any());
               verify(intentMapper)
                   .recordRetryOwnedLegacy(
                       eq("pay-1"),
@@ -2986,6 +2991,63 @@ class PayConsistencyServiceTest {
               any(),
               any());
       verify(userClient, never()).refund(any(), any(), any());
+    }
+  }
+
+  /** 第二阶段写失败只回滚该短事务，停止其后的远端写与终态。 */
+  @Test
+  void intermediateIntentFailureRollsBackStageAndStopsWritingRpc() {
+    for (String stage : java.util.List.of("DEBITED", "REFUND_PENDING")) {
+      for (String failureMode : java.util.List.of("zero", "exception")) {
+        setUp();
+        configureOrderIdentityPath("DEBITED".equals(stage) ? "paid" : "applied-cancel", "order-1");
+        if ("DEBITED".equals(stage))
+          when(orderClient.paymentState("order-1", 7L))
+              .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")));
+        if ("exception".equals(failureMode))
+          when(intentMapper.updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq(stage), any()))
+              .thenThrow(new IllegalStateException("controlled-stage-intent-write-failure"));
+        else
+          when(intentMapper.updateOwnedLegacyStatus(eq("pay-1"), anyString(), eq(stage), any()))
+              .thenReturn(0);
+        assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
+        verify(transactionManager).rollback(any());
+        verify(transactionManager, never()).commit(any());
+        verify(userClient, never()).debit(any(), any(), any());
+        verify(userClient, never()).refund(any(), any(), any());
+        verify(orderClient, never()).paid(any(), any());
+        verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+        verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+        verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+      }
+    }
+  }
+
+  /** 私有阶段提交也拒绝继承Seata上下文，不解绑caller，不启动事务或SQL。 */
+  @Test
+  void stageTransactionRejectsInheritedGlobalContext() {
+    for (String stage : java.util.List.of("DEBITED", "REFUND_PENDING")) {
+      setUp();
+      org.junit.jupiter.api.Assertions.assertNull(io.seata.core.context.RootContext.getXID());
+      io.seata.core.context.RootContext.bind("owned-stage-context");
+      try {
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class,
+                () ->
+                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                        consistencyService,
+                        "commitOwnedLegacyStage",
+                        intent(),
+                        "owned-token",
+                        stage));
+        assertEquals("Legacy阶段不得继承全局事务", failure.getMessage());
+        assertEquals("owned-stage-context", io.seata.core.context.RootContext.getXID());
+        org.mockito.Mockito.verifyNoInteractions(
+            transactionManager, intentMapper, payRecordMapper, userClient, orderClient);
+      } finally {
+        io.seata.core.context.RootContext.unbind();
+      }
     }
   }
 

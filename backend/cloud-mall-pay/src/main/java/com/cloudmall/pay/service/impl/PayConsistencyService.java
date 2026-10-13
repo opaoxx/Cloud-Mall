@@ -59,6 +59,9 @@ public class PayConsistencyService {
   /** 仅包本地Pay两表终态写的独立短事务，不包含RPC或重试。 */
   private final TransactionTemplate terminalTransactions;
 
+  /** 仅包正向或退款的本地中间阶段两写；独立于终态，不包含RPC或重试清理。 */
+  private final TransactionTemplate stageTransactions;
+
   /** 仅代表本进程扫描进度；重启复位，不等于业务成功或持久完成。 */
   private final AtomicReference<Long> scanAfterId = new AtomicReference<>();
 
@@ -79,6 +82,8 @@ public class PayConsistencyService {
         new TransactionTemplate(Objects.requireNonNull(transactionManager, "Pay终态缺少本地事务管理器"));
     this.terminalTransactions.setPropagationBehavior(
         TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    this.stageTransactions = new TransactionTemplate(transactionManager);
+    this.stageTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
   }
 
   /** 在无调用者事务上下文时保存意图并尝试支付同步；已有事务则在保存前拒绝。 */
@@ -262,10 +267,7 @@ public class PayConsistencyService {
       if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order))
         return refundCancelled(intent, claimToken);
       // 4. 其它扣款路径先持久化恢复状态，再触发远程订单支付迁移。
-      requireOwnedLegacyWrite(
-          payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now()));
-      requireOwnedLegacyWrite(
-          payDebitIntentMapper.updateOwnedLegacyStatus(intent.payNo, claimToken, "DEBITED", now()));
+      commitOwnedLegacyStage(intent, claimToken, "DEBITED");
       if (("PAID".equals(order.status()) || "COMPLETED".equals(order.status()))
           && stockActionSucceeded(order)) return finishSuccess(intent, claimToken);
       if ("CANCELLED".equals(order.status())
@@ -398,11 +400,7 @@ public class PayConsistencyService {
 
   /** 确认订单取消后先持久化退款意图，再调用幂等用户退款接口。 */
   private String refundCancelled(PayDebitIntentPO intent, String claimToken) {
-    requireOwnedLegacyWrite(
-        payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now()));
-    requireOwnedLegacyWrite(
-        payDebitIntentMapper.updateOwnedLegacyStatus(
-            intent.payNo, claimToken, "REFUND_PENDING", now()));
+    commitOwnedLegacyStage(intent, claimToken, "REFUND_PENDING");
     requireOwnedLegacyLease(intent.payNo, claimToken);
     ApiResponse<UserClient.BalanceView> refund =
         userClient.refund(
@@ -475,6 +473,27 @@ public class PayConsistencyService {
     // 2. 证明通过后仍使用原双表终态事务，保留owner/lease条件及整体回滚。
     commitOwnedLegacyTerminal(intent, claimToken, "FAILED");
     return "FAILED";
+  }
+
+  /** 中间阶段两写独立原子提交；任何零行或异常回滚该阶段，不包远端调用或后续终态。 */
+  private void commitOwnedLegacyStage(PayDebitIntentPO intent, String claimToken, String stage) {
+    if (RootContext.getXID() != null) throw new IllegalStateException("Legacy阶段不得继承全局事务");
+    stageTransactions.executeWithoutResult(
+        transactionStatus -> {
+          // 1. 按原方向写支付记录，每次仍校验当前owner和未过期租约。
+          int changed =
+              switch (stage) {
+                case "DEBITED" ->
+                    payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now());
+                case "REFUND_PENDING" ->
+                    payRecordMapper.markOwnedLegacyRefundPending(intent.payNo, claimToken, now());
+                default -> throw new IllegalArgumentException("未知Legacy支付阶段");
+              };
+          requireOwnedLegacyWrite(changed);
+          // 2. 同连接推进意图，任一写未满足条件时整体回滚，异常交回原重试链。
+          requireOwnedLegacyWrite(
+              payDebitIntentMapper.updateOwnedLegacyStatus(intent.payNo, claimToken, stage, now()));
+        });
   }
 
   /** 同一Pay本地事务内提交两个终态写；任一缺证或异常均回滚，不继承全局上下文。 */
