@@ -29,6 +29,8 @@ GO。operation GET REJECTED 账本目前只证明拒款 snapshot 与退款集合
 - Native：真实余额不足 REJECTED 账本后 owner APPLIED/TRYING、wrong user/key/mode/TCC/unknown/XID/branch、CI pay、ghost freeze/null owner 均 409，四表 no-write；合法有/无 Legacy owner、current wallet 独立保持。
 - 同 RR/资源清理，旧 T112 REJECTED zero-read 控制调整为 owner/freeze 读取；不启动 RM/TC/App。
 
+Native 验证可使用 test-only Hikari owned datasource（maxPoolSize=6、minIdle=1、唯一 poolName，共享 static `@Bean` 且 `destroyMethod=""`），避免每条 JDBC 新建 TCP 导致 Windows TIME_WAIT/动态端口耗尽；管理员 DriverManager 连接仍保持少量、只读/CREATE/DROP 用途。AfterAll 必须在 try/finally 中核 active=0、关闭并断言 pool closed，精确 DROP 自有 UUID schema；保留原 source fingerprint、旧失败 XML/log 与 docker Unix-socket 清理证据，不写系统 netsh、监听端口或生产配置。
+
 ## 5. 交付边界
 
 实现仅允许在 operation GET 原 selector/membership 后增加 REJECTED owner helper、泛化 Legacy state predicate及必要 JavaDoc/测试；不得修改 APPLIED/写路径或其它 scope。
