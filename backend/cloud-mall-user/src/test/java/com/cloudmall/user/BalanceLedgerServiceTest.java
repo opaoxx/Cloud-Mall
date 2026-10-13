@@ -1306,7 +1306,144 @@ class BalanceLedgerServiceTest {
     }
     String rejectedKey = installOperationQuery("REJECTED");
     userService.balanceOperation(7L, rejectedKey, 7L);
-    org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
+    verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
+    verify(balanceTccDebitMapper).selectByPayNo(operationSource.payNo);
+    assertOperationReadOnly();
+  }
+
+  /** 拒款账本不能与坏Legacy、其它模式或任意冻结事实并存，错误前不写资金。 */
+  @Test
+  void rejectedOperationRejectsUnprovenOwnershipAndFreeze() {
+    var checks = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String variant :
+        java.util.List.of(
+            "mode-tcc",
+            "mode-unknown",
+            "state-applied",
+            "state-trying",
+            "state-null",
+            "user",
+            "pay",
+            "order",
+            "operation-key",
+            "ledger-key",
+            "xid",
+            "branch",
+            "amount-null",
+            "amount-zero",
+            "amount-scale",
+            "amount-other",
+            "freeze-row",
+            "freeze-empty",
+            "missing-owner-freeze")) {
+      checks.add(
+          () -> {
+            String key = installOperationQuery("REJECTED");
+            var owner = installRejectedOperationOwner(true);
+            switch (variant) {
+              case "mode-tcc" -> owner.mode = "TCC";
+              case "mode-unknown" -> owner.mode = "UNKNOWN";
+              case "state-applied" -> owner.state = "APPLIED";
+              case "state-trying" -> owner.state = "TRYING";
+              case "state-null" -> owner.state = null;
+              case "user" -> owner.userId = 8L;
+              case "pay" -> owner.payNo = "PAY-1";
+              case "order" -> owner.orderNo = "foreign-order";
+              case "operation-key" -> owner.operationKey = "foreign-key";
+              case "ledger-key" -> owner.ledgerKey = "foreign-ledger";
+              case "xid" -> owner.xid = "unexpected-xid";
+              case "branch" -> owner.branchId = 1L;
+              case "amount-null" -> owner.amount = null;
+              case "amount-zero" -> owner.amount = BigDecimal.ZERO;
+              case "amount-scale" -> owner.amount = new BigDecimal("10.001");
+              case "amount-other" -> owner.amount = new BigDecimal("11.00");
+              default -> {
+                var freeze = new com.cloudmall.user.domain.po.BalanceTccDebitPO();
+                if ("freeze-row".equals(variant)) {
+                  freeze.state = "CANCELLED";
+                  freeze.userId = 8L;
+                  freeze.payNo = "PAY-1";
+                }
+                when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo)).thenReturn(freeze);
+                if ("missing-owner-freeze".equals(variant))
+                  when(balanceDebitAttemptMapper.selectByPayNo(operationSource.payNo))
+                      .thenReturn(null);
+              }
+            }
+            assertOperationConflict(key);
+            verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
+            verify(
+                    balanceTccDebitMapper,
+                    times(
+                        java.util.List.of("freeze-row", "freeze-empty", "missing-owner-freeze")
+                                .contains(variant)
+                            ? 1
+                            : 0))
+                .selectByPayNo(operationSource.payNo);
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+  }
+
+  /** 拒款owner/freeze DAO原样，原主行/集合/selector先级、健康历史查询预算保持。 */
+  @Test
+  void rejectedOperationOwnershipKeepsPriorityAndHistory() {
+    for (String phase : java.util.List.of("attempt", "freeze")) {
+      String key = installOperationQuery("REJECTED");
+      installRejectedOperationOwner(true);
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException("rejected-owner-fault");
+      if ("attempt".equals(phase))
+        org.mockito.Mockito.doThrow(failure)
+            .when(balanceDebitAttemptMapper)
+            .selectByPayNo(operationSource.payNo);
+      else
+        org.mockito.Mockito.doThrow(failure)
+            .when(balanceTccDebitMapper)
+            .selectByPayNo(operationSource.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+      assertOperationReadOnly();
+    }
+    for (String gate : java.util.List.of("primary", "collection", "selector")) {
+      String key = installOperationQuery("REJECTED");
+      org.mockito.Mockito.doThrow(new AssertionError("old rejected proof must precede owner"))
+          .when(balanceDebitAttemptMapper)
+          .selectByPayNo(operationSource.payNo);
+      if ("primary".equals(gate)) operationSource.balanceAfter = new BigDecimal("3.00");
+      else if ("collection".equals(gate))
+        when(balanceLedgerMapper.findLinkedRefundCandidates(operationSource.operationKey))
+            .thenReturn(null);
+      else
+        when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
+            .thenReturn("foreign-refund");
+      assertOperationConflict(key);
+      org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
+    }
+    for (boolean present : java.util.List.of(true, false)) {
+      String key = installOperationQuery("REJECTED");
+      var owner = installRejectedOperationOwner(present);
+      owner.amount = new BigDecimal("10.000");
+      var response =
+          (com.cloudmall.user.domain.vo.BalanceOperationVO)
+              userService.balanceOperation(7L, key, 7L).data;
+      assertEquals("REJECTED", response.state);
+      assertEquals("10.00", response.amount);
+      assertEquals(null, response.refundOperationKey);
+      verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
+      verify(balanceTccDebitMapper).selectByPayNo(operationSource.payNo);
+      assertOperationReadOnly();
+    }
+  }
+
+  /** 构造与已证拒款账本同元组的Legacy归属，缺owner历史不伪造冻结。 */
+  private BalanceDebitAttemptPO installRejectedOperationOwner(boolean present) {
+    var owner = installAppliedOperationOwner("LEGACY");
+    owner.state = "REJECTED";
+    if (!present)
+      when(balanceDebitAttemptMapper.selectByPayNo(operationSource.payNo)).thenReturn(null);
+    return owner;
   }
 
   /** 构造独立已确认TCC或APPLIED Legacy来源，null owner历史默认无冻结。 */

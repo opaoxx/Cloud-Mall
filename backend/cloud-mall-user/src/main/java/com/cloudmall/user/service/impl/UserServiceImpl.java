@@ -291,7 +291,7 @@ public class UserServiceImpl implements UserService {
     } else {
       requireBalanceOperationEvidence(containsRefundSnapshot(candidates, ledger));
     }
-    // 5. 原selector/current membership已先证明；APPLIED再核本地归属，不读当前钱包。
+    // 5. 原selector/current membership已先证明，再核对应终态的本地归属，不读当前钱包。
     if ("APPLIED".equals(original.state)) {
       try {
         requireAppliedDebitOwnership(original);
@@ -301,6 +301,8 @@ public class UserServiceImpl implements UserService {
         }
         throw invalidOwnership;
       }
+    } else if ("REJECTED".equals(original.state)) {
+      requireRejectedDebitOwnership(original);
     }
     return ApiResponse.ok(BalanceOperationVO.from(ledger, refundOperationKey));
   }
@@ -469,7 +471,7 @@ public class UserServiceImpl implements UserService {
     BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
     if (attempt != null
         && !("LEGACY".equals(attempt.mode)
-            ? isProvenLegacyRefundAttempt(original, attempt)
+            ? isProvenLegacyDebitOwnership(original, attempt)
             : confirmedTccRefund(original, attempt)))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
     // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
@@ -478,11 +480,11 @@ public class UserServiceImpl implements UserService {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
-  /** 原DEBIT已证明；已观察Legacy归属须复制精确键/身份/金额且为无TCC分支的APPLIED。 */
-  private static boolean isProvenLegacyRefundAttempt(
+  /** 原DEBIT终态已证明；Legacy须复制其状态、键/身份/金额且无TCC分支。 */
+  private static boolean isProvenLegacyDebitOwnership(
       BalanceLedgerPO original, BalanceDebitAttemptPO attempt) {
     return "LEGACY".equals(attempt.mode)
-        && "APPLIED".equals(attempt.state)
+        && Objects.equals(attempt.state, original.state)
         && Objects.equals(attempt.userId, original.userId)
         && Objects.equals(attempt.payNo, original.payNo)
         && Objects.equals(attempt.orderNo, original.orderNo)
@@ -493,6 +495,14 @@ public class UserServiceImpl implements UserService {
         && validBalanceMoney(attempt.amount)
         && attempt.amount.signum() > 0
         && attempt.amount.compareTo(original.amount) == 0;
+  }
+
+  /** 拒款原快照已先证明；有效Legacy或null历史都必须无同pay冻结，DAO异常原样传播。 */
+  private void requireRejectedDebitOwnership(BalanceLedgerPO original) {
+    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
+    requireBalanceOperationEvidence(
+        attempt == null || isProvenLegacyDebitOwnership(original, attempt));
+    requireBalanceOperationEvidence(balanceTccDebitMapper.selectByPayNo(original.payNo) == null);
   }
 
   /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */

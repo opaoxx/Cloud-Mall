@@ -20,6 +20,7 @@ import com.cloudmall.user.domain.dto.BalanceTccDebitTryDTO;
 import com.cloudmall.user.service.BalanceTccDebitService;
 import com.cloudmall.user.service.impl.BalanceTccDebitServiceImpl;
 import com.cloudmall.user.service.impl.UserServiceImpl;
+import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -65,7 +66,7 @@ class BalanceTccStateMySqlIT {
   /** 由测试生成并严格校验的临时库名。 */
   private static String testDatabase;
 
-  /** 多连接访问独立测试库，允许真实行锁与并发验证。 */
+  /** 整类共享最多6个物理连接的owned池，允许真实并发且避免每条SQL新socket。 */
   private static DataSource testDataSource;
 
   /** 测试上下文，提供真实 Mapper 和 Spring 事务代理。 */
@@ -93,9 +94,14 @@ class BalanceTccStateMySqlIT {
     testDatabase = "cm14_tcc_it_" + UUID.randomUUID().toString().replace("-", "");
     source.execute(
         "CREATE DATABASE " + testDatabase + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-    testDataSource =
-        new DriverManagerDataSource(
-            sourceUrl.replace("/cloudmall_user", "/" + testDatabase), username, password);
+    HikariDataSource ownedPool = new HikariDataSource();
+    ownedPool.setJdbcUrl(sourceUrl.replace("/cloudmall_user", "/" + testDatabase));
+    ownedPool.setUsername(username);
+    ownedPool.setPassword(password);
+    ownedPool.setMaximumPoolSize(6);
+    ownedPool.setMinimumIdle(1);
+    ownedPool.setPoolName(testDatabase);
+    testDataSource = ownedPool;
     JdbcTemplate setup = new JdbcTemplate(testDataSource);
     try {
       for (String table : List.of("mall_user", "balance_ledger", "user_address")) {
@@ -116,6 +122,16 @@ class BalanceTccStateMySqlIT {
         && testDatabase != null
         && testDatabase.matches("cm14_tcc_it_[0-9a-f]{32}")) {
       try {
+        if (testDataSource instanceof HikariDataSource ownedPool) {
+          try {
+            if (ownedPool.getHikariPoolMXBean() != null)
+              assertEquals(0, ownedPool.getHikariPoolMXBean().getActiveConnections());
+          } finally {
+            ownedPool.close();
+          }
+          assertTrue(ownedPool.isClosed());
+          System.out.println("CM16T113 owned JDBC pool closed");
+        }
         assertEquals(sourceFingerprint, originalFingerprint());
         System.out.println("CM16T18 original User tables/checksums unchanged");
       } finally {
@@ -407,6 +423,105 @@ class BalanceTccStateMySqlIT {
           });
     }
     org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 真实拒款账本不能忽略坏归属/冻结，合法旧余额不和当前钱包重新比较。 */
+  @Test
+  void rejectedOperationRejectsContradictoryOwnershipWithoutWriting() {
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String variant :
+        List.of(
+            "state-applied",
+            "state-trying",
+            "user",
+            "amount",
+            "operation-key",
+            "mode-tcc",
+            "mode-unknown",
+            "xid",
+            "branch",
+            "pay-alias",
+            "freeze",
+            "missing-owner-freeze",
+            "healthy",
+            "history-no-owner")) {
+      checks.add(
+          () -> {
+            for (String table :
+                List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+              fixture.update("DELETE FROM " + table);
+            fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+            setEnabled(true);
+            var original = request("rejected-owner-" + variant, 7L, "101.00");
+            assertEquals(
+                "PAYMENT_FAILED",
+                assertThrows(
+                        BizException.class,
+                        () -> debitLegacy(original.payNo, original.ledgerKey, 7L, "101.00"))
+                    .getCode());
+            boolean healthy = List.of("healthy", "history-no-owner").contains(variant);
+            switch (variant) {
+              case "state-applied" ->
+                  fixture.update("UPDATE balance_debit_attempt SET state='APPLIED'");
+              case "state-trying" ->
+                  fixture.update("UPDATE balance_debit_attempt SET state='TRYING'");
+              case "user" -> fixture.update("UPDATE balance_debit_attempt SET user_id=8");
+              case "amount" -> fixture.update("UPDATE balance_debit_attempt SET amount=0");
+              case "operation-key" ->
+                  fixture.update(
+                      "UPDATE balance_debit_attempt SET operation_key='foreign-rejected-key'");
+              case "mode-tcc" -> fixture.update("UPDATE balance_debit_attempt SET mode='TCC'");
+              case "mode-unknown" ->
+                  fixture.update("UPDATE balance_debit_attempt SET mode='UNKNOWN'");
+              case "xid" ->
+                  fixture.update("UPDATE balance_debit_attempt SET xid='ghost-rejected-xid'");
+              case "branch" -> fixture.update("UPDATE balance_debit_attempt SET branch_id=1");
+              case "pay-alias" ->
+                  fixture.update(
+                      "UPDATE balance_debit_attempt SET pay_no=?",
+                      original.payNo.toUpperCase(java.util.Locale.ROOT));
+              case "freeze", "missing-owner-freeze" -> {
+                fixture.update(
+                    "INSERT INTO"
+                        + " balance_tcc_debit(id,operation_key,xid,branch_id,user_id,pay_no,order_no,amount,state,balance_before,balance_after_try,created_at,updated_at)"
+                        + " VALUES(-1,?,'rejected-ghost',1,7,?,?,1,'CANCELLED',100,99,NOW(3),NOW(3))",
+                    "tcc-debit:" + original.payNo,
+                    original.payNo,
+                    original.orderNo);
+                if ("missing-owner-freeze".equals(variant))
+                  fixture.update("DELETE FROM balance_debit_attempt");
+              }
+              case "history-no-owner" -> fixture.update("DELETE FROM balance_debit_attempt");
+              default -> {}
+            }
+            if (healthy) fixture.update("UPDATE mall_user SET balance=200 WHERE id=7");
+            var before = allFundsFacts();
+            var response = operationHttp(original.ledgerKey);
+            org.junit.jupiter.api.Assertions.assertAll(
+                () ->
+                    assertEquals(healthy ? 200 : 409, response.getResponse().getStatus(), variant),
+                () -> assertHttpCode(response, healthy ? "0" : "COMMON_CONFLICT"),
+                () -> {
+                  if (healthy) {
+                    var result =
+                        (com.cloudmall.user.domain.vo.BalanceOperationVO)
+                            legacy.balanceOperation(7L, original.ledgerKey, 7L).data;
+                    assertEquals("REJECTED", result.state);
+                    assertEquals("101.00", result.amount);
+                    assertEquals(null, result.refundOperationKey);
+                  } else {
+                    var failure =
+                        assertThrows(
+                            BizException.class,
+                            () -> legacy.balanceOperation(7L, original.ledgerKey, 7L));
+                    assertEquals("COMMON_CONFLICT", failure.getCode());
+                    assertEquals("余额账本事实待核对", failure.getMessage());
+                  }
+                },
+                () -> assertEquals(before, allFundsFacts()));
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
   }
 
   /** APPLIED原DEBIT的归属矛盾不能通过DEBIT/REFUND两个GET，真实四表不写。 */
@@ -4909,8 +5024,8 @@ class BalanceTccStateMySqlIT {
   @EnableTransactionManagement(proxyTargetClass = true)
   @MapperScan("com.cloudmall.user.mapper")
   static class Beans {
-    /** 返回隔离测试数据库。 */
-    @Bean
+    /** 共享owned池由AfterAll关闭，子context不得提前销毁。 */
+    @Bean(destroyMethod = "")
     DataSource dataSource() {
       return testDataSource;
     }
