@@ -60,12 +60,14 @@ public class PayTccExecutionEvidence {
     require(
         pay.branchId != null
             && pay.branchId > 0
+            && pay.state != null
             && Set.of("TRYING", "CONFIRMED", "CANCELLED").contains(pay.state));
     PayTccFencePO fence = fences.findByBranch(pay.xid, pay.branchId);
     if (fence == null) require(!"TRYING".equals(pay.state));
     else
       require(
-          fence.xid != null
+          fence.status != null
+              && fence.xid != null
               && Objects.equals(fence.xid, pay.xid)
               && Objects.equals(fence.branchId, pay.branchId)
               && PayTccReceiptLocalResource.ACTION_NAME.equals(fence.actionName)
@@ -74,8 +76,9 @@ public class PayTccExecutionEvidence {
                   : "CONFIRMED".equals(pay.state)
                       ? Integer.valueOf(2).equals(fence.status)
                       : Set.of(3, 4).contains(fence.status)));
-    if (user == null || !Set.of("TRY_ACCEPTED", "CONFIRMED", "CANCELLED").contains(user.state))
-      return "UNKNOWN";
+    if (user == null
+        || user.state == null
+        || !Set.of("TRY_ACCEPTED", "CONFIRMED", "CANCELLED").contains(user.state)) return "UNKNOWN";
     require(
         user.userBranchId != null
             && user.userBranchId > 0

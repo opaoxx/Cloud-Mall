@@ -287,6 +287,130 @@ class PayTccExecutionEvidenceTest {
     }
   }
 
+  /** 已返回Pay/Fence空状态是载荷冲突，不能由集合NULL查询抛普通异常。 */
+  @Test
+  void missingPayOrFenceStatesRemainPayloadConflicts() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String mutation : List.of("pay-state-null", "cancelled-fence-status-null")) {
+      var fixture = new EvidenceFixture();
+      if (mutation.equals("pay-state-null")) fixture.pay.state = null;
+      else {
+        fixture.pay.state = "CANCELLED";
+        fixture.user.state = "CANCELLED";
+        fixture.fence.status = null;
+      }
+      var before = fixture.snapshot();
+      assertions.add(
+          () -> {
+            var failure =
+                assertThrows(
+                    BizException.class,
+                    () -> fixture.evidence.classify(fixture.execution, fixture.user),
+                    mutation);
+            assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+          });
+      assertions.add(() -> assertEquals(before, fixture.snapshot()));
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 真实Coordinator不能把NULL Pay/Fence状态降级为观察写或TC恢复。 */
+  @Test
+  void coordinatorDoesNotDowngradeMissingPayOrFenceState() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (boolean missingPayState : List.of(false, true)) {
+      var fixture = new EvidenceFixture();
+      if (missingPayState) fixture.pay.state = null;
+      else {
+        fixture.pay.state = "CANCELLED";
+        fixture.user.state = "CANCELLED";
+        fixture.fence.status = null;
+      }
+      var store = mock(PayTccExecutionStore.class);
+      var bridge = mock(PayTccBridgeService.class);
+      var receiptService = mock(PayTccReceiptService.class);
+      var transactions = mock(PayTccTransactionClient.class);
+      when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
+      when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+      when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
+      var coordinator =
+          new PayTccCoordinatorServiceImpl(
+              store, receiptService, bridge, fixture.evidence, transactions);
+      var before = fixture.snapshot();
+      assertions.add(
+          () -> {
+            var failure =
+                assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
+            assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          });
+      assertions.add(() -> verify(store, never()).observe(any(), any(), any()));
+      assertions.add(() -> verifyNoInteractions(transactions, receiptService));
+      assertions.add(() -> assertEquals(before, fixture.snapshot()));
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** User缺失状态仍正常UNKNOWN；原Pay状态、Fence许可和非白名单拒绝不变。 */
+  @Test
+  void absentUserStateAndExistingStateMappingsRemainStable() {
+    for (String payState : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+      for (String userState :
+          java.util.Arrays.asList(
+              null, "PREPARED", "POST_ATTEMPTED", "TRY_UNKNOWN", "other-state")) {
+        var fixture = new EvidenceFixture();
+        fixture.pay.state = payState;
+        fixture.fence.status = payState.equals("TRYING") ? 1 : payState.equals("CONFIRMED") ? 2 : 3;
+        fixture.user.state = userState;
+        fixture.user.userBranchId = null;
+        var before = fixture.snapshot();
+        assertEquals(
+            "UNKNOWN",
+            assertDoesNotThrow(() -> fixture.evidence.classify(fixture.execution, fixture.user)));
+        assertEquals(before, fixture.snapshot());
+      }
+    for (String payState : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+      for (Integer fenceStatus : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, 5)) {
+        var fixture = new EvidenceFixture();
+        fixture.pay.state = payState;
+        fixture.user.state = payState.equals("TRYING") ? "TRY_ACCEPTED" : payState;
+        fixture.fence.status = fenceStatus;
+        var before = fixture.snapshot();
+        boolean accepted =
+            payState.equals("TRYING")
+                ? Integer.valueOf(1).equals(fenceStatus)
+                : payState.equals("CONFIRMED")
+                    ? Integer.valueOf(2).equals(fenceStatus)
+                    : Integer.valueOf(3).equals(fenceStatus)
+                        || Integer.valueOf(4).equals(fenceStatus);
+        if (accepted)
+          assertEquals(
+              payState.equals("TRYING")
+                  ? "TRYING"
+                  : payState.equals("CONFIRMED") ? "COMMITTED" : "ROLLEDBACK",
+              fixture.evidence.classify(fixture.execution, fixture.user));
+        else
+          assertEquals(
+              "PAY_TCC_EXECUTION_CONFLICT",
+              assertThrows(
+                      BizException.class,
+                      () -> fixture.evidence.classify(fixture.execution, fixture.user))
+                  .getCode());
+        assertEquals(before, fixture.snapshot());
+      }
+    for (String payState : List.of("trying", "UNKNOWN", "")) {
+      var fixture = new EvidenceFixture();
+      fixture.pay.state = payState;
+      assertEquals(
+          "PAY_TCC_EXECUTION_CONFLICT",
+          assertThrows(
+                  BizException.class,
+                  () -> fixture.evidence.classify(fixture.execution, fixture.user))
+              .getCode());
+      verifyNoInteractions(fixture.fences);
+    }
+  }
+
   /** 独立完整两端载荷及查询替身，状态和输入对象均不在测试间共享。 */
   private static final class EvidenceFixture {
     /** 当前原execution金额与不可变身份。 */
