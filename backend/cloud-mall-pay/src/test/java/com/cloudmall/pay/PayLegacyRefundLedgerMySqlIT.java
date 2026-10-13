@@ -77,6 +77,9 @@ class PayLegacyRefundLedgerMySqlIT {
   /** execution观察验收专用owned真实Mapper。 */
   private com.cloudmall.pay.mapper.PayTccExecutionMapper executionObservationMapper;
 
+  /** Fence身份验收的owned真实读取入口。 */
+  private com.cloudmall.pay.mapper.PayTccFenceMapper fenceIdentityMapper;
+
   @BeforeAll
   static void setupDatabase() {
     String url = System.getProperty("cloudmall.pay.mysql.test.url");
@@ -4138,6 +4141,182 @@ class PayLegacyRefundLedgerMySqlIT {
       verify(user).refund(any(), any(), any());
       verify(orders, never()).paid(any(), any());
     }
+  }
+
+  /** 实际CI查询读到另一拼写XID，不能据该Fence输出COMMITTED。 */
+  @Test
+  void alienFenceXidCannotProveCommittedFunds() {
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence("CONFIRMED", 2, "T174-XID", 11L);
+    var matched = fenceIdentityMapper.findByBranch("t174-xid", 11L);
+    assertNotNull(matched);
+    assertEquals("T174-XID", matched.xid);
+    assertEquals(11L, matched.branchId);
+    var before = ownedFenceFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(classifyOwnedFence(evidence, "CONFIRMED")));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        },
+        () -> assertNull(returned.get(), "alien Fence must not produce terminal funds"),
+        () -> assertEquals(before, ownedFenceFacts()));
+  }
+
+  /** 精确匹配的原Fence在真实查询下保持TRYING/终态/矛盾方向，完整五表不变。 */
+  @Test
+  void exactOwnedFenceKeepsAllConclusionsAndCleanup() {
+    var evidence = ownedFenceIdentityEvidence();
+    String[][] examples = {
+      {"CONFIRMED", "CONFIRMED", "2", "COMMITTED"},
+      {"CANCELLED", "CANCELLED", "3", "ROLLEDBACK"},
+      {"CANCELLED", "CANCELLED", "4", "ROLLEDBACK"},
+      {"TRYING", "TRY_ACCEPTED", "1", "TRYING"},
+      {"CONFIRMED", "CANCELLED", "2", "CONFLICT"},
+      {"CANCELLED", "CONFIRMED", "3", "CONFLICT"},
+      {"TRYING", "CONFIRMED", "1", "UNKNOWN"}
+    };
+    for (String[] example : examples) {
+      seedOwnedFenceEvidence(example[0], Integer.parseInt(example[2]), "t174-xid", 11L);
+      var before = ownedFenceFacts();
+      assertEquals(example[3], classifyOwnedFence(evidence, example[1]));
+      assertEquals(before, ownedFenceFacts());
+    }
+    for (String state : List.of("CONFIRMED", "CANCELLED", "TRYING")) {
+      int status = state.equals("TRYING") ? 1 : state.equals("CONFIRMED") ? 2 : 3;
+      seedOwnedFenceEvidence(state, status, "t174-xid", 11L);
+      fixture.update("DELETE FROM tcc_fence_log");
+      var before = ownedFenceFacts();
+      String userState = state.equals("TRYING") ? "TRY_ACCEPTED" : state;
+      if (state.equals("TRYING"))
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> classifyOwnedFence(evidence, userState));
+      else
+        assertEquals(
+            state.equals("CONFIRMED") ? "COMMITTED" : "ROLLEDBACK",
+            classifyOwnedFence(evidence, userState));
+      assertEquals(before, ownedFenceFacts());
+    }
+    seedOwnedFenceEvidence("CONFIRMED", 2, "t174-xid", 12L);
+    assertNull(fenceIdentityMapper.findByBranch("t174-xid", 11L));
+    var before = ownedFenceFacts();
+    assertEquals("COMMITTED", classifyOwnedFence(evidence, "CONFIRMED"));
+    assertEquals(before, ownedFenceFacts());
+  }
+
+  /** 真实CI返回错误XID的Fence在各合法status阶段均冲突，不修写任何来源事实。 */
+  @Test
+  void alienFenceOnEachFundPhaseRejectsWithoutMutation() {
+    var evidence = ownedFenceIdentityEvidence();
+    String[][] examples = {
+      {"CONFIRMED", "CONFIRMED", "2"},
+      {"CANCELLED", "CANCELLED", "3"},
+      {"CANCELLED", "CANCELLED", "4"},
+      {"TRYING", "TRY_ACCEPTED", "1"}
+    };
+    for (String[] example : examples) {
+      seedOwnedFenceEvidence(example[0], Integer.parseInt(example[2]), "T174-XID", 11L);
+      var lookedUp = fenceIdentityMapper.findByBranch("t174-xid", 11L);
+      assertNotNull(lookedUp);
+      assertEquals("T174-XID", lookedUp.xid);
+      var before = ownedFenceFacts();
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> classifyOwnedFence(evidence, example[1]));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      assertEquals(before, ownedFenceFacts());
+    }
+  }
+
+  /** 原execution/receipt/Fence表只在owned克隆，通过实际Mapper同RR快照读取。 */
+  private com.cloudmall.pay.service.impl.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
+    ownedExecutionObservationStore();
+    for (String table : List.of("pay_tcc_receipt", "tcc_fence_log")) {
+      fixture.execute("DROP TABLE IF EXISTS " + table);
+      fixture.execute(
+          (String) source.queryForMap("SHOW CREATE TABLE " + table).get("Create Table"));
+    }
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccFenceMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      fenceIdentityMapper = session.getMapper(com.cloudmall.pay.mapper.PayTccFenceMapper.class);
+      return new com.cloudmall.pay.service.impl.PayTccExecutionEvidence(
+          session.getMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class),
+          fenceIdentityMapper);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned Fence factory failed", failure);
+    }
+  }
+
+  /** 同一个只读RR快照核对实际execution/receipt/Fence，User镜像仅受控传值。 */
+  private String classifyOwnedFence(
+      com.cloudmall.pay.service.impl.PayTccExecutionEvidence evidence, String userState) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    template.setReadOnly(true);
+    template.setIsolationLevel(
+        org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    return template.execute(
+        transactionStatus -> {
+          var execution = executionObservationMapper.selectByPayNo("pay-1");
+          var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+          user.payNo = execution.payNo;
+          user.xid = execution.xid;
+          user.userId = execution.userId;
+          user.orderNo = execution.orderNo;
+          user.operationKey = execution.operationKey;
+          user.ledgerKey = execution.ledgerKey;
+          user.amount = execution.amount.toPlainString();
+          user.state = userState;
+          user.userBranchId = 22L;
+          return evidence.classify(execution, user);
+        });
+  }
+
+  /** 生成完整两端同原XID，而Fence使用独立参数，可模拟CI别名/不同分支；只写owned。 */
+  private void seedOwnedFenceEvidence(
+      String payState, int status, String fenceXid, Long fenceBranch) {
+    seedOwnedExecution("RUNNING", "NONE", "t174-xid");
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    fixture.update("DELETE FROM tcc_fence_log");
+    var createdAt = LocalDateTime.of(2026, 10, 1, 0, 0);
+    fixture.update(
+        "INSERT INTO"
+            + " pay_tcc_receipt(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,branch_id,state,created_at,updated_at)"
+            + " VALUES(1,'pay-1','t174-xid',7,'order-1',10,'tcc-debit:pay-1','pay-1',11,?,?,?)",
+        payState,
+        createdAt,
+        createdAt);
+    fixture.update(
+        "INSERT INTO tcc_fence_log(xid,branch_id,action_name,status,gmt_create,gmt_modified)"
+            + " VALUES(?,?,?,?,?,?)",
+        fenceXid,
+        fenceBranch,
+        com.cloudmall.pay.service.PayTccReceiptLocalResource.ACTION_NAME,
+        status,
+        createdAt,
+        createdAt);
+  }
+
+  /** owned所有相关表完整事实，分类只读必须保持原值。 */
+  private List<List<Map<String, Object>>> ownedFenceFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
+    for (String table : List.of("pay_tcc_execution", "pay_tcc_receipt", "tcc_fence_log"))
+      facts.add(fixture.queryForList("SELECT * FROM " + table));
+    return facts;
   }
 
   /** Java未识别而原SQL已保护的CI/PAD终态，实际写零行必须明确冲突而非静默readback。 */

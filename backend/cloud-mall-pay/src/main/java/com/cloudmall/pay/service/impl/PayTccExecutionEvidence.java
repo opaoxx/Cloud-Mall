@@ -65,7 +65,10 @@ public class PayTccExecutionEvidence {
     if (fence == null) require(!"TRYING".equals(pay.state));
     else
       require(
-          PayTccReceiptLocalResource.ACTION_NAME.equals(fence.actionName)
+          fence.xid != null
+              && Objects.equals(fence.xid, pay.xid)
+              && Objects.equals(fence.branchId, pay.branchId)
+              && PayTccReceiptLocalResource.ACTION_NAME.equals(fence.actionName)
               && ("TRYING".equals(pay.state)
                   ? Integer.valueOf(1).equals(fence.status)
                   : "CONFIRMED".equals(pay.state)

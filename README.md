@@ -2407,3 +2407,9 @@ public派发镜像入口在写入前将诊断限制为512个完整Unicode码点�
 已出现的execution/receipt金额缺失、User金额文本无法解析时，返回原资金载荷冲突，不再抛NPE/NumberFormat异常或被恢复流程降为暂不可用UNKNOWN。整体缺少一端仍按原规则UNKNOWN。
 
 金额沿用原BigDecimal数值等价，10/10.000/1E+1等表示保持；不新增金额域、归一化、状态或写入规则。本轮验证真实Evidence/Coordinator逻辑与查询、Store、Bridge、TC替身，未替代真实事务/资金链路验证。
+
+### CM-18 Fence返回行的精确来源（16T174）
+
+存在Fence行时，除了动作名和状态，还必须精确匹配原receipt的XID与分支号。CI查询读到不同拼写的XID不能再作为本次资金终态证明，错误来源返回原执行冲突，不归一化或改写原记录。
+
+原SQL和终态Fence清理后的缺失语义保持。本批使用隔离真实Mapper及只读RR快照验证，未替代真实TC/全局fencing及完整资金因果验证。

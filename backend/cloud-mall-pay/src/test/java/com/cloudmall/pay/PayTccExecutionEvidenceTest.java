@@ -201,6 +201,92 @@ class PayTccExecutionEvidenceTest {
     verifyNoInteractions(claimed.fences);
   }
 
+  /** 返回Fence行的身份不能依赖查询条件或collation，错误/缺失来源均拒绝。 */
+  @Test
+  void presentFenceIdentityMustMatchOriginalReceipt() {
+    for (String mutation :
+        List.of(
+            "foreign-xid",
+            "case-xid",
+            "space-xid",
+            "null-xid",
+            "foreign-branch",
+            "zero-branch",
+            "null-branch")) {
+      var fixture = new EvidenceFixture();
+      switch (mutation) {
+        case "foreign-xid" -> fixture.fence.xid = "other-xid";
+        case "case-xid" -> fixture.fence.xid = fixture.pay.xid.toUpperCase(java.util.Locale.ROOT);
+        case "space-xid" -> fixture.fence.xid = fixture.pay.xid + " ";
+        case "null-xid" -> fixture.fence.xid = null;
+        case "foreign-branch" -> fixture.fence.branchId = 12L;
+        case "zero-branch" -> fixture.fence.branchId = 0L;
+        case "null-branch" -> fixture.fence.branchId = null;
+      }
+      var before = fixture.snapshot();
+      var failure =
+          assertThrows(
+              BizException.class,
+              () -> fixture.evidence.classify(fixture.execution, fixture.user),
+              mutation);
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      assertEquals(before, fixture.snapshot());
+    }
+  }
+
+  /** 错Fence来源经真实Coordinator恢复不能触发观察写或TC重试。 */
+  @Test
+  void coordinatorRejectsAlienFenceWithoutObservationOrTc() {
+    for (boolean wrongXid : List.of(false, true)) {
+      var fixture = new EvidenceFixture();
+      if (wrongXid) fixture.fence.xid = "other-xid";
+      else fixture.fence.branchId = 12L;
+      var store = mock(PayTccExecutionStore.class);
+      var bridge = mock(PayTccBridgeService.class);
+      var receiptService = mock(PayTccReceiptService.class);
+      var transactions = mock(PayTccTransactionClient.class);
+      when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
+      when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+      when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
+      var coordinator =
+          new PayTccCoordinatorServiceImpl(
+              store, receiptService, bridge, fixture.evidence, transactions);
+      var before = fixture.snapshot();
+      var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      verify(store, never()).observe(any(), any(), any());
+      verifyNoInteractions(transactions, receiptService);
+      assertEquals(before, fixture.snapshot());
+    }
+  }
+
+  /** 精确Fence身份仍保各状态与终态清理，未读取到目标分支不伪造TRYING。 */
+  @Test
+  void exactFenceIdentityAndCleanupKeepStateConclusions() {
+    for (String state : List.of("CONFIRMED", "CANCELLED", "TRYING")) {
+      var fixture = new EvidenceFixture();
+      fixture.pay.state = state;
+      fixture.user.state = state.equals("TRYING") ? "TRY_ACCEPTED" : state;
+      fixture.fence.status = state.equals("TRYING") ? 1 : state.equals("CONFIRMED") ? 2 : 3;
+      var before = fixture.snapshot();
+      assertEquals(
+          state.equals("TRYING")
+              ? "TRYING"
+              : state.equals("CONFIRMED") ? "COMMITTED" : "ROLLEDBACK",
+          fixture.evidence.classify(fixture.execution, fixture.user));
+      assertEquals(before, fixture.snapshot());
+      when(fixture.fences.findByBranch(any(), any())).thenReturn(null);
+      if (state.equals("TRYING"))
+        assertThrows(
+            BizException.class, () -> fixture.evidence.classify(fixture.execution, fixture.user));
+      else
+        assertEquals(
+            state.equals("CONFIRMED") ? "COMMITTED" : "ROLLEDBACK",
+            fixture.evidence.classify(fixture.execution, fixture.user));
+      assertEquals(before, fixture.snapshot());
+    }
+  }
+
   /** 独立完整两端载荷及查询替身，状态和输入对象均不在测试间共享。 */
   private static final class EvidenceFixture {
     /** 当前原execution金额与不可变身份。 */
