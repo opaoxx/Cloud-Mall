@@ -425,6 +425,98 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 同pay任意接收事实使Legacy历史待核，双接口与有/无归属历史均不cache或写五表。 */
+  @Test
+  void legacyDebitReplayRejectsObservedReceiveWithoutWriting() {
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String entry : List.of("debits", "compat")) {
+      for (String history : List.of("APPLIED", "REJECTED", "APPLIED-missing", "REJECTED-missing")) {
+        for (String variant :
+            List.of(
+                "branch-null",
+                "branch-known",
+                "unknown-state",
+                "pay-alias",
+                "foreign-user",
+                "bad-keys")) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var request = new BalanceDebitRequestDTO();
+                request.payNo = "replay-receive-" + entry + "-" + history + "-" + variant;
+                request.operationKey =
+                    "compat".equals(entry) ? request.payNo : "custom-" + request.payNo;
+                request.orderNo = "compat".equals(entry) ? request.payNo : "order-" + request.payNo;
+                request.amount =
+                    new BigDecimal(history.startsWith("REJECTED") ? "101.00" : "10.00");
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = request.payNo;
+                compatible.amount = request.amount;
+                org.junit.jupiter.api.function.Executable debit =
+                    () -> {
+                      if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
+                      else legacy.debitInternal(7L, 7L, request);
+                    };
+                if (history.startsWith("REJECTED"))
+                  assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
+                else debit.execute();
+                if (history.endsWith("missing"))
+                  fixture.update("DELETE FROM balance_debit_attempt");
+                try {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-118,?,'replay-claimed-xid',?,?,?,10,?,?,?,NOW(3),NOW(3))",
+                      "pay-alias".equals(variant)
+                          ? request.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : request.payNo,
+                      "branch-known".equals(variant) ? 1L : null,
+                      "foreign-user".equals(variant) ? 8L : 7L,
+                      request.orderNo,
+                      "bad-keys".equals(variant) ? "wrong-operation" : "tcc-debit:" + request.payNo,
+                      "bad-keys".equals(variant) ? "wrong-ledger" : request.payNo,
+                      "unknown-state".equals(variant) ? "UNKNOWN" : "CLAIMED");
+                  var before = allFundsFacts();
+                  var receiveBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  var cache = context.getBean(StringRedisTemplate.class);
+                  org.mockito.Mockito.clearInvocations(cache);
+                  var response =
+                      "compat".equals(entry)
+                          ? postCompatibleLegacyDebit(compatible)
+                          : postLegacyDebit(request);
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              409,
+                              response.getResponse().getStatus(),
+                              entry + ":" + history + ":" + variant),
+                      () -> assertHttpCode(response, "BALANCE_DEBIT_UNKNOWN"),
+                      () -> {
+                        var failure = assertThrows(BizException.class, debit);
+                        assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+                        assertEquals("扣款来源存在 TCC 接收事实", failure.getMessage());
+                      },
+                      () -> assertEquals(before, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiveBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")),
+                      () -> org.mockito.Mockito.verifyNoInteractions(cache));
+                } finally {
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id=-118");
+                }
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+  }
+
   /** 首次Legacy不能跨过同pay receive，双接口足额/不足额都不写五表事实。 */
   @Test
   void legacyFreshDebitRejectsObservedTccReceiveWithoutWrites() {

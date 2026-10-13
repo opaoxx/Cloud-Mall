@@ -2430,7 +2430,7 @@ class BalanceLedgerServiceTest {
     }
   }
 
-  /** DAO原样，原owner/ledger/freeze先级与合法null/fresh/已有历史的读取预算保持。 */
+  /** 首次扣款DAO原样、原owner/ledger/freeze先级保持；合法null与历史按各自入口读一次。 */
   @Test
   void legacyFreshReceiveKeepsOldPriorityAndHistoricalBudget() {
     for (String entry : java.util.List.of("debits", "compat")) {
@@ -2488,10 +2488,6 @@ class BalanceLedgerServiceTest {
             installLegacyDebit(entry, "REJECTED".equals(state) ? "REJECTED" : "APPLIED");
         if ("history-null-owner".equals(state))
           when(balanceDebitAttemptMapper.selectByPayNo(historical.payNo)).thenReturn(null);
-        org.mockito.Mockito.doThrow(
-                new AssertionError("existing history does not add receive read"))
-            .when(userTccReceiveMapper)
-            .findByPayNo(historical.payNo);
         if ("REJECTED".equals(state))
           assertEquals(
               "PAYMENT_FAILED",
@@ -2500,8 +2496,142 @@ class BalanceLedgerServiceTest {
                       () -> invokeLegacyDebit(entry, historical))
                   .getCode());
         else invokeLegacyDebit(entry, historical);
-        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        verify(userTccReceiveMapper).findByPayNo(historical.payNo);
         verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+      }
+    }
+  }
+
+  /** 任意接收来源使双入口、有无Legacy归属的已成功/拒款历史待核，不写资金或缓存。 */
+  @Test
+  void legacyDebitReplayRejectsAnyObservedReceive() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      for (String history :
+          java.util.List.of("APPLIED", "REJECTED", "APPLIED-missing", "REJECTED-missing")) {
+        for (String variant :
+            java.util.List.of("claimed", "unknown", "foreign", "alias", "bad-keys", "empty")) {
+          var request =
+              installLegacyDebit(entry, history.startsWith("REJECTED") ? "REJECTED" : "APPLIED");
+          if (history.endsWith("missing"))
+            when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+          var receipt = new com.cloudmall.user.domain.po.UserTccReceivePO();
+          if (!"empty".equals(variant)) {
+            receipt.payNo = "alias".equals(variant) ? "PAY-1" : request.payNo;
+            receipt.userId = "foreign".equals(variant) ? 8L : 7L;
+            receipt.state = "unknown".equals(variant) ? "UNKNOWN" : "CLAIMED";
+            receipt.operationKey =
+                "bad-keys".equals(variant) ? "bad-operation" : "tcc-debit:" + request.payNo;
+            receipt.ledgerKey = request.payNo;
+            receipt.amount = request.amount;
+          }
+          when(userTccReceiveMapper.findByPayNo(request.payNo)).thenReturn(receipt);
+          var failure =
+              assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> invokeLegacyDebit(entry, request));
+          assertEquals("BALANCE_DEBIT_UNKNOWN", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals("扣款来源存在 TCC 接收事实", failure.getMessage());
+          verify(userTccReceiveMapper).findByPayNo(request.payNo);
+          assertLegacyNoMoneyOrCacheWrite();
+        }
+      }
+    }
+  }
+
+  /** 历史receive DAO原对象传播；旧门先拒绝，正常null保持历史结果且不比较当前钱包。 */
+  @Test
+  void legacyReplayReceiveKeepsOldPriorityAndHealthyHistory() {
+    for (String entry : java.util.List.of("debits", "compat")) {
+      var request = installLegacyDebit(entry, "APPLIED");
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "legacy-replay-receive-fault");
+      org.mockito.Mockito.doThrow(failure).when(userTccReceiveMapper).findByPayNo(request.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure, assertThrows(RuntimeException.class, () -> invokeLegacyDebit(entry, request)));
+      assertLegacyNoMoneyOrCacheWrite();
+      for (String gate :
+          java.util.List.of(
+              "caller",
+              "user",
+              "owner",
+              "historical",
+              "tuple",
+              "attempt-state",
+              "state",
+              "snapshot",
+              "freeze")) {
+        var guarded = installLegacyDebit(entry, "APPLIED");
+        org.mockito.Mockito.doThrow(new AssertionError("old replay gate must precede receive"))
+            .when(userTccReceiveMapper)
+            .findByPayNo(guarded.payNo);
+        String expectedCode = "BALANCE_DEBIT_UNKNOWN";
+        switch (gate) {
+          case "user" -> {
+            when(userMapper.selectActiveForUpdate(7L)).thenReturn(null);
+            expectedCode = com.cloudmall.common.error.ErrorCodes.NOT_FOUND;
+          }
+          case "owner" -> {
+            legacyDebitAttempt.mode = "TCC";
+            expectedCode = "IDEMPOTENCY_CONFLICT";
+          }
+          case "historical" -> {
+            when(balanceLedgerMapper.findDebitCandidatesByPayNo(guarded.payNo))
+                .thenReturn(java.util.List.of(legacyDebitLedger, legacyDebitLedger));
+            expectedCode = "IDEMPOTENCY_CONFLICT";
+          }
+          case "tuple" -> {
+            legacyDebitLedger.orderNo = "other-order";
+            expectedCode = "IDEMPOTENCY_CONFLICT";
+          }
+          case "attempt-state" -> legacyDebitAttempt.state = "REJECTED";
+          case "state" -> {
+            legacyDebitLedger.state = "UNKNOWN";
+            legacyDebitAttempt.state = "UNKNOWN";
+          }
+          case "snapshot" -> legacyDebitLedger.balanceAfter = null;
+          case "freeze" ->
+              when(balanceTccDebitMapper.selectByPayNo(guarded.payNo))
+                  .thenReturn(new com.cloudmall.user.domain.po.BalanceTccDebitPO());
+          default -> expectedCode = com.cloudmall.common.error.ErrorCodes.FORBIDDEN;
+        }
+        var rejected =
+            assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> {
+                  if ("caller".equals(gate)) userService.debitInternal(7L, 8L, guarded);
+                  else invokeLegacyDebit(entry, guarded);
+                });
+        assertEquals(expectedCode, rejected.getCode());
+        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        assertLegacyNoMoneyOrCacheWrite();
+      }
+      for (String history :
+          java.util.List.of("APPLIED", "REJECTED", "APPLIED-missing", "REJECTED-missing")) {
+        var healthy =
+            installLegacyDebit(entry, history.startsWith("REJECTED") ? "REJECTED" : "APPLIED");
+        if (history.endsWith("missing"))
+          when(balanceDebitAttemptMapper.selectByPayNo(healthy.payNo)).thenReturn(null);
+        when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(null));
+        if (history.startsWith("REJECTED")) {
+          assertEquals(
+              "PAYMENT_FAILED",
+              assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> invokeLegacyDebit(entry, healthy))
+                  .getCode());
+          assertLegacyNoMoneyOrCacheWrite();
+        } else {
+          assertEquals(
+              "90.00",
+              ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, healthy).data)
+                  .balance);
+          verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+          verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).insert(any());
+          verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+        }
+        verify(userTccReceiveMapper).findByPayNo(healthy.payNo);
       }
     }
   }

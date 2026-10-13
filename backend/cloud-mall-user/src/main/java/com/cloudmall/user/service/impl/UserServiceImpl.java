@@ -799,6 +799,9 @@ public class UserServiceImpl implements UserService {
       // 原tuple/state/snapshot已先证明；Legacy历史不能忽略同pay矛盾冻结或更新缓存。
       if (balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
         throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款来源存在TCC冻结事实", 409);
+      // 历史原来源/冻结门已通过；任意接收事实都要求核对，不缓存矛盾历史结果。
+      if (userTccReceiveMapper.findByPayNo(request.payNo) != null)
+        throw new BizException("BALANCE_DEBIT_UNKNOWN", "扣款来源存在 TCC 接收事实", 409);
       if ("REJECTED".equals(existing.state)) throw new BizException("PAYMENT_FAILED", "余额不足", 409);
       cacheDebitResult(userId, existing);
       return ApiResponse.ok(
