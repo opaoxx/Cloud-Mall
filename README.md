@@ -2425,3 +2425,9 @@ public派发镜像入口在写入前将诊断限制为512个完整Unicode码点�
 已返回的Pay状态或Fence状态码为空时，返回原执行冲突，不再因集合查询NULL抛异常而被恢复流程记为UNKNOWN。User缺少状态仍正常返回UNKNOWN，接受状态集合及原Fence状态映射保持。
 
 本批以真实Evidence/Coordinator逻辑和查询、Store、Bridge、TC替身验证空值分类；未改原NOTNULL表或历史数据，未替代真实数据库/TC/跨服务资金链路验证。
+
+### CM-18 Dispatch查询返回行的原支付号（16T177）
+
+派发恢复与镜像锁定后，返回行支付号必须与请求原支付号精确一致。CI查询读到另一种大小写的原记录时返回派发冲突，不能返回其终态、查询User或更新该镜像。
+
+原SQL、缺失404、匹配行的配置/终态/PREPARED/活动状态规则保持，不归一化或修写历史。隔离MySQL实际Mapper、真实Bridge/Persistence及User替身用于验证本批入口，不代表完整资金因果或全局fencing。

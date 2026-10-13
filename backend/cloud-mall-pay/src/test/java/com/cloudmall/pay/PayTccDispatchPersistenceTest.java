@@ -168,6 +168,63 @@ class PayTccDispatchPersistenceTest {
     org.mockito.Mockito.verifyNoInteractions(payRecordMapper, cancelMapper);
   }
 
+  /** 锁定返回对象的错误/NULL原键必须在分支、终态或CAS前冲突，缺失保404。 */
+  @Test
+  void mirrorRejectsAlienRowBeforeBranchStateAndSql() {
+    for (String state :
+        List.of(
+            "CONFIRMED", "CANCELLED", "PREPARED", "POST_ATTEMPTED", "TRY_UNKNOWN", "TRY_ACCEPTED"))
+      for (String mutation : List.of("foreign", "case", "space", "null")) {
+        var row = dispatch(state, 7L);
+        row.payNo =
+            switch (mutation) {
+              case "foreign" -> "other-pay";
+              case "case" -> "PAY-PERSISTENCE-1";
+              case "space" -> "pay-persistence-1 ";
+              default -> null;
+            };
+        when(dispatchMapper.selectForUpdate("pay-persistence-1")).thenReturn(row);
+        var before =
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(row));
+        for (Long branch : List.of(0L, 7L)) {
+          var failure =
+              assertThrows(
+                  BizException.class,
+                  () ->
+                      persistence.mirror(
+                          "pay-persistence-1",
+                          "stale-state",
+                          "TRY_UNKNOWN",
+                          branch,
+                          "alias",
+                          LocalDateTime.of(2026, 10, 14, 12, 0)));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(
+            before,
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(row)));
+      }
+    var missing =
+        assertThrows(
+            BizException.class,
+            () ->
+                persistence.mirror(
+                    "absent-pay",
+                    "POST_ATTEMPTED",
+                    "TRY_UNKNOWN",
+                    0L,
+                    "absent",
+                    LocalDateTime.of(2026, 10, 14, 12, 0)));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_NOT_FOUND", missing.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(404, missing.getHttpStatus());
+    verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(payRecordMapper, cancelMapper);
+  }
+
   private PayTccDispatchPO dispatch(String state, Long branchId) {
     PayTccDispatchPO dispatch = new PayTccDispatchPO();
     dispatch.payNo = "pay-persistence-1";

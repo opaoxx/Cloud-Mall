@@ -153,6 +153,70 @@ class PayTccBridgeServiceTest {
     verifyNoInteractionsForDisabledPath();
   }
 
+  /** 返回原键错误的记录须先于配置/终态/PREPARED/User访问被拒绝。 */
+  @Test
+  void recoverRejectsAlienRowBeforeConfigurationOrUserCalls() {
+    for (boolean enabled : List.of(false, true)) {
+      ReflectionTestUtils.setField(configuration, "enabled", enabled);
+      for (String state :
+          List.of(
+              "CONFIRMED",
+              "CANCELLED",
+              "PREPARED",
+              "POST_ATTEMPTED",
+              "TRY_UNKNOWN",
+              "TRY_ACCEPTED"))
+        for (String mutation : List.of("foreign", "case", "space", "null")) {
+          var row = dispatch(state);
+          row.payNo =
+              switch (mutation) {
+                case "foreign" -> "other-pay";
+                case "case" -> "PAY-TEST";
+                case "space" -> "pay-test ";
+                default -> null;
+              };
+          when(dispatchMapper.selectByPayNo("pay-test")).thenReturn(row);
+          var before =
+              org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                  () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(row));
+          var failure = assertThrows(BizException.class, () -> service.recover("pay-test"));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+          org.junit.jupiter.api.Assertions.assertEquals(
+              before,
+              org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                  () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(row)));
+          org.mockito.Mockito.verifyNoInteractions(userTccClient, persistence, payRecordMapper);
+        }
+    }
+  }
+
+  /** 匹配行原终态、配置和PREPARED优先级保持，缺失仍404且无副作用。 */
+  @Test
+  void exactAndMissingRecoverLookupsKeepEarlyReturns() {
+    for (boolean enabled : List.of(false, true)) {
+      ReflectionTestUtils.setField(configuration, "enabled", enabled);
+      for (String state : List.of("CONFIRMED", "CANCELLED", "PREPARED")) {
+        var row = dispatch(state);
+        when(dispatchMapper.selectByPayNo(row.payNo)).thenReturn(row);
+        if (!enabled && state.equals("PREPARED")) {
+          var failure = assertThrows(BizException.class, () -> service.recover(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_UNKNOWN", failure.getCode());
+        } else {
+          var result = service.recover(row.payNo);
+          org.junit.jupiter.api.Assertions.assertEquals(row.payNo, result.payNo);
+          org.junit.jupiter.api.Assertions.assertEquals(state, result.state);
+        }
+      }
+    }
+    when(dispatchMapper.selectByPayNo("absent-pay")).thenReturn(null);
+    var missing = assertThrows(BizException.class, () -> service.recover("absent-pay"));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_NOT_FOUND", missing.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(404, missing.getHttpStatus());
+    org.mockito.Mockito.verifyNoInteractions(userTccClient, persistence, payRecordMapper);
+  }
+
   private void verifyNoInteractionsForDisabledPath() {
     verify(payRecordMapper, never()).selectByPayNo(any());
     verify(dispatchMapper, never()).selectByPayNo(any());

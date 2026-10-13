@@ -114,9 +114,11 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
   /** 只读 User 状态并更新 Pay 镜像，绝不重新发送 POST。 */
   @Override
   public PayTccDispatchVO recover(String payNo) {
-    // 1. 读取派发事实并拒绝不存在或已终态的无效恢复。
+    // 1. 读取派发事实并核对原支付号，先拒绝查询别名，再处理终态或配置。
     PayTccDispatchPO dispatch = dispatchMapper.selectByPayNo(payNo);
     if (dispatch == null) throw new BizException("PAY_TCC_DISPATCH_NOT_FOUND", "TCC 派发不存在", 404);
+    if (dispatch.payNo == null || !Objects.equals(dispatch.payNo, payNo))
+      throw new BizException("PAY_TCC_DISPATCH_CONFLICT", "派发记录与原支付号不一致", 409);
     if (terminal(dispatch.state)) return PayTccDispatchVO.from(dispatch);
     if (!configuration.isEnabled()) throw unavailable("TCC bridge 当前未启用");
     if ("PREPARED".equals(dispatch.state)) return PayTccDispatchVO.from(dispatch);

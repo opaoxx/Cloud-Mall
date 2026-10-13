@@ -82,7 +82,7 @@ public class PayTccDispatchPersistence {
     return new BizException("PAY_TCC_DISPATCH_CONFLICT", "Pay dispatch 原支付或取消 gate 冲突", 409);
   }
 
-  /** 独立提交User只读结果镜像，诊断按列容量保留512完整Unicode码点。 */
+  /** 核对原支付号后独立提交User只读镜像，诊断保留512完整Unicode码点。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean mirror(
       String payNo,
@@ -93,6 +93,7 @@ public class PayTccDispatchPersistence {
       LocalDateTime updatedAt) {
     PayTccDispatchPO current = dispatchMapper.selectForUpdate(payNo);
     if (current == null) throw new BizException("PAY_TCC_DISPATCH_NOT_FOUND", "TCC 派发不存在", 404);
+    if (current.payNo == null || !Objects.equals(current.payNo, payNo)) throw conflict();
     if (branchId != null && branchId <= 0)
       throw new BizException("PAY_TCC_UNKNOWN", "User 分支标识不合法", 503);
     if (current.userBranchId != null

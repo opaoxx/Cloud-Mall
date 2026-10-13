@@ -4682,6 +4682,215 @@ class PayLegacyRefundLedgerMySqlIT {
         LocalDateTime.of(2026, 10, 1, 0, 0));
   }
 
+  /** 实际CI查询返回另一原支付号，不能由恢复入口输出该终态。 */
+  @Test
+  void dispatchAliasCannotBeReturnedByRecovery() {
+    var persistence = ownedDispatchPersistence();
+    seedOwnedDispatch("CONFIRMED", 7L);
+    fixture.update("UPDATE pay_tcc_dispatch SET pay_no='PAY-1' WHERE id=1");
+    assertEquals("PAY-1", dispatchMirrorMapper.selectByPayNo("pay-1").payNo);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    var bridge = ownedDispatchBridge(persistence, user);
+    var before = ownedDispatchLookupFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(bridge.recover("pay-1").payNo));
+          assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+        },
+        () ->
+            assertNull(returned.get(), "alias dispatch must not be returned as requested payment"),
+        () -> assertEquals(before, ownedDispatchLookupFacts()),
+        () -> org.mockito.Mockito.verifyNoInteractions(user));
+  }
+
+  /** 实际锁定CI别名不能写入镜像，原三个owned表完整事实不动。 */
+  @Test
+  void dispatchAliasCannotBeMirrored() {
+    var persistence = ownedDispatchPersistence();
+    seedOwnedDispatch("POST_ATTEMPTED", 7L);
+    fixture.update("UPDATE pay_tcc_dispatch SET pay_no='PAY-1' WHERE id=1");
+    assertEquals("PAY-1", dispatchMirrorMapper.selectByPayNo("pay-1").payNo);
+    var before = ownedDispatchLookupFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      dispatchTransaction(
+                          () ->
+                              persistence.mirror(
+                                  "pay-1",
+                                  "POST_ATTEMPTED",
+                                  "TRY_UNKNOWN",
+                                  7L,
+                                  "alias write",
+                                  LocalDateTime.of(2026, 10, 14, 12, 0))));
+          assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+        },
+        () -> assertEquals(before, ownedDispatchLookupFacts()));
+  }
+
+  /** 真实CI查询双向别名在六种恢复/镜像状态均拒绝，不调用User或改三表facts。 */
+  @Test
+  void dispatchLookupAliasesRejectAllRecoveryAndMirrorStates() {
+    var persistence = ownedDispatchPersistence();
+    var updatedAt = LocalDateTime.of(2026, 10, 14, 12, 0);
+    for (boolean uppercaseOriginal : List.of(false, true)) {
+      String original = uppercaseOriginal ? "PAY-1" : "pay-1";
+      String requested = uppercaseOriginal ? "pay-1" : "PAY-1";
+      for (String state :
+          List.of(
+              "CONFIRMED",
+              "CANCELLED",
+              "PREPARED",
+              "POST_ATTEMPTED",
+              "TRY_UNKNOWN",
+              "TRY_ACCEPTED")) {
+        seedOwnedDispatch(state, 7L);
+        fixture.update("UPDATE pay_tcc_dispatch SET pay_no=? WHERE id=1", original);
+        assertEquals(original, dispatchMirrorMapper.selectByPayNo(requested).payNo);
+        var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+        var bridge = ownedDispatchBridge(persistence, user);
+        var before = ownedDispatchLookupFacts();
+        var recovered =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> bridge.recover(requested),
+                state);
+        assertEquals("PAY_TCC_DISPATCH_CONFLICT", recovered.getCode());
+        assertEquals(before, ownedDispatchLookupFacts());
+        var mirrored =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () ->
+                    dispatchTransaction(
+                        () ->
+                            persistence.mirror(
+                                requested,
+                                "stale-state",
+                                "TRY_UNKNOWN",
+                                7L,
+                                "alias mirror",
+                                updatedAt)),
+                state);
+        assertEquals("PAY_TCC_DISPATCH_CONFLICT", mirrored.getCode());
+        assertEquals(before, ownedDispatchLookupFacts());
+        org.mockito.Mockito.verifyNoInteractions(user);
+      }
+    }
+  }
+
+  /** 精确原键保持终态/PREPARED只读、活动状态GET镜像及缺失404，不新增POST。 */
+  @Test
+  void exactDispatchLookupKeepsRecoveryMirrorAndMissingSemantics() {
+    var persistence = ownedDispatchPersistence();
+    for (String state :
+        List.of(
+            "CONFIRMED",
+            "CANCELLED",
+            "PREPARED",
+            "POST_ATTEMPTED",
+            "TRY_UNKNOWN",
+            "TRY_ACCEPTED")) {
+      seedOwnedDispatch(state, 7L);
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      var proof = new com.cloudmall.pay.domain.vo.UserTccStateVO();
+      proof.payNo = "pay-1";
+      proof.xid = "t171-xid";
+      proof.userId = 7L;
+      proof.orderNo = "order-1";
+      proof.operationKey = "tcc-debit:pay-1";
+      proof.ledgerKey = "pay-1";
+      proof.amount = "10.00";
+      proof.branchId = 7L;
+      proof.state = "CONFIRMED";
+      proof.ledgerApplied = true;
+      when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(ApiResponse.ok(proof));
+      var bridge = ownedDispatchBridge(persistence, user);
+      var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+      var payBefore = rawIntentTimeFacts();
+      var result = bridge.recover("pay-1");
+      assertEquals("pay-1", result.payNo);
+      var after = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
+      if (List.of("CONFIRMED", "CANCELLED", "PREPARED").contains(state)) {
+        assertEquals(state, result.state);
+        assertTrue(
+            !dispatchTransaction(
+                () ->
+                    persistence.mirror(
+                        "pay-1",
+                        "stale-state",
+                        "TRY_UNKNOWN",
+                        7L,
+                        "late",
+                        LocalDateTime.of(2026, 10, 14, 12, 0))));
+        assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
+        org.mockito.Mockito.verifyNoInteractions(user);
+      } else {
+        assertEquals("CONFIRMED", result.state);
+        assertEquals("CONFIRMED", after.get("state"));
+        assertEquals(7L, result.userBranchId);
+        assertNull(result.lastError);
+        verify(user)
+            .state(7L, "tcc-debit:pay-1", 7L, "cloud-mall-pay", "owned-callback", "t171-xid");
+        verify(user, never()).prepare(any(), any(), any(), any(), any(), any());
+        for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+          before.remove(changed);
+          after.remove(changed);
+        }
+        assertEquals(before, after);
+      }
+      assertEquals(payBefore, rawIntentTimeFacts());
+    }
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    var bridge = ownedDispatchBridge(persistence, user);
+    var before = ownedDispatchLookupFacts();
+    var missing =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class, () -> bridge.recover("absent-pay"));
+    assertEquals("PAY_TCC_DISPATCH_NOT_FOUND", missing.getCode());
+    assertEquals(404, missing.getHttpStatus());
+    var missingMirror =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () ->
+                dispatchTransaction(
+                    () ->
+                        persistence.mirror(
+                            "absent-pay",
+                            "POST_ATTEMPTED",
+                            "TRY_UNKNOWN",
+                            7L,
+                            "absent",
+                            LocalDateTime.of(2026, 10, 14, 12, 0))));
+    assertEquals("PAY_TCC_DISPATCH_NOT_FOUND", missingMirror.getCode());
+    assertEquals(404, missingMirror.getHttpStatus());
+    assertEquals(before, ownedDispatchLookupFacts());
+    org.mockito.Mockito.verifyNoInteractions(user);
+  }
+
+  /** 仅构造真实Bridge逻辑及owned Mapper，User为替身，不启用应用或真实网络。 */
+  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl ownedDispatchBridge(
+      com.cloudmall.pay.service.impl.PayTccDispatchPersistence persistence,
+      com.cloudmall.pay.feign.UserTccClient user) {
+    var configuration = mock(com.cloudmall.pay.config.PayTccBridgeConfiguration.class);
+    when(configuration.isEnabled()).thenReturn(true);
+    return new com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl(
+        records, dispatchMirrorMapper, persistence, user, configuration, "owned-callback");
+  }
+
+  /** 完整原Pay/Intent/Dispatch事实，只对owned克隆读取。 */
+  private List<List<Map<String, Object>>> ownedDispatchLookupFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
+    facts.add(fixture.queryForList("SELECT * FROM pay_tcc_dispatch ORDER BY id"));
+    return facts;
+  }
+
   /** public镜像面对长诊断应正常提交512字符前缀，而不是数据库DataTooLong。 */
   @Test
   void dispatchMirrorBoundsLongErrorBeforeRealSql() {
