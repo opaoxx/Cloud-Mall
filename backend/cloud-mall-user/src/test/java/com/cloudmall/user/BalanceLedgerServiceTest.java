@@ -1475,7 +1475,7 @@ class BalanceLedgerServiceTest {
     }
   }
 
-  /** 接收DAO原样/旧门优先/null健康有无归属，APPLIED和其它来源不增加接收读取。 */
+  /** 拒款接收DAO原样/旧门优先/null健康有无归属，APPLIED按来源保持读取预算。 */
   @Test
   void rejectedOperationReceiveKeepsPriorityAndHealthyBudget() {
     for (boolean ownerPresent : java.util.List.of(true, false)) {
@@ -1559,18 +1559,159 @@ class BalanceLedgerServiceTest {
       for (String mode : java.util.List.of("TCC", "LEGACY", "missing")) {
         String key = installOperationQuery(type);
         installAppliedOperationOwner(mode);
-        org.mockito.Mockito.doThrow(new AssertionError("APPLIED does not add receive read"))
-            .when(userTccReceiveMapper)
-            .findByPayNo(operationSource.payNo);
+        if ("TCC".equals(mode))
+          org.mockito.Mockito.doThrow(new AssertionError("TCC does not add receive read"))
+              .when(userTccReceiveMapper)
+              .findByPayNo(operationSource.payNo);
         assertEquals(
             "APPLIED",
             ((com.cloudmall.user.domain.vo.BalanceOperationVO)
                     userService.balanceOperation(7L, key, 7L).data)
                 .state);
-        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        if ("TCC".equals(mode)) org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        else verify(userTccReceiveMapper).findByPayNo(operationSource.payNo);
         assertOperationReadOnly();
       }
     }
+  }
+
+  /** 同pay任意接收行阻断Legacy/null的两个GET和新退款/重放，不过滤坏元数据。 */
+  @Test
+  void appliedLegacySourcesRejectAnyObservedReceive() {
+    for (String route :
+        java.util.List.of("debit-get", "refund-get", "fresh-refund", "replay-refund")) {
+      for (String mode : java.util.List.of("LEGACY", "missing")) {
+        for (String variant :
+            java.util.List.of("claimed", "unknown", "foreign", "alias", "bad-keys", "empty")) {
+          var request = installAppliedReceiveRoute(route, mode);
+          var receipt = new com.cloudmall.user.domain.po.UserTccReceivePO();
+          if (!"empty".equals(variant)) {
+            receipt.payNo = "alias".equals(variant) ? "PAY-1" : request.payNo;
+            receipt.userId = "foreign".equals(variant) ? 8L : 7L;
+            receipt.state = "unknown".equals(variant) ? "UNKNOWN" : "CLAIMED";
+            receipt.operationKey =
+                "bad-keys".equals(variant) ? "wrong-operation" : "tcc-debit:" + request.payNo;
+            receipt.ledgerKey = request.originalOperationKey;
+            receipt.amount = request.amount;
+          }
+          when(userTccReceiveMapper.findByPayNo(request.payNo)).thenReturn(receipt);
+          var failure =
+              assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> invokeAppliedReceiveRoute(route, request));
+          assertEquals(
+              route.endsWith("get") ? "COMMON_CONFLICT" : "BALANCE_REFUND_INVALID",
+              failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertEquals(route.endsWith("get") ? "余额账本事实待核对" : "原扣款不存在或未应用", failure.getMessage());
+          var ordered =
+              org.mockito.Mockito.inOrder(
+                  balanceDebitAttemptMapper, balanceTccDebitMapper, userTccReceiveMapper);
+          ordered.verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
+          ordered.verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
+          ordered.verify(userTccReceiveMapper).findByPayNo(request.payNo);
+          ordered.verifyNoMoreInteractions();
+          assertAppliedReceiveNoWrite(route);
+        }
+      }
+    }
+  }
+
+  /** DAO原对象、owner/freeze先级与合法null保持；TCC/disabled原确认链不增加接收读。 */
+  @Test
+  void appliedLegacyReceiveKeepsPriorityAndHealthyBudgets() {
+    for (String route :
+        java.util.List.of("debit-get", "refund-get", "fresh-refund", "replay-refund")) {
+      for (String mode : java.util.List.of("LEGACY", "missing")) {
+        var request = installAppliedReceiveRoute(route, mode);
+        var failure =
+            new org.springframework.dao.DataAccessResourceFailureException(
+                "applied-legacy-receive-fault");
+        org.mockito.Mockito.doThrow(failure).when(userTccReceiveMapper).findByPayNo(request.payNo);
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure,
+            assertThrows(RuntimeException.class, () -> invokeAppliedReceiveRoute(route, request)));
+        assertAppliedReceiveNoWrite(route);
+        var healthy = installAppliedReceiveRoute(route, mode);
+        invokeAppliedReceiveRoute(route, healthy);
+        verify(userTccReceiveMapper).findByPayNo(healthy.payNo);
+        verify(userMapper, times("fresh-refund".equals(route) ? 1 : 0))
+            .creditBalance(any(), any(), any());
+        if (!"fresh-refund".equals(route)) assertAppliedReceiveNoWrite(route);
+      }
+      for (String gate : java.util.List.of("source", "owner", "freeze")) {
+        var guarded = installAppliedReceiveRoute(route, "LEGACY");
+        org.mockito.Mockito.doThrow(
+                new AssertionError("old applied source gate must precede receive"))
+            .when(userTccReceiveMapper)
+            .findByPayNo(guarded.payNo);
+        if ("source".equals(gate)) {
+          if (route.endsWith("get")) operationSource.balanceAfter = null;
+          else originalRefundDebit.balanceAfter = null;
+        } else if ("owner".equals(gate)) {
+          if (route.endsWith("get")) installAppliedOperationOwner("LEGACY").state = "REJECTED";
+          else originalRefundAttempt.state = "REJECTED";
+        } else
+          when(balanceTccDebitMapper.selectByPayNo(guarded.payNo))
+              .thenReturn(new com.cloudmall.user.domain.po.BalanceTccDebitPO());
+        assertEquals(
+            route.endsWith("get") ? "COMMON_CONFLICT" : "BALANCE_REFUND_INVALID",
+            assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> invokeAppliedReceiveRoute(route, guarded))
+                .getCode());
+        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        assertAppliedReceiveNoWrite(route);
+      }
+      var tccRequest = installAppliedReceiveRoute(route, "TCC");
+      org.mockito.Mockito.doThrow(new AssertionError("TCC owner keeps original receive budget"))
+          .when(userTccReceiveMapper)
+          .findByPayNo(tccRequest.payNo);
+      invokeAppliedReceiveRoute(route, tccRequest);
+      org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+    }
+    for (String mode : java.util.List.of("disabled-fresh", "disabled-replay")) {
+      var request = installRefundProofMode(mode);
+      org.mockito.Mockito.doThrow(new AssertionError("disabled keeps original receive budget"))
+          .when(userTccReceiveMapper)
+          .findByPayNo(request.payNo);
+      userService.refundInternal(7L, 7L, request);
+      org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+    }
+  }
+
+  /** 为四入口建立完整已成功来源/退款集合；null历史只移除归属，不保留冻结。 */
+  private BalanceRefundRequestDTO installAppliedReceiveRoute(String route, String mode) {
+    if (route.endsWith("get")) {
+      installOperationQuery("refund-get".equals(route) ? "REFUND" : "DEBIT");
+      installAppliedOperationOwner(mode);
+      return refundRequest();
+    }
+    if ("replay-refund".equals(route)) return installActiveRefundReplayOwner(mode);
+    if ("TCC".equals(mode)) return installRefundProofMode("active-fresh");
+    var request = installLegacyRefundWithNoFreeze();
+    if ("missing".equals(mode))
+      when(balanceDebitAttemptMapper.selectByPayNo(request.payNo)).thenReturn(null);
+    return request;
+  }
+
+  /** 按原Service接口调用四条来源校验链，不使用私有方法绕过前置校验。 */
+  private ApiResponse<?> invokeAppliedReceiveRoute(String route, BalanceRefundRequestDTO request) {
+    if (route.endsWith("get"))
+      return userService.balanceOperation(
+          7L,
+          "refund-get".equals(route) ? request.refundOperationKey : request.originalOperationKey,
+          7L);
+    return userService.refundInternal(7L, 7L, request);
+  }
+
+  /** 来源拒绝后无钱包/账本/缓存写入；GET额外保持钱包零读取。 */
+  private void assertAppliedReceiveNoWrite(String route) {
+    verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+    verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
+    verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
+    org.mockito.Mockito.verifyNoInteractions(valueOperations);
+    if (route.endsWith("get")) assertOperationReadOnly();
   }
 
   /** 构造与已证拒款账本同元组的Legacy归属，缺owner历史不伪造冻结。 */

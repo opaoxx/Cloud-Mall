@@ -526,7 +526,7 @@ public class UserServiceImpl implements UserService {
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
-  /** APPLIED原DEBIT已先证明；同pay本地owner/freeze只读验证，DAO异常原样传播。 */
+  /** APPLIED原DEBIT已先证明；同pay本地owner/freeze及Legacy接收互斥只读验证，DAO异常原样。 */
   private void requireAppliedDebitOwnership(BalanceLedgerPO original) {
     BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
     if (attempt != null
@@ -537,6 +537,10 @@ public class UserServiceImpl implements UserService {
     // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
     if ((attempt == null || "LEGACY".equals(attempt.mode))
         && balanceTccDebitMapper.selectByPayNo(original.payNo) != null)
+      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+    // 原归属/冻结已先证明；Legacy或缺归属历史不得忽略独立接收事实，TCC保持原确认链。
+    if ((attempt == null || "LEGACY".equals(attempt.mode))
+        && userTccReceiveMapper.findByPayNo(original.payNo) != null)
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 

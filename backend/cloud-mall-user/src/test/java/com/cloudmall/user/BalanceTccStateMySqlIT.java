@@ -931,6 +931,144 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** APPLIED Legacy/null来源的四入口均不得跨过接收事实，退款失败保留五表。 */
+  @Test
+  void appliedLegacySourcesRejectObservedReceiveWithoutWriting() throws Exception {
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String route : List.of("debit-get", "refund-get", "fresh-refund", "replay-refund")) {
+      for (boolean ownerPresent : List.of(true, false)) {
+        for (String variant :
+            List.of(
+                "branch-null",
+                "branch-known",
+                "unknown-state",
+                "pay-alias",
+                "foreign-user",
+                "bad-keys")) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var original =
+                    request(
+                        "applied-receive-" + route + "-" + ownerPresent + "-" + variant,
+                        7L,
+                        "10.00");
+                debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+                var refund = refundRequest(original, "receive-refund:" + original.payNo, "2.00");
+                if (List.of("refund-get", "replay-refund").contains(route))
+                  legacy.refundInternal(7L, 7L, refund);
+                if (!ownerPresent) fixture.update("DELETE FROM balance_debit_attempt");
+                String queryKey =
+                    "refund-get".equals(route) ? refund.refundOperationKey : original.payNo;
+                boolean getter = route.endsWith("get");
+                if (getter) assertEquals(200, operationHttp(queryKey).getResponse().getStatus());
+                try {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-120,?,'applied-source-receive-xid',?,?,?,10,?,?,?,NOW(3),NOW(3))",
+                      "pay-alias".equals(variant)
+                          ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : original.payNo,
+                      "branch-known".equals(variant) ? 1L : null,
+                      "foreign-user".equals(variant) ? 8L : 7L,
+                      original.orderNo,
+                      "bad-keys".equals(variant) ? "wrong-operation" : original.operationKey,
+                      "bad-keys".equals(variant) ? "wrong-ledger" : original.ledgerKey,
+                      "unknown-state".equals(variant) ? "UNKNOWN" : "CLAIMED");
+                  var before = allFundsFacts();
+                  var receiveBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  var response =
+                      getter
+                          ? operationHttp(queryKey)
+                          : org.springframework.test.web.servlet.setup.MockMvcBuilders
+                              .standaloneSetup(context.getBean(UserController.class))
+                              .setControllerAdvice(
+                                  new com.cloudmall.common.web.GlobalExceptionHandler())
+                              .build()
+                              .perform(
+                                  org.springframework.test.web.servlet.request
+                                      .MockMvcRequestBuilders.post(
+                                          "/api/internal/users/7/balance/refunds")
+                                      .header("X-User-Id", "7")
+                                      .contentType(
+                                          org.springframework.http.MediaType.APPLICATION_JSON)
+                                      .content(
+                                          new com.fasterxml.jackson.databind.ObjectMapper()
+                                              .writeValueAsString(refund)))
+                              .andReturn();
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              409,
+                              response.getResponse().getStatus(),
+                              route + ":" + ownerPresent + ":" + variant),
+                      () ->
+                          assertHttpCode(
+                              response, getter ? "COMMON_CONFLICT" : "BALANCE_REFUND_INVALID"),
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> {
+                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
+                                  else legacy.refundInternal(7L, 7L, refund);
+                                });
+                        assertEquals(
+                            getter ? "COMMON_CONFLICT" : "BALANCE_REFUND_INVALID",
+                            failure.getCode());
+                        assertEquals(getter ? "余额账本事实待核对" : "原扣款不存在或未应用", failure.getMessage());
+                      },
+                      () -> assertEquals(before, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiveBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")));
+                } finally {
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id=-120");
+                }
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+    closeContext();
+    createTransactionalServices();
+    var confirmed = request("applied-receive-tcc-control", 7L, "10.00");
+    service.tryDebit(confirmed);
+    service.confirmDebit(finalizeRequest(confirmed));
+    try {
+      fixture.update(
+          "INSERT INTO"
+              + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+              + " VALUES(-120,?,?,?,?,?,10,?,?,'CLAIMED',NOW(3),NOW(3))",
+          confirmed.payNo,
+          confirmed.xid,
+          confirmed.branchId,
+          confirmed.userId,
+          confirmed.orderNo,
+          confirmed.operationKey,
+          confirmed.ledgerKey);
+      assertEquals(200, operationHttp(confirmed.ledgerKey).getResponse().getStatus());
+      var refund = refundRequest(confirmed, "applied-receive-tcc-refund", "2.00");
+      legacy.refundInternal(7L, 7L, refund);
+      var before = allFundsFacts();
+      var receiptBefore = fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+      legacy.refundInternal(7L, 7L, refund);
+      assertEquals(200, operationHttp(refund.refundOperationKey).getResponse().getStatus());
+      assertEquals(before, allFundsFacts());
+      assertEquals(
+          receiptBefore, fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+    } finally {
+      fixture.update("DELETE FROM user_tcc_receive WHERE id=-120");
+    }
+  }
+
   /** REJECTED查询任意接收来源均待核，归属/冻结/接收同只读RR且五表不写。 */
   @Test
   void rejectedOperationRejectsObservedReceiveWithoutWriting() {
@@ -4605,19 +4743,22 @@ class BalanceTccStateMySqlIT {
                 });
     ReflectionTestUtils.setField(target, "balanceLedgerMapper", instrumented);
     var ownerMappers = new java.util.LinkedHashMap<String, Object>();
-    for (String fieldName : List.of("balanceDebitAttemptMapper", "balanceTccDebitMapper")) {
+    for (String fieldName :
+        List.of("balanceDebitAttemptMapper", "balanceTccDebitMapper", "userTccReceiveMapper")) {
       Object actualOwnerMapper = ReflectionTestUtils.getField(target, fieldName);
       ownerMappers.put(fieldName, actualOwnerMapper);
       Class<?> mapperType =
           "balanceDebitAttemptMapper".equals(fieldName)
               ? com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class
-              : com.cloudmall.user.mapper.BalanceTccDebitMapper.class;
+              : "balanceTccDebitMapper".equals(fieldName)
+                  ? com.cloudmall.user.mapper.BalanceTccDebitMapper.class
+                  : com.cloudmall.user.mapper.UserTccReceiveMapper.class;
       Object observedOwnerMapper =
           java.lang.reflect.Proxy.newProxyInstance(
               actualOwnerMapper.getClass().getClassLoader(),
               new Class<?>[] {mapperType},
               (proxy, mapperMethod, arguments) -> {
-                if ("selectByPayNo".equals(mapperMethod.getName())) {
+                if (List.of("selectByPayNo", "findByPayNo").contains(mapperMethod.getName())) {
                   observations.add(
                       fieldName
                           + ":"
@@ -4658,6 +4799,7 @@ class BalanceTccStateMySqlIT {
               "selectFirstRefundOperationKey:true:true:4",
               "balanceDebitAttemptMapper:true:true:4",
               "balanceTccDebitMapper:true:true:4",
+              "userTccReceiveMapper:true:true:4",
               "countOperationCandidates:true:true:4"),
           observations);
       assertEquals(1, connectionIds.size());
