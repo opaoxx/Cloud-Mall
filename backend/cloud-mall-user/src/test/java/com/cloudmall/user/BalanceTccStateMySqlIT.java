@@ -931,6 +931,150 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** REJECTED查询任意接收来源均待核，归属/冻结/接收同只读RR且五表不写。 */
+  @Test
+  void rejectedOperationRejectsObservedReceiveWithoutWriting() {
+    Object target = AopTestUtils.getUltimateTargetObject(legacy);
+    var actualMappers = new java.util.LinkedHashMap<String, Object>();
+    var observations = new ArrayList<String>();
+    var connectionIds = new ArrayList<Integer>();
+    for (String fieldName : List.of("balanceTccDebitMapper", "userTccReceiveMapper")) {
+      Object actualMapper = ReflectionTestUtils.getField(target, fieldName);
+      actualMappers.put(fieldName, actualMapper);
+      Class<?> mapperType =
+          "balanceTccDebitMapper".equals(fieldName)
+              ? com.cloudmall.user.mapper.BalanceTccDebitMapper.class
+              : com.cloudmall.user.mapper.UserTccReceiveMapper.class;
+      Object instrumented =
+          java.lang.reflect.Proxy.newProxyInstance(
+              actualMapper.getClass().getClassLoader(),
+              new Class<?>[] {mapperType},
+              (proxy, mapperMethod, arguments) -> {
+                if (List.of("selectByPayNo", "findByPayNo").contains(mapperMethod.getName())) {
+                  observations.add(
+                      fieldName
+                          + ":"
+                          + org.springframework.transaction.support
+                              .TransactionSynchronizationManager.isActualTransactionActive()
+                          + ":"
+                          + org.springframework.transaction.support
+                              .TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+                          + ":"
+                          + org.springframework.transaction.support
+                              .TransactionSynchronizationManager
+                              .getCurrentTransactionIsolationLevel());
+                  java.sql.Connection observedConnection =
+                      org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                          testDataSource);
+                  try {
+                    connectionIds.add(System.identityHashCode(observedConnection));
+                  } finally {
+                    org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                        observedConnection, testDataSource);
+                  }
+                }
+                try {
+                  return mapperMethod.invoke(actualMapper, arguments);
+                } catch (java.lang.reflect.InvocationTargetException failure) {
+                  throw failure.getCause();
+                }
+              });
+      ReflectionTestUtils.setField(target, fieldName, instrumented);
+    }
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (boolean ownerPresent : List.of(true, false)) {
+        for (String variant :
+            List.of(
+                "branch-null",
+                "branch-known",
+                "unknown-state",
+                "pay-alias",
+                "foreign-user",
+                "bad-keys")) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                var original =
+                    request("rejected-get-receive-" + ownerPresent + "-" + variant, 7L, "101.00");
+                assertEquals(
+                    "PAYMENT_FAILED",
+                    assertThrows(
+                            BizException.class,
+                            () -> debitLegacy(original.payNo, original.ledgerKey, 7L, "101.00"))
+                        .getCode());
+                if (!ownerPresent) fixture.update("DELETE FROM balance_debit_attempt");
+                assertEquals(200, operationHttp(original.ledgerKey).getResponse().getStatus());
+                try {
+                  fixture.update(
+                      "INSERT INTO"
+                          + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                          + " VALUES(-119,?,'rejected-get-receive-xid',?,?,?,101,?,?,?,NOW(3),NOW(3))",
+                      "pay-alias".equals(variant)
+                          ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                          : original.payNo,
+                      "branch-known".equals(variant) ? 1L : null,
+                      "foreign-user".equals(variant) ? 8L : 7L,
+                      original.orderNo,
+                      "bad-keys".equals(variant) ? "wrong-operation" : original.operationKey,
+                      "bad-keys".equals(variant) ? "wrong-ledger" : original.ledgerKey,
+                      "unknown-state".equals(variant) ? "UNKNOWN" : "CLAIMED");
+                  observations.clear();
+                  connectionIds.clear();
+                  var before = allFundsFacts();
+                  var receiveBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  var response = operationHttp(original.ledgerKey);
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              409,
+                              response.getResponse().getStatus(),
+                              ownerPresent + ":" + variant),
+                      () -> assertHttpCode(response, "COMMON_CONFLICT"),
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> legacy.balanceOperation(7L, original.ledgerKey, 7L));
+                        assertEquals("COMMON_CONFLICT", failure.getCode());
+                        assertEquals("余额账本事实待核对", failure.getMessage());
+                      },
+                      () -> assertEquals(before, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiveBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")),
+                      () -> {
+                        assertEquals(
+                            List.of(
+                                "balanceTccDebitMapper:true:true:4",
+                                "userTccReceiveMapper:true:true:4",
+                                "balanceTccDebitMapper:true:true:4",
+                                "userTccReceiveMapper:true:true:4"),
+                            observations);
+                        assertEquals(4, connectionIds.size());
+                        assertEquals(connectionIds.get(0), connectionIds.get(1));
+                        assertEquals(connectionIds.get(2), connectionIds.get(3));
+                      });
+                } finally {
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id=-119");
+                }
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      actualMappers.forEach(
+          (fieldName, actualMapper) ->
+              ReflectionTestUtils.setField(target, fieldName, actualMapper));
+    }
+  }
+
   /** 真实拒款账本不能忽略坏归属/冻结，合法旧余额不和当前钱包重新比较。 */
   @Test
   void rejectedOperationRejectsContradictoryOwnershipWithoutWriting() {

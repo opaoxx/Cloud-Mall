@@ -1444,6 +1444,135 @@ class BalanceLedgerServiceTest {
     }
   }
 
+  /** 已证明拒款历史不能与任意接收来源并存，有/无Legacy归属均拒绝且不写。 */
+  @Test
+  void rejectedOperationRejectsAnyObservedReceive() {
+    for (boolean ownerPresent : java.util.List.of(true, false)) {
+      for (String variant :
+          java.util.List.of("claimed", "unknown", "foreign", "alias", "bad-keys", "empty")) {
+        String key = installOperationQuery("REJECTED");
+        installRejectedOperationOwner(ownerPresent);
+        var receipt = new com.cloudmall.user.domain.po.UserTccReceivePO();
+        if (!"empty".equals(variant)) {
+          receipt.payNo = "alias".equals(variant) ? "PAY-1" : operationSource.payNo;
+          receipt.userId = "foreign".equals(variant) ? 8L : 7L;
+          receipt.state = "unknown".equals(variant) ? "UNKNOWN" : "CLAIMED";
+          receipt.operationKey =
+              "bad-keys".equals(variant) ? "wrong-operation" : "tcc-debit:" + operationSource.payNo;
+          receipt.ledgerKey = operationSource.operationKey;
+          receipt.amount = operationSource.amount;
+        }
+        when(userTccReceiveMapper.findByPayNo(operationSource.payNo)).thenReturn(receipt);
+        assertOperationConflict(key);
+        var ordered =
+            org.mockito.Mockito.inOrder(
+                balanceDebitAttemptMapper, balanceTccDebitMapper, userTccReceiveMapper);
+        ordered.verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
+        ordered.verify(balanceTccDebitMapper).selectByPayNo(operationSource.payNo);
+        ordered.verify(userTccReceiveMapper).findByPayNo(operationSource.payNo);
+        ordered.verifyNoMoreInteractions();
+      }
+    }
+  }
+
+  /** 接收DAO原样/旧门优先/null健康有无归属，APPLIED和其它来源不增加接收读取。 */
+  @Test
+  void rejectedOperationReceiveKeepsPriorityAndHealthyBudget() {
+    for (boolean ownerPresent : java.util.List.of(true, false)) {
+      String key = installOperationQuery("REJECTED");
+      installRejectedOperationOwner(ownerPresent);
+      var failure =
+          new org.springframework.dao.DataAccessResourceFailureException(
+              "rejected-get-receive-fault");
+      org.mockito.Mockito.doThrow(failure)
+          .when(userTccReceiveMapper)
+          .findByPayNo(operationSource.payNo);
+      org.junit.jupiter.api.Assertions.assertSame(
+          failure,
+          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+      assertOperationReadOnly();
+      String healthyKey = installOperationQuery("REJECTED");
+      installRejectedOperationOwner(ownerPresent);
+      var response =
+          (com.cloudmall.user.domain.vo.BalanceOperationVO)
+              userService.balanceOperation(7L, healthyKey, 7L).data;
+      assertEquals("REJECTED", response.state);
+      assertEquals("10.00", response.amount);
+      assertEquals(null, response.refundOperationKey);
+      verify(userTccReceiveMapper).findByPayNo(operationSource.payNo);
+      assertOperationReadOnly();
+    }
+    for (String gate :
+        java.util.List.of(
+            "caller",
+            "missing",
+            "count",
+            "foreign",
+            "primary",
+            "collection",
+            "payment",
+            "marker",
+            "owner",
+            "freeze")) {
+      String key = installOperationQuery("REJECTED");
+      var owner = installRejectedOperationOwner(true);
+      org.mockito.Mockito.doThrow(new AssertionError("old rejected GET gate must precede receive"))
+          .when(userTccReceiveMapper)
+          .findByPayNo(operationSource.payNo);
+      String expectedCode = "COMMON_CONFLICT";
+      switch (gate) {
+        case "caller" -> expectedCode = com.cloudmall.common.error.ErrorCodes.FORBIDDEN;
+        case "missing" -> {
+          when(balanceLedgerMapper.countOperationCandidates(key)).thenReturn(0L);
+          expectedCode = com.cloudmall.common.error.ErrorCodes.NOT_FOUND;
+        }
+        case "count" -> when(balanceLedgerMapper.countOperationCandidates(key)).thenReturn(2L);
+        case "foreign" -> {
+          operationSource.userId = 8L;
+          expectedCode = com.cloudmall.common.error.ErrorCodes.NOT_FOUND;
+        }
+        case "primary" -> operationSource.balanceAfter = new BigDecimal("3.00");
+        case "collection" ->
+            when(balanceLedgerMapper.findLinkedRefundCandidates(operationSource.operationKey))
+                .thenReturn(null);
+        case "payment" ->
+            when(balanceLedgerMapper.findRefundPaymentLedgerCandidates(operationSource.payNo))
+                .thenReturn(null);
+        case "marker" ->
+            when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
+                .thenReturn("ghost-refund");
+        case "owner" -> owner.state = "APPLIED";
+        case "freeze" ->
+            when(balanceTccDebitMapper.selectByPayNo(operationSource.payNo))
+                .thenReturn(new com.cloudmall.user.domain.po.BalanceTccDebitPO());
+        default -> throw new AssertionError("Unexpected gate");
+      }
+      var failure =
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> userService.balanceOperation(7L, key, "caller".equals(gate) ? 8L : 7L));
+      assertEquals(expectedCode, failure.getCode());
+      org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+      assertOperationReadOnly();
+    }
+    for (String type : java.util.List.of("DEBIT", "REFUND")) {
+      for (String mode : java.util.List.of("TCC", "LEGACY", "missing")) {
+        String key = installOperationQuery(type);
+        installAppliedOperationOwner(mode);
+        org.mockito.Mockito.doThrow(new AssertionError("APPLIED does not add receive read"))
+            .when(userTccReceiveMapper)
+            .findByPayNo(operationSource.payNo);
+        assertEquals(
+            "APPLIED",
+            ((com.cloudmall.user.domain.vo.BalanceOperationVO)
+                    userService.balanceOperation(7L, key, 7L).data)
+                .state);
+        org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
+        assertOperationReadOnly();
+      }
+    }
+  }
+
   /** 构造与已证拒款账本同元组的Legacy归属，缺owner历史不伪造冻结。 */
   private BalanceDebitAttemptPO installRejectedOperationOwner(boolean present) {
     var owner = installAppliedOperationOwner("LEGACY");
@@ -1614,6 +1743,8 @@ class BalanceLedgerServiceTest {
     for (Object mapper : java.util.List.of(balanceDebitAttemptMapper, balanceTccDebitMapper))
       for (var invocation : org.mockito.Mockito.mockingDetails(mapper).getInvocations())
         assertEquals("selectByPayNo", invocation.getMethod().getName());
+    for (var invocation : org.mockito.Mockito.mockingDetails(userTccReceiveMapper).getInvocations())
+      assertEquals("findByPayNo", invocation.getMethod().getName());
   }
 
   /** 新扣款钱包损坏必须在claim前拒绝，兼容入口同样不能记录假不足。 */

@@ -557,12 +557,14 @@ public class UserServiceImpl implements UserService {
         && attempt.amount.compareTo(original.amount) == 0;
   }
 
-  /** 拒款原快照已先证明；有效Legacy或null历史都必须无同pay冻结，DAO异常原样传播。 */
+  /** 拒款原快照已先证明；有效Legacy或null历史均须无同pay冻结/接收，DAO异常原样传播。 */
   private void requireRejectedDebitOwnership(BalanceLedgerPO original) {
     BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
     requireBalanceOperationEvidence(
         attempt == null || isProvenLegacyDebitOwnership(original, attempt));
     requireBalanceOperationEvidence(balanceTccDebitMapper.selectByPayNo(original.payNo) == null);
+    // 原账本/归属/冻结门已通过；拒款不能忽略独立接收事实或按其元数据过滤。
+    requireBalanceOperationEvidence(userTccReceiveMapper.findByPayNo(original.payNo) == null);
   }
 
   /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */
