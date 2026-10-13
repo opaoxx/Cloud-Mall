@@ -805,6 +805,146 @@ class UserTccStateQueryTest {
     return observed;
   }
 
+  /** 五类点读直接/标准直接包装多结果均固定事实冲突，不猜missing/UNKNOWN或终态。 */
+  @Test
+  void statePointMultipleResultsKeepBusinessConflict() {
+    for (String phase : List.of("receive", "owner", "freeze", "ledger", "fence")) {
+      for (boolean wrapped : List.of(false, true)) {
+        setUp();
+        installKnownState("CONFIRMED");
+        var duplicate =
+            new org.apache.ibatis.exceptions.TooManyResultsException("state-point-duplicate");
+        RuntimeException failure =
+            wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+        failStatePointRead(phase, failure);
+        var rejected =
+            assertThrows(
+                BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+        assertEquals("USER_TCC_STATE_CONFLICT", rejected.getCode());
+        assertEquals("TCC 持久事实不一致", rejected.getMessage());
+        assertEquals(409, rejected.getHttpStatus());
+        verifyStatePointOnce(phase);
+        assertStatePointReadsOnly();
+      }
+    }
+  }
+
+  /** 非目标故障原对象、初接收缺失404及原身份/metadata先级保持。 */
+  @Test
+  void statePointClassificationKeepsOtherFaultsAndMissingReceive() {
+    for (String phase : List.of("receive", "owner", "freeze", "ledger", "fence")) {
+      for (String shape :
+          List.of(
+              "resource",
+              "sql-wrapper",
+              "nested-too-many",
+              "other-wrapper",
+              "runtime-cause",
+              "message-only")) {
+        setUp();
+        installKnownState("CONFIRMED");
+        RuntimeException failure =
+            switch (shape) {
+              case "resource" ->
+                  new org.springframework.dao.DataAccessResourceFailureException(
+                      "state-point-jdbc-fault");
+              case "sql-wrapper" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new java.sql.SQLException("state-point-sql-fault"));
+              case "nested-too-many" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new org.apache.ibatis.exceptions.PersistenceException(
+                          "outer",
+                          new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+              case "other-wrapper" ->
+                  new org.apache.ibatis.exceptions.PersistenceException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              case "runtime-cause" ->
+                  new IllegalArgumentException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              default -> new IllegalArgumentException("TooManyResultsException is only text");
+            };
+        failStatePointRead(phase, failure);
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure,
+            assertThrows(
+                RuntimeException.class,
+                () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1")));
+        verifyStatePointOnce(phase);
+        assertStatePointReadsOnly();
+      }
+    }
+    setUp();
+    var missing =
+        assertThrows(
+            BizException.class, () -> query.read(7L, "tcc-debit:pay-query-1", "xid-query-1"));
+    assertEquals("COMMON_NOT_FOUND", missing.getCode());
+    assertEquals(404, missing.getHttpStatus());
+    verifyNoInteractions(attempts, debits, ledgers, fences);
+    for (String phase : List.of("owner", "freeze", "ledger", "fence")) {
+      for (String gate : List.of("foreign", "metadata")) {
+        setUp();
+        installKnownState("CONFIRMED");
+        UserTccReceivePO source = receive(12L);
+        if ("foreign".equals(gate)) source.userId = 8L;
+        else source.state = "UNKNOWN";
+        when(receives.findByOperationKey(source.operationKey)).thenReturn(source);
+        failStatePointRead(
+            phase,
+            new org.apache.ibatis.exceptions.TooManyResultsException("downstream-must-not-run"));
+        assertEquals(
+            "USER_TCC_STATE_CONFLICT",
+            assertThrows(BizException.class, () -> query.read(7L, source.operationKey, source.xid))
+                .getCode());
+        verifyNoInteractions(attempts, debits, ledgers, fences);
+      }
+    }
+  }
+
+  /** 只替换目标点读，完整CONFIRMED来源使之前的校验正常通过。 */
+  private void failStatePointRead(String phase, RuntimeException failure) {
+    switch (phase) {
+      case "receive" ->
+          org.mockito.Mockito.doThrow(failure)
+              .when(receives)
+              .findByOperationKey("tcc-debit:pay-query-1");
+      case "owner" ->
+          org.mockito.Mockito.doThrow(failure).when(attempts).selectByPayNo("pay-query-1");
+      case "freeze" ->
+          org.mockito.Mockito.doThrow(failure).when(debits).selectByPayNo("pay-query-1");
+      case "ledger" ->
+          org.mockito.Mockito.doThrow(failure).when(ledgers).selectByOperationKey("pay-query-1");
+      case "fence" ->
+          org.mockito.Mockito.doThrow(failure).when(fences).findByBranch("xid-query-1", 12L);
+      default -> throw new AssertionError("Unexpected state point phase");
+    }
+  }
+
+  /** 目标point恰一次，使用原查询参数，不新增COUNT或任何预算。 */
+  private void verifyStatePointOnce(String phase) {
+    switch (phase) {
+      case "receive" ->
+          org.mockito.Mockito.verify(receives).findByOperationKey("tcc-debit:pay-query-1");
+      case "owner" -> org.mockito.Mockito.verify(attempts).selectByPayNo("pay-query-1");
+      case "freeze" -> org.mockito.Mockito.verify(debits).selectByPayNo("pay-query-1");
+      case "ledger" -> org.mockito.Mockito.verify(ledgers).selectByOperationKey("pay-query-1");
+      case "fence" -> org.mockito.Mockito.verify(fences).findByBranch("xid-query-1", 12L);
+      default -> throw new AssertionError("Unexpected state point phase");
+    }
+    org.mockito.Mockito.verify(ledgers, org.mockito.Mockito.never())
+        .countOperationCandidates(org.mockito.ArgumentMatchers.any());
+  }
+
+  /** 所有Mapper交互都是现有select/find，不允许补写接收、绑定分支或修复账本。 */
+  private void assertStatePointReadsOnly() {
+    for (Object mapper : List.of(receives, attempts, debits, ledgers, fences))
+      for (var invocation : org.mockito.Mockito.mockingDetails(mapper).getInvocations()) {
+        String methodName = invocation.getMethod().getName();
+        org.junit.jupiter.api.Assertions.assertTrue(
+            methodName.startsWith("select") || methodName.startsWith("find"));
+      }
+  }
+
   private UserTccReceivePO receive(Long branchId) {
     UserTccReceivePO receive = new UserTccReceivePO();
     receive.userId = 7L;

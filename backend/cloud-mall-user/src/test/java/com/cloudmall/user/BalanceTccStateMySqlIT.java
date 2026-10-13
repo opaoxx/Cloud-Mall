@@ -931,6 +931,275 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 五类持久点读重复均为状态冲突，真实只读RR不写六表且恢复UNIQUE/Fence主键。 */
+  @Test
+  void tccStatePointDuplicatesKeepReadOnlyBusinessConflict() {
+    context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
+    context.registerBean(
+        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        () ->
+            new com.cloudmall.user.service.impl.UserTccStateQuery(
+                context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
+                context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
+    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(query));
+    Object queryTarget = AopTestUtils.getUltimateTargetObject(query);
+    var actualMappers = new java.util.LinkedHashMap<String, Object>();
+    var observations = new ArrayList<String>();
+    var connectionIds = new java.util.HashSet<Integer>();
+    var mapperTypes = new java.util.LinkedHashMap<String, Class<?>>();
+    mapperTypes.put("receives", com.cloudmall.user.mapper.UserTccReceiveMapper.class);
+    mapperTypes.put("attempts", com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class);
+    mapperTypes.put("debits", com.cloudmall.user.mapper.BalanceTccDebitMapper.class);
+    mapperTypes.put("ledgers", com.cloudmall.user.mapper.BalanceLedgerMapper.class);
+    mapperTypes.put("fences", com.cloudmall.user.mapper.TccFenceLogMapper.class);
+    mapperTypes.forEach(
+        (fieldName, mapperType) -> {
+          Object actualMapper = ReflectionTestUtils.getField(queryTarget, fieldName);
+          actualMappers.put(fieldName, actualMapper);
+          Object instrumented =
+              java.lang.reflect.Proxy.newProxyInstance(
+                  actualMapper.getClass().getClassLoader(),
+                  new Class<?>[] {mapperType},
+                  (proxy, mapperMethod, arguments) -> {
+                    if (List.of(
+                            "findByOperationKey",
+                            "selectByPayNo",
+                            "selectByOperationKey",
+                            "findByBranch")
+                        .contains(mapperMethod.getName())) {
+                      observations.add(
+                          fieldName
+                              + ":"
+                              + org.springframework.transaction.support
+                                  .TransactionSynchronizationManager.isActualTransactionActive()
+                              + ":"
+                              + org.springframework.transaction.support
+                                  .TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+                              + ":"
+                              + org.springframework.transaction.support
+                                  .TransactionSynchronizationManager
+                                  .getCurrentTransactionIsolationLevel());
+                      java.sql.Connection observedConnection =
+                          org.springframework.jdbc.datasource.DataSourceUtils.getConnection(
+                              testDataSource);
+                      try {
+                        connectionIds.add(System.identityHashCode(observedConnection));
+                      } finally {
+                        org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                            observedConnection, testDataSource);
+                      }
+                    }
+                    try {
+                      return mapperMethod.invoke(actualMapper, arguments);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                      throw failure.getCause();
+                    }
+                  });
+          ReflectionTestUtils.setField(queryTarget, fieldName, instrumented);
+        });
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String sourceKind : List.of("receive", "owner", "freeze", "ledger", "fence")) {
+        for (boolean alias : List.of(false, true)) {
+          checks.add(
+              () -> {
+                for (String bankTable :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + bankTable);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                setEnabled(true);
+                var original = request("state-point-" + sourceKind + "-" + alias, 7L, "10.00");
+                service.tryDebit(original);
+                service.confirmDebit(finalizeRequest(original));
+                fixture.update(
+                    "INSERT INTO"
+                        + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                        + " VALUES(-126,?,?,?,?,?,10,?,?,'CLAIMED',NOW(3),NOW(3))",
+                    original.payNo,
+                    original.xid,
+                    original.branchId,
+                    original.userId,
+                    original.orderNo,
+                    original.operationKey,
+                    original.ledgerKey);
+                fixture.update(
+                    "INSERT INTO"
+                        + " tcc_fence_log(xid,branch_id,action_name,status,gmt_create,gmt_modified)"
+                        + " VALUES(?,?,?,2,NOW(3),NOW(3))",
+                    original.xid,
+                    original.branchId,
+                    com.cloudmall.user.service.BalanceTccDebitLocalResource.ACTION_NAME);
+                assertEquals(
+                    "CONFIRMED", query.read(7L, original.operationKey, original.xid).state);
+                String table =
+                    switch (sourceKind) {
+                      case "receive" -> "user_tcc_receive";
+                      case "owner" -> "balance_debit_attempt";
+                      case "freeze" -> "balance_tcc_debit";
+                      case "ledger" -> "balance_ledger";
+                      default -> "tcc_fence_log";
+                    };
+                String column =
+                    List.of("receive", "ledger").contains(sourceKind) ? "operation_key" : "pay_no";
+                String uniqueIndex = "PRIMARY";
+                if (!"fence".equals(sourceKind)) {
+                  var indexes =
+                      fixture.queryForList(
+                          "SHOW INDEX FROM "
+                              + table
+                              + " WHERE Column_name='"
+                              + column
+                              + "' AND Non_unique=0");
+                  assertEquals(1, indexes.size());
+                  uniqueIndex = (String) indexes.get(0).get("Key_name");
+                  assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+                  fixture.execute("ALTER TABLE " + table + " DROP INDEX `" + uniqueIndex + "`");
+                } else {
+                  assertEquals(
+                      2,
+                      fixture
+                          .queryForList("SHOW INDEX FROM tcc_fence_log WHERE Key_name='PRIMARY'")
+                          .size());
+                  fixture.execute("ALTER TABLE tcc_fence_log DROP PRIMARY KEY");
+                }
+                try {
+                  String key =
+                      List.of("receive", "ledger").contains(sourceKind)
+                          ? "receive".equals(sourceKind)
+                              ? original.operationKey
+                              : original.ledgerKey
+                          : "fence".equals(sourceKind) ? original.xid : original.payNo;
+                  String candidateKey = alias ? key.toUpperCase(java.util.Locale.ROOT) : key;
+                  switch (sourceKind) {
+                    case "receive" ->
+                        fixture.update(
+                            "INSERT INTO"
+                                + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
+                                + " VALUES(-127,'other-state-pay','other-state-xid',1,8,'other-state-order',1,?,'other-state-ledger','CLAIMED',NOW(3),NOW(3))",
+                            candidateKey);
+                    case "owner" ->
+                        fixture.update(
+                            "INSERT INTO"
+                                + " balance_debit_attempt(id,pay_no,operation_key,mode,xid,ledger_key,branch_id,user_id,order_no,amount,state,created_at,updated_at)"
+                                + " VALUES(-127,?,'other-state-operation','TCC','other-state-xid','other-state-ledger',1,8,'other-state-order',1,'CONFIRMED',NOW(3),NOW(3))",
+                            candidateKey);
+                    case "freeze" ->
+                        fixture.update(
+                            "INSERT INTO"
+                                + " balance_tcc_debit(id,operation_key,xid,branch_id,user_id,pay_no,order_no,amount,state,balance_before,balance_after_try,created_at,updated_at)"
+                                + " VALUES(-127,'other-state-operation','other-state-xid',1,8,?,'other-state-order',1,'CONFIRMED',100,99,NOW(3),NOW(3))",
+                            candidateKey);
+                    case "ledger" ->
+                        fixture.update(
+                            "INSERT INTO"
+                                + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
+                                + " VALUES(-127,8,?,'DEBIT',NULL,'other-state-pay','other-state-order',1,'APPLIED',100,99,NOW(3))",
+                            candidateKey);
+                    case "fence" ->
+                        fixture.update(
+                            "INSERT INTO"
+                                + " tcc_fence_log(xid,branch_id,action_name,status,gmt_create,gmt_modified)"
+                                + " VALUES(?,?,'T126-shadow',2,NOW(3),NOW(3))",
+                            candidateKey,
+                            original.branchId);
+                    default -> throw new AssertionError("Unexpected state point source");
+                  }
+                  observations.clear();
+                  connectionIds.clear();
+                  var before = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                  before.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                  before.add(
+                      fixture.queryForList(
+                          "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> query.read(7L, original.operationKey, original.xid));
+                        assertEquals("USER_TCC_STATE_CONFLICT", failure.getCode());
+                        assertEquals("TCC 持久事实不一致", failure.getMessage());
+                        assertEquals(409, failure.getHttpStatus());
+                      },
+                      () -> {
+                        var after = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                        after.add(
+                            fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                        after.add(
+                            fixture.queryForList(
+                                "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                        assertEquals(before, after);
+                      },
+                      () -> {
+                        int pointCount =
+                            List.of("receive", "owner", "freeze", "ledger", "fence")
+                                    .indexOf(sourceKind)
+                                + 1;
+                        var expected =
+                            List.of("receives", "attempts", "debits", "ledgers", "fences")
+                                .subList(0, pointCount)
+                                .stream()
+                                .map(fieldName -> fieldName + ":true:true:4")
+                                .toList();
+                        assertEquals(expected, observations);
+                        assertEquals(1, connectionIds.size());
+                      });
+                } finally {
+                  if ("fence".equals(sourceKind)) {
+                    fixture.update(
+                        "DELETE FROM tcc_fence_log WHERE xid=? AND branch_id=? AND BINARY"
+                            + " action_name='T126-shadow'",
+                        original.xid,
+                        original.branchId);
+                    fixture.execute("ALTER TABLE tcc_fence_log ADD PRIMARY KEY (xid,branch_id)");
+                    assertEquals(
+                        2,
+                        fixture
+                            .queryForList("SHOW INDEX FROM tcc_fence_log WHERE Key_name='PRIMARY'")
+                            .size());
+                  } else {
+                    fixture.update("DELETE FROM " + table + " WHERE id=-127");
+                    fixture.execute(
+                        "ALTER TABLE "
+                            + table
+                            + " ADD UNIQUE INDEX `"
+                            + uniqueIndex
+                            + "` ("
+                            + column
+                            + ")");
+                    assertEquals(
+                        1,
+                        fixture
+                            .queryForList(
+                                "SHOW INDEX FROM "
+                                    + table
+                                    + " WHERE Column_name='"
+                                    + column
+                                    + "' AND Non_unique=0")
+                            .size());
+                  }
+                  fixture.update("DELETE FROM user_tcc_receive WHERE id=-126");
+                  fixture.update(
+                      "DELETE FROM tcc_fence_log WHERE xid=? AND branch_id=?",
+                      original.xid,
+                      original.branchId);
+                }
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      actualMappers.forEach(
+          (fieldName, actualMapper) ->
+              ReflectionTestUtils.setField(queryTarget, fieldName, actualMapper));
+    }
+  }
+
   /** 本地TCC三资金动作及确认Try重放不能忽略多归属/冻结/其它pay同账本键，五表不写。 */
   @Test
   void localTccPointDuplicatesKeepBusinessFailures() {

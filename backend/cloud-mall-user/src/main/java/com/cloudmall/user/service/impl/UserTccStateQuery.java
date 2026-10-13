@@ -16,6 +16,9 @@ import com.cloudmall.user.service.BalanceTccDebitLocalResource;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
+import org.apache.ibatis.exceptions.TooManyResultsException;
+import org.mybatis.spring.MyBatisSystemException;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -57,7 +60,7 @@ public class UserTccStateQuery {
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public UserTccStateVO read(Long userId, String operationKey, String xid) {
     // 1. 先验证原接收载荷和调用者的查询归属。
-    UserTccReceivePO receive = receives.findByOperationKey(operationKey);
+    UserTccReceivePO receive = readStateCandidate(() -> receives.findByOperationKey(operationKey));
     if (receive == null) throw new BizException("COMMON_NOT_FOUND", "未观察到 TCC 接收事实", 404);
     require(
         Objects.equals(receive.userId, userId)
@@ -74,9 +77,10 @@ public class UserTccStateQuery {
     view.ledgerKey = receive.ledgerKey;
     view.xid = receive.xid;
     view.state = "UNKNOWN";
-    BalanceDebitAttemptPO attempt = attempts.selectByPayNo(receive.payNo);
-    BalanceTccDebitPO debit = debits.selectByPayNo(receive.payNo);
-    BalanceLedgerPO ledger = ledgers.selectByOperationKey(receive.ledgerKey);
+    BalanceDebitAttemptPO attempt = readStateCandidate(() -> attempts.selectByPayNo(receive.payNo));
+    BalanceTccDebitPO debit = readStateCandidate(() -> debits.selectByPayNo(receive.payNo));
+    BalanceLedgerPO ledger =
+        readStateCandidate(() -> ledgers.selectByOperationKey(receive.ledgerKey));
     if (attempt == null) {
       require(debit == null && ledger == null);
       return view;
@@ -145,7 +149,7 @@ public class UserTccStateQuery {
       requireEmptyPaymentLedger(receive.payNo);
       expectedFence = debit == null ? 4 : 3;
     } else throw conflict();
-    TccFenceLogPO fence = fences.findByBranch(xid, attempt.branchId);
+    TccFenceLogPO fence = readStateCandidate(() -> fences.findByBranch(xid, attempt.branchId));
     if (fence != null)
       require(
           Objects.equals(fence.xid, xid)
@@ -155,6 +159,17 @@ public class UserTccStateQuery {
     else require(!"TRYING".equals(attempt.state));
     view.state = attempt.state;
     return view;
+  }
+
+  /** 保持同快照原单次点读；仅精确多结果表示事实冲突，其它异常/null/唯一候选原样。 */
+  private <Candidate> Candidate readStateCandidate(Supplier<Candidate> candidateRead) {
+    try {
+      return candidateRead.get();
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) throw conflict();
+      throw failure;
+    }
   }
 
   /** 未确认同pay扣款候选必须可靠empty；LIMIT2重复是业务冲突，DAO故障仍由原链传播。 */
