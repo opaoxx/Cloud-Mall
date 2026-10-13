@@ -374,6 +374,7 @@ public class UserServiceImpl implements UserService {
         if (!isProvenRefundOriginalDebit(original, request, userId)
             || existing.amount.compareTo(original.amount) > 0)
           throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+        requireActiveRefundOwnership(original, request);
       } else if (existing.amount.compareTo(disabledOriginal.amount) > 0) {
         // disabled原source/TCC与退款行已先证明；复用已读原额，不新增查询或再次入账。
         throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
@@ -395,19 +396,8 @@ public class UserServiceImpl implements UserService {
         || debitCandidates.size() != 1
         || !matchesRefundDebitScope(original, debitCandidates.get(0), request, userId))
       throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
-    // active新退款观察原归属；Legacy须复制原扣款，TCC须确认冻结，未知模式不作来源。
-    if (Objects.equals(user.status, 1)) {
-      BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
-      if (attempt != null
-          && !("LEGACY".equals(attempt.mode)
-              ? isProvenLegacyRefundAttempt(original, attempt)
-              : confirmedTccRefund(original, request, attempt)))
-        throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
-      // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
-      if ((attempt == null || "LEGACY".equals(attempt.mode))
-          && balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
-        throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
-    }
+    // active原DEBIT已证明，再核同pay归属/冻结，不重复读取原source。
+    if (Objects.equals(user.status, 1)) requireActiveRefundOwnership(original, request);
     // 4. 逐行证明有界退款集合，再按原额度、条件credit和账本写序处理。
     BigDecimal refundedAmount = provenRefundedAmount(original);
     if (refundedAmount.add(request.amount).compareTo(original.amount) > 0) {
@@ -441,6 +431,21 @@ public class UserServiceImpl implements UserService {
     if (balanceLedgerMapper.insert(refund) != 1) throw new IllegalStateException("退款账本写入未影响唯一记录");
     return ApiResponse.ok(
         BalanceRefundVO.from(refund.operationKey, refund.state, refund.balanceAfter));
+  }
+
+  /** active原DEBIT已先证明；同pay本地owner/freeze按原规则只读验证，DAO异常原样传播。 */
+  private void requireActiveRefundOwnership(
+      BalanceLedgerPO original, BalanceRefundRequestDTO request) {
+    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+    if (attempt != null
+        && !("LEGACY".equals(attempt.mode)
+            ? isProvenLegacyRefundAttempt(original, attempt)
+            : confirmedTccRefund(original, request, attempt)))
+      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
+    // 原Legacy归属已先核；无owner/Legacy都须同pay无冻结，不按state/身份过滤矛盾来源。
+    if ((attempt == null || "LEGACY".equals(attempt.mode))
+        && balanceTccDebitMapper.selectByPayNo(request.payNo) != null)
+      throw new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409);
   }
 
   /** 原DEBIT已证明；已观察Legacy归属须复制精确键/身份/金额且为无TCC分支的APPLIED。 */
