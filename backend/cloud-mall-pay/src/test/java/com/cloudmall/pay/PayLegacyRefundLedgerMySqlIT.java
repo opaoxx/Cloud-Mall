@@ -2156,9 +2156,9 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
-  /** 保INIT/REFUND_PENDING单intent写及first0+second1旧语义、原错误512截断。 */
+  /** 保INIT/REFUND_PENDING单intent写及512截断，首笔0不再单独推进intent。 */
   @Test
-  void singleIntentRetryAndFirstZeroKeepOriginalCompatibility() {
+  void singleIntentRetryAndFirstZeroPreserveSafeDirection() {
     for (String retryStatus : List.of("INIT", "REFUND_PENDING", "ORDER_SYNC_UNKNOWN")) {
       seedIntentAndPayment("INIT".equals(retryStatus) ? "PENDING" : "REFUND_PENDING", "INIT");
       var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
@@ -2174,6 +2174,12 @@ class PayLegacyRefundLedgerMySqlIT {
           token,
           retryStatus,
           error);
+      if ("ORDER_SYNC_UNKNOWN".equals(retryStatus)) {
+        assertEquals(before, payFacts());
+        assertEquals("INIT", intentStatus());
+        assertEquals(token, intentLeaseOwner());
+        continue;
+      }
       assertEquals(before.get(0), payFacts().get(0));
       assertEquals(retryStatus, intentStatus());
       assertEquals(1, intentAttempts());
@@ -2829,6 +2835,118 @@ class PayLegacyRefundLedgerMySqlIT {
           1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
       verify(user, never()).debit(any(), any(), any());
       verify(user, never()).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+    } finally {
+      intents = actualIntents;
+    }
+  }
+
+  /** 原tuple资格成立但payment退款方向拒绝正向清理0时，intent不得被单独推进。 */
+  @Test
+  void retryFirstSqlZeroPreservesIntentAndLeaseWithRealPay() {
+    seedIntentAndPayment("REFUND_PENDING", "INIT");
+    var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+    String token = "t148-owned-token";
+    assertEquals(1, intents.claim("pay-1", token, currentTime.plusSeconds(30), currentTime));
+    var expected = intents.findByPayNo("pay-1");
+    var before = payFacts();
+    PayRecordMapper actualRecords = records;
+    PayDebitIntentMapper actualIntents = intents;
+    var firstResult = new java.util.concurrent.atomic.AtomicReference<Integer>();
+    records =
+        (PayRecordMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                actualRecords.getClass().getClassLoader(),
+                new Class<?>[] {PayRecordMapper.class},
+                (proxy, method, arguments) -> {
+                  Object result;
+                  try {
+                    result = method.invoke(actualRecords, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException failure) {
+                    throw failure.getCause();
+                  }
+                  if ("markOwnedLegacyOrderUnknown".equals(method.getName()))
+                    firstResult.set((Integer) result);
+                  return result;
+                });
+    var observedIntents = org.mockito.Mockito.spy(actualIntents);
+    intents = observedIntents;
+    try {
+      org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+          newService(mock(UserClient.class), mock(OrderClient.class)),
+          "recordOwnedLegacyRetry",
+          expected,
+          token,
+          "ORDER_SYNC_UNKNOWN",
+          "owned-error");
+      assertEquals(0, firstResult.get());
+      assertEquals(before, payFacts());
+      assertEquals("REFUND_PENDING", paymentStatus());
+      assertEquals("INIT", intentStatus());
+      assertEquals(1, intentAttempts());
+      assertEquals(token, intentLeaseOwner());
+      verify(observedIntents, never())
+          .recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any());
+    } finally {
+      records = actualRecords;
+      intents = actualIntents;
+    }
+  }
+
+  /** Order故障期间PAY新退款方向拒绝first0，保原lease到期后同pay沿退款恢复。 */
+  @Test
+  void retryFirstZeroAfterOrderFailureKeepsRefundDirectionAndResumes() {
+    seedIntentAndPayment("PENDING", "INIT");
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+    var afterChange =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              org.junit.jupiter.api.Assertions.assertFalse(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive());
+              fixture.update("UPDATE pay_record SET status='REFUND_PENDING' WHERE pay_no='pay-1'");
+              afterChange.set(payFacts());
+              throw new IllegalStateException("owned-order-read-unavailable");
+            })
+        .when(orders)
+        .paymentState("order-1", 7L);
+    PayDebitIntentMapper actualIntents = intents;
+    var observedIntents = org.mockito.Mockito.spy(actualIntents);
+    intents = observedIntents;
+    try {
+      var service = newService(user, orders);
+      assertEquals("ORDER_SYNC_UNKNOWN", service.process("pay-1"));
+      assertEquals(afterChange.get(), payFacts());
+      assertEquals("REFUND_PENDING", paymentStatus());
+      assertEquals("INIT", intentStatus());
+      assertEquals(1, intentAttempts());
+      assertNotNull(intentLeaseOwner());
+      verify(observedIntents, never())
+          .recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any());
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, never()).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+      fixture.update(
+          "UPDATE pay_debit_intent SET lease_until=NOW(3)-INTERVAL 1 SECOND WHERE pay_no='pay-1'");
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", "CANCELLED", BigDecimal.TEN, 7L, "SUCCEEDED")))
+          .when(orders)
+          .paymentState("order-1", 7L);
+      assertEquals("REFUNDED", service.process("pay-1"));
+      assertEquals("REFUNDED", paymentStatus());
+      assertEquals("REFUNDED", intentStatus());
+      assertEquals(2, intentAttempts());
+      assertNull(intentLeaseOwner());
+      assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user).refund(any(), any(), any());
       verify(orders, never()).paid(any(), any());
     } finally {
       intents = actualIntents;

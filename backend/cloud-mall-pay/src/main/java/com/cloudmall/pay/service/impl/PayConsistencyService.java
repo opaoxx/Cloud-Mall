@@ -471,7 +471,7 @@ public class PayConsistencyService {
     return "FAILED";
   }
 
-  /** 重试清理独立提交；意图零行回滚并保原等待方向，数据库异常回滚后原样传播。 */
+  /** 重试清理独立提交；首笔或意图零行回滚并保原等待方向，数据库异常原样传播。 */
   private void recordOwnedLegacyRetry(
       PayDebitIntentPO intent, String claimToken, String retryStatus, String error) {
     // 1. 不把异常后的清理写入caller全局事务，也不解绑caller的上下文。
@@ -480,9 +480,13 @@ public class PayConsistencyService {
         transactionStatus -> {
           // 2. 先核并锁定两表原载荷；缺证只跳过清理，不改写新tuple或释放其租约。
           if (payRecordMapper.lockOwnedLegacyRetrySource(intent, claimToken, now()) == null) return;
-          // 3. 保原支付清理顺序与零行best-effort语义，不调用无owner旧方法。
-          if ("ORDER_SYNC_UNKNOWN".equals(retryStatus))
-            payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now());
+          // 3. 首笔清理必须恰好一行，资格或状态拒绝时不能单独推进意图及释放租约。
+          if ("ORDER_SYNC_UNKNOWN".equals(retryStatus)
+              && payRecordMapper.markOwnedLegacyOrderUnknown(intent.payNo, claimToken, now())
+                  != 1) {
+            transactionStatus.setRollbackOnly();
+            return;
+          }
           // 4. 意图重试未落盘则撤回本次支付清理；原错误截断、退避和清租约由Mapper保持。
           if (payDebitIntentMapper.recordRetryOwnedLegacy(
                   intent.payNo,

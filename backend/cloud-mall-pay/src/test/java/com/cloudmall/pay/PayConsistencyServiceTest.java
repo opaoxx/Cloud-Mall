@@ -505,9 +505,7 @@ class PayConsistencyServiceTest {
         .thenReturn(0);
     assertEquals("ORDER_SYNC_UNKNOWN", consistencyService.process("pay-1"));
     verify(payRecordMapper).markOwnedLegacyOrderUnknown(eq("pay-1"), anyString(), any());
-    verify(intentMapper)
-        .recordRetryOwnedLegacy(
-            eq("pay-1"), anyString(), eq("ORDER_SYNC_UNKNOWN"), anyString(), any(), any());
+    verify(intentMapper, never()).recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any());
     verify(payRecordMapper, never()).markOrderUnknown(anyString(), any());
     verify(intentMapper, never())
         .recordRetry(anyString(), anyString(), anyString(), anyString(), any(), any());
@@ -3309,6 +3307,56 @@ class PayConsistencyServiceTest {
         .verify(intentMapper)
         .finishOwnedLegacy(eq("pay-1"), eq("owned-token"), eq("REFUNDED"), any());
     ordered.verify(transactionManager).commit(any());
+    org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+  }
+
+  /** 首笔清理零行或异常多行时，仅标rollbackOnly，不执行intent或普通fallback。 */
+  @Test
+  void retryFirstWriteMustAffectOneRowBeforeIntentCleanup() {
+    for (int changedRows : java.util.List.of(0, 2)) {
+      setUp();
+      when(payRecordMapper.markOwnedLegacyOrderUnknown(any(), any(), any()))
+          .thenReturn(changedRows);
+      org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+          consistencyService,
+          "recordOwnedLegacyRetry",
+          intent(),
+          "owned-token",
+          "ORDER_SYNC_UNKNOWN",
+          "owned-error");
+      verify(intentMapper, never())
+          .recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any());
+      verify(intentMapper, never()).recordRetry(any(), any(), any(), any(), any(), any());
+      var status =
+          org.mockito.ArgumentCaptor.forClass(
+              org.springframework.transaction.TransactionStatus.class);
+      verify(transactionManager).commit(status.capture());
+      org.junit.jupiter.api.Assertions.assertTrue(status.getValue().isRollbackOnly());
+      // fake manager只核marker；真实rollback由native验证。
+      org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+    }
+  }
+
+  /** 第一SQL异常由原模板整体rollback后原样传播，不尝试第二SQL或RPC。 */
+  @Test
+  void retryFirstWriteFailurePropagatesWithoutIntentCleanup() {
+    when(payRecordMapper.markOwnedLegacyOrderUnknown(any(), any(), any()))
+        .thenThrow(new IllegalStateException("owned-first-retry-failure"));
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class,
+            () ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    consistencyService,
+                    "recordOwnedLegacyRetry",
+                    intent(),
+                    "owned-token",
+                    "ORDER_SYNC_UNKNOWN",
+                    "owned-error"));
+    assertEquals("owned-first-retry-failure", failure.getMessage());
+    verify(intentMapper, never()).recordRetryOwnedLegacy(any(), any(), any(), any(), any(), any());
+    verify(transactionManager).rollback(any());
+    verify(transactionManager, never()).commit(any());
     org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
   }
 
