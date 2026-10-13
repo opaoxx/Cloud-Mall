@@ -136,10 +136,11 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 非空白精确请求键、载荷一致且正数值时领取；拒绝不改意图，不保证领取后稳定。 */
+  /** 原资格通过才领取，尝试数到INT上限后饱和；拒绝不改意图，不保证领取后稳定。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
-        "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?"
+        "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=CASE WHEN"
+            + " attempts<2147483647 THEN attempts+1 ELSE attempts END,updated_at=?"
             + " WHERE BINARY pay_debit_intent.pay_no=BINARY ? AND BINARY debit_mode='LEGACY'"
             + " AND EXISTS (SELECT 1 FROM pay_record"
             + " WHERE BINARY pay_record.pay_no=BINARY pay_debit_intent.pay_no"

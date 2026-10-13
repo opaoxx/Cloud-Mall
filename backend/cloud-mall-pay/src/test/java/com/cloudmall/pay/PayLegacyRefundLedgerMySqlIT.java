@@ -4114,6 +4114,164 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** INT最大尝试数仍可合法领取，不因UPDATE范围错误阻断恢复。 */
+  @Test
+  void maximumAttemptsCanClaimWithoutOverflow() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String paymentStage : List.of("PENDING", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      assertions.add(
+          () -> {
+            seedIntentAndPayment(paymentStage, "INIT");
+            fixture.update(
+                "UPDATE pay_debit_intent SET attempts=?,last_error='owned-existing-proof' WHERE"
+                    + " id=1",
+                Integer.MAX_VALUE);
+            var before = payFacts();
+            var currentTime =
+                LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                    .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    assertEquals(
+                        1,
+                        intents.claim(
+                            "pay-1", "t162-max-token", currentTime.plusSeconds(30), currentTime)),
+                paymentStage);
+            assertEquals(Integer.MAX_VALUE, intentAttempts());
+            assertEquals("t162-max-token", intentLeaseOwner());
+            assertEquals(before.get(0), payFacts().get(0));
+            assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 普通计数递增、MAX饱和，busy不写，过期换owner后旧token仍无写资格。 */
+  @Test
+  void attemptCounterBoundariesPreserveLeaseAndOwnership() {
+    for (int originalAttempts : List.of(0, 7, Integer.MAX_VALUE - 1, Integer.MAX_VALUE)) {
+      seedIntentAndPayment("PENDING", "INIT");
+      fixture.update(
+          "UPDATE pay_debit_intent SET attempts=?,last_error='owned-existing-proof' WHERE id=1",
+          originalAttempts);
+      var before = payFacts();
+      var currentTime =
+          LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+              .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      assertEquals(1, intents.findDue(currentTime, 1).size());
+      assertEquals(1, intents.findDueAfter(currentTime, null, 1).size());
+      assertEquals(before, payFacts());
+      int firstCount =
+          originalAttempts == Integer.MAX_VALUE ? Integer.MAX_VALUE : originalAttempts + 1;
+      assertEquals(
+          1, intents.claim("pay-1", "t162-first-owner", currentTime.plusSeconds(30), currentTime));
+      assertEquals(firstCount, intentAttempts());
+      assertEquals("t162-first-owner", intentLeaseOwner());
+      assertEquals(
+          currentTime.plusSeconds(30),
+          fixture.queryForObject(
+              "SELECT lease_until FROM pay_debit_intent WHERE id=1", LocalDateTime.class));
+      assertEquals(
+          currentTime,
+          fixture.queryForObject(
+              "SELECT updated_at FROM pay_debit_intent WHERE id=1", LocalDateTime.class));
+      assertEquals(
+          "owned-existing-proof",
+          fixture.queryForObject(
+              "SELECT last_error FROM pay_debit_intent WHERE id=1", String.class));
+      assertEquals(before.get(0), payFacts().get(0));
+      assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+      var busyFacts = payFacts();
+      assertEquals(
+          0, intents.claim("pay-1", "t162-busy-owner", currentTime.plusSeconds(30), currentTime));
+      assertEquals(busyFacts, payFacts());
+      fixture.update(
+          "UPDATE pay_debit_intent SET lease_until=? WHERE id=1", currentTime.minusSeconds(1));
+      int secondCount = firstCount == Integer.MAX_VALUE ? Integer.MAX_VALUE : firstCount + 1;
+      assertEquals(
+          1, intents.claim("pay-1", "t162-second-owner", currentTime.plusSeconds(30), currentTime));
+      assertEquals(secondCount, intentAttempts());
+      assertEquals("t162-second-owner", intentLeaseOwner());
+      var reclaimed = payFacts();
+      assertTrue(!intents.hasOwnedLegacyLease("pay-1", "t162-first-owner", currentTime));
+      assertTrue(intents.hasOwnedLegacyLease("pay-1", "t162-second-owner", currentTime));
+      assertEquals(
+          0, intents.updateOwnedLegacyStatus("pay-1", "t162-first-owner", "DEBITED", currentTime));
+      assertEquals(
+          0,
+          intents.recordRetryOwnedLegacy(
+              "pay-1",
+              "t162-first-owner",
+              "INIT",
+              "old-owner-error",
+              currentTime.plusSeconds(5),
+              currentTime));
+      assertEquals(
+          0, intents.finishOwnedLegacy("pay-1", "t162-first-owner", "FAILED", currentTime));
+      assertEquals(reclaimed, payFacts());
+    }
+  }
+
+  /** MAX计数既能健康SUCCESS，也能读故障后60秒退避再同pay恢复，不重置或追加资金写。 */
+  @Test
+  void maximumAttemptsStillRecoverAfterControlledReadFailure() {
+    for (boolean failFirst : List.of(false, true)) {
+      seedIntentAndPayment("PENDING", "INIT");
+      fixture.update(
+          "UPDATE pay_debit_intent SET attempts=?,last_error='owned-existing-proof' WHERE id=1",
+          Integer.MAX_VALUE);
+      var before = payFacts();
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath("paid", "order-1", user, orders);
+      var service = newService(user, orders);
+      if (failFirst) {
+        org.mockito.Mockito.doThrow(new IllegalStateException("owned-t162-user-proof-fault"))
+            .when(user)
+            .operation(7L, "pay-1", 7L);
+        var started = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        assertEquals("INIT", service.process("pay-1"));
+        var finished = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        assertEquals(Integer.MAX_VALUE, intentAttempts());
+        assertNull(intentLeaseOwner());
+        assertEquals("PENDING", paymentStatus());
+        assertEquals("INIT", intentStatus());
+        assertTrue(retryErrorPresent());
+        assertTrue(
+            !intentNextRetry()
+                .isBefore(
+                    started.plusSeconds(60).truncatedTo(java.time.temporal.ChronoUnit.MILLIS)));
+        assertTrue(!intentNextRetry().isAfter(finished.plusSeconds(60)));
+        assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+        assertTrue(intents.findDue(finished, 1).isEmpty());
+        assertTrue(intents.findDueAfter(finished, null, 1).isEmpty());
+        fixture.update(
+            "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 SECOND WHERE id=1");
+        org.mockito.Mockito.doReturn(
+                ApiResponse.ok(
+                    new UserClient.BalanceOperationView(
+                        "pay-1", "DEBIT", "APPLIED", "10.000", null)))
+            .when(user)
+            .operation(7L, "pay-1", 7L);
+      }
+      assertEquals("SUCCESS", service.process("pay-1"));
+      assertEquals("SUCCESS", paymentStatus());
+      assertEquals("SUCCESS", intentStatus());
+      assertEquals(Integer.MAX_VALUE, intentAttempts());
+      assertNull(intentLeaseOwner());
+      assertNotNull(records.selectByPayNo("pay-1").get(0).paidAt);
+      assertEquals(7L, records.selectByPayNo("pay-1").get(0).userId);
+      assertEquals("order-1", records.selectByPayNo("pay-1").get(0).orderNo);
+      assertEquals(0, BigDecimal.TEN.compareTo(records.selectByPayNo("pay-1").get(0).amount));
+      assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, never()).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+    }
+  }
+
   /** 两表共同Java空白pay/order key不能授权领取，空白种类不按SQL trim缩窄。 */
   @Test
   void recoveryClaimRejectsJavaBlankKeys() {
