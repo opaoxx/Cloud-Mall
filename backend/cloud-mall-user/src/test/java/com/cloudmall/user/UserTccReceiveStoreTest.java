@@ -33,7 +33,7 @@ class UserTccReceiveStoreTest {
   void replayWithNullStoredAmountIsFixedConflict() {
     UserTccReceivePO original = stored(null);
     when(mapper.lockByPayNo("pay1")).thenReturn(original);
-    assertConflict(() -> store.claim(7L, request()));
+    assertConflict(() -> store.claim(7L, request(), 1));
     verify(mapper).claim(any());
     verify(mapper).lockByPayNo("pay1");
   }
@@ -43,8 +43,8 @@ class UserTccReceiveStoreTest {
   void firstClaimAndEquivalentReplayKeepOneWinner() {
     when(mapper.claim(any())).thenReturn(1, 0);
     when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.000")));
-    assertTrue(store.claim(7L, request()));
-    assertFalse(store.claim(7L, request()));
+    assertTrue(store.claim(7L, request(), 1));
+    assertFalse(store.claim(7L, request(), 1));
   }
 
   /** 原载荷或金额不一致沿已有幂等冲突，不改金额或用户。 */
@@ -60,7 +60,7 @@ class UserTccReceiveStoreTest {
         default -> throw new AssertionError(variant);
       }
       when(mapper.lockByPayNo("pay1")).thenReturn(original);
-      assertConflict(() -> store.claim(7L, request()));
+      assertConflict(() -> store.claim(7L, request(), 1));
     }
   }
 
@@ -177,7 +177,52 @@ class UserTccReceiveStoreTest {
   /** 用原公开事务方法执行三种动作，回滚由owned真实SQL证明。 */
   private void invokeReceiptStoreAction(String action) {
     if ("bind".equals(action)) store.bindBranch("pay1", "private-xid", 11L);
-    else store.claim(7L, request());
+    else store.claim(7L, request(), 1);
+  }
+
+  /** 仅首次winner在非启用状态回滚拒绝，disabled/null/坏状态已有重放仍无派发。 */
+  @Test
+  void observedDisabledStatusRejectsOnlyFreshWinner() {
+    for (Integer status : java.util.Arrays.asList(0, -1, null, 2)) {
+      setup();
+      when(mapper.claim(any())).thenReturn(1);
+      when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.00")));
+      var failure = assertThrows(BizException.class, () -> store.claim(7L, request(), status));
+      assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
+      assertEquals("用户不可用", failure.getMessage());
+      assertEquals(409, failure.getHttpStatus());
+      var ordered = inOrder(mapper);
+      ordered.verify(mapper).claim(any());
+      ordered.verify(mapper).lockByPayNo("pay1");
+      ordered.verifyNoMoreInteractions();
+      setup();
+      when(mapper.claim(any())).thenReturn(0);
+      when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.00")));
+      assertFalse(store.claim(7L, request(), status));
+      verify(mapper).claim(any());
+      verify(mapper).lockByPayNo("pay1");
+    }
+  }
+
+  /** 原载荷错误先于status，启用winner/replay与null来源错误保持。 */
+  @Test
+  void observedStatusGateKeepsPayloadPriorityAndEnabledDispatch() {
+    for (String variant : new String[] {"amount", "user", "missing"}) {
+      setup();
+      when(mapper.claim(any())).thenReturn(1);
+      UserTccReceivePO original = stored(new BigDecimal("10.00"));
+      if ("amount".equals(variant)) original.amount = null;
+      if ("user".equals(variant)) original.userId = 8L;
+      when(mapper.lockByPayNo("pay1")).thenReturn("missing".equals(variant) ? null : original);
+      assertEquals(
+          "TCC 接收载荷不一致",
+          assertThrows(BizException.class, () -> store.claim(7L, request(), 0)).getMessage());
+    }
+    setup();
+    when(mapper.claim(any())).thenReturn(1, 0);
+    when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.000")));
+    assertTrue(store.claim(7L, request(), 1));
+    assertFalse(store.claim(7L, request(), 1));
   }
 
   /** 固定原409不授权第二次Try或错误分支确认。 */

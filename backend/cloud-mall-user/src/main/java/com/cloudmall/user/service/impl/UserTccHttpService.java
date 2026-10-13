@@ -3,6 +3,7 @@ package com.cloudmall.user.service.impl;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.dto.BalanceTccBranchDTO;
 import com.cloudmall.user.domain.dto.UserTccTryDTO;
+import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.domain.vo.UserTccStateVO;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.service.BalanceTccDebitLocalResource;
@@ -57,8 +58,9 @@ public class UserTccHttpService {
     validate(xid, request);
     String previous = RootContext.getXID();
     if (previous != null && !previous.equals(xid)) throw conflict();
-    if (users.selectById(userId) == null) throw new BizException("COMMON_NOT_FOUND", "用户不存在", 404);
-    boolean winner = receives.claim(userId, request);
+    UserPO user = users.selectById(userId);
+    if (user == null) throw new BizException("COMMON_NOT_FOUND", "用户不存在", 404);
+    boolean winner = receives.claim(userId, request, user.status);
     if (!winner) return query.read(userId, request.operationKey, xid);
     // 2. 先提交 CLAIMED 再调用代理；即使失败、超时或崩溃也不恢复派发权限。
     boolean bound = previous == null;

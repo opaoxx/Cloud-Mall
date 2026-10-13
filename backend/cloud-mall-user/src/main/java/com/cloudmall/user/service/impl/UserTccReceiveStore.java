@@ -23,9 +23,16 @@ public class UserTccReceiveStore {
     this.mapper = mapper;
   }
 
-  /** 返回 true 的唯一调用者才允许进入 LocalTCC 代理。 */
+  /**
+   * 仅原用户状态启用的首次winner取得派发权，已有接收重放不受当前状态限制。
+   *
+   * @param userId 原调用用户标识
+   * @param request 已通过HTTP校验的不可变请求
+   * @param userStatus 调用方此前观察的用户状态，不提供读取后变化的fencing
+   * @return 是否取得首次派发权
+   */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
-  public boolean claim(Long userId, UserTccTryDTO request) {
+  public boolean claim(Long userId, UserTccTryDTO request, Integer userStatus) {
     // 1. 固定全部载荷并认领数据库唯一键。
     UserTccReceivePO receipt = new UserTccReceivePO();
     receipt.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
@@ -50,7 +57,9 @@ public class UserTccReceiveStore {
         || !Objects.equals(stored.operationKey, request.operationKey)
         || !Objects.equals(stored.ledgerKey, request.ledgerKey)
         || stored.amount.compareTo(request.amount) != 0) throw conflict();
-    // 3. 重放只读，不取得第二次派发权。
+    // 3. 原载荷已先证明；禁用首次winner必须在独立事务提交前回滚认领，不影响既有重放。
+    if (inserted == 1 && !Objects.equals(userStatus, 1))
+      throw new BizException("IDEMPOTENCY_CONFLICT", "用户不可用", 409);
     return inserted == 1;
   }
 

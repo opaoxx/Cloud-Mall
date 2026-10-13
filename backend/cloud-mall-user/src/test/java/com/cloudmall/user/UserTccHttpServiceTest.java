@@ -78,8 +78,8 @@ class UserTccHttpServiceTest {
   void repeatedClaimReadsStateWithoutRegisteringSecondBranch() {
     UserTccTryDTO request = request();
     UserTccStateVO state = state("TRYING", 17L);
-    doReturn(new com.cloudmall.user.domain.po.UserPO()).when(users).selectById(7L);
-    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class));
+    doReturn(enabledUser()).when(users).selectById(7L);
+    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1));
     doReturn(state).when(query).read(7L, request.operationKey, request.xid);
 
     service.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request);
@@ -94,8 +94,8 @@ class UserTccHttpServiceTest {
   void firstClaimRegistersResourceAndBindsObservedBranch() {
     UserTccTryDTO request = request();
     UserTccStateVO state = state("TRYING", 18L);
-    doReturn(new com.cloudmall.user.domain.po.UserPO()).when(users).selectById(7L);
-    doReturn(true).when(receives).claim(eq(7L), any(UserTccTryDTO.class));
+    doReturn(enabledUser()).when(users).selectById(7L);
+    doReturn(true).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1));
     doReturn(true).when(resource).prepare(any(), any());
     doReturn(state).when(query).read(7L, request.operationKey, request.xid);
 
@@ -117,6 +117,65 @@ class UserTccHttpServiceTest {
 
     org.junit.jupiter.api.Assertions.assertEquals(callerXid, RootContext.getXID());
     verify(query).read(7L, "tcc-debit:pay-http-1", "xid-http-1");
+  }
+
+  /** 已观察disabled状态交给独立claim事务，拒绝后不资源派发/查询/补绑或修改caller XID。 */
+  @Test
+  void disabledFreshClaimFailureCannotDispatchOrBindContext() {
+    for (Integer status : java.util.Arrays.asList(0, null, 2)) {
+      setUp();
+      var user = enabledUser();
+      user.status = status;
+      var request = request();
+      doReturn(user).when(users).selectById(7L);
+      org.mockito.Mockito.doThrow(new BizException("IDEMPOTENCY_CONFLICT", "用户不可用", 409))
+          .when(receives)
+          .claim(eq(7L), any(UserTccTryDTO.class), eq(status));
+      RootContext.bind(request.xid);
+      var failure =
+          assertThrows(
+              BizException.class,
+              () -> service.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request));
+      org.junit.jupiter.api.Assertions.assertEquals("用户不可用", failure.getMessage());
+      org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+      verify(users).selectById(7L);
+      verify(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(status));
+      verify(receives, never()).bindBranch(any(), any(), any());
+      verifyNoInteractions(resource, query);
+      org.junit.jupiter.api.Assertions.assertEquals(request.xid, RootContext.getXID());
+    }
+  }
+
+  /** disabled已有receipt仍读取原状态且不重新注册；原用户404先于认领。 */
+  @Test
+  void disabledReplayAndMissingUserKeepOriginalBoundaries() {
+    var user = enabledUser();
+    user.status = 0;
+    var request = request();
+    var state = state("CANCELLED", 19L);
+    doReturn(user).when(users).selectById(7L);
+    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(0));
+    doReturn(state).when(query).read(7L, request.operationKey, request.xid);
+    org.junit.jupiter.api.Assertions.assertSame(
+        state, service.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request));
+    verifyNoInteractions(resource);
+    verify(receives, never()).bindBranch(any(), any(), any());
+    org.junit.jupiter.api.Assertions.assertNull(RootContext.getXID());
+    setUp();
+    var failure =
+        assertThrows(
+            BizException.class,
+            () -> service.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request));
+    org.junit.jupiter.api.Assertions.assertEquals("COMMON_NOT_FOUND", failure.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(404, failure.getHttpStatus());
+    verifyNoInteractions(receives, resource, query);
+  }
+
+  /** 原合法调用夹具显式提供启用状态，不借缺证status通过新事务门。 */
+  private com.cloudmall.user.domain.po.UserPO enabledUser() {
+    var user = new com.cloudmall.user.domain.po.UserPO();
+    user.status = 1;
+    return user;
   }
 
   private UserTccTryDTO request() {

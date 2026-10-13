@@ -141,7 +141,9 @@ class UserTccReceiveStoreMySqlIT {
     var resource = mock(BalanceTccDebitLocalResource.class);
     var query = mock(UserTccStateQuery.class);
     var users = mock(UserMapper.class);
-    when(users.selectById(7L)).thenReturn(new UserPO());
+    UserPO activeUser = new UserPO();
+    activeUser.status = 1;
+    when(users.selectById(7L)).thenReturn(activeUser);
     var bridge = new UserTccHttpService(resource, store, query, users, "ops-secret");
     var mvc =
         MockMvcBuilders.standaloneSetup(new UserTccController(bridge))
@@ -211,7 +213,7 @@ class UserTccReceiveStoreMySqlIT {
     new TransactionTemplate(manager)
         .executeWithoutResult(
             status -> {
-              assertTrue(store.claim(7L, request()));
+              assertTrue(store.claim(7L, request(), 1));
               status.setRollbackOnly();
             });
     assertEquals(1, facts().size());
@@ -221,7 +223,7 @@ class UserTccReceiveStoreMySqlIT {
     tracked.reset();
     UserTccTryDTO replay = request();
     replay.amount = new BigDecimal("10.000");
-    assertFalse(store.claim(7L, replay));
+    assertFalse(store.claim(7L, replay, 1));
     assertEquals(before, facts());
     assertEquals(2, tracked.statements.size());
     tracked.reset();
