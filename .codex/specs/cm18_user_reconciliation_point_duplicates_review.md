@@ -24,6 +24,8 @@ GO。`UserTccReconciliationReadService.inspect` 的 receive、account projection
 - Owned MySQL：临时移除 receive pay UNIQUE、account user PK/唯一约束、refund operation UNIQUE（保留必要普通索引），插 exact/CI duplicate；HTTP 409、六表/read-only facts/source fingerprint 不变，finally 恢复索引并清理自有行。
 - 不启动完整服务/TC/RM，不宣称全局数据修复；资源 finally 清理。
 
+既有 ReconciliationMySqlIT 中依赖 UserTccStateQuery 的 UNKNOWN 读取预算需按已冻结 T127 真实查询数同步：StateQuery 分支由原 4 调整为 6，baseline 由原 8 调整为 10；TRYING/CONFIRMED/CANCELLED 其它预算保持。该同步仅更新旧测试断言，不改变本批生产 SQL、读顺序或业务语义。
+
 ## 4. 交付边界
 
 实现仅允许增加 ReconciliationReadService point-reader helper 并替换三处 SELECT、必要 JavaDoc/测试；不得修改 StateQuery、global exception、Mapper SQL 或业务写路径。
