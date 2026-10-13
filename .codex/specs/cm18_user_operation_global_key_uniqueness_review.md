@@ -29,7 +29,7 @@ REFUND primary proof 通过后，对 originalOperationKey 同样 count=1 才读�
 
 - Native owned MySQL：测试库临时移除 UNIQUE 后制造 duplicate primary/source/refund、wrong-origin/other-pay/case alias；GET 从 500/隐蔽 200 变 COMMON_CONFLICT，四表 no-write，finally 删除额外行并恢复 UNIQUE/index。
 - 健康无重复、100 集合、caller/404、RR 同连接、count 预算/DAO 通过；资源 cleanup 与 source checksum 保持。
-- 不访问全域 key、不修历史、不宣称 source fencing。
+- 只 count 当前 primary/source/linked 观察到的 key，不枚举全域 key、不修历史、不宣称 source fencing。
 
 ## 5. 交付边界
 
