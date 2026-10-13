@@ -528,7 +528,9 @@ public class UserServiceImpl implements UserService {
 
   /** APPLIED原DEBIT已先证明；同pay本地owner/freeze及Legacy接收互斥只读验证，DAO异常原样。 */
   private void requireAppliedDebitOwnership(BalanceLedgerPO original) {
-    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
+    BalanceDebitAttemptPO attempt =
+        readDebitOwnershipCandidate(
+            original.payNo, () -> new BizException("BALANCE_REFUND_INVALID", "原扣款不存在或未应用", 409));
     if (attempt != null
         && !("LEGACY".equals(attempt.mode)
             ? isProvenLegacyDebitOwnership(original, attempt)
@@ -562,12 +564,28 @@ public class UserServiceImpl implements UserService {
 
   /** 拒款原快照已先证明；有效Legacy或null历史均须无同pay冻结/接收，DAO异常原样传播。 */
   private void requireRejectedDebitOwnership(BalanceLedgerPO original) {
-    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(original.payNo);
+    BalanceDebitAttemptPO attempt =
+        readDebitOwnershipCandidate(
+            original.payNo, () -> new BizException(ErrorCodes.CONFLICT, "余额账本事实待核对", 409));
     requireBalanceOperationEvidence(
         attempt == null || isProvenLegacyDebitOwnership(original, attempt));
     requireBalanceOperationEvidence(balanceTccDebitMapper.selectByPayNo(original.payNo) == null);
     // 原账本/归属/冻结门已通过；拒款不能忽略独立接收事实或按其元数据过滤。
     requireBalanceOperationEvidence(!hasTccReceiveConflict(original.payNo));
+  }
+
+  /** 归属保持原单次点读；仅精确多结果调用所属入口异常工厂，其它故障/null/单行原样。 */
+  private BalanceDebitAttemptPO readDebitOwnershipCandidate(
+      String payNo, Supplier<BizException> duplicateConflictSupplier) {
+    try {
+      return balanceDebitAttemptMapper.selectByPayNo(payNo);
+    } catch (TooManyResultsException | MyBatisSystemException failure) {
+      if (failure instanceof TooManyResultsException
+          || failure.getCause() instanceof TooManyResultsException) {
+        throw duplicateConflictSupplier.get();
+      }
+      throw failure;
+    }
   }
 
   /** Legacy固定操作键保持原单次点读，仅直接多结果或其标准直接包装按幂等冲突拒绝。 */
@@ -597,7 +615,10 @@ public class UserServiceImpl implements UserService {
 
   /** 禁用用户保留原单次归属查询及404调用链，再复用本地确认来源门。 */
   private boolean confirmedTccRefund(BalanceLedgerPO original, BalanceRefundRequestDTO request) {
-    return confirmedTccRefund(original, balanceDebitAttemptMapper.selectByPayNo(request.payNo));
+    return confirmedTccRefund(
+        original,
+        readDebitOwnershipCandidate(
+            request.payNo, () -> new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404)));
   }
 
   /** 调用方已观察归属；复核原TCC元组和确认冻结，不重复读取attempt或扩展Legacy。 */
@@ -803,7 +824,9 @@ public class UserServiceImpl implements UserService {
     if (user == null) throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
 
     // 2. 先核对共享归属和历史账本；历史自定义 operationKey 也按 payNo 互斥。
-    BalanceDebitAttemptPO attempt = balanceDebitAttemptMapper.selectByPayNo(request.payNo);
+    BalanceDebitAttemptPO attempt =
+        readDebitOwnershipCandidate(
+            request.payNo, () -> new BizException("IDEMPOTENCY_CONFLICT", "支付号存在重复扣款归属记录", 409));
     if (attempt != null) ensureLegacyAttemptMatches(attempt, userId, request);
     // 有界候选保留全状态/CI历史；缺证不能作空，重复在单结果Mapper抛异常前按业务拒绝。
     List<BalanceLedgerPO> historicalCandidates =

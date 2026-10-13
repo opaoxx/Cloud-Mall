@@ -931,6 +931,177 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 十三入口遇exact/CI重复归属均按原业务拒绝，资金/接收/cache不写且恢复唯一索引。 */
+  @Test
+  void debitOwnershipDuplicateRowsKeepCallerBusinessFailures() {
+    var indexes =
+        fixture.queryForList(
+            "SHOW INDEX FROM balance_debit_attempt WHERE Column_name='pay_no' AND Non_unique=0");
+    assertEquals(1, indexes.size());
+    String uniqueIndex = (String) indexes.get(0).get("Key_name");
+    assertTrue(uniqueIndex.matches("[A-Za-z0-9_]+"));
+    fixture.execute("ALTER TABLE balance_debit_attempt DROP INDEX `" + uniqueIndex + "`");
+    try {
+      var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+      for (String route :
+          List.of(
+              "fresh-debits",
+              "fresh-compat",
+              "applied-replay-debits",
+              "applied-replay-compat",
+              "rejected-replay-debits",
+              "rejected-replay-compat",
+              "rejected-get",
+              "applied-debit-get",
+              "applied-refund-get",
+              "active-fresh",
+              "active-replay",
+              "disabled-fresh",
+              "disabled-replay")) {
+        for (boolean alias : List.of(false, true)) {
+          checks.add(
+              () -> {
+                for (String table :
+                    List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+                  fixture.update("DELETE FROM " + table);
+                fixture.update(
+                    "UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+                setEnabled(true);
+                boolean fresh = route.startsWith("fresh");
+                boolean getter = route.endsWith("get");
+                boolean disabled = route.startsWith("disabled");
+                boolean refunding = disabled || route.startsWith("active");
+                boolean rejected = route.startsWith("rejected");
+                var original =
+                    request(
+                        "owner-multi-" + route + "-" + alias, 7L, rejected ? "101.00" : "10.00");
+                var debit = new BalanceDebitRequestDTO();
+                debit.operationKey = original.payNo;
+                debit.payNo = original.payNo;
+                debit.orderNo = route.endsWith("compat") ? original.payNo : original.orderNo;
+                debit.amount = original.amount;
+                var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
+                compatible.paymentKey = original.payNo;
+                compatible.amount = original.amount;
+                org.junit.jupiter.api.function.Executable legacyDebit =
+                    () -> {
+                      if (route.endsWith("compat")) legacy.debit(7L, 7L, compatible);
+                      else legacy.debitInternal(7L, 7L, debit);
+                    };
+                if (disabled) {
+                  service.tryDebit(original);
+                  service.confirmDebit(finalizeRequest(original));
+                } else if (!fresh) {
+                  if (rejected)
+                    assertEquals(
+                        "PAYMENT_FAILED", assertThrows(BizException.class, legacyDebit).getCode());
+                  else legacyDebit.execute();
+                }
+                var refund =
+                    refundRequest(original, "owner-multi-refund:" + original.payNo, "2.00");
+                if (List.of("applied-refund-get", "active-replay", "disabled-replay")
+                    .contains(route)) legacy.refundInternal(7L, 7L, refund);
+                if (disabled) fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
+                String queryKey =
+                    "applied-refund-get".equals(route) ? refund.refundOperationKey : original.payNo;
+                try {
+                  for (int rowNumber = 1; rowNumber <= (fresh ? 2 : 1); rowNumber++) {
+                    fixture.update(
+                        "INSERT INTO"
+                            + " balance_debit_attempt(id,pay_no,operation_key,mode,xid,ledger_key,branch_id,user_id,order_no,amount,state,created_at,updated_at)"
+                            + " VALUES(?,?,?,'LEGACY',NULL,?,NULL,8,?,1,'APPLIED',NOW(3),NOW(3))",
+                        rowNumber == 1 ? -123L : -124L,
+                        alias && (rowNumber == 2 || !fresh)
+                            ? original.payNo.toUpperCase(java.util.Locale.ROOT)
+                            : original.payNo,
+                        "extra-owner-operation-" + rowNumber,
+                        "extra-owner-ledger-" + rowNumber,
+                        "extra-owner-order-" + rowNumber);
+                  }
+                  var before = allFundsFacts();
+                  var receiptBefore =
+                      fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
+                  var cache = context.getBean(StringRedisTemplate.class);
+                  org.mockito.Mockito.clearInvocations(cache);
+                  var response =
+                      getter
+                          ? operationHttp(queryKey)
+                          : refunding
+                              ? org.springframework.test.web.servlet.setup.MockMvcBuilders
+                                  .standaloneSetup(context.getBean(UserController.class))
+                                  .setControllerAdvice(
+                                      new com.cloudmall.common.web.GlobalExceptionHandler())
+                                  .build()
+                                  .perform(
+                                      org.springframework.test.web.servlet.request
+                                          .MockMvcRequestBuilders.post(
+                                              "/api/internal/users/7/balance/refunds")
+                                          .header("X-User-Id", "7")
+                                          .contentType(
+                                              org.springframework.http.MediaType.APPLICATION_JSON)
+                                          .content(
+                                              new com.fasterxml.jackson.databind.ObjectMapper()
+                                                  .writeValueAsString(refund)))
+                                  .andReturn()
+                              : route.endsWith("compat")
+                                  ? postCompatibleLegacyDebit(compatible)
+                                  : postLegacyDebit(debit);
+                  String expectedCode =
+                      disabled
+                          ? "COMMON_NOT_FOUND"
+                          : getter
+                              ? "COMMON_CONFLICT"
+                              : refunding ? "BALANCE_REFUND_INVALID" : "IDEMPOTENCY_CONFLICT";
+                  String expectedMessage =
+                      disabled
+                          ? "用户不存在"
+                          : getter ? "余额账本事实待核对" : refunding ? "原扣款不存在或未应用" : "支付号存在重复扣款归属记录";
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () ->
+                          assertEquals(
+                              disabled ? 404 : 409,
+                              response.getResponse().getStatus(),
+                              route + ":" + alias),
+                      () -> assertHttpCode(response, expectedCode),
+                      () -> {
+                        var failure =
+                            assertThrows(
+                                BizException.class,
+                                () -> {
+                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
+                                  else if (refunding) legacy.refundInternal(7L, 7L, refund);
+                                  else legacyDebit.execute();
+                                });
+                        assertEquals(expectedCode, failure.getCode());
+                        assertEquals(expectedMessage, failure.getMessage());
+                      },
+                      () -> assertEquals(before, allFundsFacts()),
+                      () ->
+                          assertEquals(
+                              receiptBefore,
+                              fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id")),
+                      () -> org.mockito.Mockito.verifyNoInteractions(cache));
+                } finally {
+                  fixture.update("DELETE FROM balance_debit_attempt WHERE id IN (-123,-124)");
+                }
+              });
+        }
+      }
+      org.junit.jupiter.api.Assertions.assertAll(checks);
+    } finally {
+      fixture.update("DELETE FROM balance_debit_attempt WHERE id IN (-123,-124)");
+      fixture.execute(
+          "ALTER TABLE balance_debit_attempt ADD UNIQUE INDEX `" + uniqueIndex + "` (pay_no)");
+      assertEquals(
+          1,
+          fixture
+              .queryForList(
+                  "SHOW INDEX FROM balance_debit_attempt WHERE Column_name='pay_no' AND"
+                      + " Non_unique=0")
+              .size());
+    }
+  }
+
   /** 当前pay候选不能隐藏其它pay同操作键，双Legacy入口多结果必须409且不写/cache。 */
   @Test
   void legacyDebitLedgerDuplicateKeysKeepBusinessConflicts() {

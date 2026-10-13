@@ -1714,6 +1714,157 @@ class BalanceLedgerServiceTest {
     if (route.endsWith("get")) assertOperationReadOnly();
   }
 
+  /** 十三入口的归属精确多结果只转换到各自原业务错误，不运行后置冻结/接收或资金写。 */
+  @Test
+  void ownershipMultipleResultsKeepCallerBusinessFailures() {
+    for (String route :
+        java.util.List.of(
+            "fresh-debits",
+            "fresh-compat",
+            "applied-replay-debits",
+            "applied-replay-compat",
+            "rejected-replay-debits",
+            "rejected-replay-compat",
+            "rejected-get",
+            "applied-debit-get",
+            "applied-refund-get",
+            "active-fresh",
+            "active-replay",
+            "disabled-fresh",
+            "disabled-replay")) {
+      for (boolean wrapped : java.util.List.of(false, true)) {
+        var action = installOwnershipClassificationRoute(route);
+        var duplicate =
+            new org.apache.ibatis.exceptions.TooManyResultsException("ownership-duplicate");
+        RuntimeException failure =
+            wrapped ? new org.mybatis.spring.MyBatisSystemException(duplicate) : duplicate;
+        org.mockito.Mockito.doThrow(failure).when(balanceDebitAttemptMapper).selectByPayNo("pay-1");
+        var rejected = assertThrows(com.cloudmall.common.error.BizException.class, action);
+        boolean disabled = route.startsWith("disabled");
+        boolean getter = route.endsWith("get");
+        boolean active = route.startsWith("active");
+        assertEquals(
+            disabled
+                ? "COMMON_NOT_FOUND"
+                : getter
+                    ? "COMMON_CONFLICT"
+                    : active ? "BALANCE_REFUND_INVALID" : "IDEMPOTENCY_CONFLICT",
+            rejected.getCode());
+        assertEquals(
+            disabled ? "用户不存在" : getter ? "余额账本事实待核对" : active ? "原扣款不存在或未应用" : "支付号存在重复扣款归属记录",
+            rejected.getMessage());
+        assertEquals(disabled ? 404 : 409, rejected.getHttpStatus());
+        verify(balanceDebitAttemptMapper).selectByPayNo("pay-1");
+        org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, userTccReceiveMapper);
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        assertLegacyNoMoneyOrCacheWrite();
+        if (getter) assertOperationReadOnly();
+      }
+    }
+  }
+
+  /** 非目标归属异常保留原对象，旧User/主行/原扣款前置错误不被新分类覆盖。 */
+  @Test
+  void ownershipClassificationKeepsOtherFaultsAndPriority() {
+    for (String route :
+        java.util.List.of(
+            "fresh-debits",
+            "fresh-compat",
+            "applied-replay-debits",
+            "applied-replay-compat",
+            "rejected-replay-debits",
+            "rejected-replay-compat",
+            "rejected-get",
+            "applied-debit-get",
+            "applied-refund-get",
+            "active-fresh",
+            "active-replay",
+            "disabled-fresh",
+            "disabled-replay")) {
+      for (String shape :
+          java.util.List.of(
+              "resource",
+              "sql-wrapper",
+              "nested-too-many",
+              "other-wrapper",
+              "runtime-cause",
+              "message-only")) {
+        var action = installOwnershipClassificationRoute(route);
+        RuntimeException failure =
+            switch (shape) {
+              case "resource" ->
+                  new org.springframework.dao.DataAccessResourceFailureException(
+                      "ownership-jdbc-fault");
+              case "sql-wrapper" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new java.sql.SQLException("ownership-sql-fault"));
+              case "nested-too-many" ->
+                  new org.mybatis.spring.MyBatisSystemException(
+                      new org.apache.ibatis.exceptions.PersistenceException(
+                          "outer",
+                          new org.apache.ibatis.exceptions.TooManyResultsException("nested")));
+              case "other-wrapper" ->
+                  new org.apache.ibatis.exceptions.PersistenceException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              case "runtime-cause" ->
+                  new IllegalArgumentException(
+                      "outer", new org.apache.ibatis.exceptions.TooManyResultsException("nested"));
+              default -> new IllegalArgumentException("TooManyResultsException is only text");
+            };
+        org.mockito.Mockito.doThrow(failure).when(balanceDebitAttemptMapper).selectByPayNo("pay-1");
+        org.junit.jupiter.api.Assertions.assertSame(
+            failure, assertThrows(RuntimeException.class, action));
+        verify(balanceDebitAttemptMapper).selectByPayNo("pay-1");
+        org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper, userTccReceiveMapper);
+        verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+        assertLegacyNoMoneyOrCacheWrite();
+        if (route.endsWith("get")) assertOperationReadOnly();
+      }
+      var guarded = installOwnershipClassificationRoute(route);
+      org.mockito.Mockito.doThrow(
+              new org.apache.ibatis.exceptions.TooManyResultsException("ownership-must-not-run"))
+          .when(balanceDebitAttemptMapper)
+          .selectByPayNo("pay-1");
+      String expectedCode;
+      if (route.endsWith("get")) {
+        operationSource.balanceAfter = null;
+        expectedCode = "COMMON_CONFLICT";
+      } else if (route.startsWith("active") || route.startsWith("disabled")) {
+        originalRefundDebit.balanceAfter = null;
+        expectedCode = route.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID";
+      } else {
+        when(userMapper.selectActiveForUpdate(7L)).thenReturn(null);
+        expectedCode = "COMMON_NOT_FOUND";
+      }
+      assertEquals(
+          expectedCode,
+          assertThrows(com.cloudmall.common.error.BizException.class, guarded).getCode());
+      org.mockito.Mockito.verifyNoInteractions(
+          balanceDebitAttemptMapper, balanceTccDebitMapper, userTccReceiveMapper);
+      verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
+      assertLegacyNoMoneyOrCacheWrite();
+    }
+  }
+
+  /** 为十三入口建立完整来源，经公开Service执行归属校验及其异常工厂。 */
+  private org.junit.jupiter.api.function.Executable installOwnershipClassificationRoute(
+      String route) {
+    if (route.startsWith("fresh")
+        || route.contains("replay-debits")
+        || route.contains("replay-compat")) {
+      String entry = route.endsWith("compat") ? "compat" : "debits";
+      String state =
+          route.startsWith("fresh") ? null : route.startsWith("rejected") ? "REJECTED" : "APPLIED";
+      var request = installLegacyDebit(entry, state);
+      return () -> invokeLegacyDebit(entry, request);
+    }
+    if (route.startsWith("disabled")) {
+      var request = installRefundProofMode(route);
+      return () -> userService.refundInternal(7L, 7L, request);
+    }
+    return installReceiveClassificationRoute(route);
+  }
+
   /** 双Legacy入口fresh/成功/拒款重放的固定键精确多结果均409，无后置读取或写入。 */
   @Test
   void legacyDebitFixedKeyMultipleResultsKeepBusinessConflict() {
