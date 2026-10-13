@@ -2,7 +2,7 @@
 
 ## 1. 结论与范围
 
-GO。ReceiptStore.read/lock 直接返回 CI 查询行；请求 pay-1 可能得到 PAY-1 receipt，Facade/Callback 可读取或操作异源终态。
+GO。ReceiptStore.read/lock 直接返回 CI 查询行；请求 pay-1 可能得到 PAY-1 receipt，Facade/read 会输出异源终态。Callback 已有 validateReceipt 精确核 payNo，本批只回归其对 alias 的拒绝/缺失/终态语义，不声称旧 Callback 会操作异源终态。
 
 本批只补两个 getter 的 exact payNo identity，不改 claim/transition/callback SQL。
 
