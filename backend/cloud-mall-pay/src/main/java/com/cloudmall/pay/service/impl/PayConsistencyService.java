@@ -219,6 +219,12 @@ public class PayConsistencyService {
 
       // 2. 下单支付状态未知时不得扣款或退款；明确取消且未扣款直接失败。
       OrderClient.OrderView order = readOrderState(intent);
+      // 已记录退款方向不能回到订单支付，须先证明取消和库存回滚完成。
+      if (operation != null
+          && ("REFUND_PENDING".equals(intent.status)
+              || "REFUND_PENDING".equals(observedPaymentStatus))
+          && !("CANCELLED".equals(order.status()) && stockActionSucceeded(order)))
+        throw new IllegalStateException("退款恢复阶段缺少订单取消或库存回滚证据");
       if (operation != null && operation.refundOperationKey() != null) {
         if ("CANCELLED".equals(order.status()) && stockActionSucceeded(order)) {
           confirmRefundLedger(intent, operation.refundOperationKey());

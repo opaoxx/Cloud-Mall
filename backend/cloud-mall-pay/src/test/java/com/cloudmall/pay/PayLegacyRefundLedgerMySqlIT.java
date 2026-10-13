@@ -981,6 +981,150 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
   }
 
+  /** 六组退款方向在取消和库存完成时保原退款或已退款marker恢复。 */
+  @Test
+  void completedCancellationKeepsRefundAndMarkerRecoveryWithRealPay() {
+    for (String originalStatus :
+        java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String paymentStatus :
+          java.util.List.of("PENDING", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+        if (!"REFUND_PENDING".equals(originalStatus) && !"REFUND_PENDING".equals(paymentStatus))
+          continue;
+        for (boolean markerPresent : java.util.List.of(false, true)) {
+          seedIntentAndPayment(paymentStatus, originalStatus);
+          UserClient user = mock(UserClient.class);
+          OrderClient orders = mock(OrderClient.class);
+          configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+          org.mockito.Mockito.doReturn(
+                  ApiResponse.ok(
+                      new UserClient.BalanceOperationView(
+                          "pay-1",
+                          "DEBIT",
+                          "APPLIED",
+                          "10.000",
+                          markerPresent ? "refund:pay-1" : null)))
+              .when(user)
+              .operation(7L, "pay-1", 7L);
+          assertEquals("REFUNDED", newService(user, orders).process("pay-1"));
+          assertEquals("REFUNDED", intentStatus());
+          assertEquals("REFUNDED", paymentStatus());
+          assertEquals(1, intentAttempts());
+          assertNull(intentLeaseOwner());
+          verify(user, never()).debit(any(), any(), any());
+          verify(user, org.mockito.Mockito.times(markerPresent ? 0 : 1))
+              .refund(any(), any(), any());
+          verify(orders, never()).paid(any(), any());
+        }
+      }
+    }
+  }
+
+  /** 取消/回滚证据补齐后，同支付下一次恢复只执行原退款一次。 */
+  @Test
+  void refundRecoveryCanResumeAfterCancellationEvidenceWithRealPay() {
+    for (String paymentStatus : java.util.List.of("PENDING", "REFUND_PENDING")) {
+      String originalStatus = "PENDING".equals(paymentStatus) ? "REFUND_PENDING" : "INIT";
+      seedIntentAndPayment(paymentStatus, originalStatus);
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+      var service = newService(user, orders);
+      when(orders.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")));
+      assertEquals("REFUND_PENDING", service.process("pay-1"));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, never()).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+      assertEquals("REFUND_PENDING", intentStatus());
+      assertEquals(paymentStatus, paymentStatus());
+      assertEquals(1, intentAttempts());
+      assertNull(intentLeaseOwner());
+      fixture.update(
+          "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 MINUTE WHERE"
+              + " pay_no='pay-1'");
+      when(orders.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", "CANCELLED", new BigDecimal("10.000"), 7L, "SUCCEEDED")));
+      assertEquals("REFUNDED", service.process("pay-1"));
+      assertEquals("REFUNDED", intentStatus());
+      assertEquals("REFUNDED", paymentStatus());
+      assertEquals(2, intentAttempts());
+      assertNull(intentLeaseOwner());
+      assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+      assertEquals("pay-1", fixture.queryForObject("SELECT pay_no FROM pay_record", String.class));
+      assertEquals(
+          new BigDecimal("10.00"),
+          fixture.queryForObject("SELECT amount FROM pay_record", BigDecimal.class));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+    }
+  }
+
+  /** 已记录退款方向但取消/库存证据不完整时，不得回到正向支付或写阶段。 */
+  @Test
+  void refundRecoveryRequiresCancelledOrderAndCompletedStockWithRealPay() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String originalStatus :
+        java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String paymentStatus :
+          java.util.List.of("PENDING", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+        if (!"REFUND_PENDING".equals(originalStatus) && !"REFUND_PENDING".equals(paymentStatus))
+          continue;
+        for (String orderStatus :
+            java.util.List.of("PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED")) {
+          for (String stockAction :
+              java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+            if ("CANCELLED".equals(orderStatus) && "SUCCEEDED".equals(stockAction)) continue;
+            assertions.add(
+                () -> {
+                  seedIntentAndPayment(paymentStatus, originalStatus);
+                  var before = payFacts();
+                  UserClient user = mock(UserClient.class);
+                  OrderClient orders = mock(OrderClient.class);
+                  configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+                  when(orders.paymentState("order-1", 7L))
+                      .thenReturn(
+                          ApiResponse.ok(
+                              new OrderClient.OrderView(
+                                  "order-1",
+                                  orderStatus,
+                                  new BigDecimal("10.000"),
+                                  7L,
+                                  stockAction)));
+                  String result = newService(user, orders).process("pay-1");
+                  org.junit.jupiter.api.Assertions.assertAll(
+                      () -> assertEquals("REFUND_PENDING", result),
+                      () -> verify(orders, never()).paid(any(), any()),
+                      () -> verify(user, never()).debit(any(), any(), any()),
+                      () -> verify(user, never()).refund(any(), any(), any()));
+                  assertEquals("REFUND_PENDING", intentStatus());
+                  assertEquals(paymentStatus, paymentStatus());
+                  assertEquals(1, intentAttempts());
+                  assertNull(intentLeaseOwner());
+                  assertNotNull(intentNextRetry());
+                  assertTrue(
+                      fixture
+                          .queryForObject(
+                              "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'",
+                              String.class)
+                          .contains("退款恢复阶段缺少订单取消或库存回滚证据"));
+                  assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+                });
+          }
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 正常拒绝仍FAILED，冲突来源修正后同支付可恢复成功/退款/初始拒绝。 */
   @Test
   void rejectedDebitKeepsHealthyFailureAndCanResumeAfterRepairWithRealPay() {
