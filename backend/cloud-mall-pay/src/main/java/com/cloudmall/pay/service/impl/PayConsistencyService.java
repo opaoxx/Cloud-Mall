@@ -139,8 +139,8 @@ public class PayConsistencyService {
     // 4. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
     PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
     if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
-    requireLegacyRoute(payNo, intent);
-    return processClaimed(intent, claimToken);
+    PayRecordPO payment = requireLegacyRoute(payNo, intent);
+    return processClaimed(intent, claimToken, payment);
   }
 
   /** 恢复入口必须独立于caller事务；拒绝发生在catch/retry外，保留原调用者上下文。 */
@@ -151,8 +151,12 @@ public class PayConsistencyService {
     }
   }
 
-  /** 保留协议错误优先级，再核原请求键与两表载荷；查询后漂移不属于本校验的保证。 */
-  private void requireLegacyRoute(String requestedPayNo, PayDebitIntentPO intent) {
+  /**
+   * 保留协议错误优先级，再核原请求键与两表载荷；查询后漂移不属于本校验的保证。
+   *
+   * @return 本次已校验的原支付记录，不再额外读取或改写状态
+   */
+  private PayRecordPO requireLegacyRoute(String requestedPayNo, PayDebitIntentPO intent) {
     // 1. 原模式先核对，不用当前开关改写协议或把模式错误转换成载荷冲突。
     PayDebitModes.requireSupported(intent.debitMode);
     List<PayRecordPO> records = payRecordMapper.selectByPayNo(requestedPayNo);
@@ -175,6 +179,7 @@ public class PayConsistencyService {
         || intent.amount.compareTo(payment.amount) != 0) {
       throw new BizException(ErrorCodes.CONFLICT, "支付意图与原支付记录不一致", 409);
     }
+    return payment;
   }
 
   /** 正金额须无损落在DECIMAL(18,2)，允许数值相等的额外尾零。 */
@@ -186,8 +191,12 @@ public class PayConsistencyService {
   }
 
   /** 先核对用户账本，再按订单确定成功、等待或唯一退款。 */
-  private String processClaimed(PayDebitIntentPO intent, String claimToken) {
-    String retryStatus = "INIT";
+  private String processClaimed(PayDebitIntentPO intent, String claimToken, PayRecordPO payment) {
+    String observedPaymentStatus = payment.status;
+    String retryStatus =
+        "REFUND_PENDING".equals(observedPaymentStatus)
+            ? "REFUND_PENDING"
+            : "ORDER_SYNC_UNKNOWN".equals(observedPaymentStatus) ? "ORDER_SYNC_UNKNOWN" : "INIT";
     try {
       // 1. 用户账本是扣款事实；404 只表示当前未观察到，不能抹去已记录的恢复阶段。
       UserClient.BalanceOperationView operation = readDebitOperation(intent);
@@ -215,6 +224,8 @@ public class PayConsistencyService {
       }
       if (operation == null && !"INIT".equals(intent.status))
         throw new IllegalStateException("已有资金恢复状态但原扣款账本缺失");
+      if (operation == null && !"PENDING".equals(observedPaymentStatus))
+        throw new IllegalStateException("原支付记录已进入资金恢复阶段但扣款账本缺失");
       if (operation == null && "CANCELLED".equals(order.status()))
         return failWithoutDebit(intent, claimToken);
       if (operation == null) {
@@ -267,7 +278,8 @@ public class PayConsistencyService {
       // 6. 任何查询或远程结果未知都保留原 payNo 并定时重试，禁止猜测退款。
       if ("DEBITED".equals(intent.status) || "ORDER_SYNC_UNKNOWN".equals(intent.status))
         retryStatus = "ORDER_SYNC_UNKNOWN";
-      if ("REFUND_PENDING".equals(intent.status)) retryStatus = "REFUND_PENDING";
+      if ("REFUND_PENDING".equals(intent.status) || "REFUND_PENDING".equals(observedPaymentStatus))
+        retryStatus = "REFUND_PENDING";
       PayDebitIntentPO durableState = payDebitIntentMapper.findByPayNo(intent.payNo);
       if (durableState != null && "REFUND_PENDING".equals(durableState.status))
         retryStatus = "REFUND_PENDING";

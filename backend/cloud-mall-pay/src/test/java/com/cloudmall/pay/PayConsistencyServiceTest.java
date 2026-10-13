@@ -803,6 +803,149 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** INIT与支付记录阶段错位缺证后，补原账本仍可沿同支付恢复。 */
+  @Test
+  void paymentProjectionCanResumeAfterOriginalDebit() {
+    for (String paymentStatus : java.util.List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      setUp();
+      configureOrderIdentityPath("fresh-debit", "order-1");
+      payRecordMapper.selectByPayNo("pay-1").get(0).status = paymentStatus;
+      boolean refundPending = "REFUND_PENDING".equals(paymentStatus);
+      when(orderClient.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1",
+                      refundPending ? "CANCELLED" : "PAID",
+                      new BigDecimal("10.000"),
+                      7L,
+                      "SUCCEEDED")));
+      assertEquals(paymentStatus, consistencyService.process("pay-1"));
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+      var retriedIntent = intent();
+      retriedIntent.status = paymentStatus;
+      when(intentMapper.findByPayNo("pay-1")).thenReturn(retriedIntent);
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView("pay-1", "DEBIT", "APPLIED", "10.000", null)))
+          .when(userClient)
+          .operation(7L, "pay-1", 7L);
+      String expectedTerminal = refundPending ? "REFUNDED" : "SUCCESS";
+      assertEquals(expectedTerminal, consistencyService.process("pay-1"));
+      verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq(expectedTerminal), any());
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, org.mockito.Mockito.times(refundPending ? 1 : 0))
+          .refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+    }
+  }
+
+  /** INIT意图不能覆盖已推进的支付记录来源；缺账本只保原重试方向。 */
+  @Test
+  void paymentProjectionPreventsFreshFundsWhenDebitMissing() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String paymentStatus : java.util.List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String orderStatus :
+          java.util.List.of("PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED")) {
+        for (String stockAction :
+            java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+          assertions.add(
+              () -> {
+                setUp();
+                configureOrderIdentityPath("fresh-debit", "order-1");
+                payRecordMapper.selectByPayNo("pay-1").get(0).status = paymentStatus;
+                org.mockito.Mockito.clearInvocations(payRecordMapper);
+                when(orderClient.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                orderStatus,
+                                new BigDecimal("10.000"),
+                                7L,
+                                stockAction)));
+                String result = consistencyService.process("pay-1");
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> assertEquals(paymentStatus, result),
+                    () -> verify(userClient, never()).debit(any(), any(), any()),
+                    () -> verify(orderClient, never()).paid(any(), any()),
+                    () -> verify(userClient, never()).refund(any(), any(), any()));
+                verify(intentMapper, never()).updateOwnedLegacyStatus(any(), any(), any(), any());
+                verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+                verify(payRecordMapper, org.mockito.Mockito.times(2)).selectByPayNo("pay-1");
+                verify(intentMapper)
+                    .recordRetryOwnedLegacy(
+                        eq("pay-1"), anyString(), eq(paymentStatus), anyString(), any(), any());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 原支付记录的等待方向在账本/订单故障及APPLIED之后失败时仍须保留。 */
+  @Test
+  void paymentProjectionRetryDirectionSurvivesReadFailures() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String paymentStatus : java.util.List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String failurePoint : java.util.List.of("user", "order", "bad-debit", "stock-pending")) {
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath("fresh-debit", "order-1");
+              payRecordMapper.selectByPayNo("pay-1").get(0).status = paymentStatus;
+              org.mockito.Mockito.clearInvocations(payRecordMapper);
+              if ("user".equals(failurePoint))
+                org.mockito.Mockito.doThrow(
+                        new IllegalStateException("controlled-user-read-failure"))
+                    .when(userClient)
+                    .operation(7L, "pay-1", 7L);
+              else {
+                org.mockito.Mockito.doReturn(
+                        ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "pay-1",
+                                "DEBIT",
+                                "APPLIED",
+                                "bad-debit".equals(failurePoint) ? "11.00" : "10.000",
+                                null)))
+                    .when(userClient)
+                    .operation(7L, "pay-1", 7L);
+                if ("order".equals(failurePoint))
+                  when(orderClient.paymentState("order-1", 7L))
+                      .thenThrow(new IllegalStateException("controlled-order-read-failure"));
+                else
+                  when(orderClient.paymentState("order-1", 7L))
+                      .thenReturn(
+                          ApiResponse.ok(
+                              new OrderClient.OrderView(
+                                  "order-1", "PAID", BigDecimal.TEN, 7L, "UNKNOWN")));
+              }
+              String result = consistencyService.process("pay-1");
+              assertEquals(paymentStatus, result);
+              verify(userClient, never()).debit(any(), any(), any());
+              verify(userClient, never()).refund(any(), any(), any());
+              verify(orderClient, never()).paid(any(), any());
+
+              verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+              verify(payRecordMapper, org.mockito.Mockito.times(2)).selectByPayNo("pay-1");
+              verify(intentMapper)
+                  .recordRetryOwnedLegacy(
+                      eq("pay-1"), anyString(), eq(paymentStatus), anyString(), any(), any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 推进阶段缺证后补原账本，下一次同支付恢复成功或完成原退款。 */
   @Test
   void advancedRecoveryResumesAfterOriginalDebitProof() {

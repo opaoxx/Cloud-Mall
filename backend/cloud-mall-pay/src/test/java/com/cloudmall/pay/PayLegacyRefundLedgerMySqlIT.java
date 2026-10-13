@@ -981,6 +981,162 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
   }
 
+  /** INIT与支付记录阶段错位缺证后，补原账本仍可沿同支付恢复。 */
+  @Test
+  void paymentProjectionCanResumeAfterOriginalDebitWithRealPay() {
+    for (String paymentStatus : java.util.List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      seedIntentAndPayment(paymentStatus, "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath("fresh-debit", "order-1", user, orders);
+      var service = newService(user, orders);
+      boolean refundPending = "REFUND_PENDING".equals(paymentStatus);
+      when(orders.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1",
+                      refundPending ? "CANCELLED" : "PAID",
+                      new BigDecimal("10.000"),
+                      7L,
+                      "SUCCEEDED")));
+      assertEquals(paymentStatus, service.process("pay-1"));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, never()).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+      assertEquals(paymentStatus, intentStatus());
+      assertEquals(paymentStatus, paymentStatus());
+      assertEquals(1, intentAttempts());
+      assertNull(intentLeaseOwner());
+      fixture.update(
+          "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 MINUTE WHERE"
+              + " pay_no='pay-1'");
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView("pay-1", "DEBIT", "APPLIED", "10.000", null)))
+          .when(user)
+          .operation(7L, "pay-1", 7L);
+      String expectedTerminal = refundPending ? "REFUNDED" : "SUCCESS";
+      assertEquals(expectedTerminal, service.process("pay-1"));
+      assertEquals(expectedTerminal, intentStatus());
+      assertEquals(expectedTerminal, paymentStatus());
+      assertEquals(2, intentAttempts());
+      assertNull(intentLeaseOwner());
+      assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+      assertEquals("pay-1", fixture.queryForObject("SELECT pay_no FROM pay_record", String.class));
+      assertEquals(
+          new BigDecimal("10.00"),
+          fixture.queryForObject("SELECT amount FROM pay_record", BigDecimal.class));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, org.mockito.Mockito.times(refundPending ? 1 : 0)).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+    }
+  }
+
+  /** INIT意图不能覆盖已推进的支付记录来源；缺账本只保原重试方向。 */
+  @Test
+  void paymentProjectionPreventsFreshFundsWhenDebitMissingWithRealPay() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String paymentStatus : java.util.List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String orderStatus :
+          java.util.List.of("PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED")) {
+        for (String stockAction :
+            java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+          assertions.add(
+              () -> {
+                seedIntentAndPayment(paymentStatus, "INIT");
+                var before = payFacts();
+                UserClient user = mock(UserClient.class);
+                OrderClient orders = mock(OrderClient.class);
+                configureRemoteOrderIdentityPath("fresh-debit", "order-1", user, orders);
+                when(orders.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                orderStatus,
+                                new BigDecimal("10.000"),
+                                7L,
+                                stockAction)));
+                String result = newService(user, orders).process("pay-1");
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> assertEquals(paymentStatus, result),
+                    () -> verify(user, never()).debit(any(), any(), any()),
+                    () -> verify(orders, never()).paid(any(), any()),
+                    () -> verify(user, never()).refund(any(), any(), any()));
+                assertEquals(paymentStatus, intentStatus());
+                assertEquals(paymentStatus, paymentStatus());
+                assertEquals(1, intentAttempts());
+                assertNull(intentLeaseOwner());
+                assertNotNull(intentNextRetry());
+                assertTrue(retryErrorPresent());
+                assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 原支付记录的等待方向在账本/订单故障及APPLIED之后失败时仍须保留。 */
+  @Test
+  void paymentProjectionRetryDirectionSurvivesReadFailuresWithRealPay() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String paymentStatus : java.util.List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String failurePoint : java.util.List.of("user", "order", "bad-debit", "stock-pending")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment(paymentStatus, "INIT");
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath("fresh-debit", "order-1", user, orders);
+              if ("user".equals(failurePoint))
+                org.mockito.Mockito.doThrow(
+                        new IllegalStateException("controlled-user-read-failure"))
+                    .when(user)
+                    .operation(7L, "pay-1", 7L);
+              else {
+                org.mockito.Mockito.doReturn(
+                        ApiResponse.ok(
+                            new UserClient.BalanceOperationView(
+                                "pay-1",
+                                "DEBIT",
+                                "APPLIED",
+                                "bad-debit".equals(failurePoint) ? "11.00" : "10.000",
+                                null)))
+                    .when(user)
+                    .operation(7L, "pay-1", 7L);
+                if ("order".equals(failurePoint))
+                  when(orders.paymentState("order-1", 7L))
+                      .thenThrow(new IllegalStateException("controlled-order-read-failure"));
+                else
+                  when(orders.paymentState("order-1", 7L))
+                      .thenReturn(
+                          ApiResponse.ok(
+                              new OrderClient.OrderView(
+                                  "order-1", "PAID", BigDecimal.TEN, 7L, "UNKNOWN")));
+              }
+              String result = newService(user, orders).process("pay-1");
+              assertEquals(paymentStatus, result);
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, never()).refund(any(), any(), any());
+              verify(orders, never()).paid(any(), any());
+              assertEquals(paymentStatus, intentStatus());
+              assertEquals(paymentStatus, paymentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertNotNull(intentNextRetry());
+              assertTrue(retryErrorPresent());
+              assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 推进阶段缺证后补原账本，下一次同支付恢复成功或完成原退款。 */
   @Test
   void advancedRecoveryResumesAfterOriginalDebitProofWithRealPay() {
