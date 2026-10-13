@@ -26,6 +26,8 @@ readDebitOperation 已处理的 404/null result 也由 recheck helper 安全归�
 - 同 pay 补证后下一次恢复可 SUCCESS，不重复 debit；旧 fresh fixture 明确首次 404→POST APPLIED→终态 recheck APPLIED。SUCCESS RPC/GET 预算增加一次，退款预算不变。
 - Owned Pay + controlled User/Order Feign，原 Pay checksum/资源清理，不启动服务/RM/TC；不宣称完整 source fencing。
 
+PayLegacyRefundLedgerMySqlIT 仅可采用 test-only 资源修复：BeforeAll source Hikari max2/min1；owned schema 创建后共享 owned Hikari max6/min1，BeforeEach 复用同一 pool，不为每个 case 新建 DriverManager DataSource；AfterAll 断言 active=0，并在 finally 关闭 owned/source 两 pool、精确 DROP owned schema。不得新增依赖、flag、业务配置或端口，原 DDL/事务/SQL/fingerprint 语义保持。失败 run 若 AfterAll 无法连接，必须从日志精确提取 `cm16t77_<uuid>`、dump 归档并通过 Docker Unix socket 回收；该失败跨度不宣称已完成指纹验证。成功重跑需证明原 Pay 前后 fingerprint 一致、pool closed、owned schema 消失。
+
 ## 5. 交付边界
 
 实现仅允许在 `finishSuccess` 前增加纯 recheck helper/调用及必要 JavaDoc/测试；不得修改 refund/FAILED/claim/terminal transaction/API。
