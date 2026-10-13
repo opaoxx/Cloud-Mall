@@ -33,7 +33,7 @@ class UserTccReceiveStoreTest {
   void replayWithNullStoredAmountIsFixedConflict() {
     UserTccReceivePO original = stored(null);
     when(mapper.lockByPayNo("pay1")).thenReturn(original);
-    assertConflict(() -> store.claim(7L, request(), 1));
+    assertConflict(() -> store.claim(7L, request(), 1, true));
     verify(mapper).claim(any());
     verify(mapper).lockByPayNo("pay1");
   }
@@ -43,8 +43,8 @@ class UserTccReceiveStoreTest {
   void firstClaimAndEquivalentReplayKeepOneWinner() {
     when(mapper.claim(any())).thenReturn(1, 0);
     when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.000")));
-    assertTrue(store.claim(7L, request(), 1));
-    assertFalse(store.claim(7L, request(), 1));
+    assertTrue(store.claim(7L, request(), 1, true));
+    assertFalse(store.claim(7L, request(), 1, true));
   }
 
   /** 原载荷或金额不一致沿已有幂等冲突，不改金额或用户。 */
@@ -60,7 +60,7 @@ class UserTccReceiveStoreTest {
         default -> throw new AssertionError(variant);
       }
       when(mapper.lockByPayNo("pay1")).thenReturn(original);
-      assertConflict(() -> store.claim(7L, request(), 1));
+      assertConflict(() -> store.claim(7L, request(), 1, true));
     }
   }
 
@@ -177,7 +177,7 @@ class UserTccReceiveStoreTest {
   /** 用原公开事务方法执行三种动作，回滚由owned真实SQL证明。 */
   private void invokeReceiptStoreAction(String action) {
     if ("bind".equals(action)) store.bindBranch("pay1", "private-xid", 11L);
-    else store.claim(7L, request(), 1);
+    else store.claim(7L, request(), 1, true);
   }
 
   /** 仅首次winner在非启用状态回滚拒绝，disabled/null/坏状态已有重放仍无派发。 */
@@ -187,7 +187,8 @@ class UserTccReceiveStoreTest {
       setup();
       when(mapper.claim(any())).thenReturn(1);
       when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.00")));
-      var failure = assertThrows(BizException.class, () -> store.claim(7L, request(), status));
+      var failure =
+          assertThrows(BizException.class, () -> store.claim(7L, request(), status, true));
       assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
       assertEquals("用户不可用", failure.getMessage());
       assertEquals(409, failure.getHttpStatus());
@@ -198,7 +199,7 @@ class UserTccReceiveStoreTest {
       setup();
       when(mapper.claim(any())).thenReturn(0);
       when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.00")));
-      assertFalse(store.claim(7L, request(), status));
+      assertFalse(store.claim(7L, request(), status, true));
       verify(mapper).claim(any());
       verify(mapper).lockByPayNo("pay1");
     }
@@ -216,13 +217,44 @@ class UserTccReceiveStoreTest {
       when(mapper.lockByPayNo("pay1")).thenReturn("missing".equals(variant) ? null : original);
       assertEquals(
           "TCC 接收载荷不一致",
-          assertThrows(BizException.class, () -> store.claim(7L, request(), 0)).getMessage());
+          assertThrows(BizException.class, () -> store.claim(7L, request(), 0, true)).getMessage());
     }
     setup();
     when(mapper.claim(any())).thenReturn(1, 0);
     when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.000")));
-    assertTrue(store.claim(7L, request(), 1));
-    assertFalse(store.claim(7L, request(), 1));
+    assertTrue(store.claim(7L, request(), 1, true));
+    assertFalse(store.claim(7L, request(), 1, true));
+  }
+
+  /** 仅新winner在关闭新Try模式时回滚，已有接收0重放不受模式限制。 */
+  @Test
+  void disabledDebitModeRejectsOnlyFreshWinner() {
+    when(mapper.claim(any())).thenReturn(1, 0);
+    when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.00")));
+    var failure = assertThrows(BizException.class, () -> store.claim(7L, request(), 1, false));
+    assertEquals("PAY_DEBIT_MODE_UNAVAILABLE", failure.getCode());
+    assertEquals("当前未启用此扣款方式", failure.getMessage());
+    assertEquals(503, failure.getHttpStatus());
+    assertFalse(store.claim(7L, request(), 1, false));
+    verify(mapper, times(2)).claim(any());
+    verify(mapper, times(2)).lockByPayNo("pay1");
+  }
+
+  /** 关闭模式不能覆盖原payload/status错误，正常开启的winner和replay仍保持。 */
+  @Test
+  void disabledModeKeepsPayloadAndStatusPriority() {
+    when(mapper.claim(any())).thenReturn(1);
+    when(mapper.lockByPayNo("pay1")).thenReturn(stored(null));
+    assertEquals(
+        "TCC 接收载荷不一致",
+        assertThrows(BizException.class, () -> store.claim(7L, request(), 0, false)).getMessage());
+    when(mapper.lockByPayNo("pay1")).thenReturn(stored(new BigDecimal("10.00")));
+    assertEquals(
+        "用户不可用",
+        assertThrows(BizException.class, () -> store.claim(7L, request(), 0, false)).getMessage());
+    when(mapper.claim(any())).thenReturn(1, 0);
+    assertTrue(store.claim(7L, request(), 1, true));
+    assertFalse(store.claim(7L, request(), 1, true));
   }
 
   /** 固定原409不授权第二次Try或错误分支确认。 */

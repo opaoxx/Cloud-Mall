@@ -931,6 +931,181 @@ class BalanceTccStateMySqlIT {
     }
   }
 
+  /** 关闭新Try模式不持久消耗首次派发权，重开同请求成功，再关闭仍可重放与清算。 */
+  @Test
+  void disabledModeFreshHttpCannotConsumeReceiptDispatchRight() {
+    context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
+    context.registerBean(
+        com.cloudmall.user.service.impl.UserTccReceiveStore.class,
+        () ->
+            new com.cloudmall.user.service.impl.UserTccReceiveStore(
+                context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class)));
+    context.registerBean(
+        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        () ->
+            new com.cloudmall.user.service.impl.UserTccStateQuery(
+                context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
+                context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
+                context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
+    var receives = context.getBean(com.cloudmall.user.service.impl.UserTccReceiveStore.class);
+    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    var resource =
+        org.mockito.Mockito.mock(com.cloudmall.user.service.BalanceTccDebitLocalResource.class);
+    var transactions =
+        new org.springframework.transaction.support.TransactionTemplate(
+            context.getBean(PlatformTransactionManager.class));
+    org.mockito.Mockito.when(
+            resource.prepare(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+        .thenAnswer(
+            invocation -> {
+              com.cloudmall.user.domain.dto.BalanceTccBranchDTO branch = invocation.getArgument(1);
+              var localRequest =
+                  request(branch.payNo, branch.userId, branch.amount.toPlainString());
+              localRequest.xid = io.seata.core.context.RootContext.getXID();
+              localRequest.branchId = 11L;
+              return transactions.execute(
+                  transactionStatus -> {
+                    service.tryDebit(localRequest);
+                    fixture.update(
+                        "INSERT INTO"
+                            + " tcc_fence_log(xid,branch_id,action_name,status,gmt_create,gmt_modified)"
+                            + " VALUES(?,11,?,1,NOW(3),NOW(3))",
+                        localRequest.xid,
+                        com.cloudmall.user.service.BalanceTccDebitLocalResource.ACTION_NAME);
+                    return true;
+                  });
+            });
+    var closedBridge =
+        new com.cloudmall.user.service.impl.UserTccHttpService(
+            resource,
+            receives,
+            query,
+            context.getBean(com.cloudmall.user.mapper.UserMapper.class),
+            "t130-local-test-token",
+            false);
+    var mvc =
+        org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                new com.cloudmall.user.controller.UserTccController(closedBridge))
+            .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+            .build();
+    var openBridge =
+        new com.cloudmall.user.service.impl.UserTccHttpService(
+            resource,
+            receives,
+            query,
+            context.getBean(com.cloudmall.user.mapper.UserMapper.class),
+            "t130-local-test-token",
+            true);
+    var checks = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (boolean callerBound : List.of(false, true)) {
+      checks.add(
+          () -> {
+            for (String table :
+                List.of("balance_tcc_debit", "balance_debit_attempt", "balance_ledger"))
+              fixture.update("DELETE FROM " + table);
+            fixture.update("UPDATE mall_user SET balance=100,frozen_balance=0,status=1 WHERE id=7");
+            setEnabled(false);
+            var request = new com.cloudmall.user.domain.dto.UserTccTryDTO();
+            request.payNo = "disabled-http-mode-" + callerBound;
+            request.orderNo = "order-" + request.payNo;
+            request.operationKey = "tcc-debit:" + request.payNo;
+            request.ledgerKey = request.payNo;
+            request.xid = "xid-" + request.payNo;
+            request.amount = new BigDecimal("10.00");
+            if (callerBound) io.seata.core.context.RootContext.bind(request.xid);
+            try {
+              var before = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+              before.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+              before.add(
+                  fixture.queryForList(
+                      "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+              org.mockito.Mockito.clearInvocations(resource);
+              var denied =
+                  mvc.perform(
+                          org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                                  "/api/internal/users/7/balance/tcc-debits/try")
+                              .header("X-User-Id", "7")
+                              .header("X-Internal-Service", "cloud-mall-pay")
+                              .header("X-Internal-Callback-Token", "t130-local-test-token")
+                              .header("TX_XID", request.xid)
+                              .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                              .content(
+                                  new com.fasterxml.jackson.databind.ObjectMapper()
+                                      .writeValueAsString(request)))
+                      .andReturn();
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals(503, denied.getResponse().getStatus()),
+                  () -> assertHttpCode(denied, "PAY_DEBIT_MODE_UNAVAILABLE"),
+                  () -> {
+                    var after = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+                    after.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+                    after.add(
+                        fixture.queryForList(
+                            "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+                    assertEquals(before, after);
+                  },
+                  () -> org.mockito.Mockito.verifyNoInteractions(resource),
+                  () ->
+                      assertEquals(
+                          callerBound ? request.xid : null,
+                          io.seata.core.context.RootContext.getXID()));
+              // 关闭模式拒绝不得阻止同请求重新开启后的首次派发。
+              setEnabled(true);
+              org.mockito.Mockito.clearInvocations(resource);
+              var enabled =
+                  openBridge.prepare(
+                      7L, 7L, "cloud-mall-pay", "t130-local-test-token", request.xid, request);
+              assertEquals("TRYING", enabled.state);
+              org.mockito.Mockito.verify(resource)
+                  .prepare(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+              setEnabled(false);
+              var replayBefore = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+              replayBefore.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+              replayBefore.add(
+                  fixture.queryForList(
+                      "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+              org.mockito.Mockito.clearInvocations(resource);
+              assertEquals(
+                  "TRYING",
+                  closedBridge.prepare(
+                          7L, 7L, "cloud-mall-pay", "t130-local-test-token", request.xid, request)
+                      .state);
+              org.mockito.Mockito.verifyNoInteractions(resource);
+              var replayAfter = new ArrayList<List<Map<String, Object>>>(allFundsFacts());
+              replayAfter.add(fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id"));
+              replayAfter.add(
+                  fixture.queryForList(
+                      "SELECT * FROM tcc_fence_log ORDER BY xid,branch_id,action_name"));
+              assertEquals(replayBefore, replayAfter);
+              var completion = new com.cloudmall.user.domain.dto.BalanceTccDebitFinalizeDTO();
+              completion.userId = 7L;
+              completion.payNo = request.payNo;
+              completion.orderNo = request.orderNo;
+              completion.xid = request.xid;
+              completion.branchId = 11L;
+              completion.operationKey = request.operationKey;
+              completion.ledgerKey = request.ledgerKey;
+              completion.amount = request.amount;
+              assertEquals("CANCELLED", service.cancelDebit(completion).state);
+
+              assertEquals(
+                  callerBound ? request.xid : null, io.seata.core.context.RootContext.getXID());
+            } finally {
+              fixture.update(
+                  "DELETE FROM user_tcc_receive WHERE pay_no=? AND xid=?",
+                  request.payNo,
+                  request.xid);
+              fixture.update("DELETE FROM tcc_fence_log WHERE xid=? AND branch_id=11", request.xid);
+              io.seata.core.context.RootContext.unbind();
+            }
+          });
+    }
+    org.junit.jupiter.api.Assertions.assertAll(checks);
+  }
+
   /** disabled首次HTTP不持久消耗派发权，reactivate可同请求成功，disabled既有重放只读。 */
   @Test
   void disabledFreshHttpCannotConsumeReceiptDispatchRight() {
@@ -984,7 +1159,8 @@ class BalanceTccStateMySqlIT {
             receives,
             query,
             context.getBean(com.cloudmall.user.mapper.UserMapper.class),
-            "t129-local-test-token");
+            "t129-local-test-token",
+            true);
     var mvc =
         org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
                 new com.cloudmall.user.controller.UserTccController(bridge))
@@ -1215,7 +1391,7 @@ class BalanceTccStateMySqlIT {
                                         () -> {
                                           if ("bind".equals(action))
                                             store.bindBranch(request.payNo, request.xid, 11L);
-                                          else store.claim(7L, request, 1);
+                                          else store.claim(7L, request, 1, true);
                                         });
                                 assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
                                 assertEquals("TCC 接收载荷不一致", failure.getMessage());

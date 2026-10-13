@@ -29,10 +29,12 @@ public class UserTccReceiveStore {
    * @param userId 原调用用户标识
    * @param request 已通过HTTP校验的不可变请求
    * @param userStatus 调用方此前观察的用户状态，不提供读取后变化的fencing
+   * @param debitEnabled 调用方观察的新Try模式开关，既有重放不受限制
    * @return 是否取得首次派发权
    */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
-  public boolean claim(Long userId, UserTccTryDTO request, Integer userStatus) {
+  public boolean claim(
+      Long userId, UserTccTryDTO request, Integer userStatus, boolean debitEnabled) {
     // 1. 固定全部载荷并认领数据库唯一键。
     UserTccReceivePO receipt = new UserTccReceivePO();
     receipt.id = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
@@ -57,9 +59,11 @@ public class UserTccReceiveStore {
         || !Objects.equals(stored.operationKey, request.operationKey)
         || !Objects.equals(stored.ledgerKey, request.ledgerKey)
         || stored.amount.compareTo(request.amount) != 0) throw conflict();
-    // 3. 原载荷已先证明；禁用首次winner必须在独立事务提交前回滚认领，不影响既有重放。
+    // 3. 原载荷已先证明；用户禁用或模式关闭时，首次接收在独立事务内回滚。
     if (inserted == 1 && !Objects.equals(userStatus, 1))
       throw new BizException("IDEMPOTENCY_CONFLICT", "用户不可用", 409);
+    if (inserted == 1 && !debitEnabled)
+      throw new BizException("PAY_DEBIT_MODE_UNAVAILABLE", "当前未启用此扣款方式", 503);
     return inserted == 1;
   }
 

@@ -39,7 +39,7 @@ class UserTccHttpServiceTest {
     receives = mock(UserTccReceiveStore.class);
     query = mock(UserTccStateQuery.class);
     users = mock(UserMapper.class);
-    service = new UserTccHttpService(resource, receives, query, users, TOKEN);
+    service = new UserTccHttpService(resource, receives, query, users, TOKEN, true);
     RootContext.unbind();
   }
 
@@ -79,7 +79,7 @@ class UserTccHttpServiceTest {
     UserTccTryDTO request = request();
     UserTccStateVO state = state("TRYING", 17L);
     doReturn(enabledUser()).when(users).selectById(7L);
-    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1));
+    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1), eq(true));
     doReturn(state).when(query).read(7L, request.operationKey, request.xid);
 
     service.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request);
@@ -95,7 +95,7 @@ class UserTccHttpServiceTest {
     UserTccTryDTO request = request();
     UserTccStateVO state = state("TRYING", 18L);
     doReturn(enabledUser()).when(users).selectById(7L);
-    doReturn(true).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1));
+    doReturn(true).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1), eq(true));
     doReturn(true).when(resource).prepare(any(), any());
     doReturn(state).when(query).read(7L, request.operationKey, request.xid);
 
@@ -130,7 +130,7 @@ class UserTccHttpServiceTest {
       doReturn(user).when(users).selectById(7L);
       org.mockito.Mockito.doThrow(new BizException("IDEMPOTENCY_CONFLICT", "用户不可用", 409))
           .when(receives)
-          .claim(eq(7L), any(UserTccTryDTO.class), eq(status));
+          .claim(eq(7L), any(UserTccTryDTO.class), eq(status), eq(true));
       RootContext.bind(request.xid);
       var failure =
           assertThrows(
@@ -139,7 +139,7 @@ class UserTccHttpServiceTest {
       org.junit.jupiter.api.Assertions.assertEquals("用户不可用", failure.getMessage());
       org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
       verify(users).selectById(7L);
-      verify(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(status));
+      verify(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(status), eq(true));
       verify(receives, never()).bindBranch(any(), any(), any());
       verifyNoInteractions(resource, query);
       org.junit.jupiter.api.Assertions.assertEquals(request.xid, RootContext.getXID());
@@ -154,7 +154,7 @@ class UserTccHttpServiceTest {
     var request = request();
     var state = state("CANCELLED", 19L);
     doReturn(user).when(users).selectById(7L);
-    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(0));
+    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(0), eq(true));
     doReturn(state).when(query).read(7L, request.operationKey, request.xid);
     org.junit.jupiter.api.Assertions.assertSame(
         state, service.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request));
@@ -169,6 +169,63 @@ class UserTccHttpServiceTest {
     org.junit.jupiter.api.Assertions.assertEquals("COMMON_NOT_FOUND", failure.getCode());
     org.junit.jupiter.api.Assertions.assertEquals(404, failure.getHttpStatus());
     verifyNoInteractions(receives, resource, query);
+  }
+
+  /** 配置沿既有同名flag显式注入，关闭模式的新claim拒绝不触达资源或查询。 */
+  @Test
+  void configuredDisabledModeIsPassedToFreshClaim() throws Exception {
+    var configured =
+        new com.cloudmall.user.config.UserTccHttpConfiguration()
+            .userTccHttpService(resource, receives, query, users, TOKEN, false);
+    var method =
+        com.cloudmall.user.config.UserTccHttpConfiguration.class.getMethod(
+            "userTccHttpService",
+            BalanceTccDebitLocalResource.class,
+            UserTccReceiveStore.class,
+            UserTccStateQuery.class,
+            UserMapper.class,
+            String.class,
+            boolean.class);
+    org.junit.jupiter.api.Assertions.assertEquals(
+        "${cloudmall.user.tcc-debit.enabled:false}",
+        method
+            .getParameters()[5]
+            .getAnnotation(org.springframework.beans.factory.annotation.Value.class)
+            .value());
+    var request = request();
+    doReturn(enabledUser()).when(users).selectById(7L);
+    org.mockito.Mockito.doThrow(new BizException("PAY_DEBIT_MODE_UNAVAILABLE", "当前未启用此扣款方式", 503))
+        .when(receives)
+        .claim(eq(7L), any(UserTccTryDTO.class), eq(1), eq(false));
+    RootContext.bind(request.xid);
+    var failure =
+        assertThrows(
+            BizException.class,
+            () -> configured.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_DEBIT_MODE_UNAVAILABLE", failure.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(503, failure.getHttpStatus());
+    verify(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1), eq(false));
+    verifyNoInteractions(resource, query);
+    verify(receives, never()).bindBranch(any(), any(), any());
+    org.junit.jupiter.api.Assertions.assertEquals(request.xid, RootContext.getXID());
+  }
+
+  /** 关闭模式不拦已有接收三种状态重放，不调用资源或绑定分支。 */
+  @Test
+  void disabledModeAllowsExistingReplayForKnownStates() {
+    var configured = new UserTccHttpService(resource, receives, query, users, TOKEN, false);
+    var request = request();
+    doReturn(enabledUser()).when(users).selectById(7L);
+    doReturn(false).when(receives).claim(eq(7L), any(UserTccTryDTO.class), eq(1), eq(false));
+    for (String originalState : new String[] {"TRYING", "CONFIRMED", "CANCELLED"}) {
+      var original = state(originalState, 19L);
+      doReturn(original).when(query).read(7L, request.operationKey, request.xid);
+      org.junit.jupiter.api.Assertions.assertSame(
+          original, configured.prepare(7L, 7L, "cloud-mall-pay", TOKEN, request.xid, request));
+    }
+    verifyNoInteractions(resource);
+    verify(receives, never()).bindBranch(any(), any(), any());
+    org.junit.jupiter.api.Assertions.assertNull(RootContext.getXID());
   }
 
   /** 原合法调用夹具显式提供启用状态，不借缺证status通过新事务门。 */

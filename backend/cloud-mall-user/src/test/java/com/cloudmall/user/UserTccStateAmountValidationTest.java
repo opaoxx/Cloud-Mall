@@ -122,7 +122,7 @@ class UserTccStateAmountValidationTest {
     var resource = mock(BalanceTccDebitLocalResource.class);
     var store = mock(UserTccReceiveStore.class);
     var users = mock(UserMapper.class);
-    var bridge = new UserTccHttpService(resource, store, query, users, "ops-secret");
+    var bridge = new UserTccHttpService(resource, store, query, users, "ops-secret", true);
     var mvc =
         MockMvcBuilders.standaloneSetup(new UserTccController(bridge))
             .setControllerAdvice(new GlobalExceptionHandler())

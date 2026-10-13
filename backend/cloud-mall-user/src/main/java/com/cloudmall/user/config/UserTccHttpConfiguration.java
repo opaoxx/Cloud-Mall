@@ -45,7 +45,8 @@ public class UserTccHttpConfiguration {
       UserTccReceiveStore receives,
       UserTccStateQuery query,
       UserMapper users,
-      @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}") String token) {
-    return new UserTccHttpService(resource, receives, query, users, token);
+      @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}") String token,
+      @Value("${cloudmall.user.tcc-debit.enabled:false}") boolean debitEnabled) {
+    return new UserTccHttpService(resource, receives, query, users, token, debitEnabled);
   }
 }

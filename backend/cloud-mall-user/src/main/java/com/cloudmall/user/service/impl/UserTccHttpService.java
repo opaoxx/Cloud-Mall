@@ -30,19 +30,24 @@ public class UserTccHttpService {
   /** 内部调用凭证的固定字节表示，不进入日志或响应。 */
   private final byte[] token;
 
+  /** 既有新 Try 开关的配置值，仅限制首次接收，不阻断已有重放。 */
+  private final boolean debitEnabled;
+
   /** 构造唯一入口，配置凭证不得为空。 */
   public UserTccHttpService(
       BalanceTccDebitLocalResource resource,
       UserTccReceiveStore receives,
       UserTccStateQuery query,
       UserMapper users,
-      String token) {
+      String token,
+      boolean debitEnabled) {
     if (token == null || token.isBlank()) throw new IllegalStateException("内部 TCC 凭证未配置");
     this.resource = resource;
     this.receives = receives;
     this.query = query;
     this.users = users;
     this.token = token.getBytes(StandardCharsets.UTF_8);
+    this.debitEnabled = debitEnabled;
   }
 
   /** 只有首次接收 winner 进入 LocalTCC；所有重放都只读事实。 */
@@ -60,7 +65,7 @@ public class UserTccHttpService {
     if (previous != null && !previous.equals(xid)) throw conflict();
     UserPO user = users.selectById(userId);
     if (user == null) throw new BizException("COMMON_NOT_FOUND", "用户不存在", 404);
-    boolean winner = receives.claim(userId, request, user.status);
+    boolean winner = receives.claim(userId, request, user.status, debitEnabled);
     if (!winner) return query.read(userId, request.operationKey, xid);
     // 2. 先提交 CLAIMED 再调用代理；即使失败、超时或崩溃也不恢复派发权限。
     boolean bound = previous == null;

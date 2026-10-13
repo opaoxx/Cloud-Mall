@@ -743,7 +743,7 @@ class UserTccReconciliationMySqlIT {
                 .getProxy();
     var bridge =
         new UserTccHttpService(
-            resource, receiveStore, query, session.getMapper(UserMapper.class), "ops-secret");
+            resource, receiveStore, query, session.getMapper(UserMapper.class), "ops-secret", true);
     return MockMvcBuilders.standaloneSetup(
             new UserTccController(bridge), new UserTccReconciliationController(service))
         .setControllerAdvice(new GlobalExceptionHandler())
@@ -1085,7 +1085,7 @@ class UserTccReconciliationMySqlIT {
     var query = (UserTccStateQuery) queryProxy.getProxy();
     var resource = mock(BalanceTccDebitLocalResource.class);
     var receiveStore = mock(UserTccReceiveStore.class);
-    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret", true);
     var baseReader =
         (UserTccReconciliationReadService)
             readProxy(
@@ -1221,7 +1221,7 @@ class UserTccReconciliationMySqlIT {
     var query = (UserTccStateQuery) queryProxy.getProxy();
     var resource = mock(BalanceTccDebitLocalResource.class);
     var receiveStore = mock(UserTccReceiveStore.class);
-    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret", true);
     var baseReader =
         (UserTccReconciliationReadService)
             readProxy(
@@ -1331,7 +1331,7 @@ class UserTccReconciliationMySqlIT {
     var query = (UserTccStateQuery) queryProxy.getProxy();
     var resource = mock(BalanceTccDebitLocalResource.class);
     var receiveStore = mock(UserTccReceiveStore.class);
-    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret", true);
     var baseReader =
         (UserTccReconciliationReadService)
             readProxy(
@@ -1462,7 +1462,7 @@ class UserTccReconciliationMySqlIT {
     var query = (UserTccStateQuery) queryProxy.getProxy();
     var resource = mock(BalanceTccDebitLocalResource.class);
     var receiveStore = mock(UserTccReceiveStore.class);
-    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret");
+    var bridge = new UserTccHttpService(resource, receiveStore, query, users, "ops-secret", true);
     var baseReader =
         (UserTccReconciliationReadService)
             readProxy(
