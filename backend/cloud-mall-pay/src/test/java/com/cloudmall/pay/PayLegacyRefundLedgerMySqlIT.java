@@ -3245,6 +3245,250 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 旧lease查真后tuple漂移，三RPC不能对旧身份金额写入；前置阶段/claim保持。 */
+  @Test
+  void changedTupleAfterLeaseReadStopsLegacyWritingRpc() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String operation : List.of("DEBIT", "PAID", "REFUND")) {
+      for (String side : List.of("payment", "intent", "both")) {
+        for (String mutation : List.of("user", "order", "order-alias", "amount")) {
+          assertions.add(
+              () -> {
+                seedIntentAndPayment("PENDING", "INIT");
+                UserClient user = mock(UserClient.class);
+                OrderClient orders = mock(OrderClient.class);
+                configureRemoteOrderIdentityPath(
+                    "DEBIT".equals(operation)
+                        ? "fresh-debit"
+                        : "PAID".equals(operation) ? "paid" : "applied-cancel",
+                    "order-1",
+                    user,
+                    orders);
+                if ("PAID".equals(operation))
+                  when(orders.paymentState("order-1", 7L))
+                      .thenReturn(
+                          ApiResponse.ok(
+                              new OrderClient.OrderView(
+                                  "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")));
+                PayDebitIntentMapper actualIntents = intents;
+                var guardedIntents = org.mockito.Mockito.spy(actualIntents);
+                var afterChange =
+                    new java.util.concurrent.atomic.AtomicReference<
+                        List<List<Map<String, Object>>>>();
+                org.mockito.Mockito.doAnswer(
+                        invocation -> {
+                          org.junit.jupiter.api.Assertions.assertFalse(
+                              org.springframework.transaction.support
+                                  .TransactionSynchronizationManager.isActualTransactionActive());
+                          assertTrue((Boolean) invocation.callRealMethod());
+                          changeStageSourceTuple(side, mutation);
+                          afterChange.set(payFacts());
+                          return true;
+                        })
+                    .when(guardedIntents)
+                    .hasOwnedLegacyLease(eq("pay-1"), anyString(), any());
+                intents = guardedIntents;
+                try {
+                  String expected =
+                      "DEBIT".equals(operation)
+                          ? "INIT"
+                          : "PAID".equals(operation) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+                  String result = newService(user, orders).process("pay-1");
+                  verify(user, never()).debit(any(), any(), any());
+                  verify(user, never()).refund(any(), any(), any());
+                  verify(orders, never()).paid(any(), any());
+                  assertEquals(expected, result);
+                  assertNotNull(afterChange.get());
+                  assertEquals(afterChange.get(), payFacts());
+                  assertEquals(1, intentAttempts());
+                  assertNotNull(intentLeaseOwner());
+                } finally {
+                  intents = actualIntents;
+                }
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** permission单只读SQL按操作phase/原tuple/资格拒绝，不锁或更改任何facts。 */
+  @Test
+  void legacyRpcPermissionMatchesExactPhaseAndQualification() {
+    for (String operation : List.of("DEBIT", "PAID", "REFUND")) {
+      for (String scenario :
+          List.of(
+              "healthy",
+              "phase-other",
+              "phase-alias",
+              "operation-alias",
+              "operation-unknown",
+              "payment-missing",
+              "intent-missing",
+              "owner-other",
+              "owner-alias",
+              "lease-expired",
+              "payment-tcc",
+              "intent-tcc",
+              "amount-other",
+              "user-other",
+              "order-alias")) {
+        seedIntentAndPayment(
+            "DEBIT".equals(operation)
+                ? "PENDING"
+                : "PAID".equals(operation) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING",
+            "DEBIT".equals(operation)
+                ? "INIT"
+                : "PAID".equals(operation) ? "DEBITED" : "REFUND_PENDING");
+        var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        String token = "t151-qualified-token";
+        assertEquals(1, intents.claim("pay-1", token, currentTime.plusSeconds(30), currentTime));
+        var expected = intents.findByPayNo("pay-1");
+        String requestedOperation = operation;
+        switch (scenario) {
+          case "phase-other" ->
+              fixture.update("UPDATE pay_record SET status='SUCCESS' WHERE pay_no='pay-1'");
+          case "phase-alias" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET status=LOWER(status) WHERE pay_no='pay-1'");
+          case "operation-alias" ->
+              requestedOperation = operation.toLowerCase(java.util.Locale.ROOT);
+          case "operation-unknown" -> requestedOperation = "UNKNOWN";
+          case "payment-missing" -> fixture.update("DELETE FROM pay_record WHERE pay_no='pay-1'");
+          case "intent-missing" ->
+              fixture.update("DELETE FROM pay_debit_intent WHERE pay_no='pay-1'");
+          case "owner-other" -> token = "other-owner";
+          case "owner-alias" -> token = token.toUpperCase(java.util.Locale.ROOT);
+          case "lease-expired" ->
+              fixture.update(
+                  "UPDATE pay_debit_intent SET lease_until=? WHERE pay_no='pay-1'",
+                  currentTime.minusSeconds(1));
+          case "payment-tcc" ->
+              fixture.update("UPDATE pay_record SET debit_mode='TCC' WHERE pay_no='pay-1'");
+          case "intent-tcc" ->
+              fixture.update("UPDATE pay_debit_intent SET debit_mode='TCC' WHERE pay_no='pay-1'");
+          case "amount-other" -> changeStageSourceTuple("both", "amount");
+          case "user-other" -> changeStageSourceTuple("both", "user");
+          case "order-alias" -> changeStageSourceTuple("both", "order-alias");
+          default -> {}
+        }
+        var before = payFacts();
+        assertEquals(
+            "healthy".equals(scenario),
+            intents.hasOwnedLegacyRpcPermission(expected, token, requestedOperation, currentTime),
+            operation + ":" + scenario);
+        assertEquals(before, payFacts());
+      }
+    }
+  }
+
+  /** 三写RPC各增加一次permission读，读与实际RPC均不在本地事务内。 */
+  @Test
+  void healthyLegacyWritingRpcUsesPermissionOutsideTransactions() {
+    for (String operation : List.of("DEBIT", "PAID", "REFUND")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(
+          "DEBIT".equals(operation)
+              ? "fresh-debit"
+              : "PAID".equals(operation) ? "paid" : "applied-cancel",
+          "order-1",
+          user,
+          orders);
+      if ("PAID".equals(operation))
+        when(orders.paymentState("order-1", 7L))
+            .thenReturn(
+                ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")),
+                ApiResponse.ok(
+                    new OrderClient.OrderView("order-1", "PAID", BigDecimal.TEN, 7L, "SUCCEEDED")));
+      PayDebitIntentMapper actualIntents = intents;
+      var instrumentedIntents = org.mockito.Mockito.spy(actualIntents);
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                assertTrue((Boolean) invocation.callRealMethod());
+                return true;
+              })
+          .when(instrumentedIntents)
+          .hasOwnedLegacyRpcPermission(any(), anyString(), anyString(), any());
+      intents = instrumentedIntents;
+      try {
+        assertEquals(
+            "REFUND".equals(operation) ? "REFUNDED" : "SUCCESS",
+            newService(user, orders).process("pay-1"));
+        verify(instrumentedIntents)
+            .hasOwnedLegacyRpcPermission(
+                any(), anyString(), eq("DEBIT".equals(operation) ? "DEBIT" : operation), any());
+        // fresh debit还需订单paid，原两个写RPC各有一次permission，不将它们混为一个。
+        if ("DEBIT".equals(operation))
+          verify(instrumentedIntents)
+              .hasOwnedLegacyRpcPermission(any(), anyString(), eq("PAID"), any());
+        verify(user, times("DEBIT".equals(operation) ? 1 : 0)).debit(any(), any(), any());
+        verify(user, times("REFUND".equals(operation) ? 1 : 0)).refund(any(), any(), any());
+        verify(orders, times("REFUND".equals(operation) ? 0 : 1)).paid(any(), any());
+      } finally {
+        intents = actualIntents;
+      }
+    }
+  }
+
+  /** 旧lease读后当前退款或phase变化，即使tuple一致也不发旧写RPC。 */
+  @Test
+  void changedPhaseAfterLeaseReadStopsWritingRpc() {
+    for (String operation : List.of("DEBIT", "PAID", "REFUND")) {
+      seedIntentAndPayment("PENDING", "INIT");
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath(
+          "DEBIT".equals(operation)
+              ? "fresh-debit"
+              : "PAID".equals(operation) ? "paid" : "applied-cancel",
+          "order-1",
+          user,
+          orders);
+      if ("PAID".equals(operation))
+        when(orders.paymentState("order-1", 7L))
+            .thenReturn(
+                ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")));
+      PayDebitIntentMapper actualIntents = intents;
+      var guardedIntents = org.mockito.Mockito.spy(actualIntents);
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                assertTrue((Boolean) invocation.callRealMethod());
+                fixture.update(
+                    "UPDATE pay_debit_intent SET status='REFUND_PENDING' WHERE pay_no='pay-1'");
+                fixture.update(
+                    "UPDATE pay_record SET status=? WHERE pay_no='pay-1'",
+                    "REFUND".equals(operation) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING");
+                return true;
+              })
+          .when(guardedIntents)
+          .hasOwnedLegacyLease(eq("pay-1"), anyString(), any());
+      intents = guardedIntents;
+      try {
+        assertEquals("REFUND_PENDING", newService(user, orders).process("pay-1"));
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, never()).refund(any(), any(), any());
+        verify(orders, never()).paid(any(), any());
+        assertEquals("REFUND_PENDING", intentStatus());
+        assertEquals(
+            "REFUND".equals(operation) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING", paymentStatus());
+        assertEquals(1, intentAttempts());
+        assertNull(intentLeaseOwner());
+        assertTrue(retryErrorPresent());
+      } finally {
+        intents = actualIntents;
+      }
+    }
+  }
+
   /** 健康缺失和拒绝来源经两次User读取后仍可FAILED，读取在实际事务外。 */
   @Test
   void latestStableDebitKeepsHealthyFailurePathsWithRealPay() {

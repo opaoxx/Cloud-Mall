@@ -257,6 +257,47 @@ public class PayDebitIntentMapper {
     return Integer.valueOf(1).equals(count);
   }
 
+  /**
+   * 写RPC前只读核对当前原载荷、领取资格和操作阶段；不保证查询到远端执行之间的原子性。
+   *
+   * @param expected 已核对的原意图快照
+   * @param claimToken 当前领取令牌
+   * @param operation DEBIT、PAID或REFUND写操作
+   * @param now 本次核对时间
+   * @return 恰好一组原载荷和阶段符合写权限时为true
+   */
+  public boolean hasOwnedLegacyRpcPermission(
+      PayDebitIntentPO expected, String claimToken, String operation, LocalDateTime now) {
+    Integer matchingRows =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent intent JOIN pay_record payment ON BINARY"
+                + " intent.pay_no=BINARY payment.pay_no WHERE BINARY intent.pay_no=BINARY ?"
+                + " AND BINARY intent.lease_owner=BINARY ? AND intent.lease_until>?"
+                + " AND BINARY intent.debit_mode='LEGACY' AND BINARY payment.debit_mode='LEGACY'"
+                + " AND payment.user_id=? AND intent.user_id=?"
+                + " AND BINARY payment.order_no=BINARY ? AND BINARY intent.order_no=BINARY ?"
+                + " AND payment.amount=? AND intent.amount=? AND"
+                + " ((BINARY ?='DEBIT' AND BINARY payment.status='PENDING' AND BINARY"
+                + " intent.status='INIT') OR (BINARY ?='PAID' AND BINARY"
+                + " payment.status='ORDER_SYNC_UNKNOWN' AND BINARY intent.status='DEBITED')"
+                + " OR (BINARY ?='REFUND' AND BINARY payment.status='REFUND_PENDING' AND BINARY"
+                + " intent.status='REFUND_PENDING'))",
+            Integer.class,
+            expected.payNo,
+            claimToken,
+            now,
+            expected.userId,
+            expected.userId,
+            expected.orderNo,
+            expected.orderNo,
+            expected.amount,
+            expected.amount,
+            operation,
+            operation,
+            operation);
+    return Integer.valueOf(1).equals(matchingRows);
+  }
+
   /** 将 JDBC 行映射为准确的支付意图持久化对象。 */
   private static final RowMapper<PayDebitIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {

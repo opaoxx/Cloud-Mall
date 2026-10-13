@@ -252,7 +252,7 @@ public class PayConsistencyService {
         // 已支付订单缺少本支付的账本时只能核对来源，不能追加一笔新扣款。
         if (!"PENDING_PAYMENT".equals(order.status()))
           throw new IllegalStateException("订单已支付但未观察到原扣款事实");
-        requireOwnedLegacyLease(intent.payNo, claimToken);
+        requireOwnedLegacyLease(intent, claimToken, "DEBIT");
         ApiResponse<UserClient.BalanceView> debit =
             userClient.debit(
                 intent.userId,
@@ -282,7 +282,7 @@ public class PayConsistencyService {
       if (!"PENDING_PAYMENT".equals(order.status()))
         throw new IllegalStateException("订单状态暂不可判定支付结果: " + order.status());
 
-      requireOwnedLegacyLease(intent.payNo, claimToken);
+      requireOwnedLegacyLease(intent, claimToken, "PAID");
       ApiResponse<OrderClient.OrderView> paid = orderClient.paid(intent.orderNo, intent.userId);
       if (paid != null
           && "0".equals(paid.code)
@@ -397,7 +397,7 @@ public class PayConsistencyService {
   /** 确认订单取消后先持久化退款意图，再调用幂等用户退款接口。 */
   private String refundCancelled(PayDebitIntentPO intent, String claimToken) {
     commitOwnedLegacyStage(intent, claimToken, "REFUND_PENDING");
-    requireOwnedLegacyLease(intent.payNo, claimToken);
+    requireOwnedLegacyLease(intent, claimToken, "REFUND");
     ApiResponse<UserClient.BalanceView> refund =
         userClient.refund(
             intent.userId,
@@ -563,10 +563,15 @@ public class PayConsistencyService {
     if (changedRows != 1) throw new IllegalStateException("支付终态写入未满足当前租约");
   }
 
-  /** 写RPC前核当前资格；不承诺观察之后的源变化或远端执行原子性。 */
-  private void requireOwnedLegacyLease(String payNo, String claimToken) {
-    if (!payDebitIntentMapper.hasOwnedLegacyLease(payNo, claimToken, now()))
+  /** 写RPC前先核原租约，再核原载荷和精确阶段；不保证观察后远端执行原子性。 */
+  private void requireOwnedLegacyLease(
+      PayDebitIntentPO intent, String claimToken, String operation) {
+    // 1. 保原租约失败错误及优先级，不在已失资格时追加查询。
+    if (!payDebitIntentMapper.hasOwnedLegacyLease(intent.payNo, claimToken, now()))
       throw new IllegalStateException("支付恢复领取资格已失效");
+    // 2. 当前tuple和阶段仍允许该操作才发写RPC，缺证沿原catch等待。
+    if (!payDebitIntentMapper.hasOwnedLegacyRpcPermission(intent, claimToken, operation, now()))
+      throw new IllegalStateException("支付恢复原载荷或阶段不再允许远程写入");
   }
 
   /** 对重复故障执行有上限的简单退避，记录仍保留供持续对账。 */

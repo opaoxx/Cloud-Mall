@@ -62,6 +62,8 @@ class PayConsistencyServiceTest {
     when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(1);
     when(intentMapper.findByPayNo("pay-1")).thenReturn(intent());
     when(intentMapper.hasOwnedLegacyLease(anyString(), anyString(), any())).thenReturn(true);
+    when(intentMapper.hasOwnedLegacyRpcPermission(any(), anyString(), anyString(), any()))
+        .thenReturn(true);
     when(intentMapper.updateOwnedLegacyStatus(anyString(), anyString(), anyString(), any()))
         .thenReturn(1);
     when(intentMapper.recordRetryOwnedLegacy(
@@ -3358,6 +3360,88 @@ class PayConsistencyServiceTest {
     verify(transactionManager).rollback(any());
     verify(transactionManager, never()).commit(any());
     org.mockito.Mockito.verifyNoInteractions(userClient, orderClient);
+  }
+
+  /** 三RPC的permission缺证或DAO错误均沿原等待，不发写请求。 */
+  @Test
+  void missingRpcPermissionStopsEveryWritingRpc() {
+    for (String operation : java.util.List.of("DEBIT", "PAID", "REFUND")) {
+      for (String failureMode : java.util.List.of("false", "fault")) {
+        setUp();
+        configureRpcPermissionPath(operation);
+        if ("false".equals(failureMode))
+          when(intentMapper.hasOwnedLegacyRpcPermission(any(), anyString(), eq(operation), any()))
+              .thenReturn(false);
+        else
+          when(intentMapper.hasOwnedLegacyRpcPermission(any(), anyString(), eq(operation), any()))
+              .thenThrow(new IllegalStateException("owned-permission-read-unavailable"));
+        String expected =
+            "DEBIT".equals(operation)
+                ? "INIT"
+                : "PAID".equals(operation) ? "ORDER_SYNC_UNKNOWN" : "REFUND_PENDING";
+        assertEquals(expected, consistencyService.process("pay-1"));
+        verify(intentMapper).hasOwnedLegacyRpcPermission(any(), anyString(), eq(operation), any());
+        verify(userClient, never()).debit(any(), any(), any());
+        verify(userClient, never()).refund(any(), any(), any());
+        verify(orderClient, never()).paid(any(), any());
+        verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+        verify(intentMapper)
+            .recordRetryOwnedLegacy(
+                eq("pay-1"),
+                anyString(),
+                eq(expected),
+                org.mockito.ArgumentMatchers.contains(
+                    "false".equals(failureMode)
+                        ? "支付恢复原载荷或阶段不再允许远程写入"
+                        : "owned-permission-read-unavailable"),
+                any(),
+                any());
+      }
+    }
+  }
+
+  /** 原lease失败保原错误且不运行新增permission SQL，无任何写RPC。 */
+  @Test
+  void originalLeaseFailurePrecedesNewRpcPermission() {
+    for (String operation : java.util.List.of("DEBIT", "PAID", "REFUND")) {
+      setUp();
+      configureRpcPermissionPath(operation);
+      when(intentMapper.hasOwnedLegacyLease(any(), any(), any())).thenReturn(false);
+      consistencyService.process("pay-1");
+      verify(intentMapper, never()).hasOwnedLegacyRpcPermission(any(), any(), any(), any());
+      verify(intentMapper)
+          .recordRetryOwnedLegacy(
+              eq("pay-1"),
+              anyString(),
+              anyString(),
+              org.mockito.ArgumentMatchers.contains("支付恢复领取资格已失效"),
+              any(),
+              any());
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+    }
+  }
+
+  /** 仅构造RPC前的真实流程替身，durable stage用于保原catch退款方向。 */
+  private void configureRpcPermissionPath(String operation) {
+    configureOrderIdentityPath(
+        "DEBIT".equals(operation)
+            ? "fresh-debit"
+            : "PAID".equals(operation) ? "paid" : "applied-cancel",
+        "order-1");
+    if ("PAID".equals(operation))
+      when(orderClient.paymentState("order-1", 7L))
+          .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")));
+    var original = intent();
+    var durable = intent();
+    when(intentMapper.findByPayNo("pay-1")).thenReturn(original, original, durable);
+    when(intentMapper.updateOwnedLegacyStatus(any(), any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              durable.status = invocation.getArgument(2);
+              return 1;
+            });
   }
 
   private static PayDebitIntentPO intent() {
