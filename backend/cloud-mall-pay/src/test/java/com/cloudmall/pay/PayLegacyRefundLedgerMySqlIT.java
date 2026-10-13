@@ -981,6 +981,118 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
   }
 
+  /** 推进阶段缺证后补原账本，下一次同支付恢复成功或完成原退款。 */
+  @Test
+  void advancedRecoveryResumesAfterOriginalDebitProofWithRealPay() {
+    for (String originalStatus :
+        java.util.List.of("DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      seedIntentAndPayment(
+          "REFUND_PENDING".equals(originalStatus) ? "REFUND_PENDING" : "PENDING", originalStatus);
+      UserClient user = mock(UserClient.class);
+      OrderClient orders = mock(OrderClient.class);
+      configureRemoteOrderIdentityPath("fresh-debit", "order-1", user, orders);
+      var service = newService(user, orders);
+      boolean refundPending = "REFUND_PENDING".equals(originalStatus);
+      String orderStatus =
+          refundPending ? "CANCELLED" : "DEBITED".equals(originalStatus) ? "PAID" : "COMPLETED";
+      when(orders.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", orderStatus, new BigDecimal("10.000"), 7L, "SUCCEEDED")));
+      String expectedRetry = refundPending ? "REFUND_PENDING" : "ORDER_SYNC_UNKNOWN";
+      assertEquals(expectedRetry, service.process("pay-1"));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, never()).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+      assertEquals(expectedRetry, intentStatus());
+      assertEquals(expectedRetry, paymentStatus());
+      assertEquals(1, intentAttempts());
+      assertNull(intentLeaseOwner());
+      fixture.update(
+          "UPDATE pay_debit_intent SET next_retry_at=NOW(3)-INTERVAL 1 MINUTE WHERE"
+              + " pay_no='pay-1'");
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView("pay-1", "DEBIT", "APPLIED", "10.000", null)))
+          .when(user)
+          .operation(7L, "pay-1", 7L);
+      String expectedTerminal = refundPending ? "REFUNDED" : "SUCCESS";
+      assertEquals(expectedTerminal, service.process("pay-1"));
+      assertEquals(expectedTerminal, intentStatus());
+      assertEquals(expectedTerminal, paymentStatus());
+      assertEquals(2, intentAttempts());
+      assertNull(intentLeaseOwner());
+      assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_record", Integer.class));
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+      assertEquals("pay-1", fixture.queryForObject("SELECT pay_no FROM pay_record", String.class));
+      assertEquals(
+          new BigDecimal("10.00"),
+          fixture.queryForObject("SELECT amount FROM pay_record", BigDecimal.class));
+      verify(user, never()).debit(any(), any(), any());
+      verify(user, org.mockito.Mockito.times(refundPending ? 1 : 0)).refund(any(), any(), any());
+      verify(orders, never()).paid(any(), any());
+    }
+  }
+
+  /** 已推进资金阶段不能将缺失账本当作未扣款；只保留原方向重试。 */
+  @Test
+  void missingDebitProofPreservesAdvancedRecoveryWithRealPay() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String originalStatus :
+        java.util.List.of("DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String orderStatus :
+          java.util.List.of("PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED")) {
+        for (String stockAction :
+            java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+          assertions.add(
+              () -> {
+                seedIntentAndPayment(
+                    "REFUND_PENDING".equals(originalStatus) ? "REFUND_PENDING" : "PENDING",
+                    originalStatus);
+                var before = payFacts();
+                UserClient user = mock(UserClient.class);
+                OrderClient orders = mock(OrderClient.class);
+                configureRemoteOrderIdentityPath("fresh-debit", "order-1", user, orders);
+                when(orders.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                orderStatus,
+                                new BigDecimal("10.000"),
+                                7L,
+                                stockAction)));
+                String expected =
+                    "REFUND_PENDING".equals(originalStatus)
+                        ? "REFUND_PENDING"
+                        : "ORDER_SYNC_UNKNOWN";
+                String result = newService(user, orders).process("pay-1");
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> assertEquals(expected, result),
+                    () -> verify(user, never()).debit(any(), any(), any()),
+                    () -> verify(orders, never()).paid(any(), any()),
+                    () -> verify(user, never()).refund(any(), any(), any()));
+                assertEquals(expected, intentStatus());
+                assertEquals(expected, paymentStatus());
+                assertEquals(1, intentAttempts());
+                assertNull(intentLeaseOwner());
+                assertNotNull(intentNextRetry());
+                assertTrue(
+                    fixture
+                        .queryForObject(
+                            "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'",
+                            String.class)
+                        .contains("已有资金恢复状态但原扣款账本缺失"));
+                assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 原支付缺证后读到正确APPLIED账本可恢复成功，不再次发扣款。 */
   @Test
   void originalDebitProofCanResumeWithoutRepeatingFundsWithRealPay() {
@@ -1071,7 +1183,8 @@ class PayLegacyRefundLedgerMySqlIT {
                     "REFUND_PENDING".equals(originalStatus)
                         ? "REFUND_PENDING"
                         : "INIT".equals(originalStatus) ? "INIT" : "ORDER_SYNC_UNKNOWN";
-                String errorMessage = "订单已支付但未观察到原扣款事实";
+                String errorMessage =
+                    "INIT".equals(originalStatus) ? "订单已支付但未观察到原扣款事实" : "已有资金恢复状态但原扣款账本缺失";
                 String result = newService(user, orders).process("pay-1");
                 org.junit.jupiter.api.Assertions.assertAll(
                     () -> assertEquals(expected, result),
@@ -1108,8 +1221,7 @@ class PayLegacyRefundLedgerMySqlIT {
     for (String acknowledgementKey :
         java.util.Arrays.asList(
             null, "", " ", "pay-other", "PAY-1", "páy-1", "pay-1 ", "refund:pay-1")) {
-      for (String originalStatus :
-          java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String originalStatus : java.util.List.of("INIT")) {
         assertions.add(
             () -> {
               seedIntentAndPayment(

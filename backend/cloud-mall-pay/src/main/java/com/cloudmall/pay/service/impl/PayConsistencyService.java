@@ -189,7 +189,7 @@ public class PayConsistencyService {
   private String processClaimed(PayDebitIntentPO intent, String claimToken) {
     String retryStatus = "INIT";
     try {
-      // 1. 用户账本是扣款事实；404 表示该操作键尚未落账。
+      // 1. 用户账本是扣款事实；404 只表示当前未观察到，不能抹去已记录的恢复阶段。
       UserClient.BalanceOperationView operation = readDebitOperation(intent);
       if (operation != null) {
         validateDebitOperation(intent, operation);
@@ -213,6 +213,8 @@ public class PayConsistencyService {
         }
         throw new IllegalStateException("余额已退款但订单不是已取消状态: " + order.status());
       }
+      if (operation == null && !"INIT".equals(intent.status))
+        throw new IllegalStateException("已有资金恢复状态但原扣款账本缺失");
       if (operation == null && "CANCELLED".equals(order.status()))
         return failWithoutDebit(intent, claimToken);
       if (operation == null) {

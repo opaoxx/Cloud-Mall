@@ -803,6 +803,101 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** 推进阶段缺证后补原账本，下一次同支付恢复成功或完成原退款。 */
+  @Test
+  void advancedRecoveryResumesAfterOriginalDebitProof() {
+    for (String originalStatus :
+        java.util.List.of("DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      setUp();
+      configureOrderIdentityPath("fresh-debit", "order-1");
+      var originalIntent = intent();
+      originalIntent.status = originalStatus;
+      when(intentMapper.findByPayNo("pay-1")).thenReturn(originalIntent);
+      boolean refundPending = "REFUND_PENDING".equals(originalStatus);
+      String orderStatus =
+          refundPending ? "CANCELLED" : "DEBITED".equals(originalStatus) ? "PAID" : "COMPLETED";
+      when(orderClient.paymentState("order-1", 7L))
+          .thenReturn(
+              ApiResponse.ok(
+                  new OrderClient.OrderView(
+                      "order-1", orderStatus, new BigDecimal("10.000"), 7L, "SUCCEEDED")));
+      String expectedRetry = refundPending ? "REFUND_PENDING" : "ORDER_SYNC_UNKNOWN";
+      assertEquals(expectedRetry, consistencyService.process("pay-1"));
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, never()).refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+
+      org.mockito.Mockito.doReturn(
+              ApiResponse.ok(
+                  new UserClient.BalanceOperationView("pay-1", "DEBIT", "APPLIED", "10.000", null)))
+          .when(userClient)
+          .operation(7L, "pay-1", 7L);
+      String expectedTerminal = refundPending ? "REFUNDED" : "SUCCESS";
+      assertEquals(expectedTerminal, consistencyService.process("pay-1"));
+      verify(intentMapper).finishOwnedLegacy(eq("pay-1"), anyString(), eq(expectedTerminal), any());
+      verify(userClient, never()).debit(any(), any(), any());
+      verify(userClient, org.mockito.Mockito.times(refundPending ? 1 : 0))
+          .refund(any(), any(), any());
+      verify(orderClient, never()).paid(any(), any());
+    }
+  }
+
+  /** 已推进资金阶段不能将缺失账本当作未扣款；只保留原方向重试。 */
+  @Test
+  void missingDebitProofPreservesAdvancedRecovery() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String originalStatus :
+        java.util.List.of("DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String orderStatus :
+          java.util.List.of("PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED")) {
+        for (String stockAction :
+            java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+          assertions.add(
+              () -> {
+                setUp();
+                configureOrderIdentityPath("fresh-debit", "order-1");
+                var originalIntent = intent();
+                originalIntent.status = originalStatus;
+                when(intentMapper.findByPayNo("pay-1")).thenReturn(originalIntent);
+                when(orderClient.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1",
+                                orderStatus,
+                                new BigDecimal("10.000"),
+                                7L,
+                                stockAction)));
+                String expected =
+                    "REFUND_PENDING".equals(originalStatus)
+                        ? "REFUND_PENDING"
+                        : "ORDER_SYNC_UNKNOWN";
+                String result = consistencyService.process("pay-1");
+                org.junit.jupiter.api.Assertions.assertAll(
+                    () -> assertEquals(expected, result),
+                    () -> verify(userClient, never()).debit(any(), any(), any()),
+                    () -> verify(orderClient, never()).paid(any(), any()),
+                    () -> verify(userClient, never()).refund(any(), any(), any()));
+                verify(intentMapper, never()).updateOwnedLegacyStatus(any(), any(), any(), any());
+                verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+                verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+                verify(intentMapper)
+                    .recordRetryOwnedLegacy(
+                        eq("pay-1"),
+                        anyString(),
+                        eq(expected),
+                        org.mockito.ArgumentMatchers.contains("已有资金恢复状态但原扣款账本缺失"),
+                        any(),
+                        any());
+              });
+        }
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
   /** 原支付缺证后读到正确APPLIED账本可恢复成功，不再次发扣款。 */
   @Test
   void originalDebitProofCanResumeWithoutRepeatingFunds() {
@@ -872,7 +967,8 @@ class PayConsistencyServiceTest {
                     "REFUND_PENDING".equals(originalStatus)
                         ? "REFUND_PENDING"
                         : "INIT".equals(originalStatus) ? "INIT" : "ORDER_SYNC_UNKNOWN";
-                String errorMessage = "订单已支付但未观察到原扣款事实";
+                String errorMessage =
+                    "INIT".equals(originalStatus) ? "订单已支付但未观察到原扣款事实" : "已有资金恢复状态但原扣款账本缺失";
                 String result = consistencyService.process("pay-1");
                 org.junit.jupiter.api.Assertions.assertAll(
                     () -> assertEquals(expected, result),
@@ -907,8 +1003,7 @@ class PayConsistencyServiceTest {
     for (String acknowledgementKey :
         java.util.Arrays.asList(
             null, "", " ", "pay-other", "PAY-1", "páy-1", "pay-1 ", "refund:pay-1")) {
-      for (String originalStatus :
-          java.util.List.of("INIT", "DEBITED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING")) {
+      for (String originalStatus : java.util.List.of("INIT")) {
         assertions.add(
             () -> {
               setUp();
