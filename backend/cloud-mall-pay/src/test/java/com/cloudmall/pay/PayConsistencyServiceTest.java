@@ -803,6 +803,119 @@ class PayConsistencyServiceTest {
     }
   }
 
+  /** 未知订单状态在七条恢复决策中都不能触发新资金写或支付终态。 */
+  @Test
+  void unknownOrderStatusCannotStartFundsOrFinishPayment() {
+    var assertions = new java.util.ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path :
+        java.util.List.of(
+            "no-debit-cancel",
+            "fresh-debit",
+            "rejected",
+            "applied-cancel",
+            "paid",
+            "refund-marker",
+            "after-paid")) {
+      for (String variant :
+          java.util.Arrays.asList(
+              null,
+              "",
+              "UNKNOWN",
+              "CLOSED",
+              "paid",
+              "PAID ",
+              "COMPLETED ",
+              "PENDING_PAYMENT ",
+              "CANCELLED\n",
+              "páid")) {
+        assertions.add(
+            () -> {
+              setUp();
+              configureOrderIdentityPath(path, "order-1");
+              var response =
+                  ApiResponse.ok(
+                      new OrderClient.OrderView(
+                          "order-1", variant, new BigDecimal("10.000"), 7L, "SUCCEEDED"));
+              if ("after-paid".equals(path))
+                when(orderClient.paymentState("order-1", 7L))
+                    .thenReturn(ApiResponse.ok(order("PENDING_PAYMENT")), response);
+              else when(orderClient.paymentState("order-1", 7L)).thenReturn(response);
+              String expected =
+                  java.util.List.of("no-debit-cancel", "fresh-debit", "rejected").contains(path)
+                      ? "INIT"
+                      : "ORDER_SYNC_UNKNOWN";
+              assertEquals(expected, consistencyService.process("pay-1"), path + ":" + variant);
+              verify(userClient, never()).debit(any(), any(), any());
+              verify(userClient, never()).refund(any(), any(), any());
+              verify(orderClient, org.mockito.Mockito.times("after-paid".equals(path) ? 1 : 0))
+                  .paid(any(), any());
+              verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacySuccess(any(), any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyFailed(any(), any(), any());
+              verify(payRecordMapper, never()).markOwnedLegacyRefunded(any(), any(), any());
+              verify(intentMapper)
+                  .recordRetryOwnedLegacy(
+                      eq("pay-1"),
+                      anyString(),
+                      eq(expected),
+                      org.mockito.ArgumentMatchers.contains("订单支付状态暂不可判定"),
+                      any(),
+                      any());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 未知订单状态保留已持久化的退款等待方向，不重扣或补退。 */
+  @Test
+  void unknownOrderStatusKeepsRefundPendingDirection() {
+    configureOrderIdentityPath("applied-cancel", "order-1");
+    var pending = intent();
+    pending.status = "REFUND_PENDING";
+    when(intentMapper.findByPayNo("pay-1")).thenReturn(pending);
+    when(orderClient.paymentState("order-1", 7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new OrderClient.OrderView("order-1", "UNKNOWN", BigDecimal.TEN, 7L, "SUCCEEDED")));
+    assertEquals("REFUND_PENDING", consistencyService.process("pay-1"));
+    verify(userClient, never()).debit(any(), any(), any());
+    verify(userClient, never()).refund(any(), any(), any());
+    verify(orderClient, never()).paid(any(), any());
+    verify(intentMapper, never()).finishOwnedLegacy(any(), any(), any(), any());
+    verify(intentMapper)
+        .recordRetryOwnedLegacy(
+            eq("pay-1"),
+            anyString(),
+            eq("REFUND_PENDING"),
+            org.mockito.ArgumentMatchers.contains("订单支付状态暂不可判定"),
+            any(),
+            any());
+  }
+
+  /** PAID/COMPLETED仍须库存动作成功，原等待状态不能借状态白名单直接结清。 */
+  @Test
+  void recognizedPaidStatesKeepOriginalStockCompletionGate() {
+    for (String status : java.util.List.of("PAID", "COMPLETED")) {
+      for (String stockAction : java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+        setUp();
+        configureOrderIdentityPath("paid", "order-1");
+        when(orderClient.paymentState("order-1", 7L))
+            .thenReturn(
+                ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1", status, new BigDecimal("10.000"), 7L, stockAction)));
+        String expected = "SUCCEEDED".equals(stockAction) ? "SUCCESS" : "ORDER_SYNC_UNKNOWN";
+        assertEquals(expected, consistencyService.process("pay-1"));
+        verify(intentMapper, org.mockito.Mockito.times("SUCCESS".equals(expected) ? 1 : 0))
+            .finishOwnedLegacy(eq("pay-1"), anyString(), eq("SUCCESS"), any());
+        verify(userClient, never()).debit(any(), any(), any());
+        verify(userClient, never()).refund(any(), any(), any());
+        verify(orderClient, never()).paid(any(), any());
+      }
+    }
+  }
+
   /** 同用户/金额的错订单不得决定任一支付终态或触发新的资金写。 */
   @Test
   void everyOrderReadRequiresTheExactIntentOrderNumber() {

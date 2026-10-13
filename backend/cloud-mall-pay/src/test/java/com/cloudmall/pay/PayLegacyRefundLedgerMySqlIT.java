@@ -981,6 +981,134 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(1, fixture.update("UPDATE " + table + " SET " + assignment + " WHERE id=1"));
   }
 
+  /** 未知订单状态在七条恢复决策中都不能触发新资金写或支付终态。 */
+  @Test
+  void unknownOrderStatusCannotStartFundsOrFinishRealPayment() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String path :
+        List.of(
+            "no-debit-cancel",
+            "fresh-debit",
+            "rejected",
+            "applied-cancel",
+            "paid",
+            "refund-marker",
+            "after-paid")) {
+      for (String variant :
+          java.util.Arrays.asList(
+              null,
+              "",
+              "UNKNOWN",
+              "CLOSED",
+              "paid",
+              "PAID ",
+              "COMPLETED ",
+              "PENDING_PAYMENT ",
+              "CANCELLED\n",
+              "páid")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              var before = payFacts();
+              UserClient user = mock(UserClient.class);
+              OrderClient orders = mock(OrderClient.class);
+              configureRemoteOrderIdentityPath(path, "order-1", user, orders);
+              var response =
+                  ApiResponse.ok(
+                      new OrderClient.OrderView(
+                          "order-1", variant, new BigDecimal("10.000"), 7L, "SUCCEEDED"));
+              if ("after-paid".equals(path))
+                when(orders.paymentState("order-1", 7L))
+                    .thenReturn(
+                        ApiResponse.ok(
+                            new OrderClient.OrderView(
+                                "order-1", "PENDING_PAYMENT", BigDecimal.TEN, 7L, "SUCCEEDED")),
+                        response);
+              else when(orders.paymentState("order-1", 7L)).thenReturn(response);
+              String expected =
+                  List.of("no-debit-cancel", "fresh-debit", "rejected").contains(path)
+                      ? "INIT"
+                      : "ORDER_SYNC_UNKNOWN";
+              String result = newService(user, orders).process("pay-1");
+              org.junit.jupiter.api.Assertions.assertAll(
+                  () -> assertEquals(expected, result, path + ":" + variant),
+                  () -> verify(user, never()).debit(any(), any(), any()),
+                  () -> assertNotEquals("FAILED", paymentStatus()));
+              assertEquals(expected, intentStatus());
+              assertEquals(
+                  "INIT".equals(expected) ? "PENDING" : "ORDER_SYNC_UNKNOWN", paymentStatus());
+              assertEquals(1, intentAttempts());
+              assertNull(intentLeaseOwner());
+              assertNotNull(intentNextRetry());
+              String error =
+                  fixture.queryForObject(
+                      "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'", String.class);
+              assertTrue(error.contains("订单支付状态暂不可判定"));
+              verify(user, never()).debit(any(), any(), any());
+              verify(user, never()).refund(any(), any(), any());
+              verify(orders, times("after-paid".equals(path) ? 1 : 0)).paid(any(), any());
+              assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 未知订单读只记录退款等待重试，不终结真实Pay记录或重发资金RPC。 */
+  @Test
+  void unknownOrderStatusKeepsRealRefundPendingDirection() {
+    seedIntentAndPayment("REFUND_PENDING", "REFUND_PENDING");
+    var before = payFacts();
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    configureRemoteOrderIdentityPath("applied-cancel", "order-1", user, orders);
+    when(orders.paymentState("order-1", 7L))
+        .thenReturn(
+            ApiResponse.ok(
+                new OrderClient.OrderView("order-1", "UNKNOWN", BigDecimal.TEN, 7L, "SUCCEEDED")));
+    assertEquals("REFUND_PENDING", newService(user, orders).process("pay-1"));
+    assertEquals("REFUND_PENDING", paymentStatus());
+    assertEquals("REFUND_PENDING", intentStatus());
+    assertEquals(1, intentAttempts());
+    assertNull(intentLeaseOwner());
+    assertNotNull(intentNextRetry());
+    assertTrue(
+        fixture
+            .queryForObject(
+                "SELECT last_error FROM pay_debit_intent WHERE pay_no='pay-1'", String.class)
+            .contains("订单支付状态暂不可判定"));
+    assertEquals(immutableRecoveryFacts(before), immutableRecoveryFacts(payFacts()));
+    verify(user, never()).debit(any(), any(), any());
+    verify(user, never()).refund(any(), any(), any());
+    verify(orders, never()).paid(any(), any());
+  }
+
+  /** 正常PAID/COMPLETED仅在库存动作成功时结清，否则真实两表继续等待。 */
+  @Test
+  void recognizedPaidStatesKeepRealStockCompletionGate() {
+    for (String status : List.of("PAID", "COMPLETED")) {
+      for (String stockAction : java.util.Arrays.asList("SUCCEEDED", "PENDING", "UNKNOWN", null)) {
+        seedIntentAndPayment("PENDING", "INIT");
+        UserClient user = mock(UserClient.class);
+        OrderClient orders = mock(OrderClient.class);
+        configureRemoteOrderIdentityPath("paid", "order-1", user, orders);
+        when(orders.paymentState("order-1", 7L))
+            .thenReturn(
+                ApiResponse.ok(
+                    new OrderClient.OrderView(
+                        "order-1", status, new BigDecimal("10.000"), 7L, stockAction)));
+        String expected = "SUCCEEDED".equals(stockAction) ? "SUCCESS" : "ORDER_SYNC_UNKNOWN";
+        assertEquals(expected, newService(user, orders).process("pay-1"));
+        assertEquals(expected, paymentStatus());
+        assertEquals(expected, intentStatus());
+        assertNull(intentLeaseOwner());
+        verify(user, never()).debit(any(), any(), any());
+        verify(user, never()).refund(any(), any(), any());
+        verify(orders, never()).paid(any(), any());
+      }
+    }
+  }
+
   /** 七种决策的错订单读都只能保留原retry，真实两表不能被该返回结清。 */
   @Test
   void wrongOrderIdentityCannotSettleOrStartFundsWithRealMappers() {

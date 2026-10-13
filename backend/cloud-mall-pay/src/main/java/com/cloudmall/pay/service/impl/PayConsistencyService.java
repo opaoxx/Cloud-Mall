@@ -317,7 +317,7 @@ public class PayConsistencyService {
     }
   }
 
-  /** 只读订单必须精确对应原订单号、归属和金额，不用别单或CI别名作支付决策。 */
+  /** 只读订单须精确对应原身份和金额，且状态可判定，才参与资金恢复决策。 */
   private OrderClient.OrderView readOrderState(PayDebitIntentPO intent) {
     ApiResponse<OrderClient.OrderView> response =
         orderClient.paymentState(intent.orderNo, intent.userId);
@@ -328,6 +328,10 @@ public class PayConsistencyService {
         || !Objects.equals(order.userId(), intent.userId)
         || order.payAmount().compareTo(intent.amount) != 0)
       throw new BizException(ErrorCodes.CONFLICT, "订单身份、归属或金额与支付意图不一致", 409);
+    if (!("PENDING_PAYMENT".equals(order.status())
+        || "PAID".equals(order.status())
+        || "COMPLETED".equals(order.status())
+        || "CANCELLED".equals(order.status()))) throw new IllegalStateException("订单支付状态暂不可判定");
     return order;
   }
 
