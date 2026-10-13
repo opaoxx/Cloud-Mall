@@ -4114,6 +4114,232 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 原schema历史零时间不能进入实际JDBC扫描，也不能领取并顺带改坏metadata。 */
+  @Test
+  void zeroCalendarTimesDoNotScanOrClaim() {
+    var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
+    for (String field : List.of("next_retry_at", "created_at", "updated_at", "lease_until")) {
+      for (String value :
+          List.of(
+              "0000-00-00 00:00:00.000",
+              "0000-01-01 00:00:00.000",
+              "2026-00-15 00:00:00.000",
+              "2026-01-00 00:00:00.000")) {
+        assertions.add(
+            () -> {
+              seedIntentAndPayment("PENDING", "INIT");
+              writeOwnedHistoricalTime(field, value, 1L);
+              var before = rawIntentTimeFacts();
+              var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+              org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                  () -> assertTrue(intents.findDue(currentTime, 1).isEmpty()), field + ":" + value);
+              org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                  () -> assertTrue(intents.findDueAfter(currentTime, null, 1).isEmpty()),
+                  field + ":" + value);
+              assertEquals(
+                  0,
+                  intents.claim(
+                      "pay-1", "t166-zero-token", currentTime.plusSeconds(30), currentTime));
+              assertEquals(before, rawIntentTimeFacts());
+              assertEquals(0, intentAttempts());
+              assertNull(intentLeaseOwner());
+            });
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertAll(assertions);
+  }
+
+  /** 100个零日期坏头先过滤，正常尾项按原时间/主键扫描并能进入实际恢复轮转。 */
+  @Test
+  void zeroCalendarHeadCannotBlockHealthyRecovery() {
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("DELETE FROM pay_record");
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    var fields = List.of("next_retry_at", "created_at", "updated_at", "lease_until");
+    var badTimes =
+        List.of(
+            "0000-00-00 00:00:00.000",
+            "0000-01-01 00:00:00.000",
+            "2026-00-15 00:00:00.000",
+            "2026-01-00 00:00:00.000");
+    for (long identifier = 1; identifier <= 103; identifier++) {
+      String payNo = "t166-pay-" + identifier;
+      String orderNo = "t166-order-" + identifier;
+      fixture.update(
+          "INSERT INTO"
+              + " pay_record(id,pay_no,order_no,user_id,amount,status,debit_mode,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'PENDING','LEGACY',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          currentTime,
+          currentTime);
+      var due = currentTime.minusSeconds(identifier == 101 ? 3 : identifier == 102 ? 5 : 4);
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,last_error,created_at,updated_at)"
+              + " VALUES(?,?,?,7,10,'INIT','LEGACY',0,?,'owned-calendar-proof',?,?)",
+          identifier,
+          payNo,
+          orderNo,
+          due,
+          currentTime,
+          currentTime);
+      if (identifier <= 100) {
+        int variant = (int) (identifier - 1);
+        writeOwnedHistoricalTime(
+            fields.get(variant % 4), badTimes.get((variant / 4) % 4), identifier);
+      }
+    }
+    var before = rawIntentTimeFacts();
+    assertEquals(
+        List.of(102L),
+        intents.findDue(currentTime, 1).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(102L, 103L, 101L),
+        intents.findDue(currentTime, 50).stream().map(candidate -> candidate.id).toList());
+    assertEquals(
+        List.of(101L),
+        intents.findDueAfter(currentTime, null, 0).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(102L),
+        intents.findDueAfter(currentTime, 101L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertEquals(
+        List.of(103L),
+        intents.findDueAfter(currentTime, 102L, 1).stream()
+            .map(candidate -> candidate.id)
+            .toList());
+    assertTrue(intents.findDueAfter(currentTime, 103L, 1).isEmpty());
+    assertEquals(before, rawIntentTimeFacts());
+    UserClient user = mock(UserClient.class);
+    OrderClient orders = mock(OrderClient.class);
+    when(user.operation(eq(7L), anyString(), eq(7L)))
+        .thenThrow(new IllegalStateException("owned-calendar-user-read-fault"));
+    var service = newService(user, orders);
+    service.recoverDue();
+    assertEquals(
+        3,
+        fixture.queryForObject(
+            "SELECT COUNT(*) FROM pay_debit_intent WHERE id>100 AND attempts=1"
+                + " AND lease_owner IS NULL AND last_error LIKE '%owned-calendar-user-read-fault%'",
+            Integer.class));
+    verify(user, times(3)).operation(eq(7L), anyString(), eq(7L));
+    assertEquals(before.get(0), rawIntentTimeFacts().get(0));
+    assertEquals(before.get(1).subList(0, 100), rawIntentTimeFacts().get(1).subList(0, 100));
+    service.recoverDue();
+    verify(user, times(3)).operation(eq(7L), anyString(), eq(7L));
+    verify(user, never()).debit(any(), any(), any());
+    verify(user, never()).refund(any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(orders);
+    assertEquals(before.get(1).subList(0, 100), rawIntentTimeFacts().get(1).subList(0, 100));
+  }
+
+  /** 非零日期含1000/9999边界保持，NULL/到期租约可领取，未来重试或租约仍拒绝。 */
+  @Test
+  void nonzeroCalendarBoundariesPreserveDueAndLeaseRules() {
+    var currentTime =
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+    for (String historicalTime :
+        List.of("1000-01-01 00:00:00.000", "2026-01-15 12:34:56.789", "9999-12-31 23:59:59.999")) {
+      for (String lease : List.of("NULL", "EXPIRED", "EQUAL", "FUTURE", "ZERO_YEAR")) {
+        seedIntentAndPayment("PENDING", "INIT");
+        fixture.update(
+            "UPDATE pay_debit_intent SET next_retry_at=?,last_error='owned-calendar-proof' WHERE"
+                + " id=1",
+            currentTime);
+        writeOwnedHistoricalTime("created_at", historicalTime, 1L);
+        writeOwnedHistoricalTime("updated_at", historicalTime, 1L);
+        if (lease.equals("EXPIRED"))
+          writeOwnedHistoricalTime("lease_until", "1000-01-01 00:00:00.000", 1L);
+        if (lease.equals("EQUAL"))
+          fixture.update("UPDATE pay_debit_intent SET lease_until=? WHERE id=1", currentTime);
+        if (lease.equals("FUTURE"))
+          writeOwnedHistoricalTime("lease_until", "9999-12-31 23:59:59.999", 1L);
+        // 非零月日仍不能接受1000年下界之外的历史年；仅owned SESSION允许模拟。
+        if (lease.equals("ZERO_YEAR"))
+          writeOwnedHistoricalTime("lease_until", "0999-01-01 00:00:00.000", 1L);
+        var before = rawIntentTimeFacts();
+        boolean eligible = !lease.equals("FUTURE") && !lease.equals("ZERO_YEAR");
+        assertEquals(eligible ? 1 : 0, intents.findDue(currentTime, 1).size());
+        assertEquals(eligible ? 1 : 0, intents.findDueAfter(currentTime, null, 1).size());
+        assertEquals(before, rawIntentTimeFacts());
+        assertEquals(
+            eligible ? 1 : 0,
+            intents.claim("pay-1", "t166-healthy-token", currentTime.plusSeconds(30), currentTime));
+        if (eligible) {
+          assertEquals(1, intentAttempts());
+          assertEquals("t166-healthy-token", intentLeaseOwner());
+          assertEquals(before.get(0), rawIntentTimeFacts().get(0));
+          var claimed = new java.util.LinkedHashMap<>(rawIntentTimeFacts().get(1).get(0));
+          var expected = new java.util.LinkedHashMap<>(before.get(1).get(0));
+          for (String changed : List.of("lease_owner", "lease_until", "attempts", "updated_at")) {
+            claimed.remove(changed);
+            expected.remove(changed);
+          }
+          assertEquals(expected, claimed);
+        } else assertEquals(before, rawIntentTimeFacts());
+      }
+    }
+    seedIntentAndPayment("PENDING", "INIT");
+    writeOwnedHistoricalTime("next_retry_at", "9999-12-31 23:59:59.999", 1L);
+    var before = rawIntentTimeFacts();
+    assertTrue(intents.findDue(currentTime, 1).isEmpty());
+    assertTrue(intents.findDueAfter(currentTime, null, 1).isEmpty());
+    assertEquals(
+        0, intents.claim("pay-1", "t166-future-token", currentTime.plusSeconds(30), currentTime));
+    assertEquals(before, rawIntentTimeFacts());
+  }
+
+  /** 仅借用本类owned连接模拟历史写入，SESSION模式finally恢复，禁止全局/原业务库。 */
+  private void writeOwnedHistoricalTime(String field, String value, long identifier) {
+    assertTrue(List.of("next_retry_at", "created_at", "updated_at", "lease_until").contains(field));
+    try (var connection = ownedPool.getConnection();
+        var statement = connection.createStatement()) {
+      assertEquals(database, connection.getCatalog());
+      String originalMode;
+      try (var result = statement.executeQuery("SELECT @@SESSION.sql_mode")) {
+        assertTrue(result.next());
+        originalMode = result.getString(1);
+      }
+      statement.execute("SET SESSION sql_mode=''");
+      try (var update =
+          connection.prepareStatement("UPDATE pay_debit_intent SET " + field + "=? WHERE id=?")) {
+        update.setString(1, value);
+        update.setLong(2, identifier);
+        assertEquals(1, update.executeUpdate());
+      } finally {
+        try (var restore = connection.prepareStatement("SET SESSION sql_mode=?")) {
+          restore.setString(1, originalMode);
+          restore.execute();
+        }
+        try (var restored = statement.executeQuery("SELECT @@SESSION.sql_mode")) {
+          assertTrue(restored.next());
+          assertEquals(originalMode, restored.getString(1));
+        }
+      }
+    } catch (java.sql.SQLException failure) {
+      throw new IllegalStateException("owned historical datetime fixture failed", failure);
+    }
+  }
+
+  /** 对owned意图四时间强制CHAR取原事实，避免检查坏日期时被JDBC转换中断。 */
+  private List<List<Map<String, Object>>> rawIntentTimeFacts() {
+    return List.of(
+        fixture.queryForList("SELECT * FROM pay_record ORDER BY id"),
+        fixture.queryForList(
+            "SELECT id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,CAST(next_retry_at"
+                + " AS CHAR) AS next_retry_at,lease_owner,CAST(lease_until AS CHAR) AS"
+                + " lease_until,last_error,CAST(created_at AS CHAR) AS created_at,CAST(updated_at"
+                + " AS CHAR) AS updated_at FROM pay_debit_intent ORDER BY id"));
+  }
+
   /** SQL NULL时间必须读为NULL，而不是NPE或用当前时间替代真实缺失。 */
   @Test
   void intentTimeMappingPreservesSqlNullWithoutFailure() {

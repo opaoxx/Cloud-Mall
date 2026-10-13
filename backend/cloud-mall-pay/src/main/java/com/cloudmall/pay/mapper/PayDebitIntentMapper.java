@@ -90,7 +90,7 @@ public class PayDebitIntentMapper {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
-  /** 先筛选计数非负、非空白原键及原载荷资格均符合的LEGACY候选，再限制批量。 */
+  /** 先过滤零年月日及原计数、键、载荷资格不符的LEGACY候选，再限制批量。 */
   public List<PayDebitIntentPO> findDue(LocalDateTime now, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
@@ -102,7 +102,16 @@ public class PayDebitIntentMapper {
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-            + " intent.attempts>=0 AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
+            + " intent.attempts>=0"
+            + " AND YEAR(intent.next_retry_at)>=1000 AND MONTH(intent.next_retry_at)>0"
+            + " AND DAYOFMONTH(intent.next_retry_at)>0"
+            + " AND YEAR(intent.created_at)>=1000 AND MONTH(intent.created_at)>0"
+            + " AND DAYOFMONTH(intent.created_at)>0"
+            + " AND YEAR(intent.updated_at)>=1000 AND MONTH(intent.updated_at)>0"
+            + " AND DAYOFMONTH(intent.updated_at)>0"
+            + " AND (intent.lease_until IS NULL OR (YEAR(intent.lease_until)>=1000"
+            + " AND MONTH(intent.lease_until)>0 AND DAYOFMONTH(intent.lease_until)>0))"
+            + " AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
             + " intent.lease_until<=?)"
             + " ORDER BY intent.next_retry_at,intent.id LIMIT ?",
         ROW_MAPPER,
@@ -113,7 +122,7 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 主键轮转仅扫描计数非负及原键载荷资格符合的候选；null从头读，保原时间与批量。 */
+  /** 主键轮转过滤零年月日并保持原资格；null从头读，保原时间与批量。 */
   public List<PayDebitIntentPO> findDueAfter(LocalDateTime now, Long afterId, int limit) {
     return jdbcTemplate.query(
         "SELECT intent.* FROM pay_debit_intent intent JOIN pay_record payment ON"
@@ -125,7 +134,16 @@ public class PayDebitIntentMapper {
             + " payment.debit_mode='LEGACY' AND payment.status IN"
             + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND intent.status IN"
             + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
-            + " intent.attempts>=0 AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
+            + " intent.attempts>=0"
+            + " AND YEAR(intent.next_retry_at)>=1000 AND MONTH(intent.next_retry_at)>0"
+            + " AND DAYOFMONTH(intent.next_retry_at)>0"
+            + " AND YEAR(intent.created_at)>=1000 AND MONTH(intent.created_at)>0"
+            + " AND DAYOFMONTH(intent.created_at)>0"
+            + " AND YEAR(intent.updated_at)>=1000 AND MONTH(intent.updated_at)>0"
+            + " AND DAYOFMONTH(intent.updated_at)>0"
+            + " AND (intent.lease_until IS NULL OR (YEAR(intent.lease_until)>=1000"
+            + " AND MONTH(intent.lease_until)>0 AND DAYOFMONTH(intent.lease_until)>0))"
+            + " AND intent.next_retry_at<=? AND (intent.lease_until IS NULL OR"
             + " intent.lease_until<=?)"
             + " AND (? IS NULL OR intent.id>?) ORDER BY intent.id LIMIT ?",
         ROW_MAPPER,
@@ -138,24 +156,26 @@ public class PayDebitIntentMapper {
         Math.max(1, limit));
   }
 
-  /** 计数非负及原资格通过才领取，INT上限饱和；拒绝不改意图，不保证领取后稳定。 */
+  /** 零年月日及原资格检查通过才领取，INT上限饱和；拒绝不改意图，不保证领取后稳定。 */
   public int claim(String payNo, String owner, LocalDateTime leaseUntil, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE pay_debit_intent SET lease_owner=?,lease_until=?,attempts=CASE WHEN"
-            + " attempts<2147483647 THEN attempts+1 ELSE attempts END,updated_at=?"
-            + " WHERE BINARY pay_debit_intent.pay_no=BINARY ? AND attempts>=0 AND BINARY"
-            + " debit_mode='LEGACY'"
-            + " AND EXISTS (SELECT 1 FROM pay_record"
-            + " WHERE BINARY pay_record.pay_no=BINARY pay_debit_intent.pay_no"
-            + " AND pay_record.user_id=pay_debit_intent.user_id AND BINARY"
-            + " pay_record.order_no=BINARY pay_debit_intent.order_no"
-            + " AND pay_record.amount=pay_debit_intent.amount"
-            + " AND pay_record.user_id>0 AND pay_record.amount>0"
-            + " AND REGEXP_LIKE(pay_record.pay_no,?,'c') AND REGEXP_LIKE(pay_record.order_no,?,'c')"
-            + " AND BINARY pay_record.debit_mode='LEGACY' AND pay_record.status IN"
-            + " ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')) AND status IN"
-            + " ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
-            + " AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<=?)",
+            + " attempts<2147483647 THEN attempts+1 ELSE attempts END,updated_at=? WHERE BINARY"
+            + " pay_debit_intent.pay_no=BINARY ? AND attempts>=0 AND BINARY debit_mode='LEGACY' AND"
+            + " EXISTS (SELECT 1 FROM pay_record WHERE BINARY pay_record.pay_no=BINARY"
+            + " pay_debit_intent.pay_no AND pay_record.user_id=pay_debit_intent.user_id AND BINARY"
+            + " pay_record.order_no=BINARY pay_debit_intent.order_no AND"
+            + " pay_record.amount=pay_debit_intent.amount AND pay_record.user_id>0 AND"
+            + " pay_record.amount>0 AND REGEXP_LIKE(pay_record.pay_no,?,'c') AND"
+            + " REGEXP_LIKE(pay_record.order_no,?,'c') AND BINARY pay_record.debit_mode='LEGACY'"
+            + " AND pay_record.status IN ('PENDING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')) AND"
+            + " status IN ('INIT','DEBITED','ORDER_SYNC_UNKNOWN','REFUND_PENDING') AND"
+            + " YEAR(next_retry_at)>=1000 AND MONTH(next_retry_at)>0 AND"
+            + " DAYOFMONTH(next_retry_at)>0 AND YEAR(created_at)>=1000 AND MONTH(created_at)>0 AND"
+            + " DAYOFMONTH(created_at)>0 AND YEAR(updated_at)>=1000 AND MONTH(updated_at)>0 AND"
+            + " DAYOFMONTH(updated_at)>0 AND (lease_until IS NULL OR (YEAR(lease_until)>=1000 AND"
+            + " MONTH(lease_until)>0 AND DAYOFMONTH(lease_until)>0)) AND next_retry_at<=? AND"
+            + " (lease_until IS NULL OR lease_until<=?)",
         owner,
         leaseUntil,
         now,
