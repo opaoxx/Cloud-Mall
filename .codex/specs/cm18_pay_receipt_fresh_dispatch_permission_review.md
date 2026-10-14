@@ -31,7 +31,7 @@ anchor.userBranchId == null
 
 ### 3.2 Owned native
 
-- 使用真实 ReceiptStore/Facade、Payment/Dispatch/Receipt Mapper 与 owned 原 DDL；Bridge/resource 为受控替身，claim 与 LocalTCC 由程序化短事务边界验证，不启动业务 App、TC/RM 或真实 HTTP。
+- 使用真实 ReceiptStore/Facade、Payment/Dispatch/Receipt Mapper 与 owned 原 DDL；claim 由程序化本地短事务验证，LocalTCC 仅使用 resource 替身并计数调用，不冒称真实注册、回调或业务事务；不启动业务 App、TC/RM 或真实 HTTP。
 - 旧 red：当前 POST marker 非 null、当前 User branch 非 null 时 fresh 仍 insert CLAIMED 并触发 resource.prepare；修复后各返回 409，四表 facts 不变、resource 不调用。
 - control：fresh 各 predicate 单变异、输入 advanced、anchor advanced 均零 resource/零写；唯一 valid fresh winner 只一次 resource 尝试，重放不新增。
 - 原 receipt source identity、healthy four receipt states、missing/cancel gate、历史 bad owner 与 T195/T196 回归保持。generic seed helper 不改；healthy seed 可在本批专用 helper 中清理 `postAttemptedAt`/branch 为 null。
