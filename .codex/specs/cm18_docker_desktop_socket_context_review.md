@@ -13,7 +13,7 @@
 1. 当前 PowerShell 进程读取 `GetCurrentPackageFullName`、`fsutil reparsepoint query`、文件属性/ACL、socket 元数据和可读性。
 2. 使用 `Win32_Process.Create` 启动 Hidden PowerShell，执行完全相同的只读命令并回收子进程。
 
-两组结果必须逐项保存：包名/包上下文、进程完整路径、用户/Integrity 信息、socket 属性、reparse/Archive 状态、父目录 ACL 和 error code。实验只访问现有 socket 与父目录，不删除、重命名、修复 ACL、改变 reparse point 或写入目录。
+两组结果必须逐项保存：包名/包上下文、进程完整路径、用户/Integrity 信息、socket 属性、reparse/Archive 状态、父目录 ACL 和 error code。实验只访问现有 socket 与父目录，不删除、重命名、修复 ACL、改变 reparse point 或写入目录。若两端同为未打包进程但 CreateFileW/fsutil 结果不同，只能记录为启动上下文访问差异，不能据此宣称 API 证明包身份或全面证明 MSIX 虚拟化机理。
 
 仅当两组结果出现可重复的包内/包外差异时，才把“上下文相关”记录为支持性假设；即使如此，也不得声称已证明 Docker Desktop 根因。若两组一致，保留未定位状态。
 
@@ -34,7 +34,7 @@
 
 - Docker engine pipe 与 `docker compose ps` 可用；
 - MySQL/Redis/Nginx 协议和容器 health 按既有 16T181 规则验证；
-- 两个 16T184 owned schema 确认不存在，原 Pay 176 表指纹与历史归档保持一致；
+- 两个 16T184 owned schema 确认不存在，原 Pay 完整表清单、逐表 checksum 与历史归档保持一致；
 - 不启动业务 Java、TC/RM 客户端，不写业务库，不改变容器配置或持久化卷。
 
 若引擎恢复但协议、容器 health、owned 清理或原指纹复核失败，报告部分恢复并停止，不宣称环境闭环。
@@ -55,4 +55,4 @@ Issue 链接、Docker 日志和上下文差异只能分别作为线索、运行�
 
 ## 6. 明确不在范围
 
-不修改业务代码、README、Compose、Docker 镜像、端口、账号、named volume、ACL、Windows/WSL 配置、安装包或系统网络；不执行 force/kill、升级、重置、删卷、重命名 socket/目录或启动业务服务。该规格不证明 Docker Desktop 根因、不承诺 TC/RM/Java 或资金链路健康，也不改变 16T184 业务验证历史证据。
+不修改业务代码、Compose、Docker 镜像、端口、账号、named volume、ACL、Windows/WSL 配置、安装包或系统网络；不执行 force/kill、升级、重置、删卷、重命名 socket/目录或启动业务服务。允许 README 增加本机人工恢复说明：建议从 Windows 开始菜单正常启动 Docker Desktop，先执行只读上下文对照再操作，禁止反复 `Start-Process` 拉起失败实例、删除 socket 或重置环境，并要求恢复后重新验证现有 ports；不得新增自动启停脚本。该规格不证明 Docker Desktop 根因、不承诺 TC/RM/Java 或资金链路健康，也不改变 16T184 业务验证历史证据。
