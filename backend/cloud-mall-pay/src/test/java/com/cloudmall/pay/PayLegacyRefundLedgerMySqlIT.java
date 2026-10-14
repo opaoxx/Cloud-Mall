@@ -5897,7 +5897,7 @@ class PayLegacyRefundLedgerMySqlIT {
     else if (ledgerVariant.equals("number-zero")) json.put("ledgerApplied", 0);
     else if (ledgerVariant.equals("text-false")) json.put("ledgerApplied", "false");
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
-    mutateUserIdentityJson(json, ledgerVariant);
+    mutateUserEvidenceJson(json, ledgerVariant);
     com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
     try {
       decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
@@ -5909,7 +5909,8 @@ class PayLegacyRefundLedgerMySqlIT {
           ledgerVariant.equals("false")
               || ledgerVariant.equals("true")
               || ledgerVariant.startsWith("branch-")
-              || ledgerVariant.startsWith("user-"),
+              || ledgerVariant.startsWith("user-")
+              || ledgerVariant.startsWith("amount-"),
           decoded.ledgerAppliedPresent);
       assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
     }
@@ -6114,7 +6115,7 @@ class PayLegacyRefundLedgerMySqlIT {
     else if (ledgerVariant.equals("number-zero")) json.put("ledgerApplied", 0);
     else if (ledgerVariant.equals("text-false")) json.put("ledgerApplied", "false");
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
-    mutateUserIdentityJson(json, ledgerVariant);
+    mutateUserEvidenceJson(json, ledgerVariant);
     com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
     try {
       decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
@@ -6126,7 +6127,8 @@ class PayLegacyRefundLedgerMySqlIT {
           ledgerVariant.equals("false")
               || ledgerVariant.equals("true")
               || ledgerVariant.startsWith("branch-")
-              || ledgerVariant.startsWith("user-"),
+              || ledgerVariant.startsWith("user-")
+              || ledgerVariant.startsWith("amount-"),
           decoded.ledgerAppliedPresent);
       assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
     }
@@ -6317,6 +6319,60 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 整数/小数金额token均不能授权回滚、决议或可信派发镜像。 */
+  @Test
+  void numericUserAmountCannotAuthorizeAnyConsumer() {
+    for (String variant : List.of("amount-number-int", "amount-number-decimal")) {
+      var rollbackStore = ownedRollbackTokenStore();
+      seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+      var projection = rollbackLedgerPresenceService(rollbackStore, variant);
+      var beforeProjection = ownedCancelIdentityFacts();
+      var publicFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> projection.project(rollbackTokenPayment()));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", publicFailure.getCode());
+      assertEquals(202, publicFailure.getHttpStatus());
+      var claimedFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> projection.projectClaimed(rollbackTokenPayment(), "worker"));
+      assertEquals(202, claimedFailure.getHttpStatus());
+      assertEquals(beforeProjection, ownedCancelIdentityFacts());
+      var abortStore = ownedAbortLedgerStore();
+      seedAbortLedgerDecision("RUNNING", "PENDING");
+      var abort = abortLedgerPresenceService(abortStore, variant);
+      var beforeAbort = ownedCancelIdentityFacts();
+      var abortFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> abort.requestRollback(rollbackTokenPayment()));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", abortFailure.getCode());
+      assertEquals(202, abortFailure.getHttpStatus());
+      assertEquals(beforeAbort, ownedCancelIdentityFacts());
+      var persistence = ownedDispatchPersistence();
+      seedBridgeLedgerRow(false);
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      when(user.state(any(), any(), any(), any(), any(), any()))
+          .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", variant)));
+      var payBefore = rawIntentTimeFacts();
+      var beforeDispatch = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+      var result = bridgeLedgerTransactions(persistence, user).recover("pay-1");
+      assertEquals("TRY_UNKNOWN", result.state);
+      assertNull(result.userBranchId);
+      var afterDispatch = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+      assertEquals("TRY_UNKNOWN", afterDispatch.get("state"));
+      assertNull(afterDispatch.get("user_branch_id"));
+      for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+        beforeDispatch.remove(changed);
+        afterDispatch.remove(changed);
+      }
+      assertEquals(beforeDispatch, afterDispatch);
+      assertEquals(payBefore, rawIntentTimeFacts());
+      verify(user, never()).prepare(any(), any(), any(), any(), any(), any());
+    }
+  }
+
   /** 小数branchId不能截断为原分支并授权Pay FAILED。 */
   @Test
   void fractionalUserBranchCannotAuthorizeRollbackProjection() {
@@ -6364,8 +6420,54 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals(7L, row.userBranchId));
   }
 
-  /** 只扩受控User JSON输入形态，账本标志仍是明确原生false。 */
-  private void mutateUserIdentityJson(
+  /** 数字金额不能转成文本并授权Pay FAILED。 */
+  @Test
+  void numericUserAmountCannotAuthorizeRollbackProjection() {
+    var store = ownedRollbackTokenStore();
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+    var service = rollbackLedgerPresenceService(store, "amount-number-int");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> service.project(rollbackTokenPayment())),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 小数金额token不能冒充文本证明并选择ROLLBACK。 */
+  @Test
+  void decimalUserAmountCannotAuthorizeAbortDecision() {
+    var store = ownedAbortLedgerStore();
+    seedAbortLedgerDecision("RUNNING", "PENDING");
+    var service = abortLedgerPresenceService(store, "amount-number-decimal");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> service.requestRollback(rollbackTokenPayment())),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 数字金额不能生成可信CANCELLED镜像或学习分支。 */
+  @Test
+  void numericAmountCannotAuthorizeCancelledDispatchMirror() {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(false);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.state(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", "amount-number-int")));
+    var result = bridgeLedgerTransactions(persistence, user).recover("pay-1");
+    var row = dispatchMirrorMapper.selectByPayNo("pay-1");
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals("TRY_UNKNOWN", result.state),
+        () -> assertEquals("TRY_UNKNOWN", row.state),
+        () -> assertNull(row.userBranchId));
+  }
+
+  /** 只扩受控User JSON身份/金额类型，账本标志仍是明确原生false。 */
+  private void mutateUserEvidenceJson(
       com.fasterxml.jackson.databind.node.ObjectNode json, String variant) {
     if (variant.equals("user-fractional"))
       json.put("userId", new BigDecimal(json.get("userId").asText() + ".9"));
@@ -6373,6 +6475,8 @@ class PayLegacyRefundLedgerMySqlIT {
       json.put("branchId", new BigDecimal(json.get("branchId").asText() + ".9"));
     else if (variant.equals("user-text")) json.put("userId", json.get("userId").asText());
     else if (variant.equals("branch-text")) json.put("branchId", json.get("branchId").asText());
+    else if (variant.equals("amount-number-int")) json.put("amount", 10);
+    else if (variant.equals("amount-number-decimal")) json.put("amount", new BigDecimal("10.00"));
   }
 
   /** 原DDL和实际Pay/Execution/Cancel/Intent Mapper验证本地门，不执行远端证明。 */
@@ -7194,7 +7298,7 @@ class PayLegacyRefundLedgerMySqlIT {
     else if (ledgerVariant.equals("number-zero")) json.put("ledgerApplied", 0);
     else if (ledgerVariant.equals("text-false")) json.put("ledgerApplied", "false");
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
-    mutateUserIdentityJson(json, ledgerVariant);
+    mutateUserEvidenceJson(json, ledgerVariant);
     try {
       var decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
       if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
@@ -7202,7 +7306,8 @@ class PayLegacyRefundLedgerMySqlIT {
             ledgerVariant.equals("false")
                 || ledgerVariant.equals("true")
                 || ledgerVariant.startsWith("branch-")
-                || ledgerVariant.startsWith("user-"),
+                || ledgerVariant.startsWith("user-")
+                || ledgerVariant.startsWith("amount-"),
             decoded.ledgerAppliedPresent);
       }
       return decoded;

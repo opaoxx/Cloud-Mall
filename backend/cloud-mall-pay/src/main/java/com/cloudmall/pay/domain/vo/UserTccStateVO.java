@@ -1,6 +1,7 @@
 package com.cloudmall.pay.domain.vo;
 
 import com.cloudmall.pay.util.UserTccLedgerBooleanDeserializer;
+import com.cloudmall.pay.util.UserTccNativeTextDeserializer;
 import com.cloudmall.pay.util.UserTccPositiveLongDeserializer;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSetter;
@@ -14,21 +15,27 @@ public class UserTccStateVO {
   public Long userId;
 
   /** 支付号。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String payNo;
 
   /** 订单号。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String orderNo;
 
   /** 金额字符串。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String amount;
 
   /** TCC 操作键。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String operationKey;
 
   /** 最终账本键。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String ledgerKey;
 
   /** XID。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String xid;
 
   /** User 分支标识。 */
@@ -36,6 +43,7 @@ public class UserTccStateVO {
   public Long branchId;
 
   /** User 业务状态。 */
+  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String state;
 
   /** 是否存在 APPLIED 账本。 */

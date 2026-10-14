@@ -2536,3 +2536,9 @@ Pay接收User的ledgerApplied时只接受JSON原生true/false；数字、字符�
 Pay接收User状态的userId、branchId时，只接受JSON原生整数且值在1..Long.MAX_VALUE。小数、数字字符串、非正数或越界值按身份缺证处理，不能再因截断或强转匹配原用户/分支并授权资金投影、回滚决议或可信镜像。
 
 仅这两个字段使用专用解析器，public Long赋值、整数输出、全局ObjectMapper及账本原生布尔规则保持。各调用方沿原待确认/UNKNOWN规则；本批真实Jackson与隔离Pay Mapper验证不替代真实User/TC资金链路验证。
+
+### CM-18 User文本字段原生字符串解析（16T193）
+
+Pay接收User状态的payNo、orderNo、amount、operationKey、ledgerKey、xid、state时，只接受JSON原生字符串。数字金额不能再强转成文本并匹配原金额；非字符串按缺证处理，沿原待确认/UNKNOWN规则阻断可信结果。
+
+合法文本逐字保留，不trim或新增金额词法；public String赋值/输出、全局ObjectMapper及原Boolean/Long字段规则保持。本批隔离验证覆盖数字金额在回滚、主动决议和派发镜像的影响，其余文本字段由单元测试验证，不代表真实User/TC资金链路闭环。
