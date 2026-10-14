@@ -2572,3 +2572,9 @@ POST权限领取沿Pay→cancel→dispatch顺序增加一次派发行锁定读�
 新建receipt前，输入dispatch与当前锚点均须为PREPARED且未观察到User分支，当前锚点还必须没有POST时间标记。证据不符返回原409，不插入CLAIMED、不触发Pay资源尝试，保持Pay receipt先于User派发的固定顺序。
 
 已有receipt仍先核载荷并只返回原事实，不因后续派发进展误用首次认领门，也不注册第二Pay分支。本批使用真实隔离Store/Facade与资源替身，不代表真实TC注册或完整资金因果验证。
+
+### CM-18 Pay receipt准备结果的原载荷校验（16T199）
+
+receipt准备后的非空读回必须仍匹配原dispatch的payNo、xid、userId、orderNo、amount、operationKey、ledgerKey，才能生成返回视图；载荷变化沿原409拒绝，保留已经完成的claim/资源尝试，不追加注册。
+
+状态/分支进展、金额数值等价和缺行原503保持。复用服务包内纯比较函数，既有receipt缺金额保守拒绝为409；本批不新增查询或SQL，也不代表真实LocalTCC/TC或完整资金因果验证。

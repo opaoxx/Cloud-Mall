@@ -46,6 +46,8 @@ public class PayTccReceiptServiceImpl implements PayTccReceiptService {
     // 3. 返回已提交事实，CLAIMED 或 TRYING 均不是支付成功。
     PayTccReceiptPO receipt = receipts.read(dispatch.payNo);
     if (receipt == null) throw new BizException("PAY_TCC_RECEIPT_UNKNOWN", "Pay receipt 未找到", 503);
+    if (!PayTccReceiptStore.samePayload(receipt, dispatch))
+      throw new BizException("PAY_TCC_RECEIPT_CONFLICT", "Pay receipt 读回载荷与原记录不一致", 409);
     return PayTccReceiptVO.from(receipt);
   }
 

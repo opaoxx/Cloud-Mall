@@ -406,6 +406,97 @@ class PayTccReceiptServiceTest {
     verify(fixture.receiptRows, never()).claim(any());
   }
 
+  /** winner/replay的七字段变化或缺金额都不能作为原准备结果返回。 */
+  @Test
+  void prepareReadbackRequiresOriginalReceiptPayload() {
+    for (boolean winner : java.util.List.of(false, true))
+      for (var mutation : receiptReadbackMutations()) {
+        setUp();
+        var expected = dispatch();
+        var changed = receipt("TRYING");
+        mutation.accept(changed);
+        when(bridge.prepare(any())).thenReturn(expected);
+        when(receipts.claim(expected)).thenReturn(winner);
+        when(resource.prepare(any(), any())).thenReturn(true);
+        when(receipts.read(expected.payNo)).thenReturn(changed);
+        var failure = assertThrows(BizException.class, () -> service.prepare(request()));
+        assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        verify(receipts).claim(expected);
+        verify(resource, org.mockito.Mockito.times(winner ? 1 : 0)).prepare(any(), any());
+        verify(receipts).read(expected.payNo);
+      }
+  }
+
+  /** 数值等价、状态/分支进展保持，缺行先于payload仍原503且不追加注册。 */
+  @Test
+  void prepareReadbackKeepsProgressEqualMoneyAndMissingPriority() {
+    for (boolean winner : java.util.List.of(false, true))
+      for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+        setUp();
+        var expected = dispatch();
+        expected.amount = "1E+1";
+        var current = receipt(state);
+        current.amount = new BigDecimal("10.000");
+        current.branchId = state.equals("CLAIMED") ? null : 11L;
+        when(bridge.prepare(any())).thenReturn(expected);
+        when(receipts.claim(expected)).thenReturn(winner);
+        when(resource.prepare(any(), any())).thenReturn(true);
+        when(receipts.read(expected.payNo)).thenReturn(current);
+        var result = service.prepare(request());
+        assertEquals(state, result.state);
+        assertEquals(current.branchId, result.branchId);
+        assertEquals(current.xid, result.xid);
+        verify(resource, org.mockito.Mockito.times(winner ? 1 : 0)).prepare(any(), any());
+        assertEquals("1E+1", expected.amount);
+      }
+    for (boolean winner : java.util.List.of(false, true)) {
+      setUp();
+      var expected = dispatch();
+      when(bridge.prepare(any())).thenReturn(expected);
+      when(receipts.claim(expected)).thenReturn(winner);
+      when(resource.prepare(any(), any())).thenReturn(true);
+      var failure = assertThrows(BizException.class, () -> service.prepare(request()));
+      assertEquals("PAY_TCC_RECEIPT_UNKNOWN", failure.getCode());
+      assertEquals(503, failure.getHttpStatus());
+      verify(resource, org.mockito.Mockito.times(winner ? 1 : 0)).prepare(any(), any());
+    }
+  }
+
+  /** 实际Store复用payload规则，既有缺金额409；合法尾零/指数重放不改金额或状态。 */
+  @Test
+  void existingReceiptPayloadComparisonRejectsMissingMoneySafely() {
+    var missing = new ReceiptClaimFixture();
+    missing.seedExisting();
+    missing.stored.amount = null;
+    assertFreshClaimRejected(missing);
+    var equal = new ReceiptClaimFixture();
+    equal.seedExisting();
+    equal.dispatch.amount = "1E+1";
+    equal.stored.amount = new BigDecimal("10.000");
+    var before = equal.snapshot();
+    org.junit.jupiter.api.Assertions.assertFalse(equal.store.claim(equal.dispatch));
+    assertEquals(before, equal.snapshot());
+    verify(equal.receiptRows, never()).claim(any());
+  }
+
+  /** 每次只变异独立读回PO，保留原dispatch预期，不借变更修复坏场景。 */
+  private java.util.List<java.util.function.Consumer<PayTccReceiptPO>> receiptReadbackMutations() {
+    return java.util.List.of(
+        current -> current.payNo = "PAY-RECEIPT-TEST",
+        current -> current.xid = "changed-xid",
+        current -> current.userId = 8L,
+        current -> current.orderNo = "changed-order",
+        current -> current.amount = new BigDecimal("11.00"),
+        current -> current.operationKey = "changed-operation",
+        current -> current.ledgerKey = "changed-ledger",
+        current -> current.amount = null,
+        current -> {
+          current.xid = "changed-xid";
+          current.userId = 8L;
+        });
+  }
+
   /** 真实Store及可独立变异来源；Mapper均为替身，不模拟数据库列可NULL。 */
   private static final class ReceiptClaimFixture {
     /** 已冻结的原派发输入。 */

@@ -152,18 +152,30 @@ public class PayTccReceiptStore {
 
   /** 重放必须匹配全部不可变字段和有效状态，未知分支不获得新认领权。 */
   private void validate(PayTccReceiptPO stored, PayTccDispatchVO dispatch) {
-    if (stored == null
-        || !Objects.equals(stored.payNo, dispatch.payNo)
-        || !Objects.equals(stored.xid, dispatch.xid)
-        || !Objects.equals(stored.userId, dispatch.userId)
-        || !Objects.equals(stored.orderNo, dispatch.orderNo)
-        || stored.amount.compareTo(new BigDecimal(dispatch.amount)) != 0
-        || !Objects.equals(stored.operationKey, dispatch.operationKey)
-        || !Objects.equals(stored.ledgerKey, dispatch.ledgerKey)) {
+    if (!samePayload(stored, dispatch)) {
       throw new BizException("PAY_TCC_RECEIPT_CONFLICT", "Pay receipt 载荷不一致", 409);
     }
     if (!Set.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED").contains(stored.state)
         || (stored.branchId == null && !"CLAIMED".equals(stored.state))) throw conflict();
+  }
+
+  /** 包内共享的原载荷纯比较；缺金额或格式错误只拒绝证据，状态/分支/时间不参与。 */
+  static boolean samePayload(PayTccReceiptPO stored, PayTccDispatchVO expected) {
+    if (stored == null || expected == null || stored.amount == null || expected.amount == null)
+      return false;
+    BigDecimal expectedAmount;
+    try {
+      expectedAmount = new BigDecimal(expected.amount);
+    } catch (NumberFormatException malformedAmount) {
+      return false;
+    }
+    return Objects.equals(stored.payNo, expected.payNo)
+        && Objects.equals(stored.xid, expected.xid)
+        && Objects.equals(stored.userId, expected.userId)
+        && Objects.equals(stored.orderNo, expected.orderNo)
+        && stored.amount.compareTo(expectedAmount) == 0
+        && Objects.equals(stored.operationKey, expected.operationKey)
+        && Objects.equals(stored.ledgerKey, expected.ledgerKey);
   }
 
   /** 锚点不完整或原身份冲突时不创建 receipt。 */

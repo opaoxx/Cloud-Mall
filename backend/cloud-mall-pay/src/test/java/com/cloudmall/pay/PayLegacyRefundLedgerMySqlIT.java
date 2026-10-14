@@ -7127,12 +7127,25 @@ class PayLegacyRefundLedgerMySqlIT {
       com.cloudmall.pay.service.impl.PayTccReceiptStore actual,
       com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch,
       com.cloudmall.pay.service.PayTccReceiptLocalResource resource) {
+    return receiptClaimFacade(actual, dispatch, resource, () -> {});
+  }
+
+  /** 后置hook只在claim短事务结束后运行，资源注册仍为外部受控替身。 */
+  private com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl receiptClaimFacade(
+      com.cloudmall.pay.service.impl.PayTccReceiptStore actual,
+      com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch,
+      com.cloudmall.pay.service.PayTccReceiptLocalResource resource,
+      Runnable afterClaim) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     when(bridge.prepare(any())).thenReturn(dispatch);
     var boundary = mock(com.cloudmall.pay.service.impl.PayTccReceiptStore.class);
     when(boundary.claim(any()))
         .thenAnswer(
-            invocation -> dispatchTransaction(() -> actual.claim(invocation.getArgument(0))));
+            invocation -> {
+              boolean winner = dispatchTransaction(() -> actual.claim(invocation.getArgument(0)));
+              afterClaim.run();
+              return winner;
+            });
     when(boundary.read(any())).thenAnswer(invocation -> actual.read(invocation.getArgument(0)));
     return new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, boundary, resource);
   }
@@ -7146,6 +7159,153 @@ class PayLegacyRefundLedgerMySqlIT {
     request.orderNo = dispatch.orderNo;
     request.amount = new BigDecimal(dispatch.amount);
     return request;
+  }
+
+  /** winner资源调用后receipt xid变化，不能把另一xid作为原准备结果。 */
+  @Test
+  void receiptWinnerReadbackCannotReturnChangedXid() {
+    assertReceiptReadbackRejected(false, "UPDATE pay_tcc_receipt SET xid='changed-receipt-xid'");
+  }
+
+  /** replay claim结束后operation变化，不能返回已漂移的receipt键。 */
+  @Test
+  void receiptReplayReadbackCannotReturnChangedOperation() {
+    assertReceiptReadbackRejected(
+        true, "UPDATE pay_tcc_receipt SET operation_key='changed-receipt-operation'");
+  }
+
+  /** winner/replay读回七字段分别变异，原payNo门及新的完整载荷门均拒绝。 */
+  @Test
+  void receiptReadbackPayloadChangesCannotPublishForeignViews() {
+    for (String mutation :
+        List.of(
+            "UPDATE pay_tcc_receipt SET pay_no='PAY-1'",
+            "UPDATE pay_tcc_receipt SET xid='changed-receipt-xid'",
+            "UPDATE pay_tcc_receipt SET user_id=8",
+            "UPDATE pay_tcc_receipt SET order_no='changed-order'",
+            "UPDATE pay_tcc_receipt SET amount=11.00",
+            "UPDATE pay_tcc_receipt SET operation_key='changed-receipt-operation'",
+            "UPDATE pay_tcc_receipt SET ledger_key='changed-ledger'"))
+      for (boolean replay : List.of(false, true)) assertReceiptReadbackRejected(replay, mutation);
+  }
+
+  /** 同原载荷的四状态和金额等价可读回，实际缺行保持原503及资源尝试次数。 */
+  @Test
+  void receiptReadbackKeepsProgressEqualMoneyAndMissingResult() {
+    for (boolean replay : List.of(false, true))
+      for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+        var store = ownedReceiptClaimStore();
+        var dispatch = seedOwnedReceiptClaim();
+        dispatch.amount = "10.000";
+        if (replay) assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+        var afterProgress =
+            new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+        Runnable progress =
+            () -> {
+              org.junit.jupiter.api.Assertions.assertFalse(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive());
+              fixture.update(
+                  "UPDATE pay_tcc_receipt SET state=?,branch_id=?,updated_at=NOW(3)",
+                  state,
+                  state.equals("CLAIMED") ? null : 11L);
+              afterProgress.set(ownedReceiptClaimFacts());
+            };
+        var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+        if (!replay)
+          when(resource.prepare(any(), any()))
+              .thenAnswer(
+                  invocation -> {
+                    progress.run();
+                    return true;
+                  });
+        var facade = receiptClaimFacade(store, dispatch, resource, replay ? progress : () -> {});
+        var result = facade.prepare(receiptClaimRequest(dispatch));
+        assertEquals(state, result.state);
+        assertEquals(state.equals("CLAIMED") ? null : 11L, result.branchId);
+        assertEquals("t171-xid", result.xid);
+        assertEquals(afterProgress.get(), ownedReceiptClaimFacts());
+        verify(resource, org.mockito.Mockito.times(replay ? 0 : 1)).prepare(any(), any());
+        assertEquals("10.000", dispatch.amount);
+      }
+    for (boolean replay : List.of(false, true)) {
+      var store = ownedReceiptClaimStore();
+      var dispatch = seedOwnedReceiptClaim();
+      if (replay) assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+      var afterRemove =
+          new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+      Runnable remove =
+          () -> {
+            org.junit.jupiter.api.Assertions.assertFalse(
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isActualTransactionActive());
+            fixture.update("DELETE FROM pay_tcc_receipt");
+            afterRemove.set(ownedReceiptClaimFacts());
+          };
+      var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+      if (!replay)
+        when(resource.prepare(any(), any()))
+            .thenAnswer(
+                invocation -> {
+                  remove.run();
+                  return true;
+                });
+      var facade = receiptClaimFacade(store, dispatch, resource, replay ? remove : () -> {});
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> facade.prepare(receiptClaimRequest(dispatch)));
+      assertEquals("PAY_TCC_RECEIPT_UNKNOWN", failure.getCode());
+      assertEquals(503, failure.getHttpStatus());
+      assertEquals(afterRemove.get(), ownedReceiptClaimFacts());
+      verify(resource, org.mockito.Mockito.times(replay ? 0 : 1)).prepare(any(), any());
+    }
+  }
+
+  /** 真实claim/读回之间注入owned变更，原winner调用不撤回但不能追加注册/写入。 */
+  private void assertReceiptReadbackRejected(boolean replay, String mutationSql) {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    if (replay) assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+    var afterChange =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    Runnable mutation =
+        () -> {
+          org.junit.jupiter.api.Assertions.assertFalse(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          fixture.update(mutationSql);
+          afterChange.set(ownedReceiptClaimFacts());
+        };
+    var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+    if (!replay)
+      when(resource.prepare(any(), any()))
+          .thenAnswer(
+              invocation -> {
+                mutation.run();
+                return true;
+              });
+    var facade = receiptClaimFacade(store, dispatch, resource, replay ? mutation : () -> {});
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccReceiptVO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(facade.prepare(receiptClaimRequest(dispatch))));
+          assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () ->
+            assertNull(
+                returned.get() == null
+                    ? null
+                    : returned.get().xid + "|" + returned.get().operationKey));
+    org.junit.jupiter.api.Assertions.assertNotNull(afterChange.get());
+    assertEquals(afterChange.get(), ownedReceiptClaimFacts());
+    verify(resource, org.mockito.Mockito.times(replay ? 0 : 1)).prepare(any(), any());
   }
 
   /** 原Pay/Dispatch/Receipt实际Mapper共享owned数据源；cancel gate仅为无取消替身。 */
