@@ -16,7 +16,7 @@ id, payNo, xid, userId, orderNo, amount, operationKey, ledgerKey
 
 Bridge 两处 readback 使用原始 dispatch snapshot 调用该纯函数：
 
-1. `postOnce` 的 `markPostAttempted=false` 路径中，当前行非 null 时先校验，再 `PayTccDispatchVO.from(current)`；不一致抛既有 `PAY_TCC_DISPATCH_CONFLICT/409`，由原 `rethrowIdentityConflict` 处理，不能返回 foreign VO 或继续 POST。current 为 null 的 `mirrorUnknown("派发租约丢失")` 分支逐字保持。
+1. `postOnce` 的 `markPostAttempted=false` 路径中，当前行非 null 时先校验，再 `PayTccDispatchVO.from(current)`；不一致直接抛既有 `PAY_TCC_DISPATCH_CONFLICT/409`，不能返回 foreign VO 或继续 POST。current 为 null 的 `mirrorUnknown("派发租约丢失")` 分支逐字保持。
 2. `mirror` 成功提交后，`updated` 非 null 时先校验，再 `PayTccDispatchVO.from(updated)`；不一致同样 409，不 fallback/再写。updated 为 null 的既有 unavailable 分支保持，不预设其最终 HTTP code 或改变外层 catch。
 
 Bridge 传入的 expected 必须是调用前原 dispatch snapshot，不在 readback 期间重读构造。healthy mutable state/branch/time/diagnostic 变化以及金额数值等价不拒绝。Persistence、Mapper SQL、Feign、DTO/API、事务、状态机、TCC 不改。
