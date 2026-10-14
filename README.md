@@ -2472,3 +2472,9 @@ receipt读取与锁定只返回支付号精确匹配的原记录，CI查询命�
 delivery的claim/stage/finish统一要求token非NULL、非blank且Java UTF-16长度不超过128。非法claim返回原交付冲突；非法stage返回false，非法finish不改任何租约或退避字段。
 
 不trim非blank token的首尾空格；正常UUID、原锁序/状态/租约/退避及SQL保持。历史坏owner不自动修复，本批仅Store输入域及隔离Mapper/本地事务验证，未覆盖直接Mapper调用或完整资金fencing。
+
+### CM-18 Cancel租约token有效域（16T184）
+
+取消恢复claimRecovery/stage/finish统一要求token非NULL、非blank且Java UTF-16长度不超过128。非法claim沿用原取消参数冲突，stage返回false，finish不清租约或修改退避；非blank首尾空格不trim。
+
+合法token的租约、状态、资金互斥、退避及SQL保持。emoji65虽能按数据库字符容量存入，仍因Java域超限被拒；本批不修历史坏owner，也不代表直接Mapper调用或完整取消fencing验收。

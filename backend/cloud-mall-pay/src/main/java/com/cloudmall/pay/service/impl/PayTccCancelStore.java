@@ -111,7 +111,7 @@ public class PayTccCancelStore {
   /** 认领到期取消恢复任务，旧事实或载荷变化均拒绝认领。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccCancelPO claimRecovery(String payNo, String token) {
-    if (payNo == null || token == null || token.isBlank()) throw conflict("取消恢复参数不完整");
+    if (payNo == null || !validToken(token)) throw conflict("取消恢复参数不完整");
     payments.selectForUpdate(payNo);
     LocalDateTime currentTime = now();
     if (cancels.claimRecovery(payNo, token, currentTime.plusSeconds(60), currentTime) != 1)
@@ -128,8 +128,7 @@ public class PayTccCancelStore {
     LocalDateTime currentTime = now();
     if (records.size() != 1
         || current == null
-        || token == null
-        || token.isBlank()
+        || !validToken(token)
         || current.leaseOwner == null
         || !current.leaseOwner.equals(token)
         || current.leaseUntil == null
@@ -158,6 +157,7 @@ public class PayTccCancelStore {
   /** 释放当前 lease 并按尝试次数设置有界退避，不改变业务状态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void finish(String payNo, String token, int attempts, String error) {
+    if (!validToken(token)) return;
     int boundedAttempts = Math.max(1, Math.min(31, attempts));
     long seconds = 5L * (1L << Math.min(6, boundedAttempts - 1));
     LocalDateTime currentTime = now();
@@ -209,6 +209,11 @@ public class PayTccCancelStore {
         || !Objects.equals(cancel.orderNo, payment.orderNo)
         || cancel.amount == null
         || cancel.amount.compareTo(payment.amount) != 0) throw conflict("取消台账载荷不一致");
+  }
+
+  /** 按UTF-16限制租约身份为非blank且不超过128单位，不归一化原token。 */
+  private static boolean validToken(String token) {
+    return token != null && !token.isBlank() && token.length() <= 128;
   }
 
   private static String truncate(String error) {

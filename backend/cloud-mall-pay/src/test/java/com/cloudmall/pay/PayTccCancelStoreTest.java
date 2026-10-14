@@ -264,6 +264,106 @@ class PayTccCancelStoreTest {
     verify(cancels, never()).finish(any(), any(), any(), any(), any());
   }
 
+  /** 七种非法token在任何Mapper之前按原参数409拒绝，NULL支付号保持原门。 */
+  @Test
+  void invalidRecoveryTokensFailBeforeAnyMapper() {
+    for (String token :
+        java.util.Arrays.asList(
+            null, "", " ", "\t\r\n", "\u3000", "a".repeat(129), "😀".repeat(65))) {
+      setUp();
+      var failure =
+          assertThrows(BizException.class, () -> store.claimRecovery("pay-cancel-store", token));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals("取消恢复参数不完整", failure.getMessage());
+      org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+      org.mockito.Mockito.verifyNoInteractions(
+          payments, cancels, executions, dispatches, receipts, intents);
+    }
+    assertThrows(BizException.class, () -> store.claimRecovery(null, "worker"));
+    org.mockito.Mockito.verifyNoInteractions(
+        payments, cancels, executions, dispatches, receipts, intents);
+  }
+
+  /** stage保原两锁顺序但无资金读写，finish非法时完全不调用Mapper。 */
+  @Test
+  void invalidStageAndFinishTokensSkipAllWrites() {
+    for (String token :
+        java.util.Arrays.asList(
+            null, "", " ", "\t\r\n", "\u3000", "a".repeat(129), "😀".repeat(65))) {
+      setUp();
+      var record = paymentRecord("TCC", "PENDING");
+      var current = cancel("REQUESTED", token);
+      current.leaseUntil = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1);
+      when(payments.selectForUpdate("pay-cancel-store")).thenReturn(List.of(record));
+      when(cancels.selectForUpdate("pay-cancel-store")).thenReturn(current);
+      var before =
+          org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+              () ->
+                  new com.fasterxml.jackson.databind.ObjectMapper()
+                      .findAndRegisterModules()
+                      .writeValueAsString(List.of(record, current)));
+      assertFalse(store.stage("pay-cancel-store", token, "COMPLETED", "should-not-save"));
+      var order = org.mockito.Mockito.inOrder(payments, cancels);
+      order.verify(payments).selectForUpdate("pay-cancel-store");
+      order.verify(cancels).selectForUpdate("pay-cancel-store");
+      order.verifyNoMoreInteractions();
+      org.mockito.Mockito.verifyNoInteractions(executions, dispatches, receipts, intents);
+      org.mockito.Mockito.clearInvocations(
+          payments, cancels, executions, dispatches, receipts, intents);
+      store.finish("pay-cancel-store", token, 31, "should-not-save");
+      org.mockito.Mockito.verifyNoInteractions(
+          payments, cancels, executions, dispatches, receipts, intents);
+      org.junit.jupiter.api.Assertions.assertEquals(
+          before,
+          org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+              () ->
+                  new com.fasterxml.jackson.databind.ObjectMapper()
+                      .findAndRegisterModules()
+                      .writeValueAsString(List.of(record, current))));
+    }
+  }
+
+  /** 四种合法边界保原精确token/readback和300秒封顶退避，无首尾trim。 */
+  @Test
+  void validCancelTokensPreserveParametersReadbackAndDelay() {
+    for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64))) {
+      setUp();
+      var current = cancel("REQUESTED", token);
+      current.leaseUntil = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1);
+      when(payments.selectForUpdate("pay-cancel-store"))
+          .thenReturn(List.of(paymentRecord("TCC", "PENDING")));
+      when(cancels.claimRecovery(any(), any(), any(), any())).thenReturn(1);
+      when(cancels.selectByPayNo("pay-cancel-store")).thenReturn(current);
+      org.junit.jupiter.api.Assertions.assertSame(
+          current, store.claimRecovery("pay-cancel-store", token));
+      verify(cancels).claimRecovery(eq("pay-cancel-store"), eq(token), any(), any());
+      when(cancels.selectForUpdate("pay-cancel-store")).thenReturn(current);
+      when(payments.markFailed(any(), any())).thenReturn(1);
+      when(cancels.updateState(any(), any(), any(), any(), any())).thenReturn(1);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          store.stage("pay-cancel-store", token, "COMPLETED", null));
+      verify(cancels)
+          .updateState(
+              eq("pay-cancel-store"),
+              eq(token),
+              eq("COMPLETED"),
+              org.mockito.ArgumentMatchers.isNull(),
+              any());
+      var nextAt = org.mockito.ArgumentCaptor.forClass(LocalDateTime.class);
+      var finishedAt = org.mockito.ArgumentCaptor.forClass(LocalDateTime.class);
+      store.finish("pay-cancel-store", token, 31, "cancel-evidence");
+      verify(cancels)
+          .finish(
+              eq("pay-cancel-store"),
+              eq(token),
+              nextAt.capture(),
+              eq("cancel-evidence"),
+              finishedAt.capture());
+      org.junit.jupiter.api.Assertions.assertEquals(
+          finishedAt.getValue().plusSeconds(300), nextAt.getValue());
+    }
+  }
+
   private PayVO payment() {
     PayVO payment = new PayVO();
     payment.payNo = "pay-cancel-store";

@@ -5296,6 +5296,178 @@ class PayLegacyRefundLedgerMySqlIT {
         fixed);
   }
 
+  /** UTF-16超限但数据库可存的token不能认领并改lease/attempt。 */
+  @Test
+  void cancelClaimCannotPersistOverlongLeaseToken() {
+    var store = ownedCancelRecoveryIdentityStore();
+    seedOwnedCancelIdentity("REQUESTED", "pay-1");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      cancelIdentityTransaction(
+                          () -> store.claimRecovery("pay-1", "😀".repeat(65))));
+          assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+        },
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 历史UTF-16超限owner与入参相等不能推进取消或Pay FAILED。 */
+  @Test
+  void cancelStageCannotWriteWithOverlongToken() {
+    var store = ownedCancelRecoveryIdentityStore();
+    seedOwnedCancelIdentity("REQUESTED", "pay-1");
+    String token = "😀".repeat(65);
+    fixture.update(
+        "UPDATE pay_tcc_cancel SET lease_owner=?,lease_until=?",
+        token,
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+    var before = ownedCancelIdentityFacts();
+    boolean changed = dispatchTransaction(() -> store.stage("pay-1", token, "COMPLETED", null));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertFalse(
+                changed, "overlong token must not authorize cancellation"),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 历史空白owner不能被空白token释放租约或覆写退避/错误。 */
+  @Test
+  void cancelFinishCannotReleaseBlankOwner() {
+    var store = ownedCancelRecoveryIdentityStore();
+    seedOwnedCancelIdentity("REQUESTED", "pay-1");
+    fixture.update(
+        "UPDATE pay_tcc_cancel SET lease_owner=' ',lease_until=?",
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+    var before = ownedCancelIdentityFacts();
+    cancelIdentityTransaction(
+        () -> {
+          store.finish("pay-1", " ", 1, "blank-cancel-proof");
+          return null;
+        });
+    assertEquals(before, ownedCancelIdentityFacts());
+  }
+
+  /** 六种数据库可存的非法token三入口均不改变六表事实。 */
+  @Test
+  void invalidCancelLeaseTokensCannotMutateAnyFacts() {
+    var store = ownedCancelRecoveryIdentityStore();
+    for (String token :
+        java.util.Arrays.asList(null, "", " ", "\t\r\n", "\u3000", "😀".repeat(65))) {
+      seedOwnedCancelIdentity("REQUESTED", "pay-1");
+      var beforeClaim = ownedCancelIdentityFacts();
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> cancelIdentityTransaction(() -> store.claimRecovery("pay-1", token)));
+      assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+      assertEquals(beforeClaim, ownedCancelIdentityFacts());
+      fixture.update(
+          "UPDATE pay_tcc_cancel SET lease_owner=?,lease_until=?",
+          token,
+          LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+      var beforeWrite = ownedCancelIdentityFacts();
+      org.junit.jupiter.api.Assertions.assertFalse(
+          dispatchTransaction(() -> store.stage("pay-1", token, "COMPLETED", "should-not-save")));
+      assertEquals(beforeWrite, ownedCancelIdentityFacts());
+      cancelIdentityTransaction(
+          () -> {
+            store.finish("pay-1", token, 31, "should-not-save");
+            return null;
+          });
+      assertEquals(beforeWrite, ownedCancelIdentityFacts());
+    }
+  }
+
+  /** 四种合法token及三个active状态保持真实取消/Pay原子写、退避与旧lease门。 */
+  @Test
+  void validCancelLeaseTokensKeepExistingWritesAndLeaseGates() {
+    var store = ownedCancelRecoveryIdentityStore();
+    for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64)))
+      for (String state : List.of("REQUESTED", "ORDER_CANCELLED", "CANCEL_UNKNOWN")) {
+        seedOwnedCancelIdentity(state, "pay-1");
+        var paymentBefore = fixture.queryForMap("SELECT * FROM pay_record");
+        var claimed = cancelIdentityTransaction(() -> store.claimRecovery("pay-1", token));
+        assertEquals(token, claimed.leaseOwner);
+        assertEquals(state, claimed.state);
+        assertEquals(1, claimed.attempts);
+        assertEquals(claimed.updatedAt.plusSeconds(60), claimed.leaseUntil);
+        var beforeStale = ownedCancelIdentityFacts();
+        org.junit.jupiter.api.Assertions.assertFalse(
+            dispatchTransaction(() -> store.stage("pay-1", "different-worker", "COMPLETED", null)));
+        cancelIdentityTransaction(
+            () -> {
+              store.finish("pay-1", "different-worker", 1, "stale");
+              return null;
+            });
+        assertEquals(beforeStale, ownedCancelIdentityFacts());
+        assertTrue(dispatchTransaction(() -> store.stage("pay-1", token, "COMPLETED", null)));
+        var staged = store.read("pay-1");
+        assertEquals("COMPLETED", staged.state);
+        assertEquals(token, staged.leaseOwner);
+        assertEquals(claimed.leaseUntil, staged.leaseUntil);
+        assertEquals("FAILED", fixture.queryForMap("SELECT * FROM pay_record").get("status"));
+        cancelIdentityTransaction(
+            () -> {
+              store.finish("pay-1", token, 1, "cancel-evidence");
+              return null;
+            });
+        var finished = store.read("pay-1");
+        assertNull(finished.leaseOwner);
+        assertNull(finished.leaseUntil);
+        assertEquals("COMPLETED", finished.state);
+        assertEquals(1, finished.attempts);
+        assertEquals("cancel-evidence", finished.lastError);
+        assertEquals(finished.updatedAt.plusSeconds(5), finished.nextRetryAt);
+        var paymentAfter = fixture.queryForMap("SELECT * FROM pay_record");
+        for (String changed : List.of("status", "updated_at")) {
+          paymentBefore.remove(changed);
+          paymentAfter.remove(changed);
+        }
+        assertEquals(paymentBefore, paymentAfter);
+        assertEquals(
+            0, fixture.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
+        for (String table : List.of("pay_tcc_execution", "pay_tcc_dispatch", "pay_tcc_receipt"))
+          assertEquals(0, fixture.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class));
+        var beforeLate = ownedCancelIdentityFacts();
+        org.junit.jupiter.api.Assertions.assertFalse(
+            dispatchTransaction(() -> store.stage("pay-1", token, "COMPLETED", null)));
+        cancelIdentityTransaction(
+            () -> {
+              store.finish("pay-1", token, 1, "late");
+              return null;
+            });
+        assertEquals(beforeLate, ownedCancelIdentityFacts());
+      }
+    seedOwnedCancelIdentity("REQUESTED", "pay-1");
+    fixture.update("UPDATE pay_tcc_cancel SET attempts=31");
+    assertEquals(
+        31,
+        cancelIdentityTransaction(() -> store.claimRecovery("pay-1", "bounded-worker")).attempts);
+    cancelIdentityTransaction(
+        () -> {
+          store.finish("pay-1", "bounded-worker", 31, "cap");
+          return null;
+        });
+    var capped = store.read("pay-1");
+    assertEquals(capped.updatedAt.plusSeconds(300), capped.nextRetryAt);
+    fixture.update(
+        "UPDATE pay_tcc_cancel SET lease_owner='expired-worker',lease_until=?",
+        LocalDateTime.of(2026, 10, 1, 0, 0));
+    var expired = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertFalse(
+        dispatchTransaction(() -> store.stage("pay-1", "expired-worker", "COMPLETED", null)));
+    cancelIdentityTransaction(
+        () -> {
+          store.finish("pay-1", "expired-worker", 1, "expired");
+          return null;
+        });
+    assertEquals(expired, ownedCancelIdentityFacts());
+  }
+
   /** 克隆原来源表，缺失cancel时用实际Mapper仅建owned表；原库不初始化新业务表。 */
   private com.cloudmall.pay.service.impl.PayTccCancelStore ownedCancelRecoveryIdentityStore() {
     boolean originalCancelExists =
