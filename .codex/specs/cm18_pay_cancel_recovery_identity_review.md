@@ -45,3 +45,13 @@ row.payNo != null && Objects.equals(row.payNo, payNo)
 ## 5. 明确边界
 
 本批不修改 SQL JOIN 的排序规则、不引入全局唯一索引、不修复历史重复数据，不扩展 `selectForUpdate`、readback、stage、finish、claimOrRead 或 Service 的来源身份检查，也不宣称取消流程已经具备完整 tuple fencing、跨表原子性或远端 Order/TC 证明。现有租约期间外部事实漂移仍由后续规格处理。
+
+## 6. Native fixture 与连接环境边界
+
+本批 native 验收只使用 owned schema。测试通过同一 MySQL 实例的临时 loopback 通道连接；该通道仅解决当前 host 转发端口立即 EOF 的测试传输问题，不改变 MySQL、操作系统、容器或业务服务配置，也不代表 `host:13307` 转发已修复。通道、监听 socket、JDBC/CLI 子进程均须在 `finally` 中关闭回收；连接失败、表创建失败或断言未执行时，必须记录为环境/fixture 失败，不宣称业务红测或全链路验证通过。
+
+owned 取消表 fixture 的规则如下：
+
+- `pay_tcc_dispatch`、`pay_tcc_execution`、`pay_tcc_receipt` 按既有 DDL 克隆到 owned schema。
+- 若 owned schema 中已有 `pay_tcc_cancel`，按既有 DDL 克隆；若不存在，只调用实际 `PayTccCancelMapper.ensureTable()` 在 owned schema 创建，禁止在测试中抄写或扩展生产 SQL/表结构。
+- 原 cloudmall_pay 的源表清单、逐表指纹和数据保持只读且不变；fixture 失败产生的 owned schema 必须按精确名称归档后删除并复查不存在。
