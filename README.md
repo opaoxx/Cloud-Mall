@@ -2578,3 +2578,9 @@ POST权限领取沿Pay→cancel→dispatch顺序增加一次派发行锁定读�
 receipt准备后的非空读回必须仍匹配原dispatch的payNo、xid、userId、orderNo、amount、operationKey、ledgerKey，才能生成返回视图；载荷变化沿原409拒绝，保留已经完成的claim/资源尝试，不追加注册。
 
 状态/分支进展、金额数值等价和缺行原503保持。复用服务包内纯比较函数，既有receipt缺金额保守拒绝为409；本批不新增查询或SQL，也不代表真实LocalTCC/TC或完整资金因果验证。
+
+### CM-18 Pay receipt状态与分支证据（16T200）
+
+receipt重放校验和prepare末次读回共用状态/分支有效域门：状态只允许CLAIMED、TRYING、CONFIRMED、CANCELLED，非空分支号必须为正数；后三种状态必须已有正分支，CLAIMED可为空或已有正分支。坏证据返回原409，空状态也明确拒绝。
+
+CLAIMED不能据此推断分支未登记或资金结果。原载荷校验优先、缺行503、合法进展与资源尝试次数保持；本批仅验证本地Store/Facade，未改变公开read、回调、SQL或事务，不代表完整TC链路验证。

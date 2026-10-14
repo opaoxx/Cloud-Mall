@@ -15,7 +15,6 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Service;
@@ -155,8 +154,18 @@ public class PayTccReceiptStore {
     if (!samePayload(stored, dispatch)) {
       throw new BizException("PAY_TCC_RECEIPT_CONFLICT", "Pay receipt 载荷不一致", 409);
     }
-    if (!Set.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED").contains(stored.state)
-        || (stored.branchId == null && !"CLAIMED".equals(stored.state))) throw conflict();
+    if (!hasValidStateAndBranch(stored)) throw conflict();
+  }
+
+  /** 本地资源证据的纯有效域门；CLAIMED可未知或已有正分支，不据此推断资金结果。 */
+  static boolean hasValidStateAndBranch(PayTccReceiptPO receipt) {
+    if (receipt == null || receipt.state == null) return false;
+    if (receipt.branchId != null && receipt.branchId <= 0) return false;
+    return switch (receipt.state) {
+      case "CLAIMED" -> true;
+      case "TRYING", "CONFIRMED", "CANCELLED" -> receipt.branchId != null;
+      default -> false;
+    };
   }
 
   /** 包内共享的原载荷纯比较；缺金额或格式错误只拒绝证据，状态/分支/时间不参与。 */

@@ -497,6 +497,140 @@ class PayTccReceiptServiceTest {
         });
   }
 
+  /** 实际Store既有坏证据统一409，不NPE、不新claim、不触发资源替身。 */
+  @Test
+  void existingReceiptRequiresValidStateAndBranch() {
+    for (var mutation : receiptEvidenceMutations()) {
+      var fixture = new ReceiptClaimFixture();
+      fixture.seedExisting();
+      mutation.accept(fixture.stored);
+      assertFreshClaimRejected(fixture);
+      var anchorBridge = mock(PayTccBridgeService.class);
+      var localResource = mock(PayTccReceiptLocalResource.class);
+      when(anchorBridge.prepare(any())).thenReturn(fixture.dispatch);
+      var before = fixture.snapshot();
+      var failure =
+          assertThrows(
+              BizException.class,
+              () ->
+                  new PayTccReceiptServiceImpl(anchorBridge, fixture.store, localResource)
+                      .prepare(request()));
+      assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(before, fixture.snapshot());
+      org.mockito.Mockito.verifyNoInteractions(localResource);
+      verify(fixture.receiptRows, never()).claim(any());
+    }
+    var bothBad = new ReceiptClaimFixture();
+    bothBad.seedExisting();
+    bothBad.stored.xid = "changed-xid";
+    bothBad.stored.state = null;
+    var failure = assertThrows(BizException.class, () -> bothBad.store.claim(bothBad.dispatch));
+    assertEquals("Pay receipt 载荷不一致", failure.getMessage());
+  }
+
+  /** winner/replay末次读回拒绝坏状态/分支，已完成资源次数保持不追加。 */
+  @Test
+  void prepareReadbackRequiresValidStateAndBranch() {
+    for (boolean winner : java.util.List.of(false, true))
+      for (var mutation : receiptEvidenceMutations()) {
+        setUp();
+        var expected = dispatch();
+        var current = receipt("CLAIMED");
+        mutation.accept(current);
+        when(bridge.prepare(any())).thenReturn(expected);
+        when(receipts.claim(expected)).thenReturn(winner);
+        when(resource.prepare(any(), any())).thenReturn(true);
+        when(receipts.read(expected.payNo)).thenReturn(current);
+        var before =
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(current));
+        var failure = assertThrows(BizException.class, () -> service.prepare(request()));
+        assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals(
+            before,
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(current)));
+        verify(receipts).claim(expected);
+        verify(receipts).read(expected.payNo);
+        verify(resource, org.mockito.Mockito.times(winner ? 1 : 0)).prepare(any(), any());
+      }
+    setUp();
+    var expected = dispatch();
+    var bothBad = receipt("CLAIMED");
+    bothBad.xid = "changed-xid";
+    bothBad.state = null;
+    when(bridge.prepare(any())).thenReturn(expected);
+    when(receipts.read(expected.payNo)).thenReturn(bothBad);
+    var failure = assertThrows(BizException.class, () -> service.prepare(request()));
+    assertEquals("Pay receipt 读回载荷与原记录不一致", failure.getMessage());
+  }
+
+  /** CLAIMED不证明未登记；合法NULL/正branch及上界均保持原只读重放。 */
+  @Test
+  void validReceiptEvidenceKeepsClaimedUnknownAndBoundProgress() {
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED"))
+      for (Long branch : java.util.Arrays.asList(null, 1L, Long.MAX_VALUE)) {
+        if (branch == null && !state.equals("CLAIMED")) continue;
+        var fixture = new ReceiptClaimFixture();
+        fixture.seedExisting();
+        fixture.stored.state = state;
+        fixture.stored.branchId = branch;
+        fixture.payment.status = "SUCCESS";
+        fixture.anchor.state = "CONFIRMED";
+        fixture.anchor.postAttemptedAt = java.time.LocalDateTime.of(2026, 10, 15, 0, 0);
+        fixture.anchor.userBranchId = 7L;
+        fixture.dispatch.state = null;
+        fixture.dispatch.userBranchId = 7L;
+        var before = fixture.snapshot();
+        org.junit.jupiter.api.Assertions.assertFalse(fixture.store.claim(fixture.dispatch));
+        assertEquals(before, fixture.snapshot());
+        verify(fixture.receiptRows, never()).claim(any());
+        for (boolean winner : java.util.List.of(false, true)) {
+          setUp();
+          var expected = dispatch();
+          when(bridge.prepare(any())).thenReturn(expected);
+          when(receipts.claim(expected)).thenReturn(winner);
+          when(resource.prepare(any(), any())).thenReturn(true);
+          when(receipts.read(expected.payNo)).thenReturn(fixture.stored);
+          var result = service.prepare(request());
+          assertEquals(state, result.state);
+          assertEquals(branch, result.branchId);
+          verify(resource, org.mockito.Mockito.times(winner ? 1 : 0)).prepare(any(), any());
+          assertEquals(before, fixture.snapshot());
+        }
+      }
+  }
+
+  /** 独立变异stored事实；null状态仅模拟异常Mapper结果，不宣称DB允许NULL。 */
+  private java.util.List<java.util.function.Consumer<PayTccReceiptPO>> receiptEvidenceMutations() {
+    var mutations = new java.util.ArrayList<java.util.function.Consumer<PayTccReceiptPO>>();
+    for (String state : java.util.Arrays.asList(null, "UNKNOWN", "", "trying", "TRYING "))
+      mutations.add(
+          current -> {
+            current.state = state;
+            current.branchId = 11L;
+          });
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      for (Long branch : java.util.List.of(0L, -1L))
+        mutations.add(
+            current -> {
+              current.state = state;
+              current.branchId = branch;
+            });
+      if (!state.equals("CLAIMED"))
+        mutations.add(
+            current -> {
+              current.state = state;
+              current.branchId = null;
+            });
+    }
+    return mutations;
+  }
+
   /** 真实Store及可独立变异来源；Mapper均为替身，不模拟数据库列可NULL。 */
   private static final class ReceiptClaimFixture {
     /** 已冻结的原派发输入。 */
@@ -612,6 +746,7 @@ class PayTccReceiptServiceTest {
     return dispatch;
   }
 
+  /** 默认合法资源证据；坏分支/状态测试必须在构造后显式变异。 */
   private PayTccReceiptPO receipt(String state) {
     PayTccReceiptPO receipt = new PayTccReceiptPO();
     receipt.payNo = "pay-receipt-test";
@@ -622,6 +757,7 @@ class PayTccReceiptServiceTest {
     receipt.operationKey = "tcc-debit:pay-receipt-test";
     receipt.ledgerKey = "pay-receipt-test";
     receipt.state = state;
+    receipt.branchId = "CLAIMED".equals(state) ? null : 11L;
     return receipt;
   }
 }
