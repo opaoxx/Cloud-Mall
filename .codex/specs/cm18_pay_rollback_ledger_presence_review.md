@@ -16,7 +16,7 @@ if (!"CANCELLED".equals(user.state)
     || user.ledgerApplied) throw pending();
 ```
 
-缺少 `ledgerApplied` 字段和 JSON null 均拒绝；显式 JSON `false` 继续作为明确 no-ledger 证据，显式 `true` 继续拒绝。该门位于现有 tuple/状态/金额 proof 之后的原 User evidence 条件中，proof/GET 次数、错误优先级、事务、锁、Mapper、Pay 写入和 API/序列化字段均不变。
+缺少 `ledgerApplied` 字段和 JSON null 均拒绝；显式 JSON `false` 继续作为明确 no-ledger 证据，显式 `true` 继续拒绝。该门位于同一 User evidence 条件的 CANCELLED 状态门之后、原 primitive `ledgerApplied` 布尔门之前；其后的 tuple、XID、branch、key、金额等字段门顺序保持。proof/GET 次数、错误优先级、事务、锁、Mapper、Pay 写入和 API/序列化字段均不变。
 
 `UserTccStateVO` 的 `@JsonSetter`、`@JsonIgnore ledgerAppliedPresent` 和 primitive false 默认语义不改；不新增对数字、字符串或其它 DTO 字段的强制转换。User 为 null、状态不在既有集合或其它合法缺证仍沿原 UNKNOWN/pending 语义。
 
