@@ -66,11 +66,11 @@ public interface PayTccCancelMapper extends BaseMapper<PayTccCancelPO> {
           + " receipt ON receipt.pay_no=cancel.pay_no LEFT JOIN pay_debit_intent intent ON"
           + " intent.pay_no=cancel.pay_no SET"
           + " cancel.lease_owner=#{token},cancel.lease_until=#{leaseUntil},cancel.attempts=LEAST(cancel.attempts+1,31),cancel.updated_at=#{now}"
-          + " WHERE cancel.pay_no=#{payNo} AND BINARY payment.debit_mode='TCC' AND BINARY"
-          + " payment.pay_no=BINARY cancel.pay_no AND payment.user_id=cancel.user_id AND BINARY"
-          + " payment.order_no=BINARY cancel.order_no AND payment.amount=cancel.amount AND BINARY"
-          + " payment.status='PENDING' AND execution.pay_no IS NULL AND dispatch.pay_no IS NULL AND"
-          + " receipt.pay_no IS NULL AND intent.pay_no IS NULL AND BINARY cancel.state IN"
+          + " WHERE BINARY cancel.pay_no=BINARY #{payNo} AND BINARY payment.debit_mode='TCC' AND"
+          + " BINARY payment.pay_no=BINARY cancel.pay_no AND payment.user_id=cancel.user_id AND"
+          + " BINARY payment.order_no=BINARY cancel.order_no AND payment.amount=cancel.amount AND"
+          + " BINARY payment.status='PENDING' AND execution.pay_no IS NULL AND dispatch.pay_no IS"
+          + " NULL AND receipt.pay_no IS NULL AND intent.pay_no IS NULL AND BINARY cancel.state IN"
           + " ('REQUESTED','ORDER_CANCELLED','CANCEL_UNKNOWN') AND cancel.next_retry_at<=#{now} AND"
           + " (cancel.lease_until IS NULL OR cancel.lease_until<=#{now})")
   int claimRecovery(

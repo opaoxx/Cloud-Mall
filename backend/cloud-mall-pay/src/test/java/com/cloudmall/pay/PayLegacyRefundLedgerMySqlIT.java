@@ -77,6 +77,9 @@ class PayLegacyRefundLedgerMySqlIT {
   /** execution观察验收专用owned真实Mapper。 */
   private com.cloudmall.pay.mapper.PayTccExecutionMapper executionObservationMapper;
 
+  /** 取消恢复身份验收使用的owned实际Mapper。 */
+  private com.cloudmall.pay.mapper.PayTccCancelMapper cancelRecoveryIdentityMapper;
+
   /** Fence身份验收的owned真实读取入口。 */
   private com.cloudmall.pay.mapper.PayTccFenceMapper fenceIdentityMapper;
 
@@ -4680,6 +4683,264 @@ class PayLegacyRefundLedgerMySqlIT {
         decision,
         LocalDateTime.of(2026, 10, 1, 0, 0),
         LocalDateTime.of(2026, 10, 1, 0, 0));
+  }
+
+  /** 输入别名不能领取另一原支付号任务，更不能改变其租约/attempt。 */
+  @Test
+  void cancelRecoveryCannotClaimAnotherPaymentSpelling() {
+    var store = ownedCancelRecoveryIdentityStore();
+    seedOwnedCancelIdentity("REQUESTED", "PAY-1");
+    assertEquals("PAY-1", cancelRecoveryIdentityMapper.selectByPayNo("pay-1").payNo);
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            assertNull(
+                cancelIdentityTransaction(() -> store.claimRecovery("pay-1", "t180-worker")),
+                "input alias must not claim another original task"),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** claim0后的读取回退不能将另一原取消任务终态作为请求结果。 */
+  @Test
+  void cancelFallbackCannotReturnAnotherTerminal() {
+    var store = ownedCancelRecoveryIdentityStore();
+    seedOwnedCancelIdentity("COMPLETED", "PAY-1");
+    fixture.update("UPDATE pay_record SET status='FAILED'");
+    var orders = mock(OrderClient.class);
+    var service = new com.cloudmall.pay.service.impl.PayTccCancelService(store, orders);
+    var before = ownedCancelIdentityFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(service.reconcile("pay-1")));
+          assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+        },
+        () -> assertNull(returned.get(), "alias task must not supply a terminal result"),
+        () -> assertEquals(before, ownedCancelIdentityFacts()),
+        () -> org.mockito.Mockito.verifyNoInteractions(orders));
+  }
+
+  /** 三活动状态的真实CI双向请求别名均SQL零行，不碰另一原任务lease/attempt。 */
+  @Test
+  void cancelRecoveryAliasRequestsCannotMutateAnyActiveState() {
+    var store = ownedCancelRecoveryIdentityStore();
+    for (boolean uppercaseOriginal : List.of(false, true)) {
+      String original = uppercaseOriginal ? "PAY-1" : "pay-1";
+      String requested = uppercaseOriginal ? "pay-1" : "PAY-1";
+      for (String state : List.of("REQUESTED", "ORDER_CANCELLED", "CANCEL_UNKNOWN")) {
+        seedOwnedCancelIdentity(state, original);
+        assertEquals(original, cancelRecoveryIdentityMapper.selectByPayNo(requested).payNo);
+        var before = ownedCancelIdentityFacts();
+        var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        cancelIdentityTransaction(
+            () -> {
+              assertEquals(
+                  0,
+                  cancelRecoveryIdentityMapper.claimRecovery(
+                      requested, "t180-direct", currentTime.plusSeconds(60), currentTime));
+              return null;
+            });
+        assertNull(cancelIdentityTransaction(() -> store.claimRecovery(requested, "t180-worker")));
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class, () -> store.read(requested));
+        assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+        assertEquals(before, ownedCancelIdentityFacts());
+      }
+    }
+  }
+
+  /** 原键保持三活动状态/60秒租约/31上限；原资金互斥、到期和缺失门均保零行。 */
+  @Test
+  void canonicalCancelRecoveryKeepsLeaseAndAllExistingGates() {
+    var store = ownedCancelRecoveryIdentityStore();
+    var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+    for (String state : List.of("REQUESTED", "ORDER_CANCELLED", "CANCEL_UNKNOWN")) {
+      seedOwnedCancelIdentity(state, "pay-1");
+      var before = ownedCancelIdentityFacts();
+      var cancelBefore = fixture.queryForMap("SELECT * FROM pay_tcc_cancel");
+      var claimed = cancelIdentityTransaction(() -> store.claimRecovery("pay-1", "t180-worker"));
+      assertNotNull(claimed);
+      assertEquals("pay-1", claimed.payNo);
+      assertEquals(state, claimed.state);
+      assertEquals("t180-worker", claimed.leaseOwner);
+      assertEquals(1, claimed.attempts);
+      assertEquals(claimed.updatedAt.plusSeconds(60), claimed.leaseUntil);
+      assertEquals("owned-original-error", claimed.lastError);
+      assertEquals(json.valueToTree(claimed), json.valueToTree(store.read("pay-1")));
+      var cancelAfter = fixture.queryForMap("SELECT * FROM pay_tcc_cancel");
+      for (String changed : List.of("lease_owner", "lease_until", "attempts", "updated_at")) {
+        cancelBefore.remove(changed);
+        cancelAfter.remove(changed);
+      }
+      assertEquals(cancelBefore, cancelAfter);
+      var after = ownedCancelIdentityFacts();
+      for (int tableIndex : List.of(0, 1, 3, 4, 5))
+        assertEquals(before.get(tableIndex), after.get(tableIndex));
+      assertNull(cancelIdentityTransaction(() -> store.claimRecovery("pay-1", "t180-second")));
+      assertEquals(after, ownedCancelIdentityFacts());
+    }
+    seedOwnedCancelIdentity("REQUESTED", "pay-1");
+    fixture.update("UPDATE pay_tcc_cancel SET attempts=31");
+    assertEquals(
+        31, cancelIdentityTransaction(() -> store.claimRecovery("pay-1", "t180-cap")).attempts);
+    for (String blocked :
+        List.of(
+            "missing",
+            "future",
+            "leased",
+            "COMPLETED",
+            "CONFLICT",
+            "legacy",
+            "failed",
+            "order-tuple",
+            "execution",
+            "dispatch",
+            "receipt",
+            "intent")) {
+      seedOwnedCancelIdentity("REQUESTED", "pay-1");
+      switch (blocked) {
+        case "missing" -> fixture.update("DELETE FROM pay_tcc_cancel");
+        case "future" ->
+            fixture.update(
+                "UPDATE pay_tcc_cancel SET next_retry_at=?",
+                LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+        case "leased" ->
+            fixture.update(
+                "UPDATE pay_tcc_cancel SET lease_owner='held-worker',lease_until=?",
+                LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+        case "COMPLETED", "CONFLICT" ->
+            fixture.update("UPDATE pay_tcc_cancel SET state=?", blocked);
+        case "legacy" -> fixture.update("UPDATE pay_record SET debit_mode='LEGACY'");
+        case "failed" -> fixture.update("UPDATE pay_record SET status='FAILED'");
+        case "order-tuple" -> fixture.update("UPDATE pay_record SET order_no='ORDER-1'");
+        default -> insertOwnedCancelBlockingFact(blocked);
+      }
+      var before = ownedCancelIdentityFacts();
+      assertNull(
+          cancelIdentityTransaction(() -> store.claimRecovery("pay-1", "t180-blocked")), blocked);
+      assertEquals(before, ownedCancelIdentityFacts());
+    }
+    assertNull(store.read("absent-pay"));
+  }
+
+  /** owned中构造单一互斥资金事实，其余原支付/取消资格保持，避免同时触发其它门。 */
+  private void insertOwnedCancelBlockingFact(String kind) {
+    var fixed = LocalDateTime.of(2026, 10, 1, 0, 0);
+    if (kind.equals("intent")) {
+      fixture.update(
+          "INSERT INTO"
+              + " pay_debit_intent(id,pay_no,order_no,user_id,amount,status,debit_mode,attempts,next_retry_at,created_at,updated_at)"
+              + " VALUES(1,'pay-1','order-1',7,10,'INIT','LEGACY',0,?,?,?)",
+          fixed,
+          fixed,
+          fixed);
+      return;
+    }
+    String table =
+        switch (kind) {
+          case "execution" -> "pay_tcc_execution";
+          case "dispatch" -> "pay_tcc_dispatch";
+          case "receipt" -> "pay_tcc_receipt";
+          default -> throw new IllegalArgumentException(kind);
+        };
+    String decisionColumn = kind.equals("execution") ? ",decision" : "";
+    String decisionValue = kind.equals("execution") ? ",'NONE'" : "";
+    String state =
+        kind.equals("execution")
+            ? "RUNNING"
+            : kind.equals("dispatch") ? "POST_ATTEMPTED" : "CLAIMED";
+    fixture.update(
+        "INSERT INTO "
+            + table
+            + "(id,pay_no,xid,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at"
+            + decisionColumn
+            + ") VALUES(1,'pay-1','t180-fund-xid',7,'order-1',10,'tcc-debit:pay-1','pay-1',?,?,?"
+            + decisionValue
+            + ")",
+        state,
+        fixed,
+        fixed);
+  }
+
+  /** 克隆原来源表，缺失cancel时用实际Mapper仅建owned表；原库不初始化新业务表。 */
+  private com.cloudmall.pay.service.impl.PayTccCancelStore ownedCancelRecoveryIdentityStore() {
+    boolean originalCancelExists =
+        source.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cloudmall_pay'"
+                    + " AND table_name='pay_tcc_cancel'",
+                Integer.class)
+            == 1;
+    for (String table :
+        List.of("pay_tcc_cancel", "pay_tcc_execution", "pay_tcc_dispatch", "pay_tcc_receipt")) {
+      fixture.execute("DROP TABLE IF EXISTS " + table);
+      if (table.equals("pay_tcc_cancel") && !originalCancelExists) continue;
+      fixture.execute(
+          (String) source.queryForMap("SHOW CREATE TABLE " + table).get("Create Table"));
+    }
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccCancelMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      cancelRecoveryIdentityMapper =
+          session.getMapper(com.cloudmall.pay.mapper.PayTccCancelMapper.class);
+      if (!originalCancelExists) cancelRecoveryIdentityMapper.ensureTable();
+      return new com.cloudmall.pay.service.impl.PayTccCancelStore(
+          cancelRecoveryIdentityMapper,
+          records,
+          mock(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),
+          mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),
+          mock(com.cloudmall.pay.mapper.PayTccReceiptMapper.class),
+          intents);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned cancel identity factory failed", failure);
+    }
+  }
+
+  /** 精确来源、旧的到期任务和无任何资金执行；不使用DB NOW或紧邻时钟边界。 */
+  private void seedOwnedCancelIdentity(String state, String originalPayNo) {
+    seedIntentAndPayment("PENDING", "INIT");
+    fixture.update("DELETE FROM pay_debit_intent");
+    for (String table :
+        List.of("pay_tcc_cancel", "pay_tcc_execution", "pay_tcc_dispatch", "pay_tcc_receipt"))
+      fixture.update("DELETE FROM " + table);
+    fixture.update("UPDATE pay_record SET pay_no=?,debit_mode='TCC'", originalPayNo);
+    var fixed = LocalDateTime.of(2026, 10, 1, 0, 0);
+    fixture.update(
+        "INSERT INTO"
+            + " pay_tcc_cancel(id,pay_no,user_id,order_no,amount,state,attempts,next_retry_at,last_error,created_at,updated_at)"
+            + " VALUES(1,?,7,'order-1',10,?,0,?,'owned-original-error',?,?)",
+        originalPayNo,
+        state,
+        fixed,
+        fixed,
+        fixed);
+  }
+
+  /** 同owned数据源程序化短事务，仅证明本地Mapper/Store，不代理REQUIRES_NEW。 */
+  private com.cloudmall.pay.domain.po.PayTccCancelPO cancelIdentityTransaction(
+      java.util.function.Supplier<com.cloudmall.pay.domain.po.PayTccCancelPO> action) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    return template.execute(transactionStatus -> action.get());
+  }
+
+  /** 恢复SQL涉及六表的完整事实，拒绝不得修改资金/租约/退避字段。 */
+  private List<List<Map<String, Object>>> ownedCancelIdentityFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
+    for (String table :
+        List.of("pay_tcc_cancel", "pay_tcc_execution", "pay_tcc_dispatch", "pay_tcc_receipt"))
+      facts.add(fixture.queryForList("SELECT * FROM " + table + " ORDER BY id"));
+    return facts;
   }
 
   /** 实际receipt CI查询读到另一原支付号，Facade不能返回其终态。 */

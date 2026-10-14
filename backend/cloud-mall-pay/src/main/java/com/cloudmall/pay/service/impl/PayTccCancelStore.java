@@ -169,9 +169,12 @@ public class PayTccCancelStore {
         currentTime);
   }
 
-  /** 读取取消事实，不创建新台账。 */
+  /** 只返回原支付号的取消事实；缺失仍NULL，查询别名行冲突且不创建台账。 */
   public PayTccCancelPO read(String payNo) {
-    return cancels.selectByPayNo(payNo);
+    PayTccCancelPO current = cancels.selectByPayNo(payNo);
+    if (current != null && (current.payNo == null || !Objects.equals(current.payNo, payNo)))
+      throw conflict("取消台账与原支付号不一致");
+    return current;
   }
 
   private void validatePaymentView(PayVO payment) {

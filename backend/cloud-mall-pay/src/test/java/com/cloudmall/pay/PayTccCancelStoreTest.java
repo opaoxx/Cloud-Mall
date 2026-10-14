@@ -173,6 +173,97 @@ class PayTccCancelStoreTest {
     verify(cancels, never()).insertRequested(any());
   }
 
+  /** 五状态的foreign/case/space/NULL原支付号不能被取消读取当成请求事实。 */
+  @Test
+  void cancelReadRejectsForeignOrMissingReturnedIdentity() {
+    for (String state :
+        List.of("REQUESTED", "ORDER_CANCELLED", "CANCEL_UNKNOWN", "COMPLETED", "CONFLICT"))
+      for (String mutation : List.of("foreign", "case", "space", "null")) {
+        var row = cancel(state, null);
+        row.payNo =
+            switch (mutation) {
+              case "foreign" -> "other-pay";
+              case "case" -> "PAY-CANCEL-STORE";
+              case "space" -> "pay-cancel-store ";
+              default -> null;
+            };
+        when(cancels.selectByPayNo("pay-cancel-store")).thenReturn(row);
+        var before =
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .findAndRegisterModules()
+                        .writeValueAsString(row));
+        var failure = assertThrows(BizException.class, () -> store.read("pay-cancel-store"));
+        org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+        org.junit.jupiter.api.Assertions.assertEquals("取消台账与原支付号不一致", failure.getMessage());
+        org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+        org.junit.jupiter.api.Assertions.assertEquals(
+            before,
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () ->
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                        .findAndRegisterModules()
+                        .writeValueAsString(row)));
+      }
+    var nullKey = cancel("COMPLETED", null);
+    nullKey.payNo = null;
+    when(cancels.selectByPayNo(null)).thenReturn(nullKey);
+    assertThrows(BizException.class, () -> store.read(null));
+    org.mockito.Mockito.verifyNoInteractions(payments, executions, dispatches, receipts, intents);
+    verify(cancels, never()).claimRecovery(any(), any(), any(), any());
+    verify(cancels, never()).updateState(any(), any(), any(), any(), any());
+    verify(cancels, never()).finish(any(), any(), any(), any(), any());
+  }
+
+  /** 真实Service/Store的claim0回退拒绝异源终态，不发Order或stage/finish。 */
+  @Test
+  void reconcileCannotReturnAliasedTerminalFromReadFallback() {
+    var orders = mock(com.cloudmall.pay.feign.OrderClient.class);
+    var service = new com.cloudmall.pay.service.impl.PayTccCancelService(store, orders);
+    for (String state : List.of("COMPLETED", "CONFLICT")) {
+      var row = cancel(state, null);
+      row.payNo = "PAY-CANCEL-STORE";
+      when(cancels.selectByPayNo("pay-cancel-store")).thenReturn(row);
+      var failure = assertThrows(BizException.class, () -> service.reconcile("pay-cancel-store"));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals(state, row.state);
+    }
+    org.mockito.Mockito.verifyNoInteractions(orders);
+    verify(payments, never()).markFailed(any(), any());
+    verify(cancels, never()).updateState(any(), any(), any(), any(), any());
+    verify(cancels, never()).finish(any(), any(), any(), any(), any());
+  }
+
+  /** SQL零行不readback；原键fallback返回原状态或缺失UNKNOWN，非法参数仍先拒绝。 */
+  @Test
+  void cancelRecoveryZeroAndCanonicalFallbackKeepSemantics() {
+    org.junit.jupiter.api.Assertions.assertNull(store.claimRecovery("pay-cancel-store", "worker"));
+    verify(cancels, never()).selectByPayNo(any());
+    var orders = mock(com.cloudmall.pay.feign.OrderClient.class);
+    var service = new com.cloudmall.pay.service.impl.PayTccCancelService(store, orders);
+    for (String state :
+        List.of("REQUESTED", "ORDER_CANCELLED", "CANCEL_UNKNOWN", "COMPLETED", "CONFLICT")) {
+      var row = cancel(state, null);
+      when(cancels.selectByPayNo("pay-cancel-store")).thenReturn(row);
+      org.junit.jupiter.api.Assertions.assertSame(row, store.read("pay-cancel-store"));
+      org.junit.jupiter.api.Assertions.assertEquals(state, service.reconcile("pay-cancel-store"));
+    }
+    org.junit.jupiter.api.Assertions.assertNull(store.read("absent-pay"));
+    org.junit.jupiter.api.Assertions.assertEquals(
+        "CANCEL_UNKNOWN", service.reconcile("absent-pay"));
+    for (String token : java.util.Arrays.asList(null, "", " ")) {
+      var failure =
+          assertThrows(BizException.class, () -> store.claimRecovery("pay-cancel-store", token));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_CANCEL_CONFLICT", failure.getCode());
+    }
+    assertThrows(BizException.class, () -> store.claimRecovery(null, "worker"));
+    org.mockito.Mockito.verifyNoInteractions(orders, executions, dispatches, receipts, intents);
+    verify(payments, never()).markFailed(any(), any());
+    verify(cancels, never()).updateState(any(), any(), any(), any(), any());
+    verify(cancels, never()).finish(any(), any(), any(), any(), any());
+  }
+
   private PayVO payment() {
     PayVO payment = new PayVO();
     payment.payNo = "pay-cancel-store";
