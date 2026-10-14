@@ -28,8 +28,8 @@
 
 - 使用实际 DispatchMapper/Persistence/Bridge 与 owned Pay/Dispatch 表；通过程序化本地事务和测试 hook 在 claim 前注入 owned drift，不冒称真实 HTTP 并发、TC/RM 或 Spring 代理。
 - 旧 red：claim 前改 xid 时仍 POST/消耗 marker，随后 T195 mirror 才失败；PREPARED+已有 post marker 时旧实现仍 POST。修复后八字段 drift 返回 409、无 User RPC、三表事实保持；已有 marker/非 PREPARED 返回 PREPARED 或 false，零写。
-- control：八字段合法 DB 变化 × GET/POST 与正常/空 response；仅 PREPARED+marker null 能 CAS/发一次 POST。progress/terminal/branch/Unicode 状态矩阵、T195 mirror anchor 回归保持。
-- 原库表指纹、owned 清理、池关闭和 T195 历史证据保持；native 只证明本地 POST 权限门，不宣称 claim commit→远端 POST、TC 或完整 fencing 已闭环。
+- control：八字段 beforeclaim 合法 DB 漂移均返回 409、无 User RPC 且 facts 不变；五种 current state（PREPARED、POST_ATTEMPTED、TRY_ACCEPTED、CANCELLED、CONFIRMED）× marker null/non-null，仅 PREPARED+marker null 能 CAS 并发一次 POST，随后 dispatch 只读；其它组合 Persistence 返回 false、无 RPC。progress/terminal/branch/Unicode 状态矩阵、T195 mirror anchor 回归保持。
+- 原库表指纹、owned 清理、池关闭和 T195 历史证据保持；已有 marker/非 PREPARED 时 Persistence 返回 false，Bridge 沿原 mark 失败 readback 返回当前 state；脏 PREPARED+已有 marker 返回 PREPARED。native 只证明本地 POST 权限门，不宣称 claim commit→远端 POST、TC 或完整 fencing 已闭环。
 
 ## 4. 明确边界
 
