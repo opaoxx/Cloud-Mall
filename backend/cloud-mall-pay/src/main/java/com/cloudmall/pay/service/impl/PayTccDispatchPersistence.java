@@ -152,9 +152,11 @@ public class PayTccDispatchPersistence {
     return true;
   }
 
-  /** 精确核对原行身份与资金载荷；金额按数值比较，状态/分支/时间不作为不可变锚点。 */
-  private boolean sameAnchor(PayTccDispatchPO expected, PayTccDispatchPO current) {
-    return Objects.equals(expected.id, current.id)
+  /** 包内共享的纯锚点比较；金额按数值比较，状态/分支/时间不作为不可变锚点。 */
+  static boolean sameAnchor(PayTccDispatchPO expected, PayTccDispatchPO current) {
+    return expected != null
+        && current != null
+        && Objects.equals(expected.id, current.id)
         && Objects.equals(expected.payNo, current.payNo)
         && Objects.equals(expected.xid, current.xid)
         && Objects.equals(expected.userId, current.userId)

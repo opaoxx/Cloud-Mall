@@ -7468,6 +7468,16 @@ class PayLegacyRefundLedgerMySqlIT {
       com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
       com.cloudmall.pay.feign.UserTccClient user,
       Runnable beforeClaim) {
+    return bridgeLedgerTransactions(actual, user, beforeClaim, () -> {}, () -> {});
+  }
+
+  /** 后置hook在实际claim/mirror事务提交后、Bridge读回之前执行，其余场景默认noop。 */
+  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
+      com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
+      com.cloudmall.pay.feign.UserTccClient user,
+      Runnable beforeClaim,
+      Runnable afterClaim,
+      Runnable afterMirror) {
     var boundary = mock(com.cloudmall.pay.service.impl.PayTccDispatchPersistence.class);
     var transactions =
         new org.springframework.transaction.support.TransactionTemplate(
@@ -7481,24 +7491,31 @@ class PayLegacyRefundLedgerMySqlIT {
     org.mockito.Mockito.doAnswer(
             invocation -> {
               beforeClaim.run();
-              return dispatchTransaction(
-                  () ->
-                      actual.markPostAttempted(
-                          invocation.getArgument(0), invocation.getArgument(1)));
+              boolean claimed =
+                  dispatchTransaction(
+                      () ->
+                          actual.markPostAttempted(
+                              invocation.getArgument(0), invocation.getArgument(1)));
+              afterClaim.run();
+              return claimed;
             })
         .when(boundary)
         .markPostAttempted(any(), any());
     org.mockito.Mockito.doAnswer(
-            invocation ->
-                dispatchTransaction(
-                    () ->
-                        actual.mirror(
-                            invocation.getArgument(0),
-                            invocation.getArgument(1),
-                            invocation.getArgument(2),
-                            invocation.getArgument(3),
-                            invocation.getArgument(4),
-                            invocation.getArgument(5))))
+            invocation -> {
+              boolean mirrored =
+                  dispatchTransaction(
+                      () ->
+                          actual.mirror(
+                              invocation.getArgument(0),
+                              invocation.getArgument(1),
+                              invocation.getArgument(2),
+                              invocation.getArgument(3),
+                              invocation.getArgument(4),
+                              invocation.getArgument(5)));
+              afterMirror.run();
+              return mirrored;
+            })
         .when(boundary)
         .mirror(any(), any(), any(), any(), any(), any());
     return ownedDispatchBridge(boundary, user);
@@ -7994,6 +8011,183 @@ class PayLegacyRefundLedgerMySqlIT {
           org.junit.jupiter.api.Assertions.assertNotNull(afterDrift.get());
           assertEquals(afterDrift.get(), ownedDispatchLookupFacts());
         });
+  }
+
+  /** mirror已经提交后出现原键CI别名，不能把别名行作为本次恢复结果返回。 */
+  @Test
+  void mirrorReadbackAliasCannotBeReturnedAsOriginalDispatch() {
+    assertDispatchReadbackDrift(false, false, false, "UPDATE pay_tcc_dispatch SET pay_no='PAY-1'");
+  }
+
+  /** claim false后原xid改变，不能直接返回另一全局事务载荷。 */
+  @Test
+  void failedClaimReadbackCannotReturnChangedXid() {
+    assertDispatchReadbackDrift(
+        true, true, false, "UPDATE pay_tcc_dispatch SET xid='changed-after-failed-claim'");
+  }
+
+  /** 八字段覆盖两种mirror响应与两个入口，以及无User调用的claim false读回。 */
+  @Test
+  void readbackAnchorChangesCannotReturnForeignPayloads() {
+    for (String mutation :
+        List.of(
+            "UPDATE pay_tcc_dispatch SET id=2",
+            "UPDATE pay_tcc_dispatch SET pay_no='PAY-1'",
+            "UPDATE pay_tcc_dispatch SET xid='changed-readback-xid'",
+            "UPDATE pay_tcc_dispatch SET user_id=8",
+            "UPDATE pay_tcc_dispatch SET order_no='changed-order'",
+            "UPDATE pay_tcc_dispatch SET amount=11.00",
+            "UPDATE pay_tcc_dispatch SET operation_key='changed-operation'",
+            "UPDATE pay_tcc_dispatch SET ledger_key='changed-ledger'")) {
+      for (boolean post : List.of(false, true))
+        for (boolean empty : List.of(false, true))
+          assertDispatchReadbackDrift(post, false, empty, mutation);
+      assertDispatchReadbackDrift(true, true, false, mutation);
+    }
+  }
+
+  /** mutable进展仍返回最新视图，缺行保原404回退，读回不产生额外数据库写。 */
+  @Test
+  void readbackKeepsMutableProgressAndMissingRowFallback() {
+    for (int scenario = 0; scenario < 3; scenario++) {
+      boolean post = scenario != 0;
+      boolean failedClaim = scenario == 2;
+      var persistence = ownedDispatchPersistence();
+      seedBridgeLedgerRow(post);
+      if (failedClaim)
+        fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at='2026-10-15 00:00:00.123'");
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      var response = ApiResponse.ok(bridgeLedgerReply("TRYING", "false"));
+      when(user.prepare(any(), any(), any(), any(), any(), any())).thenReturn(response);
+      when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(response);
+      var afterHook =
+          new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+      String progressedState = failedClaim ? "TRY_ACCEPTED" : "CONFIRMED";
+      Runnable progress =
+          () -> {
+            org.junit.jupiter.api.Assertions.assertFalse(
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isActualTransactionActive());
+            fixture.update(
+                "UPDATE pay_tcc_dispatch SET"
+                    + " state=?,user_branch_id=7,last_error='newer-progress',updated_at='2026-10-15"
+                    + " 02:00:00.123'",
+                progressedState);
+            afterHook.set(ownedDispatchLookupFacts());
+          };
+      var bridge =
+          bridgeLedgerTransactions(
+              persistence,
+              user,
+              () -> {},
+              failedClaim ? progress : () -> {},
+              failedClaim ? () -> {} : progress);
+      var result = post ? bridgeLedgerPost(bridge) : bridge.recover("pay-1");
+      assertEquals(progressedState, result.state);
+      assertEquals(7L, result.userBranchId);
+      assertEquals("newer-progress", result.lastError);
+      assertEquals(afterHook.get(), ownedDispatchLookupFacts());
+      verify(user, org.mockito.Mockito.times(post && !failedClaim ? 1 : 0))
+          .prepare(any(), any(), any(), any(), any(), any());
+      verify(user, org.mockito.Mockito.times(!post ? 1 : 0))
+          .state(any(), any(), any(), any(), any(), any());
+    }
+    for (boolean failedClaim : List.of(false, true)) {
+      var persistence = ownedDispatchPersistence();
+      seedBridgeLedgerRow(failedClaim);
+      if (failedClaim)
+        fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at='2026-10-15 00:00:00.123'");
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      when(user.state(any(), any(), any(), any(), any(), any()))
+          .thenReturn(ApiResponse.ok(bridgeLedgerReply("TRYING", "false")));
+      var afterHook =
+          new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+      Runnable remove =
+          () -> {
+            org.junit.jupiter.api.Assertions.assertFalse(
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isActualTransactionActive());
+            fixture.update("DELETE FROM pay_tcc_dispatch");
+            afterHook.set(ownedDispatchLookupFacts());
+          };
+      var bridge =
+          bridgeLedgerTransactions(
+              persistence,
+              user,
+              () -> {},
+              failedClaim ? remove : () -> {},
+              failedClaim ? () -> {} : remove);
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> {
+                if (failedClaim) bridgeLedgerPost(bridge);
+                else bridge.recover("pay-1");
+              });
+      assertEquals("PAY_TCC_DISPATCH_NOT_FOUND", failure.getCode());
+      assertEquals(404, failure.getHttpStatus());
+      assertEquals(afterHook.get(), ownedDispatchLookupFacts());
+      verify(user, never()).prepare(any(), any(), any(), any(), any(), any());
+      verify(user, org.mockito.Mockito.times(failedClaim ? 0 : 1))
+          .state(any(), any(), any(), any(), any(), any());
+    }
+  }
+
+  /** 在真实短事务结束后的读回窗口注入owned变化，核原结果拒绝且无后续写/RPC。 */
+  private void assertDispatchReadbackDrift(
+      boolean post, boolean failedClaim, boolean emptyResponse, String mutationSql) {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(post);
+    if (failedClaim)
+      fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at='2026-10-15 00:00:00.123'");
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    ApiResponse<com.cloudmall.pay.domain.vo.UserTccStateVO> response =
+        emptyResponse
+            ? null
+            : ApiResponse.ok(bridgeLedgerReply(post ? "TRYING" : "CANCELLED", "false"));
+    when(user.prepare(any(), any(), any(), any(), any(), any())).thenReturn(response);
+    when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(response);
+    var afterHook =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    Runnable mutation =
+        () -> {
+          org.junit.jupiter.api.Assertions.assertFalse(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          fixture.update(mutationSql);
+          afterHook.set(ownedDispatchLookupFacts());
+        };
+    var bridge =
+        bridgeLedgerTransactions(
+            persistence,
+            user,
+            () -> {},
+            failedClaim ? mutation : () -> {},
+            failedClaim ? () -> {} : mutation);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccDispatchVO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(post ? bridgeLedgerPost(bridge) : bridge.recover("pay-1")));
+          assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () ->
+            assertNull(
+                returned.get() == null ? null : returned.get().payNo + "|" + returned.get().xid));
+    org.junit.jupiter.api.Assertions.assertNotNull(afterHook.get());
+    assertEquals(afterHook.get(), ownedDispatchLookupFacts());
+    if (failedClaim) org.mockito.Mockito.verifyNoInteractions(user);
+    else {
+      verify(user, org.mockito.Mockito.times(post ? 1 : 0))
+          .prepare(any(), any(), any(), any(), any(), any());
+      verify(user, org.mockito.Mockito.times(post ? 0 : 1))
+          .state(any(), any(), any(), any(), any(), any());
+    }
   }
 
   /** 旧直接Store测试读取真实PO，但保留请求原键以继续验证CI别名；Bridge不使用此helper。 */

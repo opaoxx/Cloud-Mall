@@ -98,6 +98,13 @@ class PayTccBridgeServiceTest {
         .thenReturn(dispatch);
     when(persistence.markPostAttempted(any(), any())).thenReturn(true);
     when(persistence.mirror(any(), any(), any(), any(), any(), any())).thenReturn(true);
+    when(persistence.prepare(any()))
+        .thenAnswer(
+            invocation -> {
+              PayTccDispatchPO prepared = invocation.getArgument(0);
+              dispatch.id = prepared.id;
+              return prepared;
+            });
     doThrow(new RuntimeException("response lost"))
         .when(userTccClient)
         .prepare(any(), any(), any(), any(), any(), any());
@@ -306,6 +313,117 @@ class PayTccBridgeServiceTest {
     }
   }
 
+  /** mirror两入口正常/未知响应后的八字段漂移均409，不能再fallback镜像。 */
+  @Test
+  void mirrorReadbackMustMatchOriginalAnchorBeforeReturning() {
+    for (boolean post : List.of(false, true))
+      for (boolean empty : List.of(false, true))
+        for (var mutation : readbackMutations()) {
+          setUp();
+          var original =
+              arrangeBridgeLedgerReply(post, empty ? null : state("TRYING", 7L, false), null);
+          var changed = dispatch("TRY_ACCEPTED");
+          changed.userBranchId = 7L;
+          mutation.accept(changed);
+          when(dispatchMapper.selectByPayNo("pay-test")).thenReturn(original, changed);
+          var failure = assertThrows(BizException.class, () -> callBridgeLedgerReply(post));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+          verify(persistence)
+              .mirror(
+                  org.mockito.ArgumentMatchers.same(original), any(), any(), any(), any(), any());
+          verify(userTccClient, org.mockito.Mockito.times(post ? 1 : 0))
+              .prepare(any(), any(), any(), any(), any(), any());
+          verify(userTccClient, org.mockito.Mockito.times(post ? 0 : 1))
+              .state(any(), any(), any(), any(), any(), any());
+        }
+  }
+
+  /** claim false后的读回不能返回另一载荷，不发User或新镜像请求。 */
+  @Test
+  void failedClaimReadbackMustMatchOriginalAnchorWithoutRpc() {
+    for (var mutation : readbackMutations()) {
+      setUp();
+      var original = arrangeBridgeLedgerReply(true, state("TRYING", 7L, false), null);
+      var changed = dispatch("CONFIRMED");
+      mutation.accept(changed);
+      when(dispatchMapper.selectByPayNo("pay-test")).thenReturn(original, changed);
+      when(persistence.markPostAttempted(any(), any())).thenReturn(false);
+      var failure = assertThrows(BizException.class, () -> service.dispatch(request()));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+      org.mockito.Mockito.verifyNoInteractions(userTccClient);
+      verify(persistence, never()).mirror(any(), any(), any(), any(), any(), any());
+    }
+  }
+
+  /** 数值等价和mutable进展仍可返回，null读回仍沿原fallback至缺行错误。 */
+  @Test
+  void readbackKeepsProgressEquivalentMoneyAndMissingBranches() {
+    for (boolean failedClaim : List.of(false, true))
+      for (boolean post : List.of(false, true)) {
+        if (failedClaim && !post) continue;
+        setUp();
+        var original = arrangeBridgeLedgerReply(post, state("TRYING", 7L, false), null);
+        var progressed = dispatch("CONFIRMED");
+        progressed.amount = new BigDecimal("10.000");
+        progressed.userBranchId = 7L;
+        progressed.lastError = "newer-progress";
+        progressed.updatedAt = java.time.LocalDateTime.of(2026, 10, 15, 2, 0);
+        when(dispatchMapper.selectByPayNo("pay-test")).thenReturn(original, progressed);
+        if (failedClaim) when(persistence.markPostAttempted(any(), any())).thenReturn(false);
+        var result = callBridgeLedgerReply(post);
+        org.junit.jupiter.api.Assertions.assertEquals("CONFIRMED", result.state);
+        org.junit.jupiter.api.Assertions.assertEquals("10.000", result.amount);
+        org.junit.jupiter.api.Assertions.assertEquals(7L, result.userBranchId);
+        org.junit.jupiter.api.Assertions.assertEquals("newer-progress", result.lastError);
+        verify(persistence, org.mockito.Mockito.times(failedClaim ? 0 : 1))
+            .mirror(any(), any(), any(), any(), any(), any());
+      }
+    for (boolean failedClaim : List.of(false, true)) {
+      setUp();
+      var original = arrangeBridgeLedgerReply(failedClaim, state("TRYING", 7L, false), null);
+      when(dispatchMapper.selectByPayNo("pay-test")).thenReturn(original).thenReturn(null);
+      var missing = new BizException("PAY_TCC_DISPATCH_NOT_FOUND", "missing", 404);
+      if (failedClaim) {
+        when(persistence.markPostAttempted(any(), any())).thenReturn(false);
+        org.mockito.Mockito.doThrow(missing)
+            .when(persistence)
+            .mirror(any(), any(), any(), any(), any(), any());
+      } else
+        org.mockito.Mockito.doReturn(true)
+            .doThrow(missing)
+            .when(persistence)
+            .mirror(any(), any(), any(), any(), any(), any());
+      var failure = assertThrows(BizException.class, () -> callBridgeLedgerReply(failedClaim));
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "PAY_TCC_DISPATCH_NOT_FOUND", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals(404, failure.getHttpStatus());
+      verify(persistence, org.mockito.Mockito.times(failedClaim ? 1 : 2))
+          .mirror(any(), any(), any(), any(), any(), any());
+      if (failedClaim) org.mockito.Mockito.verifyNoInteractions(userTccClient);
+    }
+  }
+
+  /** 只变异读回PO，不修改作为原证据的独立snapshot；含金额null及多字段控制。 */
+  private List<java.util.function.Consumer<PayTccDispatchPO>> readbackMutations() {
+    return List.of(
+        current -> current.id = 2L,
+        current -> current.payNo = "PAY-TEST",
+        current -> current.xid = "changed-xid",
+        current -> current.userId = 8L,
+        current -> current.orderNo = "changed-order",
+        current -> current.amount = new BigDecimal("11.00"),
+        current -> current.operationKey = "changed-operation",
+        current -> current.ledgerKey = "changed-ledger",
+        current -> current.amount = null,
+        current -> {
+          current.xid = "changed-xid";
+          current.userId = 8L;
+        });
+  }
+
   /** 保Bridge逻辑和参数，持久化为替身；真实CAS由owned native另验。 */
   private PayTccDispatchPO arrangeBridgeLedgerReply(
       boolean post, UserTccStateVO reply, Long existingBranch) {
@@ -375,6 +493,7 @@ class PayTccBridgeServiceTest {
 
   private PayTccDispatchPO dispatch(String state) {
     PayTccDispatchPO dispatch = new PayTccDispatchPO();
+    dispatch.id = 1L;
     dispatch.payNo = "pay-test";
     dispatch.xid = "xid-pay-test";
     dispatch.userId = 7L;

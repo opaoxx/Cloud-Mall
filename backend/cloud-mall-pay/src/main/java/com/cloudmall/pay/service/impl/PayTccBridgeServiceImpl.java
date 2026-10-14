@@ -150,6 +150,7 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
     LocalDateTime now = now();
     if (!persistence.markPostAttempted(dispatch, now)) {
       PayTccDispatchPO current = dispatchMapper.selectByPayNo(dispatch.payNo);
+      if (current != null) validateReadback(dispatch, current);
       return current == null ? mirrorUnknown(dispatch, "派发租约丢失") : PayTccDispatchVO.from(current);
     }
     UserTccTryDTO request = new UserTccTryDTO();
@@ -192,7 +193,14 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
     persistence.mirror(dispatch, dispatch.state, targetState, branchId, reason, now());
     PayTccDispatchPO updated = dispatchMapper.selectByPayNo(dispatch.payNo);
     if (updated == null) throw unavailable("派发镜像事实丢失");
+    validateReadback(dispatch, updated);
     return PayTccDispatchVO.from(updated);
+  }
+
+  /** 二次读取必须仍属于原派发载荷；合法状态进展可返回，载荷漂移不能冒充原结果。 */
+  private void validateReadback(PayTccDispatchPO expected, PayTccDispatchPO current) {
+    if (!PayTccDispatchPersistence.sameAnchor(expected, current))
+      throw new BizException("PAY_TCC_DISPATCH_CONFLICT", "派发读回载荷与原记录不一致", 409);
   }
 
   /** 不可变分支或终态矛盾不能被当作普通网络未知吞掉。 */
