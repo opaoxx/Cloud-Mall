@@ -71,9 +71,11 @@ public class PayTccExecutionRecoveryStore {
   /** 只允许仍有效的原token写调度元数据，永远不修改execution资金状态或决议。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean finishRecovery(String payNo, String token, LocalDateTime nextAt, String error) {
-    // 1. 按完整Unicode码点限制诊断，保调用方计算的退避时间。
+    // 1. 与claim保持相同token有效域，非法身份不读取或写入恢复事实。
+    if (token == null || token.isBlank() || token.length() > 128) return false;
+    // 2. 按完整Unicode码点限制诊断，保调用方计算的退避时间。
     error = PayErrorMessages.truncate(error);
-    // 2. 使用同一次上海毫秒时间，拒绝过期或已被接管的恢复租约。
+    // 3. 使用同一次上海毫秒时间，拒绝过期或已被接管的恢复租约。
     LocalDateTime currentTime =
         LocalDateTime.now(ZoneId.of("Asia/Shanghai")).truncatedTo(ChronoUnit.MILLIS);
     return recovery.finishRecovery(payNo, token, nextAt, error, currentTime) == 1;

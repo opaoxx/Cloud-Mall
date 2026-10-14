@@ -225,6 +225,72 @@ class PayTccErrorUnicodeTest {
     throw new IllegalArgumentException("unknown diagnostic path");
   }
 
+  /** 七类非法token均false且不触及任何Mapper，NULL nextAt也不进入持久层。 */
+  @Test
+  void invalidExecutionRecoveryFinishTokensSkipEveryMapper() {
+    for (String token :
+        Arrays.asList(null, "", " ", "\t\r\n", "\u3000", "a".repeat(129), "😀".repeat(65))) {
+      var recovery = mock(PayTccExecutionRecoveryMapper.class);
+      var executions = mock(PayTccExecutionMapper.class);
+      var payments = mock(PayRecordMapper.class);
+      var store = new PayTccExecutionRecoveryStore(recovery, executions, payments);
+      org.junit.jupiter.api.Assertions.assertFalse(
+          store.finishRecovery("pay-1", token, null, "😀".repeat(513)));
+      org.mockito.Mockito.verifyNoInteractions(recovery, executions, payments);
+    }
+  }
+
+  /** 合法token逐字传递，nextAt不改精度，error保完整码点，当前时间仅毫秒。 */
+  @Test
+  void validExecutionRecoveryFinishTokensKeepBindingsAndReturn() {
+    var nextAt = LocalDateTime.of(2027, 1, 1, 0, 0, 0, 123_456_789);
+    for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64))) {
+      var recovery = mock(PayTccExecutionRecoveryMapper.class);
+      var executions = mock(PayTccExecutionMapper.class);
+      var payments = mock(PayRecordMapper.class);
+      when(recovery.finishRecovery(any(), any(), any(), any(), any())).thenReturn(1);
+      var store = new PayTccExecutionRecoveryStore(recovery, executions, payments);
+      var before =
+          LocalDateTime.now(ZoneId.of("Asia/Shanghai"))
+              .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      assertTrue(store.finishRecovery("pay-1", token, nextAt, "😀".repeat(513)));
+      var after = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+      var now = org.mockito.ArgumentCaptor.forClass(LocalDateTime.class);
+      org.mockito.Mockito.verify(recovery)
+          .finishRecovery(
+              org.mockito.ArgumentMatchers.eq("pay-1"),
+              org.mockito.ArgumentMatchers.eq(token),
+              org.mockito.ArgumentMatchers.eq(nextAt),
+              org.mockito.ArgumentMatchers.eq("😀".repeat(512)),
+              now.capture());
+      assertEquals(0, now.getValue().getNano() % 1_000_000);
+      assertTrue(!now.getValue().isBefore(before) && !now.getValue().isAfter(after));
+      org.mockito.Mockito.verifyNoMoreInteractions(recovery);
+      org.mockito.Mockito.verifyNoInteractions(executions, payments);
+    }
+  }
+
+  /** 合法token未命中仍false，保NULL诊断/原nextAt与唯一一次Mapper写尝试。 */
+  @Test
+  void zeroRowExecutionRecoveryFinishRemainsFalse() {
+    var nextAt = LocalDateTime.of(2027, 1, 1, 0, 0);
+    var recovery = mock(PayTccExecutionRecoveryMapper.class);
+    var executions = mock(PayTccExecutionMapper.class);
+    var payments = mock(PayRecordMapper.class);
+    var store = new PayTccExecutionRecoveryStore(recovery, executions, payments);
+    org.junit.jupiter.api.Assertions.assertFalse(
+        store.finishRecovery("pay-1", "worker", nextAt, null));
+    org.mockito.Mockito.verify(recovery)
+        .finishRecovery(
+            org.mockito.ArgumentMatchers.eq("pay-1"),
+            org.mockito.ArgumentMatchers.eq("worker"),
+            org.mockito.ArgumentMatchers.eq(nextAt),
+            org.mockito.ArgumentMatchers.isNull(),
+            any());
+    org.mockito.Mockito.verifyNoMoreInteractions(recovery);
+    org.mockito.Mockito.verifyNoInteractions(executions, payments);
+  }
+
   /** 单次实际Store调用、捕获结果与错误参数的位置。 */
   private static final class Scenario {
     /** 调用真实public Store逻辑。 */

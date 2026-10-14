@@ -2494,3 +2494,9 @@ delivery的claim/stage/finish统一要求token非NULL、非blank且Java UTF-16�
 取消恢复claimRecovery/stage/finish统一要求token非NULL、非blank且Java UTF-16长度不超过128。非法claim沿用原取消参数冲突，stage返回false，finish不清租约或修改退避；非blank首尾空格不trim。
 
 合法token的租约、状态、资金互斥、退避及SQL保持。emoji65虽能按数据库字符容量存入，仍因Java域超限被拒；本批不修历史坏owner，也不代表直接Mapper调用或完整取消fencing验收。
+
+### CM-18 ExecutionRecovery收尾token有效域（16T186）
+
+execution恢复收尾与原claim入口沿用同一token域：非NULL、非blank、Java UTF-16长度不超过128。非法finishRecovery直接返回false，不清owner/lease，不改退避或诊断；合法非blank首尾空格不trim。
+
+原SQL的精确owner/payNo、有效lease门、nextAt、Unicode诊断截断和boolean语义保持。历史坏owner、直接Mapper调用及完整资金fencing仍需后续处理，本批本地事务验收不替代真实TC/跨服务故障验证。

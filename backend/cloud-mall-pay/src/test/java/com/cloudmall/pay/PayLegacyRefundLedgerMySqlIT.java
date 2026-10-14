@@ -4631,6 +4631,158 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(payBefore, rawIntentTimeFacts());
   }
 
+  /** 历史空白owner不能被空白token释放execution恢复租约或改诊断。 */
+  @Test
+  void executionRecoveryFinishCannotReleaseBlankOwner() {
+    var store = ownedExecutionRecoveryTokenStore();
+    seedExecutionRecoveryToken("RUNNING", "NONE", " ");
+    var before = executionRecoveryTokenFacts();
+    boolean changed =
+        dispatchTransaction(
+            () ->
+                store.finishRecovery(
+                    "pay-1", " ", LocalDateTime.of(2027, 1, 1, 0, 0), "blank-recovery-proof"));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertFalse(
+                changed, "blank token must not release recovery lease"),
+        () -> assertEquals(before, executionRecoveryTokenFacts()));
+  }
+
+  /** emoji65虽数据库可存，但超过Java token域，不能收尾回滚投影租约。 */
+  @Test
+  void executionRecoveryFinishCannotReleaseOverlongOwner() {
+    var store = ownedExecutionRecoveryTokenStore();
+    String token = "😀".repeat(65);
+    seedExecutionRecoveryToken("ROLLEDBACK", "ROLLBACK", token);
+    var before = executionRecoveryTokenFacts();
+    boolean changed =
+        dispatchTransaction(
+            () ->
+                store.finishRecovery(
+                    "pay-1", token, LocalDateTime.of(2027, 1, 1, 0, 0), "overlong-recovery-proof"));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertFalse(
+                changed, "overlong token must not release recovery lease"),
+        () -> assertEquals(before, executionRecoveryTokenFacts()));
+  }
+
+  /** 六类列可表示的非法token在普通恢复与回滚投影均不改三表。 */
+  @Test
+  void invalidExecutionRecoveryFinishTokensKeepAllFacts() {
+    var store = ownedExecutionRecoveryTokenStore();
+    for (String state : List.of("RUNNING", "ROLLEDBACK"))
+      for (String token :
+          java.util.Arrays.asList(null, "", " ", "\t\r\n", "\u3000", "😀".repeat(65))) {
+        seedExecutionRecoveryToken(state, state.equals("RUNNING") ? "NONE" : "ROLLBACK", token);
+        var before = executionRecoveryTokenFacts();
+        org.junit.jupiter.api.Assertions.assertFalse(
+            dispatchTransaction(
+                () ->
+                    store.finishRecovery(
+                        "pay-1", token, LocalDateTime.of(2027, 1, 1, 0, 0), "should-not-save")));
+        assertEquals(before, executionRecoveryTokenFacts());
+      }
+  }
+
+  /** 合法边界保原nextAt/Unicode诊断/资金字段，错owner/别名/过期仍零行。 */
+  @Test
+  void validExecutionRecoveryFinishTokensAndLeaseControlsRemainUnchanged() {
+    var store = ownedExecutionRecoveryTokenStore();
+    var nextAt = LocalDateTime.of(2027, 1, 1, 0, 0, 0, 123_000_000);
+    for (String state : List.of("RUNNING", "ROLLEDBACK"))
+      for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64))) {
+        seedExecutionRecoveryToken(state, state.equals("RUNNING") ? "NONE" : "ROLLBACK", token);
+        var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+        var paymentBefore = rawIntentTimeFacts();
+        assertTrue(
+            dispatchTransaction(
+                () -> store.finishRecovery("pay-1", token, nextAt, "😀".repeat(513))));
+        var after = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+        assertNull(after.get("recovery_owner"));
+        assertNull(after.get("recovery_lease_until"));
+        assertEquals(nextAt, after.get("next_recovery_at"));
+        assertEquals("😀".repeat(512), after.get("recovery_last_error"));
+        for (String changed :
+            List.of(
+                "recovery_owner",
+                "recovery_lease_until",
+                "next_recovery_at",
+                "recovery_last_error")) {
+          before.remove(changed);
+          after.remove(changed);
+        }
+        assertEquals(before, after);
+        assertEquals(paymentBefore, rawIntentTimeFacts());
+        var released = executionRecoveryTokenFacts();
+        org.junit.jupiter.api.Assertions.assertFalse(
+            dispatchTransaction(() -> store.finishRecovery("pay-1", token, nextAt, "late")));
+        assertEquals(released, executionRecoveryTokenFacts());
+      }
+    for (String blocked : List.of("expired", "null-lease", "wrong-owner", "pay-alias", "missing")) {
+      seedExecutionRecoveryToken("RUNNING", "NONE", "worker");
+      if (blocked.equals("expired"))
+        fixture.update(
+            "UPDATE pay_tcc_execution SET recovery_lease_until=?",
+            LocalDateTime.of(2026, 10, 1, 0, 0));
+      if (blocked.equals("null-lease"))
+        fixture.update("UPDATE pay_tcc_execution SET recovery_lease_until=NULL");
+      String requestedPay =
+          blocked.equals("pay-alias")
+              ? "PAY-1"
+              : blocked.equals("missing") ? "missing-pay" : "pay-1";
+      String requestedToken = blocked.equals("wrong-owner") ? "WORKER" : "worker";
+      var before = executionRecoveryTokenFacts();
+      org.junit.jupiter.api.Assertions.assertFalse(
+          dispatchTransaction(
+              () -> store.finishRecovery(requestedPay, requestedToken, nextAt, "blocked")),
+          blocked);
+      assertEquals(before, executionRecoveryTokenFacts(), blocked);
+    }
+  }
+
+  /** 只克隆原execution DDL，实际Recovery Mapper与Store使用同一owned有界连接池。 */
+  private com.cloudmall.pay.service.impl.PayTccExecutionRecoveryStore
+      ownedExecutionRecoveryTokenStore() {
+    ownedExecutionObservationStore();
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccExecutionRecoveryMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      var mapper = session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionRecoveryMapper.class);
+      return new com.cloudmall.pay.service.impl.PayTccExecutionRecoveryStore(
+          mapper, executionObservationMapper, records);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned recovery token factory failed", failure);
+    }
+  }
+
+  /** 生成明确有效的历史owner场景，时间远离当前边界；只写owned的三张表。 */
+  private void seedExecutionRecoveryToken(String state, String decision, String token) {
+    seedOwnedExecution(state, decision, "t186-xid");
+    fixture.update("UPDATE pay_record SET debit_mode='TCC'");
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update(
+        "UPDATE pay_tcc_execution SET"
+            + " recovery_owner=?,recovery_lease_until=?,recovery_attempts=7,next_recovery_at=?,recovery_last_error='owned-recovery-old'",
+        token,
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1),
+        LocalDateTime.of(2026, 10, 1, 0, 0));
+  }
+
+  /** Pay/Intent/Execution全字段快照，收尾不得触及资金状态或载荷。 */
+  private List<List<Map<String, Object>>> executionRecoveryTokenFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
+    facts.add(fixture.queryForList("SELECT * FROM pay_tcc_execution ORDER BY id"));
+    return facts;
+  }
+
   /** owned库克隆原execution DDL，不启动应用或TC，只建立实际MyBatis读取和写入入口。 */
   private com.cloudmall.pay.service.impl.PayTccExecutionStore ownedExecutionObservationStore() {
     fixture.execute("DROP TABLE IF EXISTS pay_tcc_execution");
