@@ -133,9 +133,11 @@ class PayTccDispatchPersistenceTest {
     PayTccDispatchPO dispatch = dispatch("PREPARED", null);
     when(payRecordMapper.selectForUpdate(dispatch.payNo))
         .thenReturn(List.of(payment("TCC", "PENDING")));
+    when(dispatchMapper.selectForUpdate(dispatch.payNo)).thenReturn(dispatch);
     when(dispatchMapper.markPostAttempted(any(), any(), any())).thenReturn(0);
 
     assertFalse(persistence.markPostAttempted(dispatch, LocalDateTime.now()));
+    verify(dispatchMapper).markPostAttempted(any(), any(), any());
   }
 
   /** 捕获实际镜像参数，长Unicode诊断被限制但当前状态/分支/更新时间不变。 */
@@ -323,6 +325,93 @@ class PayTccDispatchPersistenceTest {
       org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
     }
     verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
+  }
+
+  /** claim前八字段或多字段变化先于当前权限状态拒绝，不消费POST CAS。 */
+  @Test
+  void changedPostClaimAnchorCannotConsumePermission() {
+    var mutations =
+        List.<java.util.function.Consumer<PayTccDispatchPO>>of(
+            current -> current.id = 2L,
+            current -> current.payNo = "PAY-PERSISTENCE-1",
+            current -> current.xid = "changed-xid",
+            current -> current.userId = 8L,
+            current -> current.orderNo = "changed-order",
+            current -> current.amount = new BigDecimal("11.00"),
+            current -> current.operationKey = "changed-operation",
+            current -> current.ledgerKey = "changed-ledger",
+            current -> {
+              current.xid = "changed-xid";
+              current.ledgerKey = "changed-ledger";
+            });
+    when(payRecordMapper.selectForUpdate("pay-persistence-1"))
+        .thenReturn(List.of(payment("TCC", "PENDING")));
+    for (String state : List.of("PREPARED", "TRY_ACCEPTED", "CONFIRMED"))
+      for (var mutation : mutations) {
+        var expected = dispatch("PREPARED", null);
+        var current = dispatch(state, null);
+        mutation.accept(current);
+        when(dispatchMapper.selectForUpdate(expected.payNo)).thenReturn(current);
+        var failure =
+            assertThrows(
+                BizException.class,
+                () -> persistence.markPostAttempted(expected, LocalDateTime.now()));
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+        org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+      }
+    verify(dispatchMapper, never()).markPostAttempted(any(), any(), any());
+  }
+
+  /** 只按锁内当前PREPARED/空marker竞争权限，金额数值等价保持。 */
+  @Test
+  void currentStateAndMarkerDefinePostClaimPermission() {
+    when(payRecordMapper.selectForUpdate("pay-persistence-1"))
+        .thenReturn(List.of(payment("TCC", "PENDING")));
+    when(dispatchMapper.markPostAttempted(any(), any(), any())).thenReturn(1);
+    var attemptedAt = LocalDateTime.of(2026, 10, 15, 1, 0);
+    for (String state :
+        List.of("PREPARED", "POST_ATTEMPTED", "TRY_ACCEPTED", "CANCELLED", "CONFIRMED"))
+      for (boolean marked : List.of(false, true)) {
+        org.mockito.Mockito.clearInvocations(dispatchMapper);
+        var expected = dispatch("PREPARED", null);
+        expected.amount = new BigDecimal("10.000");
+        var current = dispatch(state, null);
+        current.postAttemptedAt = marked ? attemptedAt.minusMinutes(1) : null;
+        when(dispatchMapper.selectForUpdate(expected.payNo)).thenReturn(current);
+        boolean permitted = state.equals("PREPARED") && !marked;
+        org.junit.jupiter.api.Assertions.assertEquals(
+            permitted, persistence.markPostAttempted(expected, attemptedAt), state + ":" + marked);
+        verify(dispatchMapper).selectForUpdate(expected.payNo);
+        verify(dispatchMapper, org.mockito.Mockito.times(permitted ? 1 : 0))
+            .markPostAttempted(expected.payNo, attemptedAt, attemptedAt);
+        org.junit.jupiter.api.Assertions.assertNull(expected.postAttemptedAt);
+      }
+  }
+
+  /** 无效snapshot不读库，取消门优先于dispatch读取，缺当前行保原false。 */
+  @Test
+  void postClaimMissingSnapshotCancelAndMissingRowKeepTheirPriority() {
+    for (var invalid : java.util.Arrays.asList(null, new PayTccDispatchPO())) {
+      var failure =
+          assertThrows(
+              BizException.class,
+              () -> persistence.markPostAttempted(invalid, LocalDateTime.now()));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+    }
+    org.mockito.Mockito.verifyNoInteractions(payRecordMapper, cancelMapper, dispatchMapper);
+    var expected = dispatch("PREPARED", null);
+    when(payRecordMapper.selectForUpdate(expected.payNo))
+        .thenReturn(List.of(payment("TCC", "PENDING")));
+    when(cancelMapper.selectForUpdate(expected.payNo))
+        .thenReturn(new com.cloudmall.pay.domain.po.PayTccCancelPO());
+    assertFalse(persistence.markPostAttempted(expected, LocalDateTime.now()));
+    verify(dispatchMapper, never()).selectForUpdate(any());
+    when(cancelMapper.selectForUpdate(expected.payNo)).thenReturn(null);
+    assertFalse(persistence.markPostAttempted(expected, LocalDateTime.now()));
+    verify(dispatchMapper).selectForUpdate(expected.payNo);
+    verify(dispatchMapper, never()).markPostAttempted(any(), any(), any());
   }
 
   /** 用请求原键构造测试锚点，不能从已变异的当前行复制。 */

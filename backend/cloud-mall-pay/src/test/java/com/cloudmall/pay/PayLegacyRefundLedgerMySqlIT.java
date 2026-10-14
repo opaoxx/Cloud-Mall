@@ -7460,6 +7460,14 @@ class PayLegacyRefundLedgerMySqlIT {
   private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
       com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
       com.cloudmall.pay.feign.UserTccClient user) {
+    return bridgeLedgerTransactions(actual, user, () -> {});
+  }
+
+  /** 只在领取短事务开始前调用受控hook，其余prepare/mirror事务边界不变。 */
+  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
+      com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
+      com.cloudmall.pay.feign.UserTccClient user,
+      Runnable beforeClaim) {
     var boundary = mock(com.cloudmall.pay.service.impl.PayTccDispatchPersistence.class);
     var transactions =
         new org.springframework.transaction.support.TransactionTemplate(
@@ -7471,11 +7479,13 @@ class PayLegacyRefundLedgerMySqlIT {
         .when(boundary)
         .prepare(any());
     org.mockito.Mockito.doAnswer(
-            invocation ->
-                dispatchTransaction(
-                    () ->
-                        actual.markPostAttempted(
-                            invocation.getArgument(0), invocation.getArgument(1))))
+            invocation -> {
+              beforeClaim.run();
+              return dispatchTransaction(
+                  () ->
+                      actual.markPostAttempted(
+                          invocation.getArgument(0), invocation.getArgument(1)));
+            })
         .when(boundary)
         .markPostAttempted(any(), any());
     org.mockito.Mockito.doAnswer(
@@ -7855,6 +7865,135 @@ class PayLegacyRefundLedgerMySqlIT {
         .prepare(any(), any(), any(), any(), any(), any());
     verify(user, org.mockito.Mockito.times(post ? 0 : 1))
         .state(any(), any(), any(), any(), any(), any());
+  }
+
+  /** 原xid在领取前变化时，晚到镜像409仍不能弥补已经发出的POST。 */
+  @Test
+  void changedDispatchBeforeClaimCannotIssueOldUserPost() {
+    assertDispatchPostClaimDrift("UPDATE pay_tcc_dispatch SET xid='changed-before-claim'");
+  }
+
+  /** PREPARED上已存在POST时间，不能重领并重新发送User Try。 */
+  @Test
+  void preparedDispatchWithConsumedMarkerCannotPostAgain() {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(true);
+    fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at='2026-10-15 00:00:00.123'");
+    var before = ownedDispatchLookupFacts();
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.prepare(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("TRYING", "false")));
+    var result = bridgeLedgerPost(bridgeLedgerTransactions(persistence, user));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals("PREPARED", result.state),
+        () -> org.mockito.Mockito.verifyNoInteractions(user),
+        () -> assertEquals(before, ownedDispatchLookupFacts()));
+  }
+
+  /** 八字段在领取前改变时均不消费POST权限，不等待晚到镜像门才拒绝。 */
+  @Test
+  void changedPostClaimFieldsKeepPermissionAndSuppressAllUserRpc() {
+    for (String mutation :
+        List.of(
+            "UPDATE pay_tcc_dispatch SET id=2",
+            "UPDATE pay_tcc_dispatch SET pay_no='PAY-1'",
+            "UPDATE pay_tcc_dispatch SET xid='changed-before-claim'",
+            "UPDATE pay_tcc_dispatch SET user_id=8",
+            "UPDATE pay_tcc_dispatch SET order_no='changed-order'",
+            "UPDATE pay_tcc_dispatch SET amount=11.00",
+            "UPDATE pay_tcc_dispatch SET operation_key='changed-operation'",
+            "UPDATE pay_tcc_dispatch SET ledger_key='changed-ledger'"))
+      assertDispatchPostClaimDrift(mutation);
+  }
+
+  /** 五种当前状态与marker双矩阵仅允许PREPARED/空marker发一次POST。 */
+  @Test
+  void postClaimStateAndMarkerMatrixKeepsSinglePostPermission() {
+    for (String state :
+        List.of("PREPARED", "POST_ATTEMPTED", "TRY_ACCEPTED", "CANCELLED", "CONFIRMED"))
+      for (boolean marked : List.of(false, true)) {
+        var persistence = ownedDispatchPersistence();
+        seedBridgeLedgerRow(true);
+        var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+        var response = ApiResponse.ok(bridgeLedgerReply("TRYING", "false"));
+        when(user.prepare(any(), any(), any(), any(), any(), any())).thenReturn(response);
+        when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(response);
+        var afterHook =
+            new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+        var bridge =
+            bridgeLedgerTransactions(
+                persistence,
+                user,
+                () -> {
+                  org.junit.jupiter.api.Assertions.assertFalse(
+                      org.springframework.transaction.support.TransactionSynchronizationManager
+                          .isActualTransactionActive());
+                  fixture.update(
+                      "UPDATE pay_tcc_dispatch SET state=?,post_attempted_at=?",
+                      state,
+                      marked ? LocalDateTime.of(2026, 10, 15, 0, 0, 0, 123000000) : null);
+                  afterHook.set(ownedDispatchLookupFacts());
+                });
+        var result = bridgeLedgerPost(bridge);
+        boolean permitted = state.equals("PREPARED") && !marked;
+        if (!permitted) {
+          assertEquals(state, result.state);
+          org.mockito.Mockito.verifyNoInteractions(user);
+          assertEquals(afterHook.get(), ownedDispatchLookupFacts());
+        } else {
+          assertEquals("TRY_ACCEPTED", result.state);
+          var afterFirst = ownedDispatchLookupFacts();
+          org.junit.jupiter.api.Assertions.assertNotNull(
+              afterFirst.get(2).get(0).get("post_attempted_at"));
+          assertEquals("TRY_ACCEPTED", bridgeLedgerPost(bridge).state);
+          verify(user).prepare(any(), any(), any(), any(), any(), any());
+          verify(user).state(any(), any(), any(), any(), any(), any());
+          var afterSecond = ownedDispatchLookupFacts();
+          assertEquals(afterHook.get().subList(0, 2), afterSecond.subList(0, 2));
+          var firstDispatch = new java.util.HashMap<>(afterFirst.get(2).get(0));
+          var secondDispatch = new java.util.HashMap<>(afterSecond.get(2).get(0));
+          for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+            firstDispatch.remove(changed);
+            secondDispatch.remove(changed);
+          }
+          assertEquals(firstDispatch, secondDispatch);
+        }
+      }
+  }
+
+  /** hook在原snapshot读取后、实际claim短事务前注入owned变化，核无权限写也无User RPC。 */
+  private void assertDispatchPostClaimDrift(String mutationSql) {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(true);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.prepare(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("TRYING", "false")));
+    var afterDrift =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var bridge =
+        bridgeLedgerTransactions(
+            persistence,
+            user,
+            () -> {
+              org.junit.jupiter.api.Assertions.assertFalse(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive());
+              fixture.update(mutationSql);
+              afterDrift.set(ownedDispatchLookupFacts());
+            });
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class, () -> bridgeLedgerPost(bridge));
+          assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> org.mockito.Mockito.verifyNoInteractions(user),
+        () -> {
+          org.junit.jupiter.api.Assertions.assertNotNull(afterDrift.get());
+          assertEquals(afterDrift.get(), ownedDispatchLookupFacts());
+        });
   }
 
   /** 旧直接Store测试读取真实PO，但保留请求原键以继续验证CI别名；Bridge不使用此helper。 */

@@ -58,9 +58,17 @@ public class PayTccDispatchPersistence {
     return dispatch;
   }
 
-  /** 独立提交唯一 POST_ATTEMPTED CAS。 */
+  /**
+   * 锁内核对原始派发锚点和未消耗权限，独立提交唯一POST_ATTEMPTED CAS。
+   *
+   * @param dispatch 调用方此前读取的原始派发快照
+   * @param attemptedAt 本次POST权限消耗时间
+   * @return 是否成功消费原始派发的一次POST权限
+   */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean markPostAttempted(PayTccDispatchPO dispatch, LocalDateTime attemptedAt) {
+    // 1. 保留原Pay支付行锁及载荷门，无效snapshot不能触发数据库访问。
+    if (dispatch == null || dispatch.payNo == null) throw conflict();
     java.util.List<PayRecordPO> records = payRecordMapper.selectForUpdate(dispatch.payNo);
     PayRecordPO payment = records.size() == 1 ? records.get(0) : null;
     if (payment == null
@@ -73,7 +81,13 @@ public class PayTccDispatchPersistence {
         || dispatch.amount.compareTo(payment.amount) != 0) {
       return false;
     }
+    // 2. 按Pay→cancel→dispatch顺序锁定原行，阻止读取到claim期间的载荷漂移。
     if (cancelMapper.selectForUpdate(dispatch.payNo) != null) return false;
+    PayTccDispatchPO current = dispatchMapper.selectForUpdate(dispatch.payNo);
+    if (current == null) return false;
+    if (!sameAnchor(dispatch, current)) throw conflict();
+    if (!"PREPARED".equals(current.state) || current.postAttemptedAt != null) return false;
+    // 3. 只有未消费的当前PREPARED可以CAS，不回收已有POST标记。
     return dispatchMapper.markPostAttempted(dispatch.payNo, attemptedAt, attemptedAt) == 1;
   }
 

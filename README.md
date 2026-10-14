@@ -2554,3 +2554,9 @@ User状态响应的十个已知根字段必须唯一；重复字段即使等值�
 派发桥将User调用前的原始dispatch快照传入镜像事务。锁内再次核对id、payNo、xid、userId、orderNo、amount、operationKey、ledgerKey；载荷变化返回原409，旧响应不能写入另一份派发载荷，也不能退为UNKNOWN诊断继续写入。
 
 金额保持数值等价，状态、分支及时间等按原规则处理，保留当前状态CAS、终态保护和一次POST权限。本批用隔离数据库在受控User调用窗口注入变化，验证本地镜像边界，不代表完整远端或TC fencing。
+
+### CM-18 POST权限领取的原始锚点与标记（16T196）
+
+POST权限领取沿Pay→cancel→dispatch顺序增加一次派发行锁定读取，核对原八字段载荷；变化时返回原409，阻止先发出旧User POST、再被镜像门拒绝。只有当前PREPARED且postAttemptedAt为空才执行原CAS，已有标记不会被重领或清除。
+
+原支付/取消门优先级、缺行或CAS零行的false语义、当前状态readback和SQL保持。本批验证读取到claim的本地窗口，不代表claim提交到远端POST之间的窗口或完整TC fencing已闭环。
