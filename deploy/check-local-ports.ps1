@@ -5,7 +5,8 @@ Read-only Windows checks for Compose TCP bindings and optional local service por
 [CmdletBinding()]
 param(
     [string]$ComposeFile,
-    [switch]$IncludeBusinessPorts
+    [switch]$IncludeBusinessPorts,
+    [switch]$ProbeProtocols
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,6 +86,21 @@ try {
         if ($ranges.Count -eq 0 -and $portListeners.Count -eq 0) {
             Write-Output "AVAILABLE $($binding.Service) port=$($binding.Port)"
         }
+    }
+    if ($ProbeProtocols) {
+        . (Join-Path $PSScriptRoot 'service-protocol.ps1')
+        foreach ($binding in ($bindings | Where-Object Service -in @('mysql', 'redis') | Sort-Object Service, Port)) {
+            foreach ($hostAddress in @('localhost', '127.0.0.1')) {
+                $probe = Test-CloudMallServiceProtocol -Protocol $binding.Service -HostAddress $hostAddress -Port $binding.Port
+                if ($probe.Reachable) {
+                    Write-Output "PROTOCOL $($binding.Service) port=$($binding.Port) host=$hostAddress peer=$($probe.RemoteEndpoint) result=$($probe.Status)"
+                } else {
+                    Write-Output "UNREACHABLE $($binding.Service) port=$($binding.Port) host=$hostAddress reason=$($probe.Error)"
+                    $conflicts++
+                }
+            }
+        }
+        Write-Output 'Protocol probes check MySQL greeting / Redis PING only; they do not validate authentication or business health.'
     }
     if ($conflicts -gt 0) { exit 1 }
     Write-Output 'TCP port checks passed. No processes or system settings were changed.'

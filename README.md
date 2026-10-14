@@ -56,12 +56,23 @@ Windows 出现 `ports are not available` / `forbidden by its access permissions`
 .\deploy\check-local-ports.ps1
 # 同时检查 IDEA 业务服务固定端口和 Vite 端口：
 .\deploy\check-local-ports.ps1 -IncludeBusinessPorts
+# 检查 MySQL/Redis 的宿主协议响应（只读，单次最多 2 秒）：
+.\deploy\check-local-ports.ps1 -ProbeProtocols
 netsh interface ipv4 show excludedportrange protocol=tcp
 netsh interface ipv6 show excludedportrange protocol=tcp
 ```
 
-脚本报告排除范围或监听 PID，允许本项目运行中容器自身的 Docker/WSL 转发监听；
-不会杀进程或修改系统设置。2026-10-08 本机排除范围覆盖 8088/8091，且无残留
+脚本报告排除范围或监听 PID，允许本项目运行中容器自身的 Docker/WSL 转发监听，
+不会杀进程或修改系统设置。
+`OWN` 只说明端口监听归属，容器 `healthy` 也不能证明宿主连接可用。
+`-ProbeProtocols` 另查 `localhost` 与 `127.0.0.1` 的 MySQL greeting 和 Redis PING，
+EOF、超时或错误响应返回失败；Redis `NOAUTH` 表示协议可达，认证须单独验证。
+2026-10-14 曾出现 MySQL 13307/Redis 16379 立即 EOF、容器内部 TCP 正常的转发故障。
+备份并核对业务表校验和、Redis 持久化文件及命名卷后，分别仅重启对应容器恢复了
+原端口；未改端口、镜像、数据卷或 WSL 配置。此恢复不能保证故障不会再次出现。
+恢复时应先记录证据和备份，再按单服务操作，勿以 `down -v` 或清空数据卷排障。
+
+2026-10-08 本机排除范围覆盖 8088/8091，且无残留
 Java/javaw 进程，因此本次映射改为上述高位端口。业务固定 8080–8086 当时也在
 排除范围内；中间件启动成功不代表这些 IDEA 端口已经可绑定，启动业务前须另行
 解决 Windows 的端口保留问题，并保持项目业务端口契约。
