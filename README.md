@@ -2548,3 +2548,9 @@ Pay接收User状态的payNo、orderNo、amount、operationKey、ledgerKey、xid�
 User状态响应的十个已知根字段必须唯一；重复字段即使等值，也不能用最后一个值覆盖原始矛盾并生成可信证据。专用对象解析器完整消费重复响应后返回null，回滚/主动决议保持原202，派发桥保持原UNKNOWN诊断。
 
 原生Boolean、正Long和原生文本规则继续复用；Java字段赋值、Boolean setter与输出保持。未知字段及内部presence按原Jackson策略处理，未知嵌套字段不计入根字段重复集合。本批不改变全局解析规则，也不替代真实User/TC链路验证。
+
+### CM-18 派发镜像原始载荷锚点（16T195）
+
+派发桥将User调用前的原始dispatch快照传入镜像事务。锁内再次核对id、payNo、xid、userId、orderNo、amount、operationKey、ledgerKey；载荷变化返回原409，旧响应不能写入另一份派发载荷，也不能退为UNKNOWN诊断继续写入。
+
+金额保持数值等价，状态、分支及时间等按原规则处理，保留当前状态CAS、终态保护和一次POST权限。本批用隔离数据库在受控User调用窗口注入变化，验证本地镜像边界，不代表完整远端或TC fencing。

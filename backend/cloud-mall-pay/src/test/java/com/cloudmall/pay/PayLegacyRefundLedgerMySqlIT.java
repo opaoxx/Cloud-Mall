@@ -7105,7 +7105,7 @@ class PayLegacyRefundLedgerMySqlIT {
                       dispatchTransaction(
                           () ->
                               persistence.mirror(
-                                  "pay-1",
+                                  dispatchMirrorAnchor("pay-1"),
                                   "POST_ATTEMPTED",
                                   "TRY_UNKNOWN",
                                   7L,
@@ -7152,7 +7152,7 @@ class PayLegacyRefundLedgerMySqlIT {
                     dispatchTransaction(
                         () ->
                             persistence.mirror(
-                                requested,
+                                dispatchMirrorAnchor(requested),
                                 "stale-state",
                                 "TRY_UNKNOWN",
                                 7L,
@@ -7204,7 +7204,7 @@ class PayLegacyRefundLedgerMySqlIT {
             !dispatchTransaction(
                 () ->
                     persistence.mirror(
-                        "pay-1",
+                        dispatchMirrorAnchor("pay-1"),
                         "stale-state",
                         "TRY_UNKNOWN",
                         7L,
@@ -7243,7 +7243,7 @@ class PayLegacyRefundLedgerMySqlIT {
                 dispatchTransaction(
                     () ->
                         persistence.mirror(
-                            "absent-pay",
+                            dispatchMirrorAnchor("absent-pay"),
                             "POST_ATTEMPTED",
                             "TRY_UNKNOWN",
                             7L,
@@ -7545,7 +7545,12 @@ class PayLegacyRefundLedgerMySqlIT {
                         dispatchTransaction(
                             () ->
                                 store.mirror(
-                                    "pay-1", "stale-state", "TRY_UNKNOWN", 7L, error, updatedAt))));
+                                    dispatchMirrorAnchor("pay-1"),
+                                    "stale-state",
+                                    "TRY_UNKNOWN",
+                                    7L,
+                                    error,
+                                    updatedAt))));
             assertEquals(
                 error.startsWith("a".repeat(513)) ? "a".repeat(512) : "a".repeat(511) + "😀",
                 fixture.queryForObject(
@@ -7582,7 +7587,13 @@ class PayLegacyRefundLedgerMySqlIT {
       assertTrue(
           dispatchTransaction(
               () ->
-                  store.mirror("pay-1", "stale-state", "TRY_UNKNOWN", 7L, example[0], updatedAt)));
+                  store.mirror(
+                      dispatchMirrorAnchor("pay-1"),
+                      "stale-state",
+                      "TRY_UNKNOWN",
+                      7L,
+                      example[0],
+                      updatedAt)));
       var after = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
       assertEquals(example[1], after.get("last_error"));
       assertEquals("TRY_UNKNOWN", after.get("state"));
@@ -7606,7 +7617,14 @@ class PayLegacyRefundLedgerMySqlIT {
     seedOwnedDispatch("POST_ATTEMPTED", 7L);
     assertTrue(
         dispatchTransaction(
-            () -> store.mirror("pay-1", "stale-state", "TRY_UNKNOWN", null, null, updatedAt)));
+            () ->
+                store.mirror(
+                    dispatchMirrorAnchor("pay-1"),
+                    "stale-state",
+                    "TRY_UNKNOWN",
+                    null,
+                    null,
+                    updatedAt)));
     assertEquals(
         7L,
         fixture.queryForObject(
@@ -7628,7 +7646,12 @@ class PayLegacyRefundLedgerMySqlIT {
           !dispatchTransaction(
               () ->
                   store.mirror(
-                      "pay-1", "stale-state", "TRY_UNKNOWN", 7L, "😀".repeat(513), updatedAt)));
+                      dispatchMirrorAnchor("pay-1"),
+                      "stale-state",
+                      "TRY_UNKNOWN",
+                      7L,
+                      "😀".repeat(513),
+                      updatedAt)));
       assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
       assertEquals(payBefore, rawIntentTimeFacts());
     }
@@ -7641,7 +7664,7 @@ class PayLegacyRefundLedgerMySqlIT {
               dispatchTransaction(
                   () ->
                       store.mirror(
-                          "pay-1",
+                          dispatchMirrorAnchor("pay-1"),
                           "stale-state",
                           "TRY_UNKNOWN",
                           branch,
@@ -7657,7 +7680,12 @@ class PayLegacyRefundLedgerMySqlIT {
             dispatchTransaction(
                 () ->
                     store.mirror(
-                        "pay-1", "stale-state", "CANCELLED", 7L, "a".repeat(513), updatedAt)));
+                        dispatchMirrorAnchor("pay-1"),
+                        "stale-state",
+                        "CANCELLED",
+                        7L,
+                        "a".repeat(513),
+                        updatedAt)));
     assertEquals(terminal, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
     seedOwnedDispatch("POST_ATTEMPTED", 7L);
     var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
@@ -7693,7 +7721,7 @@ class PayLegacyRefundLedgerMySqlIT {
                 dispatchTransaction(
                     () ->
                         rejected.mirror(
-                            "pay-1",
+                            dispatchMirrorAnchor("pay-1"),
                             "stale-state",
                             "TRY_UNKNOWN",
                             7L,
@@ -7702,6 +7730,139 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals("TCC 派发镜像状态未更新", failure.getMessage());
     assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1"));
     assertEquals(payBefore, rawIntentTimeFacts());
+  }
+
+  /** GET返回前原xid变化，旧响应不能写到新全局事务载荷。 */
+  @Test
+  void changedDispatchXidCannotConsumeOldGetProof() {
+    assertDispatchMirrorDrift(false, "UPDATE pay_tcc_dispatch SET xid='changed-xid'", false);
+  }
+
+  /** POST已消耗后原operation变化，旧受理响应不能写到另一操作键。 */
+  @Test
+  void changedDispatchOperationCannotConsumeOldPostProof() {
+    assertDispatchMirrorDrift(
+        true, "UPDATE pay_tcc_dispatch SET operation_key='changed-operation'", false);
+  }
+
+  /** 八个原锚点字段在GET/POST窗口漂移，可信响应与空响应均不可写新镜像。 */
+  @Test
+  void dispatchMirrorAnchorChangesBlockTrustedAndUnknownResponses() {
+    var mutations =
+        List.of(
+            "UPDATE pay_tcc_dispatch SET id=2",
+            "UPDATE pay_tcc_dispatch SET pay_no='PAY-1'",
+            "UPDATE pay_tcc_dispatch SET xid='changed-xid'",
+            "UPDATE pay_tcc_dispatch SET user_id=8",
+            "UPDATE pay_tcc_dispatch SET order_no='changed-order'",
+            "UPDATE pay_tcc_dispatch SET amount=11.00",
+            "UPDATE pay_tcc_dispatch SET operation_key='changed-operation'",
+            "UPDATE pay_tcc_dispatch SET ledger_key='changed-ledger'");
+    for (String mutation : mutations)
+      for (boolean post : List.of(false, true))
+        for (boolean empty : List.of(false, true)) assertDispatchMirrorDrift(post, mutation, empty);
+  }
+
+  /** 远端读取期间仅状态/诊断/时间推进允许原镜像，未知不降级既有受理。 */
+  @Test
+  void dispatchMirrorKeepsMutableProgressAndOnePostPermission() {
+    for (boolean post : List.of(false, true))
+      for (boolean empty : List.of(false, true)) {
+        var persistence = ownedDispatchPersistence();
+        seedBridgeLedgerRow(post);
+        var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+        var afterProgress =
+            new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+        org.mockito.stubbing.Answer<ApiResponse<com.cloudmall.pay.domain.vo.UserTccStateVO>>
+            response =
+                invocation -> {
+                  org.junit.jupiter.api.Assertions.assertFalse(
+                      org.springframework.transaction.support.TransactionSynchronizationManager
+                          .isActualTransactionActive());
+                  fixture.update(
+                      "UPDATE pay_tcc_dispatch SET"
+                          + " state='TRY_ACCEPTED',user_branch_id=7,last_error='concurrent-progress',created_at='2026-10-01"
+                          + " 00:00:00.123',updated_at='2026-10-02 00:00:00.123'");
+                  afterProgress.set(ownedDispatchLookupFacts());
+                  return empty
+                      ? null
+                      : ApiResponse.ok(bridgeLedgerReply(post ? "TRYING" : "CANCELLED", "false"));
+                };
+        if (post) when(user.prepare(any(), any(), any(), any(), any(), any())).thenAnswer(response);
+        else when(user.state(any(), any(), any(), any(), any(), any())).thenAnswer(response);
+        var bridge = bridgeLedgerTransactions(persistence, user);
+        var result = post ? bridgeLedgerPost(bridge) : bridge.recover("pay-1");
+        assertEquals(empty || post ? "TRY_ACCEPTED" : "CANCELLED", result.state);
+        assertEquals(7L, result.userBranchId);
+        var after = ownedDispatchLookupFacts();
+        if (empty) assertEquals(afterProgress.get(), after);
+        else {
+          assertNull(result.lastError);
+          assertEquals(afterProgress.get().subList(0, 2), after.subList(0, 2));
+          var beforeDispatch = new java.util.HashMap<>(afterProgress.get().get(2).get(0));
+          var afterDispatch = new java.util.HashMap<>(after.get(2).get(0));
+          for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+            beforeDispatch.remove(changed);
+            afterDispatch.remove(changed);
+          }
+          assertEquals(beforeDispatch, afterDispatch);
+        }
+        verify(user, org.mockito.Mockito.times(post ? 1 : 0))
+            .prepare(any(), any(), any(), any(), any(), any());
+        verify(user, org.mockito.Mockito.times(post ? 0 : 1))
+            .state(any(), any(), any(), any(), any(), any());
+      }
+  }
+
+  /** 受控User RPC窗口只改owned载荷，镜像不得在注入变更之后再改任何三表事实。 */
+  private void assertDispatchMirrorDrift(boolean post, String mutationSql, boolean emptyResponse) {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(post);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    var afterDrift =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    org.mockito.stubbing.Answer<ApiResponse<com.cloudmall.pay.domain.vo.UserTccStateVO>> response =
+        invocation -> {
+          org.junit.jupiter.api.Assertions.assertFalse(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          fixture.update(mutationSql);
+          afterDrift.set(ownedDispatchLookupFacts());
+          return emptyResponse
+              ? null
+              : ApiResponse.ok(bridgeLedgerReply(post ? "TRYING" : "CANCELLED", "false"));
+        };
+    if (post) when(user.prepare(any(), any(), any(), any(), any(), any())).thenAnswer(response);
+    else when(user.state(any(), any(), any(), any(), any(), any())).thenAnswer(response);
+    var bridge = bridgeLedgerTransactions(persistence, user);
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> {
+                    if (post) bridgeLedgerPost(bridge);
+                    else bridge.recover("pay-1");
+                  });
+          assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> {
+          org.junit.jupiter.api.Assertions.assertNotNull(afterDrift.get());
+          assertEquals(afterDrift.get(), ownedDispatchLookupFacts());
+        });
+    verify(user, org.mockito.Mockito.times(post ? 1 : 0))
+        .prepare(any(), any(), any(), any(), any(), any());
+    verify(user, org.mockito.Mockito.times(post ? 0 : 1))
+        .state(any(), any(), any(), any(), any(), any());
+  }
+
+  /** 旧直接Store测试读取真实PO，但保留请求原键以继续验证CI别名；Bridge不使用此helper。 */
+  private com.cloudmall.pay.domain.po.PayTccDispatchPO dispatchMirrorAnchor(String requestedPayNo) {
+    var expected = dispatchMirrorMapper.selectByPayNo(requestedPayNo);
+    if (expected == null) expected = new com.cloudmall.pay.domain.po.PayTccDispatchPO();
+    expected.payNo = requestedPayNo;
+    return expected;
   }
 
   /** 仅在owned库克隆原dispatch DDL，以原真实MyBatis Mapper执行public镜像逻辑。 */

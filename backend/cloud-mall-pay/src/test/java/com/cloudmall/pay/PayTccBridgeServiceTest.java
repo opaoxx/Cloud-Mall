@@ -233,7 +233,7 @@ class PayTccBridgeServiceTest {
           org.junit.jupiter.api.Assertions.assertNull(row.userBranchId);
           verify(persistence)
               .mirror(
-                  org.mockito.ArgumentMatchers.eq("pay-test"),
+                  org.mockito.ArgumentMatchers.same(row),
                   any(),
                   org.mockito.ArgumentMatchers.eq("TRY_UNKNOWN"),
                   org.mockito.ArgumentMatchers.isNull(),
@@ -265,7 +265,7 @@ class PayTccBridgeServiceTest {
             new com.fasterxml.jackson.databind.ObjectMapper()
                 .writeValueAsString(decoded)
                 .contains("ledgerAppliedPresent"));
-        arrangeBridgeLedgerReply(post, decoded, null);
+        var row = arrangeBridgeLedgerReply(post, decoded, null);
         String target =
             userStateName.equals("TRYING")
                 ? "TRY_ACCEPTED"
@@ -282,7 +282,7 @@ class PayTccBridgeServiceTest {
         }
         verify(persistence)
             .mirror(
-                org.mockito.ArgumentMatchers.eq("pay-test"),
+                org.mockito.ArgumentMatchers.same(row),
                 any(),
                 org.mockito.ArgumentMatchers.eq(target),
                 any(),

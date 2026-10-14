@@ -189,7 +189,7 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
   /** 事务内校验分支与镜像终态，再返回实际已提交状态。 */
   private PayTccDispatchVO mirror(
       PayTccDispatchPO dispatch, String targetState, Long branchId, String reason) {
-    persistence.mirror(dispatch.payNo, dispatch.state, targetState, branchId, reason, now());
+    persistence.mirror(dispatch, dispatch.state, targetState, branchId, reason, now());
     PayTccDispatchPO updated = dispatchMapper.selectByPayNo(dispatch.payNo);
     if (updated == null) throw unavailable("派发镜像事实丢失");
     return PayTccDispatchVO.from(updated);

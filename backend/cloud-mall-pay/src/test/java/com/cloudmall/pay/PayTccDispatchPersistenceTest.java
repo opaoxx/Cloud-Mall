@@ -53,7 +53,7 @@ class PayTccDispatchPersistenceTest {
 
     assertFalse(
         persistence.mirror(
-            dispatch.payNo, "CONFIRMED", "TRY_UNKNOWN", null, "late", LocalDateTime.now()));
+            dispatch, "CONFIRMED", "TRY_UNKNOWN", null, "late", LocalDateTime.now()));
     verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
   }
 
@@ -65,16 +65,14 @@ class PayTccDispatchPersistenceTest {
     assertThrows(
         BizException.class,
         () ->
-            persistence.mirror(
-                confirmed.payNo, "CONFIRMED", "CANCELLED", 7L, null, LocalDateTime.now()));
+            persistence.mirror(confirmed, "CONFIRMED", "CANCELLED", 7L, null, LocalDateTime.now()));
 
     PayTccDispatchPO trying = dispatch("TRY_ACCEPTED", 7L);
     when(dispatchMapper.selectForUpdate(trying.payNo)).thenReturn(trying);
     assertThrows(
         BizException.class,
         () ->
-            persistence.mirror(
-                trying.payNo, "TRY_ACCEPTED", "CONFIRMED", 8L, null, LocalDateTime.now()));
+            persistence.mirror(trying, "TRY_ACCEPTED", "CONFIRMED", 8L, null, LocalDateTime.now()));
   }
 
   /** TRY_ACCEPTED 的未知结果不能覆盖已经观察到的受理状态。 */
@@ -85,12 +83,7 @@ class PayTccDispatchPersistenceTest {
 
     assertFalse(
         persistence.mirror(
-            dispatch.payNo,
-            "TRY_ACCEPTED",
-            "TRY_UNKNOWN",
-            null,
-            "late unknown",
-            LocalDateTime.now()));
+            dispatch, "TRY_ACCEPTED", "TRY_UNKNOWN", null, "late unknown", LocalDateTime.now()));
     verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
   }
 
@@ -102,7 +95,7 @@ class PayTccDispatchPersistenceTest {
 
     assertFalse(
         persistence.mirror(
-            dispatch.payNo, "PREPARED", "TRY_UNKNOWN", null, "not posted", LocalDateTime.now()));
+            dispatch, "PREPARED", "TRY_UNKNOWN", null, "not posted", LocalDateTime.now()));
     verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
   }
 
@@ -153,8 +146,7 @@ class PayTccDispatchPersistenceTest {
     when(dispatchMapper.mirrorState(any(), any(), any(), any(), any(), any())).thenReturn(1);
     var updatedAt = LocalDateTime.of(2026, 10, 14, 12, 34, 56, 789000000);
     org.junit.jupiter.api.Assertions.assertTrue(
-        persistence.mirror(
-            current.payNo, "stale-state", "TRY_UNKNOWN", 7L, "😀".repeat(513), updatedAt));
+        persistence.mirror(current, "stale-state", "TRY_UNKNOWN", 7L, "😀".repeat(513), updatedAt));
     var error = org.mockito.ArgumentCaptor.forClass(String.class);
     verify(dispatchMapper)
         .mirrorState(
@@ -193,7 +185,7 @@ class PayTccDispatchPersistenceTest {
                   BizException.class,
                   () ->
                       persistence.mirror(
-                          "pay-persistence-1",
+                          mirrorAnchor("pay-persistence-1"),
                           "stale-state",
                           "TRY_UNKNOWN",
                           branch,
@@ -213,7 +205,7 @@ class PayTccDispatchPersistenceTest {
             BizException.class,
             () ->
                 persistence.mirror(
-                    "absent-pay",
+                    mirrorAnchor("absent-pay"),
                     "POST_ATTEMPTED",
                     "TRY_UNKNOWN",
                     0L,
@@ -225,8 +217,124 @@ class PayTccDispatchPersistenceTest {
     org.mockito.Mockito.verifyNoInteractions(payRecordMapper, cancelMapper);
   }
 
+  /** 八字段单边及多字段漂移必须先于分支、终态或PREPARED早返拒绝。 */
+  @Test
+  void changedOriginalAnchorCannotReachBranchStateOrMirrorSql() {
+    var mutations =
+        List.<java.util.function.Consumer<PayTccDispatchPO>>of(
+            current -> current.id = 2L,
+            current -> current.payNo = "PAY-PERSISTENCE-1",
+            current -> current.xid = "other-xid",
+            current -> current.userId = 8L,
+            current -> current.orderNo = "other-order",
+            current -> current.amount = new BigDecimal("11.00"),
+            current -> current.operationKey = "other-operation",
+            current -> current.ledgerKey = "other-ledger",
+            current -> {
+              current.xid = "other-xid";
+              current.userId = 8L;
+            });
+    for (String state : List.of("POST_ATTEMPTED", "CONFIRMED", "PREPARED", "TRY_ACCEPTED")) {
+      for (var mutation : mutations) {
+        var expected = dispatch("POST_ATTEMPTED", null);
+        var current = dispatch(state, 7L);
+        mutation.accept(current);
+        when(dispatchMapper.selectForUpdate(expected.payNo)).thenReturn(current);
+        var failure =
+            assertThrows(
+                BizException.class,
+                () ->
+                    persistence.mirror(
+                        expected, "old-state", "TRY_UNKNOWN", 0L, "unknown", LocalDateTime.now()));
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+        org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+      }
+    }
+    verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
+    org.mockito.Mockito.verifyNoInteractions(payRecordMapper, cancelMapper);
+  }
+
+  /** 数值等价金额和状态/分支/时间进展不属于载荷漂移，CAS仍用锁内状态。 */
+  @Test
+  void equalMoneyAndMutableProgressKeepCurrentStateCas() {
+    var expected = dispatch("POST_ATTEMPTED", null);
+    expected.amount = new BigDecimal("10.000");
+    expected.createdAt = LocalDateTime.of(2026, 10, 1, 0, 0, 0, 123456789);
+    var current = dispatch("TRY_ACCEPTED", 7L);
+    current.createdAt = LocalDateTime.of(2026, 10, 1, 0, 0, 0, 123000000);
+    current.updatedAt = LocalDateTime.of(2026, 10, 2, 0, 0);
+    current.lastError = "concurrent-progress";
+    when(dispatchMapper.selectForUpdate(expected.payNo)).thenReturn(current);
+    when(dispatchMapper.mirrorState(any(), any(), any(), any(), any(), any())).thenReturn(1);
+    var updatedAt = LocalDateTime.of(2026, 10, 15, 1, 0);
+    org.junit.jupiter.api.Assertions.assertTrue(
+        persistence.mirror(expected, "old-state", "CANCELLED", 7L, null, updatedAt));
+    verify(dispatchMapper)
+        .mirrorState(
+            org.mockito.ArgumentMatchers.eq(expected.payNo),
+            org.mockito.ArgumentMatchers.eq("TRY_ACCEPTED"),
+            org.mockito.ArgumentMatchers.eq("CANCELLED"),
+            org.mockito.ArgumentMatchers.eq(7L),
+            org.mockito.ArgumentMatchers.isNull(),
+            org.mockito.ArgumentMatchers.same(updatedAt));
+    org.junit.jupiter.api.Assertions.assertEquals("POST_ATTEMPTED", expected.state);
+    org.junit.jupiter.api.Assertions.assertNull(expected.userBranchId);
+  }
+
+  /** 缺原snapshot不能重建，缺当前行仍404，任一侧缺金额均409而非NPE。 */
+  @Test
+  void missingAnchorAndMoneyStayDistinctFromMissingRow() {
+    assertThrows(
+        BizException.class,
+        () -> persistence.mirror(null, "old", "TRY_UNKNOWN", null, null, LocalDateTime.now()));
+    assertThrows(
+        BizException.class,
+        () ->
+            persistence.mirror(
+                new PayTccDispatchPO(), "old", "TRY_UNKNOWN", null, null, LocalDateTime.now()));
+    org.mockito.Mockito.verifyNoInteractions(dispatchMapper);
+    var absent =
+        assertThrows(
+            BizException.class,
+            () ->
+                persistence.mirror(
+                    mirrorAnchor("absent-pay"),
+                    "old",
+                    "TRY_UNKNOWN",
+                    0L,
+                    null,
+                    LocalDateTime.now()));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_NOT_FOUND", absent.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(404, absent.getHttpStatus());
+    for (boolean expectedMissing : List.of(false, true)) {
+      var expected = dispatch("POST_ATTEMPTED", null);
+      var current = dispatch("POST_ATTEMPTED", null);
+      if (expectedMissing) expected.amount = null;
+      else current.amount = null;
+      when(dispatchMapper.selectForUpdate(expected.payNo)).thenReturn(current);
+      var failure =
+          assertThrows(
+              BizException.class,
+              () ->
+                  persistence.mirror(
+                      expected, "old", "TRY_UNKNOWN", null, null, LocalDateTime.now()));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+    }
+    verify(dispatchMapper, never()).mirrorState(any(), any(), any(), any(), any(), any());
+  }
+
+  /** 用请求原键构造测试锚点，不能从已变异的当前行复制。 */
+  private PayTccDispatchPO mirrorAnchor(String payNo) {
+    var expected = dispatch("POST_ATTEMPTED", null);
+    expected.payNo = payNo;
+    return expected;
+  }
+
   private PayTccDispatchPO dispatch(String state, Long branchId) {
     PayTccDispatchPO dispatch = new PayTccDispatchPO();
+    dispatch.id = 1L;
     dispatch.payNo = "pay-persistence-1";
     dispatch.xid = "xid-persistence-1";
     dispatch.userId = 7L;

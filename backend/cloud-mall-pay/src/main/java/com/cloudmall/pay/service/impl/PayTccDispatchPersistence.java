@@ -82,18 +82,32 @@ public class PayTccDispatchPersistence {
     return new BizException("PAY_TCC_DISPATCH_CONFLICT", "Pay dispatch 原支付或取消 gate 冲突", 409);
   }
 
-  /** 核对原支付号后独立提交User只读镜像，诊断保留512完整Unicode码点。 */
+  /**
+   * 锁内核对RPC前原始派发锚点后提交User镜像，诊断保留512完整Unicode码点。
+   *
+   * @param expected User调用前读取的原始派发快照
+   * @param expectedState 调用方此前观察状态，CAS仍使用锁内当前状态
+   * @param targetState 已核验的User镜像目标状态
+   * @param branchId 本次观察到的User分支，未知时为null
+   * @param lastError 未知原因，正常证明时为null
+   * @param updatedAt 本次镜像更新时间
+   * @return 是否提交了镜像更新
+   */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean mirror(
-      String payNo,
+      PayTccDispatchPO expected,
       String expectedState,
       String targetState,
       Long branchId,
       String lastError,
       LocalDateTime updatedAt) {
+    // 1. 只使用调用方原始快照定位行，不能锁内重建锚点掩盖RPC窗口漂移。
+    if (expected == null || expected.payNo == null) throw conflict();
+    String payNo = expected.payNo;
     PayTccDispatchPO current = dispatchMapper.selectForUpdate(payNo);
     if (current == null) throw new BizException("PAY_TCC_DISPATCH_NOT_FOUND", "TCC 派发不存在", 404);
-    if (current.payNo == null || !Objects.equals(current.payNo, payNo)) throw conflict();
+    // 2. 不可变载荷必须仍属于原证据，先于分支、终态和未知诊断的任何处理。
+    if (current.payNo == null || !sameAnchor(expected, current)) throw conflict();
     if (branchId != null && branchId <= 0)
       throw new BizException("PAY_TCC_UNKNOWN", "User 分支标识不合法", 503);
     if (current.userBranchId != null
@@ -109,6 +123,7 @@ public class PayTccDispatchPersistence {
     }
     if ("PREPARED".equals(current.state)) return false;
     if ("TRY_UNKNOWN".equals(targetState) && "TRY_ACCEPTED".equals(current.state)) return false;
+    // 3. 允许合法状态进展，沿原锁内当前状态CAS，保持终态和分支不可逆规则。
     expectedState = current.state;
     if (dispatchMapper.mirrorState(
             payNo,
@@ -121,5 +136,19 @@ public class PayTccDispatchPersistence {
       throw new IllegalStateException("TCC 派发镜像状态未更新");
     }
     return true;
+  }
+
+  /** 精确核对原行身份与资金载荷；金额按数值比较，状态/分支/时间不作为不可变锚点。 */
+  private boolean sameAnchor(PayTccDispatchPO expected, PayTccDispatchPO current) {
+    return Objects.equals(expected.id, current.id)
+        && Objects.equals(expected.payNo, current.payNo)
+        && Objects.equals(expected.xid, current.xid)
+        && Objects.equals(expected.userId, current.userId)
+        && Objects.equals(expected.orderNo, current.orderNo)
+        && expected.amount != null
+        && current.amount != null
+        && expected.amount.compareTo(current.amount) == 0
+        && Objects.equals(expected.operationKey, current.operationKey)
+        && Objects.equals(expected.ledgerKey, current.ledgerKey);
   }
 }
