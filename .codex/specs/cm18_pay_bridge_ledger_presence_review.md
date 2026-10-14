@@ -25,11 +25,11 @@ Presence 失败不获得可信状态或 branch 学习。已经消耗的 POST 权
 - 真实 Jackson JSON missing/null 的 TRYING/CANCELLED 响应分别覆盖 POST/GET；确认 Presence 失败沿原 UNKNOWN/503 mirror 路径，dispatch payload 不变。
 - 显式 false 的 TRYING/CANCELLED 与显式 true 的 CONFIRMED 保持原 mirror；UNKNOWN 早返回、branch mismatch 409、tuple/金额/XID 错误和终态/PREPARED 控制优先。
 - Presence 字段为 `@JsonIgnore`，不出现在 JSON；Bridge 原 TRY_ACCEPTED 不降级控制保持。
-- 受控 Persistence 三个方法用程序化短事务验证 mirrorUnknown/CAS 结果，不将其当 Spring/TC 集成。
+- Unit 的 Persistence 为 mock，仅验证调用/返回顺序，不将 mock 当事务证据；程序化短事务验证归入 native，且不将其当 Spring/TC 集成。
 
 ### 3.2 Owned native
 
-- 使用真实 Jackson、Bridge、DispatchPersistence 及 owned Pay/Dispatch Mapper；UserClient、cancel gate 与 execution/receipt evidence 为受控替身，不启动业务 App、TC/RM 或真实 HTTP/Feign。
+- 使用真实 Jackson、Bridge、DispatchPersistence 及 owned Pay/Dispatch Mapper；UserClient 与 cancel gate 为受控替身，不启动业务 App、TC/RM 或真实 HTTP/Feign。
 - 旧 red：GET missing TRYING 曾返回/镜像 `TRY_ACCEPTED`，POST null CANCELLED 曾生成错误终态镜像；修复后缺证 × TRYING/CANCELLED × GET/POST 均沿原 UNKNOWN 处理，payload、Pay/Intent 及 dispatch facts 不出现新的可信状态写入。POST 已消耗的权限保持原语义。
 - 显式 false 的 TRYING/CANCELLED、显式 true 的 CONFIRMED、UNKNOWN early return、终态/PREPARED、branch409 和 disabled 控制保持；只验证实际 owned mapper 与程序化短事务的镜像行为。
 - native 只证明 dispatch mirror 的本地证据门，不证明 User/Fence/TC/网络或全局资金因果。
