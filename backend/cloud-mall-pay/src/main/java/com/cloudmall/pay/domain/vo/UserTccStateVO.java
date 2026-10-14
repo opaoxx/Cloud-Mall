@@ -1,7 +1,9 @@
 package com.cloudmall.pay.domain.vo;
 
+import com.cloudmall.pay.util.UserTccLedgerBooleanDeserializer;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import java.math.BigDecimal;
 
 /** User TCC 只读状态响应。 */
@@ -41,6 +43,7 @@ public class UserTccStateVO {
 
   /** 保留既有boolean语义，同时区分缺字段/null与明确false。 */
   @JsonSetter("ledgerApplied")
+  @JsonDeserialize(using = UserTccLedgerBooleanDeserializer.class)
   public void setLedgerApplied(Boolean applied) {
     ledgerAppliedPresent = applied != null;
     ledgerApplied = Boolean.TRUE.equals(applied);

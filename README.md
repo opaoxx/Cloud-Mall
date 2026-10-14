@@ -2524,3 +2524,9 @@ execution恢复收尾与原claim入口沿用同一token域：非NULL、非blank�
 派发桥消费可确认的User状态时，要求ledgerApplied明确存在。TRYING/CANCELLED缺字段或JSON null沿原未知镜像路径处理，不学习新branch；已消费的Try POST权限不归还，后续仍只GET。
 
 UNKNOWN早返回、branch永久冲突及已有TRY_ACCEPTED不降级规则保持，明确false/true沿原状态映射。本批只修Bridge证据门，隔离Mapper与User替身验证不代表真实User/TC链路闭环。
+
+### CM-18 User账本字段原生布尔解析（16T191）
+
+Pay接收User的ledgerApplied时只接受JSON原生true/false；数字、字符串、数组或对象按缺证处理，不再通过Jackson强转获得可信账本标志。缺字段/null和程序化Boolean setter语义保持。
+
+解析器只绑定这一属性，不改全局ObjectMapper、其它字段或输出JSON；各调用方仍沿原待确认/UNKNOWN规则。回滚、主动决议与派发镜像的隔离验证不代表真实User/TC资金链路闭环。

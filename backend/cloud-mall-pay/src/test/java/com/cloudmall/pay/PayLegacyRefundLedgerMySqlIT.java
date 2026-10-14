@@ -5894,6 +5894,8 @@ class PayLegacyRefundLedgerMySqlIT {
     com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(user);
     if (ledgerVariant.equals("missing")) json.remove("ledgerApplied");
     else if (ledgerVariant.equals("null")) json.putNull("ledgerApplied");
+    else if (ledgerVariant.equals("number-zero")) json.put("ledgerApplied", 0);
+    else if (ledgerVariant.equals("text-false")) json.put("ledgerApplied", "false");
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
     com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
     try {
@@ -5901,10 +5903,12 @@ class PayLegacyRefundLedgerMySqlIT {
     } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
       throw new IllegalStateException("owned User DTO decode failed", failure);
     }
-    assertEquals(
-        ledgerVariant.equals("false") || ledgerVariant.equals("true"),
-        decoded.ledgerAppliedPresent);
-    assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
+    if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
+      assertEquals(
+          ledgerVariant.equals("false") || ledgerVariant.equals("true"),
+          decoded.ledgerAppliedPresent);
+      assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
+    }
     var users = mock(com.cloudmall.pay.feign.UserTccClient.class);
     when(users.state(any(), any(), any(), any(), any(), any())).thenReturn(ApiResponse.ok(decoded));
     var boundary = mock(com.cloudmall.pay.service.impl.PayTccPublicStateStore.class);
@@ -6103,6 +6107,8 @@ class PayLegacyRefundLedgerMySqlIT {
     com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(user);
     if (ledgerVariant.equals("missing")) json.remove("ledgerApplied");
     else if (ledgerVariant.equals("null")) json.putNull("ledgerApplied");
+    else if (ledgerVariant.equals("number-zero")) json.put("ledgerApplied", 0);
+    else if (ledgerVariant.equals("text-false")) json.put("ledgerApplied", "false");
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
     com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
     try {
@@ -6110,10 +6116,12 @@ class PayLegacyRefundLedgerMySqlIT {
     } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
       throw new IllegalStateException("owned abort User decode failed", failure);
     }
-    assertEquals(
-        ledgerVariant.equals("false") || ledgerVariant.equals("true"),
-        decoded.ledgerAppliedPresent);
-    assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
+    if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
+      assertEquals(
+          ledgerVariant.equals("false") || ledgerVariant.equals("true"),
+          decoded.ledgerAppliedPresent);
+      assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
+    }
     var users = mock(com.cloudmall.pay.feign.UserTccClient.class);
     when(users.state(any(), any(), any(), any(), any(), any()))
         .thenAnswer(
@@ -6144,6 +6152,106 @@ class PayLegacyRefundLedgerMySqlIT {
         .when(boundary)
         .requestRollback(any(), any());
     return new com.cloudmall.pay.service.impl.PayTccAbortService(boundary, users, "internal-token");
+  }
+
+  /** 数字0不能被强转为明确no-ledger并授权Pay FAILED投影。 */
+  @Test
+  void numericLedgerTokenCannotAuthorizeRollbackProjection() {
+    var store = ownedRollbackTokenStore();
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+    var service = rollbackLedgerPresenceService(store, "number-zero");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> service.project(rollbackTokenPayment())),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 字符串false不能被强转为明确no-ledger并授权回滚决议。 */
+  @Test
+  void textualLedgerTokenCannotAuthorizeAbortDecision() {
+    var store = ownedAbortLedgerStore();
+    seedAbortLedgerDecision("RUNNING", "PENDING");
+    var service = abortLedgerPresenceService(store, "text-false");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> service.requestRollback(rollbackTokenPayment())),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 字符串false不能使Bridge生成新的可信CANCELLED终态。 */
+  @Test
+  void textualLedgerTokenCannotAuthorizeCancelledMirror() {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(false);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.state(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", "text-false")));
+    var result = bridgeLedgerTransactions(persistence, user).recover("pay-1");
+    var row = dispatchMirrorMapper.selectByPayNo("pay-1");
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals("TRY_UNKNOWN", result.state),
+        () -> assertEquals("TRY_UNKNOWN", row.state),
+        () -> assertNull(row.userBranchId));
+  }
+
+  /** 两种旧可强转标量在回滚投影/主动决议/派发镜像均不能形成可信结果。 */
+  @Test
+  void nonBooleanLedgerTokensStayBlockedAcrossConsumers() {
+    for (String variant : List.of("number-zero", "text-false")) {
+      var rollbackStore = ownedRollbackTokenStore();
+      seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+      var projection = rollbackLedgerPresenceService(rollbackStore, variant);
+      var beforeProjection = ownedCancelIdentityFacts();
+      var publicFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> projection.project(rollbackTokenPayment()));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", publicFailure.getCode());
+      assertEquals(202, publicFailure.getHttpStatus());
+      var claimedFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> projection.projectClaimed(rollbackTokenPayment(), "worker"));
+      assertEquals(202, claimedFailure.getHttpStatus());
+      assertEquals(beforeProjection, ownedCancelIdentityFacts());
+      var abortStore = ownedAbortLedgerStore();
+      seedAbortLedgerDecision("RUNNING", "PENDING");
+      var abort = abortLedgerPresenceService(abortStore, variant);
+      var beforeAbort = ownedCancelIdentityFacts();
+      var abortFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> abort.requestRollback(rollbackTokenPayment()));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", abortFailure.getCode());
+      assertEquals(202, abortFailure.getHttpStatus());
+      assertEquals(beforeAbort, ownedCancelIdentityFacts());
+      var persistence = ownedDispatchPersistence();
+      seedBridgeLedgerRow(false);
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      when(user.state(any(), any(), any(), any(), any(), any()))
+          .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", variant)));
+      var payBefore = rawIntentTimeFacts();
+      var beforeDispatch = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+      var result = bridgeLedgerTransactions(persistence, user).recover("pay-1");
+      assertEquals("TRY_UNKNOWN", result.state);
+      assertNull(result.userBranchId);
+      var afterDispatch = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+      assertEquals("TRY_UNKNOWN", afterDispatch.get("state"));
+      assertNull(afterDispatch.get("user_branch_id"));
+      for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+        beforeDispatch.remove(changed);
+        afterDispatch.remove(changed);
+      }
+      assertEquals(beforeDispatch, afterDispatch);
+      assertEquals(payBefore, rawIntentTimeFacts());
+      verify(user, never()).prepare(any(), any(), any(), any(), any(), any());
+    }
   }
 
   /** 原DDL和实际Pay/Execution/Cancel/Intent Mapper验证本地门，不执行远端证明。 */
@@ -6962,12 +7070,16 @@ class PayLegacyRefundLedgerMySqlIT {
     com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(user);
     if (ledgerVariant.equals("missing")) json.remove("ledgerApplied");
     else if (ledgerVariant.equals("null")) json.putNull("ledgerApplied");
+    else if (ledgerVariant.equals("number-zero")) json.put("ledgerApplied", 0);
+    else if (ledgerVariant.equals("text-false")) json.put("ledgerApplied", "false");
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
     try {
       var decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
-      assertEquals(
-          ledgerVariant.equals("false") || ledgerVariant.equals("true"),
-          decoded.ledgerAppliedPresent);
+      if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
+        assertEquals(
+            ledgerVariant.equals("false") || ledgerVariant.equals("true"),
+            decoded.ledgerAppliedPresent);
+      }
       return decoded;
     } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
       throw new IllegalStateException("owned bridge User decode failed", failure);
