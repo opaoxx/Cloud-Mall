@@ -5620,6 +5620,202 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(expired, ownedCancelIdentityFacts());
   }
 
+  /** 历史emoji65 owner虽数据库可存，也不能授权Pay FAILED投影。 */
+  @Test
+  void rollbackProjectionCannotWriteWithOverlongLeaseToken() {
+    var store = ownedRollbackTokenStore();
+    String token = "😀".repeat(65);
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", token);
+    var before = ownedCancelIdentityFacts();
+    var result = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      result.set(
+                          rollbackTokenTransaction(
+                              () ->
+                                  store.projectFailedClaimed(
+                                      rollbackTokenPayment(), "t187-xid", token))),
+                  () -> "unexpected projection result=" + result.get());
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+        },
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 六类可存非法token在三decision和两可写/FAILED重入状态均无六表写。 */
+  @Test
+  void invalidRollbackProjectionTokensCannotChangeAnyFacts() {
+    var store = ownedRollbackTokenStore();
+    for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+      for (String status : List.of("PENDING", "ORDER_SYNC_UNKNOWN", "FAILED"))
+        for (String token :
+            java.util.Arrays.asList(null, "", " ", "\t\r\n", "\u3000", "😀".repeat(65))) {
+          seedRollbackTokenProjection(status, decision, token);
+          var before = ownedCancelIdentityFacts();
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      rollbackTokenTransaction(
+                          () ->
+                              store.projectFailedClaimed(
+                                  rollbackTokenPayment(), "t187-xid", token)));
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+          assertEquals(before, ownedCancelIdentityFacts());
+        }
+  }
+
+  /** 四合法token保三decision的FAILED投影/重入，公开无租约和既有冲突门不变。 */
+  @Test
+  void validRollbackProjectionTokensKeepWritesAndPublicPath() {
+    var store = ownedRollbackTokenStore();
+    for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64)))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String status : List.of("PENDING", "ORDER_SYNC_UNKNOWN")) {
+          seedRollbackTokenProjection(status, decision, token);
+          var before = ownedCancelIdentityFacts();
+          var paymentBefore = fixture.queryForMap("SELECT * FROM pay_record");
+          assertEquals(
+              "FAILED",
+              rollbackTokenTransaction(
+                  () -> store.projectFailedClaimed(rollbackTokenPayment(), "t187-xid", token)));
+          var after = ownedCancelIdentityFacts();
+          assertEquals(before.subList(1, before.size()), after.subList(1, after.size()));
+          assertEquals("FAILED", fixture.queryForMap("SELECT * FROM pay_record").get("status"));
+          var paymentAfter = fixture.queryForMap("SELECT * FROM pay_record");
+          for (String changed : List.of("status", "updated_at")) {
+            paymentBefore.remove(changed);
+            paymentAfter.remove(changed);
+          }
+          assertEquals(paymentBefore, paymentAfter);
+          var completed = ownedCancelIdentityFacts();
+          assertEquals(
+              "FAILED",
+              rollbackTokenTransaction(
+                  () -> store.projectFailedClaimed(rollbackTokenPayment(), "t187-xid", token)));
+          assertEquals(completed, ownedCancelIdentityFacts());
+        }
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", null);
+    assertEquals(
+        "FAILED",
+        rollbackTokenTransaction(() -> store.projectFailed(rollbackTokenPayment(), "t187-xid")));
+    for (String blocked :
+        List.of(
+            "wrong-owner",
+            "expired",
+            "null-lease",
+            "running",
+            "cancel",
+            "intent",
+            "pay-alias",
+            "missing",
+            "success",
+            "refunded")) {
+      seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+      var payment = rollbackTokenPayment();
+      switch (blocked) {
+        case "expired" ->
+            fixture.update(
+                "UPDATE pay_tcc_execution SET recovery_lease_until=?",
+                LocalDateTime.of(2026, 10, 1, 0, 0));
+        case "null-lease" ->
+            fixture.update("UPDATE pay_tcc_execution SET recovery_lease_until=NULL");
+        case "running" -> fixture.update("UPDATE pay_tcc_execution SET state='RUNNING'");
+        case "cancel" ->
+            fixture.update(
+                "INSERT INTO"
+                    + " pay_tcc_cancel(id,pay_no,user_id,order_no,amount,state,next_retry_at,created_at,updated_at)"
+                    + " VALUES(1,'pay-1',7,'order-1',10,'REQUESTED',?,?,?)",
+                LocalDateTime.of(2026, 10, 1, 0, 0),
+                LocalDateTime.of(2026, 10, 1, 0, 0),
+                LocalDateTime.of(2026, 10, 1, 0, 0));
+        case "intent" ->
+            fixture.update(
+                "INSERT INTO"
+                    + " pay_debit_intent(id,pay_no,user_id,order_no,amount,status,debit_mode,next_retry_at,created_at,updated_at)"
+                    + " VALUES(1,'pay-1',7,'order-1',10,'INIT','LEGACY',?,?,?)",
+                LocalDateTime.of(2026, 10, 1, 0, 0),
+                LocalDateTime.of(2026, 10, 1, 0, 0),
+                LocalDateTime.of(2026, 10, 1, 0, 0));
+        case "pay-alias" -> payment.payNo = "PAY-1";
+        case "missing" -> fixture.update("DELETE FROM pay_tcc_execution");
+        case "success" -> fixture.update("UPDATE pay_record SET status='SUCCESS'");
+        case "refunded" -> fixture.update("UPDATE pay_record SET status='REFUNDED'");
+        default -> {}
+      }
+      String token = blocked.equals("wrong-owner") ? "WORKER" : "worker";
+      var before = ownedCancelIdentityFacts();
+      org.junit.jupiter.api.Assertions.assertThrows(
+          com.cloudmall.common.error.BizException.class,
+          () ->
+              rollbackTokenTransaction(
+                  () -> store.projectFailedClaimed(payment, "t187-xid", token)),
+          blocked);
+      assertEquals(before, ownedCancelIdentityFacts(), blocked);
+    }
+  }
+
+  /** 原DDL和实际Pay/Execution/Cancel/Intent Mapper验证本地门，不执行远端证明。 */
+  private com.cloudmall.pay.service.impl.PayTccPublicStateStore ownedRollbackTokenStore() {
+    ownedCancelRecoveryIdentityStore();
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      return new com.cloudmall.pay.service.impl.PayTccPublicStateStore(
+          records,
+          session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),
+          mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),
+          mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class),
+          cancelRecoveryIdentityMapper,
+          intents);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned rollback token factory failed", failure);
+    }
+  }
+
+  /** 只在owned构造原载荷匹配及未来lease，所有互斥来源表保持空。 */
+  private void seedRollbackTokenProjection(String status, String decision, String token) {
+    seedOwnedExecution("ROLLEDBACK", decision, "t187-xid");
+    fixture.update("UPDATE pay_record SET debit_mode='TCC',status=?", status);
+    fixture.update("DELETE FROM pay_debit_intent");
+    for (String table : List.of("pay_tcc_cancel", "pay_tcc_dispatch", "pay_tcc_receipt"))
+      fixture.update("DELETE FROM " + table);
+    fixture.update(
+        "UPDATE pay_tcc_execution SET recovery_owner=?,recovery_lease_until=?",
+        token,
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+  }
+
+  /** 输入Pay VO与owned原载荷精确对应，状态不代替数据库当前读。 */
+  private com.cloudmall.pay.domain.vo.PayVO rollbackTokenPayment() {
+    var payment = new com.cloudmall.pay.domain.vo.PayVO();
+    payment.payNo = "pay-1";
+    payment.userId = 7L;
+    payment.orderNo = "order-1";
+    payment.amount = BigDecimal.TEN;
+    payment.status = "PENDING";
+    return payment;
+  }
+
+  /** 程序化owned短事务证明本地写与回滚，不代理REQUIRES_NEW或NOT_SUPPORTED。 */
+  private String rollbackTokenTransaction(java.util.function.Supplier<String> action) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    return template.execute(transactionStatus -> action.get());
+  }
+
   /** 克隆原来源表，缺失cancel时用实际Mapper仅建owned表；原库不初始化新业务表。 */
   private com.cloudmall.pay.service.impl.PayTccCancelStore ownedCancelRecoveryIdentityStore() {
     boolean originalCancelExists =

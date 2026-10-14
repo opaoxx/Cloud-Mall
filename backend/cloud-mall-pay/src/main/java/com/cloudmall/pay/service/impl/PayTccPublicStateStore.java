@@ -94,7 +94,7 @@ public class PayTccPublicStateStore {
   /** 后台投影必须仍持有有效随机租约，旧工作者不得通过公开投影绕开认领。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public String projectFailedClaimed(PayVO payment, String xid, String token) {
-    if (token == null || token.isBlank()) throw pending();
+    if (token == null || token.isBlank() || token.length() > 128) throw pending();
     return projectLocked(payment, xid, token);
   }
 

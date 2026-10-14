@@ -2500,3 +2500,9 @@ delivery的claim/stage/finish统一要求token非NULL、非blank且Java UTF-16�
 execution恢复收尾与原claim入口沿用同一token域：非NULL、非blank、Java UTF-16长度不超过128。非法finishRecovery直接返回false，不清owner/lease，不改退避或诊断；合法非blank首尾空格不trim。
 
 原SQL的精确owner/payNo、有效lease门、nextAt、Unicode诊断截断和boolean语义保持。历史坏owner、直接Mapper调用及完整资金fencing仍需后续处理，本批本地事务验收不替代真实TC/跨服务故障验证。
+
+### CM-18 回滚投影租约token有效域（16T187）
+
+带恢复租约的回滚投影在Service与Store入口同步要求token非NULL、非blank、Java UTF-16长度不超过128。超限token在本地proof、User GET和Pay FAILED写入前沿原202待确认语义拒绝；非blank首尾空格不trim。
+
+公开无租约投影、原证据与lease/状态/decision门保持。emoji65虽数据库可存，仍因Java域超限被拒；历史owner不自动修复，本批隔离本地事务及User替身验证不代表真实TC/User资金链路闭环。

@@ -51,7 +51,7 @@ public class PayTccRollbackProjectionService {
   @Transactional(propagation = Propagation.NOT_SUPPORTED)
   public String projectClaimed(PayVO payment, String recoveryToken) {
     // 1. 后台必须携带认领 token，不能降级为公开无租约路径。
-    if (recoveryToken == null || recoveryToken.isBlank()) {
+    if (recoveryToken == null || recoveryToken.isBlank() || recoveryToken.length() > 128) {
       throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "回滚投影租约无效", 202);
     }
     try {
