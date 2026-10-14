@@ -2466,3 +2466,9 @@ receipt读取与锁定只返回支付号精确匹配的原记录，CI查询命�
 交付ensure在原执行已确认后核对原请求支付号，两个来源互相一致仍不能替别名请求创建或返回任务。claim按请求支付号精确领取，read拒绝返回另一原拼写任务；原缺失、未确认和非COMMIT提前返回NULL保持。
 
 原状态、资金来源、租约、重试和退款键不变，不归一化或修历史。本批以隔离实际Mapper和程序化本地事务、真实Store/Service与RPC替身验证请求身份，未替代真实TC、资金因果或全局fencing验收。
+
+### CM-18 Delivery租约token有效域（16T183）
+
+delivery的claim/stage/finish统一要求token非NULL、非blank且Java UTF-16长度不超过128。非法claim返回原交付冲突；非法stage返回false，非法finish不改任何租约或退避字段。
+
+不trim非blank token的首尾空格；正常UUID、原锁序/状态/租约/退避及SQL保持。历史坏owner不自动修复，本批仅Store输入域及隔离Mapper/本地事务验证，未覆盖直接Mapper调用或完整资金fencing。

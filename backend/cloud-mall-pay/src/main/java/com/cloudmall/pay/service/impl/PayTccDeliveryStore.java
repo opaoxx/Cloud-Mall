@@ -93,13 +93,15 @@ public class PayTccDeliveryStore {
   /** 单次随机 token 认领后立即结束事务，不跨 RPC 持锁。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccDeliveryPO claim(String payNo, String token) {
-    // 1. 与取消方向选择共用Pay→delivery锁序，再执行原资格CAS。
+    // 1. 本次租约身份须完整，非法token不读取或锁定业务行。
+    if (!validToken(token)) throw conflict();
+    // 2. 与取消方向选择共用Pay→delivery锁序，再执行原资格CAS。
     payments.selectForUpdate(payNo);
     PayTccDeliveryPO current = deliveries.selectForUpdate(payNo);
     if (current == null) return null;
     LocalDateTime now = now();
     if (deliveries.claim(payNo, token, now.plusSeconds(60), now) != 1) return null;
-    // 2. 使用本次认领后的状态，不能沿用ensure阶段读取的旧READY视图。
+    // 3. 使用本次认领后的状态，不能沿用ensure阶段读取的旧READY视图。
     return deliveries.selectByPayNo(payNo);
   }
 
@@ -123,7 +125,7 @@ public class PayTccDeliveryStore {
     PayTccDeliveryPO job = deliveries.selectForUpdate(payNo);
     LocalDateTime now = now();
     if (job == null
-        || token == null
+        || !validToken(token)
         || job.leaseOwner == null
         || !job.leaseOwner.equals(token)
         || job.leaseUntil == null
@@ -170,6 +172,7 @@ public class PayTccDeliveryStore {
   /** 只更新当前 lease 的恢复元数据，不覆写终态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void finish(String payNo, String token, int attempts, String error) {
+    if (!validToken(token)) return;
     error = PayErrorMessages.truncate(error);
     LocalDateTime now = now();
     deliveries.finishAttempt(
@@ -217,6 +220,11 @@ public class PayTccDeliveryStore {
         || !Objects.equals(job.orderNo, execution.orderNo)
         || job.amount.compareTo(execution.amount) != 0
         || !Objects.equals(job.refundOperationKey, "refund:" + job.payNo)) throw conflict();
+  }
+
+  /** 与恢复token契约一致：按UTF-16计128上限，非blank，不trim或改写原身份。 */
+  private static boolean validToken(String token) {
+    return token != null && !token.isBlank() && token.length() <= 128;
   }
 
   private static LocalDateTime now() {

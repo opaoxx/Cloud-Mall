@@ -4688,6 +4688,155 @@ class PayLegacyRefundLedgerMySqlIT {
         LocalDateTime.of(2026, 10, 1, 0, 0));
   }
 
+  /** 无token不能认领，也不能留下NULL owner配未来lease及新attempt。 */
+  @Test
+  void deliveryClaimCannotPersistNullLeaseOwner() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("pay-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET next_retry_at=?", LocalDateTime.of(2026, 10, 1, 0, 0));
+    var before = ownedDeliveryIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> deliveryIdentityTransaction(() -> store.claim("pay-1", null)));
+          assertEquals("PAY_TCC_DELIVERY_CONFLICT", failure.getCode());
+        },
+        () -> assertEquals(before, ownedDeliveryIdentityFacts()));
+  }
+
+  /** 空白owner与空白token相等仍无推进权，不能改Pay或delivery业务状态。 */
+  @Test
+  void deliveryStageCannotWriteWithBlankToken() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("pay-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET lease_owner=' ',lease_until=?",
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+    var before = ownedDeliveryIdentityFacts();
+    boolean changed = dispatchTransaction(() -> store.stage("pay-1", " ", "ORDER_SYNC_UNKNOWN"));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertFalse(
+                changed, "blank token must not authorize stage"),
+        () -> assertEquals(before, ownedDeliveryIdentityFacts()));
+  }
+
+  /** 空白token不能清历史空白owner的租约、改错误或推迟重试。 */
+  @Test
+  void deliveryFinishCannotReleaseBlankOwner() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("pay-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET lease_owner='"
+            + " ',lease_until=?,next_retry_at=?,last_error='owned-old-proof'",
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1),
+        LocalDateTime.of(2026, 10, 1, 0, 0));
+    var before = ownedDeliveryIdentityFacts();
+    deliveryIdentityTransaction(
+        () -> {
+          store.finish("pay-1", " ", 1, "blank-owner-proof");
+          return null;
+        });
+    assertEquals(before, ownedDeliveryIdentityFacts());
+  }
+
+  /** 原列可表示的五种非法owner在claim/stage/finish三入口均无任何事实写。 */
+  @Test
+  void deliveryInvalidLeaseTokensCannotMutateAnyFacts() {
+    var store = ownedDeliveryIdentityStore();
+    for (String token : java.util.Arrays.asList(null, "", " ", "\t\r\n", "\u3000")) {
+      seedOwnedDeliveryIdentity("pay-1");
+      assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+      fixture.update(
+          "UPDATE pay_tcc_delivery SET next_retry_at=?", LocalDateTime.of(2026, 10, 1, 0, 0));
+      var beforeClaim = ownedDeliveryIdentityFacts();
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> deliveryIdentityTransaction(() -> store.claim("pay-1", token)));
+      assertEquals("PAY_TCC_DELIVERY_CONFLICT", failure.getCode());
+      assertEquals(beforeClaim, ownedDeliveryIdentityFacts());
+      fixture.update(
+          "UPDATE pay_tcc_delivery SET lease_owner=?,lease_until=?,last_error='owned-bad-owner'",
+          token,
+          LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+      var beforeWrite = ownedDeliveryIdentityFacts();
+      assertTrue(!dispatchTransaction(() -> store.stage("pay-1", token, "ORDER_SYNC_UNKNOWN")));
+      assertEquals(beforeWrite, ownedDeliveryIdentityFacts());
+      deliveryIdentityTransaction(
+          () -> {
+            store.finish("pay-1", token, 1, "should-not-save");
+            return null;
+          });
+      assertEquals(beforeWrite, ownedDeliveryIdentityFacts());
+    }
+  }
+
+  /** 非blank首尾空格不归一化，128 UTF16合法边界保持真实租约/推进/收尾。 */
+  @Test
+  void validDeliveryLeaseTokensKeepAllExistingWrites() {
+    var store = ownedDeliveryIdentityStore();
+    for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64))) {
+      seedOwnedDeliveryIdentity("pay-1");
+      assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+      fixture.update(
+          "UPDATE pay_tcc_delivery SET next_retry_at=?", LocalDateTime.of(2026, 10, 1, 0, 0));
+      var executionBefore = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+      var paymentBefore = fixture.queryForMap("SELECT * FROM pay_record");
+      var claimed = deliveryIdentityTransaction(() -> store.claim("pay-1", token));
+      assertEquals(token, claimed.leaseOwner);
+      assertEquals(1, claimed.attempts);
+      assertEquals(claimed.updatedAt.plusSeconds(60), claimed.leaseUntil);
+      assertTrue(dispatchTransaction(() -> store.stage("pay-1", token, "ORDER_SYNC_UNKNOWN")));
+      assertEquals(
+          "ORDER_SYNC_UNKNOWN", fixture.queryForMap("SELECT * FROM pay_record").get("status"));
+      var staged = store.read("pay-1");
+      assertEquals("ORDER_SYNC_UNKNOWN", staged.state);
+      assertEquals(token, staged.leaseOwner);
+      assertEquals(claimed.leaseUntil, staged.leaseUntil);
+      deliveryIdentityTransaction(
+          () -> {
+            store.finish("pay-1", token, 1, "lease-evidence");
+            return null;
+          });
+      var finished = store.read("pay-1");
+      assertNull(finished.leaseOwner);
+      assertNull(finished.leaseUntil);
+      assertEquals("ORDER_SYNC_UNKNOWN", finished.state);
+      assertEquals(1, finished.attempts);
+      assertEquals("lease-evidence", finished.lastError);
+      assertTrue(finished.nextRetryAt.isAfter(LocalDateTime.of(2026, 10, 1, 0, 0)));
+      assertEquals(executionBefore, fixture.queryForMap("SELECT * FROM pay_tcc_execution"));
+      var paymentAfter = fixture.queryForMap("SELECT * FROM pay_record");
+      for (String changed : List.of("status", "updated_at")) {
+        paymentBefore.remove(changed);
+        paymentAfter.remove(changed);
+      }
+      assertEquals(paymentBefore, paymentAfter);
+      var beforeLate = ownedDeliveryIdentityFacts();
+      assertTrue(!dispatchTransaction(() -> store.stage("pay-1", token, "SUCCESS")));
+      deliveryIdentityTransaction(
+          () -> {
+            store.finish("pay-1", token, 1, "late");
+            return null;
+          });
+      assertEquals(beforeLate, ownedDeliveryIdentityFacts());
+    }
+    seedOwnedDeliveryIdentity("pay-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET attempts=31,next_retry_at=?",
+        LocalDateTime.of(2026, 10, 1, 0, 0));
+    assertEquals(
+        31, deliveryIdentityTransaction(() -> store.claim("pay-1", "bounded-worker")).attempts);
+  }
+
   /** 原payment/execution一致也不能据其为另一个请求支付号创建交付任务。 */
   @Test
   void deliveryEnsureCannotCreateFromAnotherRequestedPayment() {

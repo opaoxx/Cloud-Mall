@@ -134,6 +134,91 @@ class PayTccDeliveryIdentityTest {
     verifyNoInteractions(missingExecution.deliveries);
   }
 
+  /** 非法租约身份在任何认领读取/锁之前409，不能用NULL owner保存认领。 */
+  @Test
+  void invalidClaimTokensFailBeforeAnyLookup() {
+    for (String token :
+        Arrays.asList(null, "", " ", "\t\r\n", "\u3000", "a".repeat(129), "😀".repeat(65))) {
+      var fixture = new DeliveryFixture("pay-identity");
+      var before = fixture.snapshot();
+      var failure =
+          assertThrows(BizException.class, () -> fixture.store.claim("pay-identity", token));
+      assertEquals("PAY_TCC_DELIVERY_CONFLICT", failure.getCode());
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(before, fixture.snapshot());
+      verifyNoInteractions(
+          fixture.payments,
+          fixture.deliveries,
+          fixture.executions,
+          fixture.dispatches,
+          fixture.evidence);
+    }
+  }
+
+  /** 非法token不能借历史坏owner相等获得推进或收尾权；已有锁查询顺序保持。 */
+  @Test
+  void invalidStageAndFinishTokensKeepFactsAndSkipWrites() {
+    for (String token :
+        Arrays.asList(null, "", " ", "\t\r\n", "\u3000", "a".repeat(129), "😀".repeat(65))) {
+      var fixture = new DeliveryFixture("pay-identity");
+      fixture.seedJob("READY");
+      fixture.current.leaseOwner = token;
+      fixture.current.leaseUntil =
+          java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1);
+      var before = fixture.snapshot();
+      org.junit.jupiter.api.Assertions.assertFalse(
+          fixture.store.stage("pay-identity", token, "ORDER_SYNC_UNKNOWN"));
+      verify(fixture.payments).selectForUpdate("pay-identity");
+      verify(fixture.deliveries).selectForUpdate("pay-identity");
+      fixture.store.finish("pay-identity", token, 1, "should-not-save");
+      assertEquals(before, fixture.snapshot());
+      verify(fixture.payments, never()).markOrderUnknown(any(), any());
+      verify(fixture.deliveries, never()).updateState(any(), any(), any(), any(), any(), any());
+      verify(fixture.deliveries, never()).finishAttempt(any(), any(), any(), any(), any());
+      verifyNoInteractions(fixture.executions, fixture.dispatches, fixture.evidence);
+    }
+  }
+
+  /** 合法边界保原token/readback/状态参数，不trim首尾非blank空格。 */
+  @Test
+  void validLeaseTokenParametersAndReadbackRemainUnchanged() {
+    for (String token : List.of("worker", " worker ", "a".repeat(128), "😀".repeat(64))) {
+      var fixture = new DeliveryFixture("pay-identity");
+      fixture.seedJob("READY");
+      fixture.current.leaseOwner = token;
+      fixture.current.leaseUntil =
+          java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1);
+      when(fixture.deliveries.claim(any(), any(), any(), any())).thenReturn(1);
+      assertSame(fixture.current, fixture.store.claim("pay-identity", token));
+      verify(fixture.deliveries)
+          .claim(
+              org.mockito.ArgumentMatchers.eq("pay-identity"),
+              org.mockito.ArgumentMatchers.eq(token),
+              any(),
+              any());
+      when(fixture.payments.markOrderUnknown(any(), any())).thenReturn(1);
+      when(fixture.deliveries.updateState(any(), any(), any(), any(), any(), any())).thenReturn(1);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          fixture.store.stage("pay-identity", token, "ORDER_SYNC_UNKNOWN"));
+      verify(fixture.deliveries)
+          .updateState(
+              org.mockito.ArgumentMatchers.eq("pay-identity"),
+              org.mockito.ArgumentMatchers.eq(token),
+              org.mockito.ArgumentMatchers.eq("READY"),
+              org.mockito.ArgumentMatchers.eq("ORDER_SYNC_UNKNOWN"),
+              org.mockito.ArgumentMatchers.isNull(),
+              any());
+      fixture.store.finish("pay-identity", token, 1, "lease-evidence");
+      verify(fixture.deliveries)
+          .finishAttempt(
+              org.mockito.ArgumentMatchers.eq("pay-identity"),
+              org.mockito.ArgumentMatchers.eq(token),
+              any(),
+              org.mockito.ArgumentMatchers.eq("lease-evidence"),
+              any());
+    }
+  }
+
   /** 完整相同原拼写来源，持久读取/插入为替身，未套Spring事务代理。 */
   private static final class DeliveryFixture {
     /** 原支付对象。 */
