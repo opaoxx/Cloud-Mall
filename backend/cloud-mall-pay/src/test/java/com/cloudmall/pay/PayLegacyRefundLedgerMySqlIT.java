@@ -5931,6 +5931,221 @@ class PayLegacyRefundLedgerMySqlIT {
         boundary, users, "internal-token");
   }
 
+  /** TRYING响应缺少ledgerApplied不能用默认false授权原执行回滚决议。 */
+  @Test
+  void missingAbortLedgerFlagCannotChooseRollbackDecision() {
+    var store = ownedAbortLedgerStore();
+    seedAbortLedgerDecision("RUNNING", "PENDING");
+    var service = abortLedgerPresenceService(store, "missing");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> service.requestRollback(rollbackTokenPayment()));
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+        },
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** TRYING JSON null布尔不能授权UNKNOWN原执行的回滚决议。 */
+  @Test
+  void nullAbortLedgerFlagCannotChooseRollbackDecision() {
+    var store = ownedAbortLedgerStore();
+    seedAbortLedgerDecision("UNKNOWN", "ORDER_SYNC_UNKNOWN");
+    var service = abortLedgerPresenceService(store, "null");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> service.requestRollback(rollbackTokenPayment()));
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+        },
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 缺字段/null/true在两个未决execution状态及两Pay状态均不选择回滚。 */
+  @Test
+  void incompleteAbortLedgerEvidenceKeepsAllDecisionFacts() {
+    var store = ownedAbortLedgerStore();
+    for (String state : List.of("RUNNING", "UNKNOWN"))
+      for (String paymentStatus : List.of("PENDING", "ORDER_SYNC_UNKNOWN"))
+        for (String variant : List.of("missing", "null", "true")) {
+          seedAbortLedgerDecision(state, paymentStatus);
+          var service = abortLedgerPresenceService(store, variant);
+          var before = ownedCancelIdentityFacts();
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> service.requestRollback(rollbackTokenPayment()));
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+          assertEquals(before, ownedCancelIdentityFacts());
+        }
+  }
+
+  /** 明确false仍只写原回滚请求四列；owner/lease/attempts与其它五表保持。 */
+  @Test
+  void explicitNoLedgerAbortPreservesOriginalDecisionWrites() {
+    var store = ownedAbortLedgerStore();
+    for (String state : List.of("RUNNING", "UNKNOWN"))
+      for (String paymentStatus : List.of("PENDING", "ORDER_SYNC_UNKNOWN")) {
+        seedAbortLedgerDecision(state, paymentStatus);
+        var service = abortLedgerPresenceService(store, "false");
+        var before = ownedCancelIdentityFacts();
+        var executionBefore = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+        service.requestRollback(rollbackTokenPayment());
+        var after = ownedCancelIdentityFacts();
+        assertEquals(before.subList(0, 3), after.subList(0, 3));
+        assertEquals(before.subList(4, 6), after.subList(4, 6));
+        var executionAfter = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+        assertEquals("ROLLBACK_REQUESTED", executionAfter.get("state"));
+        assertEquals("ROLLBACK", executionAfter.get("decision"));
+        assertEquals(executionAfter.get("updated_at"), executionAfter.get("next_recovery_at"));
+        assertNotEquals(
+            executionBefore.get("next_recovery_at"), executionAfter.get("next_recovery_at"));
+        for (String changed : List.of("state", "decision", "updated_at", "next_recovery_at")) {
+          executionBefore.remove(changed);
+          executionAfter.remove(changed);
+        }
+        assertEquals(executionBefore, executionAfter);
+        var requested = ownedCancelIdentityFacts();
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> service.requestRollback(rollbackTokenPayment()));
+        assertEquals(requested, ownedCancelIdentityFacts());
+      }
+    seedAbortLedgerDecision("RUNNING", "PENDING");
+    fixture.update("UPDATE pay_tcc_execution SET decision='COMMIT',state='COMMIT_REQUESTED'");
+    var beforeCommitWinner = ownedCancelIdentityFacts();
+    var service = abortLedgerPresenceService(store, "false");
+    org.junit.jupiter.api.Assertions.assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () -> service.requestRollback(rollbackTokenPayment()));
+    assertEquals(beforeCommitWinner, ownedCancelIdentityFacts());
+  }
+
+  /** 仅Pay/Execution/Cancel/Intent是真实owned Mapper，分支与Fence证据为受控替身。 */
+  private com.cloudmall.pay.service.impl.PayTccAbortStore ownedAbortLedgerStore() {
+    ownedCancelRecoveryIdentityStore();
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      var dispatch = new com.cloudmall.pay.domain.po.PayTccDispatchPO();
+      dispatch.payNo = "pay-1";
+      dispatch.userId = 7L;
+      dispatch.orderNo = "order-1";
+      dispatch.amount = BigDecimal.TEN;
+      dispatch.xid = "t189-xid";
+      dispatch.operationKey = "tcc-debit:pay-1";
+      dispatch.ledgerKey = "pay-1";
+      dispatch.userBranchId = 31L;
+      dispatch.state = "TRY_ACCEPTED";
+      var receipt = new com.cloudmall.pay.domain.po.PayTccReceiptPO();
+      receipt.payNo = "pay-1";
+      receipt.xid = "t189-xid";
+      receipt.branchId = 41L;
+      var dispatches = mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class);
+      var receipts = mock(com.cloudmall.pay.mapper.PayTccReceiptMapper.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      when(dispatches.selectByPayNo(any())).thenReturn(dispatch);
+      when(receipts.selectByPayNo(any())).thenReturn(receipt);
+      when(evidence.classify(any(), any())).thenReturn("TRYING");
+      return new com.cloudmall.pay.service.impl.PayTccAbortStore(
+          records,
+          session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),
+          dispatches,
+          receipts,
+          evidence,
+          cancelRecoveryIdentityMapper,
+          intents);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned abort ledger factory failed", failure);
+    }
+  }
+
+  /** 保留未来恢复时间与已有owner/lease/attempts，成功决议只能改变四个目标列。 */
+  private void seedAbortLedgerDecision(String state, String paymentStatus) {
+    seedRollbackTokenProjection(paymentStatus, "NONE", "owned-abort-worker");
+    fixture.update(
+        "UPDATE pay_tcc_execution SET"
+            + " state=?,xid='t189-xid',recovery_attempts=7,next_recovery_at=?",
+        state,
+        LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+  }
+
+  /** 两个实际Store阶段分别进入程序化短事务，受控User GET不在这些事务内。 */
+  private com.cloudmall.pay.service.impl.PayTccAbortService abortLedgerPresenceService(
+      com.cloudmall.pay.service.impl.PayTccAbortStore actualStore, String ledgerVariant) {
+    var user = new com.cloudmall.pay.domain.vo.UserTccStateVO();
+    user.payNo = "pay-1";
+    user.userId = 7L;
+    user.orderNo = "order-1";
+    user.amount = "10.00";
+    user.xid = "t189-xid";
+    user.branchId = 31L;
+    user.operationKey = "tcc-debit:pay-1";
+    user.ledgerKey = "pay-1";
+    user.state = "TRYING";
+    user.setLedgerApplied(false);
+    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(user);
+    if (ledgerVariant.equals("missing")) json.remove("ledgerApplied");
+    else if (ledgerVariant.equals("null")) json.putNull("ledgerApplied");
+    else json.put("ledgerApplied", ledgerVariant.equals("true"));
+    com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
+    try {
+      decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
+    } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+      throw new IllegalStateException("owned abort User decode failed", failure);
+    }
+    assertEquals(
+        ledgerVariant.equals("false") || ledgerVariant.equals("true"),
+        decoded.ledgerAppliedPresent);
+    assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
+    var users = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(users.state(any(), any(), any(), any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              org.junit.jupiter.api.Assertions.assertFalse(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive());
+              return ApiResponse.ok(decoded);
+            });
+    var boundary = mock(com.cloudmall.pay.service.impl.PayTccAbortStore.class);
+    var transactions =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    org.mockito.Mockito.doAnswer(
+            invocation ->
+                transactions.execute(
+                    status -> actualStore.preparedProof(invocation.getArgument(0))))
+        .when(boundary)
+        .preparedProof(any());
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              transactions.executeWithoutResult(
+                  status ->
+                      actualStore.requestRollback(
+                          invocation.getArgument(0), invocation.getArgument(1)));
+              return null;
+            })
+        .when(boundary)
+        .requestRollback(any(), any());
+    return new com.cloudmall.pay.service.impl.PayTccAbortService(boundary, users, "internal-token");
+  }
+
   /** 原DDL和实际Pay/Execution/Cancel/Intent Mapper验证本地门，不执行远端证明。 */
   private com.cloudmall.pay.service.impl.PayTccPublicStateStore ownedRollbackTokenStore() {
     ownedCancelRecoveryIdentityStore();

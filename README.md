@@ -2512,3 +2512,9 @@ execution恢复收尾与原claim入口沿用同一token域：非NULL、非blank�
 回滚投影消费User状态时，要求ledgerApplied字段明确存在且为false。缺字段或JSON null只能保持待确认，不能利用Java默认false投影Pay FAILED；显式true仍拒绝。
 
 公开与后台租约入口共享该证据门；原状态/载荷/分支/金额校验和DTO绑定保持。本批使用真实JSON解析、隔离Pay本地写与User/证明替身，未替代真实User/TC资金链路验证。
+
+### CM-18 主动回滚无扣款字段存在性（16T189）
+
+主动回滚消费User TRYING状态时，要求ledgerApplied明确存在且为false；缺字段或JSON null保持原202待确认，不选择ROLLBACK决议，显式true仍拒绝。
+
+显式false仍按原证明和CAS选择ROLLBACK_REQUESTED，不代表回滚完成或Pay FAILED。原RootContext、双段本地事务与远端字段校验保持；本批隔离Mapper/程序化事务和受控User/Fence证据不替代真实TC/User链路验证。

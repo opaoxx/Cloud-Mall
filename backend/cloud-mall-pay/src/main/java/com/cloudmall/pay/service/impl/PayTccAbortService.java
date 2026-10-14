@@ -57,6 +57,7 @@ public class PayTccAbortService {
     if (response == null || !"0".equals(response.code) || response.data == null) throw pending();
     UserTccStateVO user = response.data;
     if (!"TRYING".equals(user.state)
+        || !user.ledgerAppliedPresent
         || user.ledgerApplied
         || !Objects.equals(user.payNo, proof.payNo)
         || !Objects.equals(user.orderNo, proof.orderNo)

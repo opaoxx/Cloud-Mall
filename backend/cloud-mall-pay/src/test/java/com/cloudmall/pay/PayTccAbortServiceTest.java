@@ -21,8 +21,13 @@ import org.junit.jupiter.api.Test;
 
 /** Pay TCC 主动回滚服务的 User TRYING/no-ledger 证明门测试。 */
 class PayTccAbortServiceTest {
+  /** 初段proof与最终回滚决议边界替身。 */
   private PayTccAbortStore store;
+
+  /** User当前状态只读客户端替身。 */
   private UserTccClient users;
+
+  /** 被测未决回滚请求服务。 */
   private PayTccAbortService service;
 
   /** 准备主动回滚服务依赖。 */
@@ -105,6 +110,114 @@ class PayTccAbortServiceTest {
     verify(store, never()).requestRollback(any(), any());
   }
 
+  /** 实际Jackson缺字段/null均默认false但无presence，不能进入最终决议Store。 */
+  @Test
+  void missingOrNullLedgerEvidenceNeverRequestsRollback() throws Exception {
+    for (String variant : java.util.List.of("missing", "null")) {
+      setUp();
+      var payment = payment();
+      var proof = proof();
+      var decoded = decodedAbortLedgerState(variant);
+      org.junit.jupiter.api.Assertions.assertFalse(decoded.ledgerApplied);
+      org.junit.jupiter.api.Assertions.assertFalse(decoded.ledgerAppliedPresent);
+      when(store.preparedProof(payment)).thenReturn(proof);
+      when(users.state(any(), any(), any(), any(), any(), any()))
+          .thenReturn(ApiResponse.ok(decoded));
+      var failure = assertThrows(BizException.class, () -> service.requestRollback(payment));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+      assertEquals(202, failure.getHttpStatus());
+      assertEquals("User分支尚不能证明可回滚，请等待原资金结果", failure.getMessage());
+      var order = org.mockito.Mockito.inOrder(store, users);
+      order.verify(store).preparedProof(payment);
+      order
+          .verify(users)
+          .state(
+              proof.userId, proof.operationKey, proof.userId, "cloud-mall-pay", "token", proof.xid);
+      order.verifyNoMoreInteractions();
+      verify(store, never()).requestRollback(any(), any());
+    }
+  }
+
+  /** 明确false保proof→GET→原Store次序，true仍pending且presence不序列化。 */
+  @Test
+  void explicitLedgerBooleanPreservesAbortContract() throws Exception {
+    for (String variant : java.util.List.of("false", "true")) {
+      setUp();
+      var payment = payment();
+      var proof = proof();
+      var decoded = decodedAbortLedgerState(variant);
+      org.junit.jupiter.api.Assertions.assertTrue(decoded.ledgerAppliedPresent);
+      assertEquals(variant.equals("true"), decoded.ledgerApplied);
+      org.junit.jupiter.api.Assertions.assertFalse(
+          new com.fasterxml.jackson.databind.ObjectMapper()
+              .writeValueAsString(decoded)
+              .contains("ledgerAppliedPresent"));
+      when(store.preparedProof(payment)).thenReturn(proof);
+      when(users.state(any(), any(), any(), any(), any(), any()))
+          .thenReturn(ApiResponse.ok(decoded));
+      if (variant.equals("false")) {
+        service.requestRollback(payment);
+        var order = org.mockito.Mockito.inOrder(store, users);
+        order.verify(store).preparedProof(payment);
+        order
+            .verify(users)
+            .state(
+                proof.userId,
+                proof.operationKey,
+                proof.userId,
+                "cloud-mall-pay",
+                "token",
+                proof.xid);
+        order.verify(store).requestRollback(payment, proof);
+        order.verifyNoMoreInteractions();
+      } else {
+        assertEquals(
+            202,
+            assertThrows(BizException.class, () -> service.requestRollback(payment))
+                .getHttpStatus());
+        verify(store, never()).requestRollback(any(), any());
+      }
+    }
+  }
+
+  /** 外来RootContext和初段proof失败仍先拒绝，未触及User或最终决议Store。 */
+  @Test
+  void inheritedContextAndLocalProofKeepEarlierPriority() {
+    String originalXid = io.seata.core.context.RootContext.unbind();
+    try {
+      io.seata.core.context.RootContext.bind("foreign-abort-proof-xid");
+      try {
+        var failure = assertThrows(BizException.class, () -> service.requestRollback(payment()));
+        assertEquals("PAY_TCC_CONTEXT_INVALID", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        org.mockito.Mockito.verifyNoInteractions(store, users);
+      } finally {
+        io.seata.core.context.RootContext.unbind();
+      }
+      setUp();
+      var original = new BizException("PAY_ORDER_SYNC_UNKNOWN", "local-proof-pending", 202);
+      when(store.preparedProof(any())).thenThrow(original);
+      org.junit.jupiter.api.Assertions.assertSame(
+          original, assertThrows(BizException.class, () -> service.requestRollback(payment())));
+      org.mockito.Mockito.verifyNoInteractions(users);
+      verify(store, never()).requestRollback(any(), any());
+    } finally {
+      if (originalXid != null) io.seata.core.context.RootContext.bind(originalXid);
+    }
+  }
+
+  /** 真实JSON解布尔presence，不直接修改内部标志。 */
+  private com.cloudmall.pay.domain.vo.UserTccStateVO decodedAbortLedgerState(String variant)
+      throws com.fasterxml.jackson.core.JsonProcessingException {
+    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.node.ObjectNode json =
+        mapper.valueToTree(userState("TRYING", false, 31L));
+    if (variant.equals("missing")) json.remove("ledgerApplied");
+    else if (variant.equals("null")) json.putNull("ledgerApplied");
+    else json.put("ledgerApplied", variant.equals("true"));
+    return mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
+  }
+
   private PayVO payment() {
     PayVO payment = new PayVO();
     payment.payNo = "pay-abort-test";
@@ -147,7 +260,7 @@ class PayTccAbortServiceTest {
     view.xid = "xid-abort-test";
     view.branchId = branch;
     view.state = state;
-    view.ledgerApplied = ledger;
+    view.setLedgerApplied(ledger);
     return view;
   }
 }
