@@ -44,7 +44,7 @@ Mapper SQL、锁序、状态集合、lease 时长、错误码、DTO/API、RPC/TC
 - 使用已有 owned Delivery、Payment、Execution、Dispatch、Receipt/Intent Mapper 与程序化本地事务；不启动业务 App、TC/RM 或写原业务库。
 - 在实际列可表示的 owner 值中复现旧行为：null/blank claim 会写 lease、blank stage 可推进 Pay/Delivery、blank finish 可清 lease；这些 red 证据与修复后零写/全事实不变分别归档。
 - 修复后验证非法 token 的 claim、stage、finish 不改变 delivery、payment、execution、dispatch、receipt/intent 事实；合法 token 仍能 claim、stage、finish，60 秒 lease、attempts=31 上限和旧状态规则不变。
-- ASCII129 与 emoji65 这类 UTF-16 超限值不写入 128 长度数据库列，使用 unit 验证拒绝；native 只验证列可表示的合法/非法 owner 边界。
+- ASCII129 与 emoji65 这类 UTF-16 超限值仅因 Java token 域规则被拒绝，使用 unit 验证且不写库；这不是数据库字符容量错误断言，emoji 仍可能按数据库字符数落入 `VARCHAR(128)`。native 只验证列可表示的合法/非法 owner 边界。
 
 ## 5. 明确边界
 
