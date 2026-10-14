@@ -36,12 +36,25 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 /** TCC ROLLEDBACK 到公开 FAILED 的完整 User 证据门测试。 */
 class PayTccRollbackFailureTest {
+  /** 原资金执行/恢复入口替身。 */
   private PayTccCoordinatorService coordinator;
+
+  /** 本批不得调用的交付替身。 */
   private PayTccDeliveryService delivery;
+
+  /** 本地回滚证明与投影边界替身。 */
   private PayTccPublicStateStore states;
+
+  /** 本批不得调用的Order客户端替身。 */
   private OrderClient orders;
+
+  /** User当前状态只读客户端替身。 */
   private UserTccClient users;
+
+  /** 被测公开支付/失败入口。 */
   private PayTccPaymentService service;
+
+  /** 无execution主动取消入口替身。 */
   private PayTccCancelService cancelService;
 
   /** 准备 Pay TCC payment service 及可选取消服务。 */
@@ -202,6 +215,136 @@ class PayTccRollbackFailureTest {
     org.mockito.Mockito.verifyNoInteractions(coordinator, delivery, orders, users, cancelService);
   }
 
+  /** 真实JSON缺字段/null两入口均pending；原null用户/坏状态门也保持。 */
+  @Test
+  void missingLedgerEvidenceNeverReachesEitherProjection() throws Exception {
+    for (String variant :
+        java.util.List.of("missing", "null", "user-null", "state-null", "unknown"))
+      for (boolean claimed : java.util.List.of(false, true)) {
+        setUp();
+        var payment = payment();
+        var decoded = decodedRollbackLedgerState(variant);
+        if (variant.equals("missing") || variant.equals("null")) {
+          org.junit.jupiter.api.Assertions.assertFalse(decoded.ledgerApplied);
+          org.junit.jupiter.api.Assertions.assertFalse(decoded.ledgerAppliedPresent);
+        }
+        when(states.cancelledProof(payment)).thenReturn(proof());
+        when(users.state(any(), any(), any(), any(), any(), any()))
+            .thenReturn(ApiResponse.ok(decoded));
+        var projection = new PayTccRollbackProjectionService(states, users, "token");
+        var failure =
+            assertThrows(
+                BizException.class,
+                () -> {
+                  if (claimed) projection.projectClaimed(payment, "worker");
+                  else projection.project(payment);
+                });
+        assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+        assertEquals(202, failure.getHttpStatus());
+        assertEquals("订单或资金结果待确认，请保留原支付单", failure.getMessage());
+        verify(states).cancelledProof(payment);
+        verify(users)
+            .state(
+                payment.userId,
+                proof().operationKey,
+                payment.userId,
+                "cloud-mall-pay",
+                "token",
+                proof().xid);
+        verify(states, never()).projectFailed(any(), any());
+        verify(states, never()).projectFailedClaimed(any(), any(), any());
+        org.mockito.Mockito.verifyNoInteractions(coordinator, delivery, orders, cancelService);
+      }
+  }
+
+  /** JSON显式false保持两入口返回，显式true保持拒绝，presence不进入JSON。 */
+  @Test
+  void explicitLedgerBooleanKeepsBothProjectionContracts() throws Exception {
+    for (String variant : java.util.List.of("false", "true"))
+      for (boolean claimed : java.util.List.of(false, true)) {
+        setUp();
+        var payment = payment();
+        var decoded = decodedRollbackLedgerState(variant);
+        org.junit.jupiter.api.Assertions.assertTrue(decoded.ledgerAppliedPresent);
+        assertEquals(variant.equals("true"), decoded.ledgerApplied);
+        org.junit.jupiter.api.Assertions.assertFalse(
+            new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsString(decoded)
+                .contains("ledgerAppliedPresent"));
+        when(states.cancelledProof(payment)).thenReturn(proof());
+        when(users.state(any(), any(), any(), any(), any(), any()))
+            .thenReturn(ApiResponse.ok(decoded));
+        when(states.projectFailed(payment, proof().xid)).thenReturn("FAILED");
+        when(states.projectFailedClaimed(payment, proof().xid, "worker")).thenReturn("FAILED");
+        var projection = new PayTccRollbackProjectionService(states, users, "token");
+        if (variant.equals("false")) {
+          assertEquals(
+              "FAILED",
+              claimed ? projection.projectClaimed(payment, "worker") : projection.project(payment));
+          if (claimed) verify(states).projectFailedClaimed(payment, proof().xid, "worker");
+          else verify(states).projectFailed(payment, proof().xid);
+        } else {
+          assertThrows(
+              BizException.class,
+              () -> {
+                if (claimed) projection.projectClaimed(payment, "worker");
+                else projection.project(payment);
+              });
+          verify(states, never()).projectFailed(any(), any());
+          verify(states, never()).projectFailedClaimed(any(), any(), any());
+        }
+      }
+  }
+
+  /** 公开支付/失败入口收到缺失或null无扣款证据时保留PENDING，不再报FAILED。 */
+  @Test
+  void incompleteLedgerProofKeepsPublicPaymentEntryPending() throws Exception {
+    for (String variant : java.util.List.of("missing", "null"))
+      for (String entry : java.util.List.of("failure", "pay")) {
+        setUp();
+        var payment = payment();
+        when(states.execution(payment.payNo)).thenReturn(execution("ROLLEDBACK"));
+        var recovered = new com.cloudmall.pay.domain.vo.PayTccExecutionVO();
+        recovered.state = "ROLLEDBACK";
+        recovered.xid = "xid-rollback-test";
+        recovered.payNo = payment.payNo;
+        when(coordinator.recover(payment.payNo)).thenReturn(recovered);
+        when(states.cancelledProof(payment)).thenReturn(proof());
+        when(users.state(any(), any(), any(), any(), any(), any()))
+            .thenReturn(ApiResponse.ok(decodedRollbackLedgerState(variant)));
+        assertEquals(
+            202,
+            assertThrows(
+                    BizException.class,
+                    () -> {
+                      if (entry.equals("failure")) service.failure(payment);
+                      else service.pay(payment);
+                    })
+                .getHttpStatus());
+        assertEquals("PENDING", payment.status);
+        verify(states, never()).projectFailed(any(), any());
+        verify(states, never()).projectFailedClaimed(any(), any(), any());
+        verify(coordinator, never()).execute(any());
+        if (entry.equals("failure")) verify(coordinator, never()).recover(any());
+        else verify(coordinator).recover(payment.payNo);
+        org.mockito.Mockito.verifyNoInteractions(delivery, orders, cancelService);
+      }
+  }
+
+  /** 以实际Jackson解码显式布尔/缺失/null，不手工伪造presence标志。 */
+  private UserTccStateVO decodedRollbackLedgerState(String variant)
+      throws com.fasterxml.jackson.core.JsonProcessingException {
+    if (variant.equals("user-null")) return null;
+    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(userState(false, 31L));
+    if (variant.equals("missing")) json.remove("ledgerApplied");
+    else if (variant.equals("null")) json.putNull("ledgerApplied");
+    else json.put("ledgerApplied", variant.equals("true"));
+    if (variant.equals("state-null")) json.putNull("state");
+    if (variant.equals("unknown")) json.put("state", "UNKNOWN");
+    return mapper.treeToValue(json, UserTccStateVO.class);
+  }
+
   private PayVO payment() {
     return payment("PENDING");
   }
@@ -255,7 +398,7 @@ class PayTccRollbackFailureTest {
     state.xid = "xid-rollback-test";
     state.branchId = branchId;
     state.state = "CANCELLED";
-    state.ledgerApplied = ledgerApplied;
+    state.setLedgerApplied(ledgerApplied);
     return state;
   }
 

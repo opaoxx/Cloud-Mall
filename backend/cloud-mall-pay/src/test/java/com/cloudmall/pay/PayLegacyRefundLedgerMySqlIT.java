@@ -5760,6 +5760,177 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** JSON缺少ledgerApplied不得被默认false当作无扣款证明写Pay FAILED。 */
+  @Test
+  void missingRollbackLedgerFlagCannotProjectPublicFailure() {
+    var store = ownedRollbackTokenStore();
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+    var projection = rollbackLedgerPresenceService(store, "missing");
+    var before = ownedCancelIdentityFacts();
+    var result = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> result.set(projection.project(rollbackTokenPayment())),
+                  () -> "unexpected missing-ledger result=" + result.get());
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+        },
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** JSON null无扣款字段不得授权带lease的Pay FAILED投影。 */
+  @Test
+  void nullRollbackLedgerFlagCannotProjectClaimedFailure() {
+    var store = ownedRollbackTokenStore();
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+    var projection = rollbackLedgerPresenceService(store, "null");
+    var before = ownedCancelIdentityFacts();
+    var result = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> result.set(projection.projectClaimed(rollbackTokenPayment(), "worker")),
+                  () -> "unexpected null-ledger result=" + result.get());
+          assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+          assertEquals(202, failure.getHttpStatus());
+        },
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 缺字段/null及显式true在两投影入口均不能改变六表资金事实。 */
+  @Test
+  void incompleteRollbackLedgerProofCannotWriteAcrossStatesAndDecisions() {
+    var store = ownedRollbackTokenStore();
+    for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+      for (String status : List.of("PENDING", "ORDER_SYNC_UNKNOWN", "FAILED"))
+        for (String variant : List.of("missing", "null", "true"))
+          for (boolean claimed : List.of(false, true)) {
+            seedRollbackTokenProjection(status, decision, "worker");
+            var service = rollbackLedgerPresenceService(store, variant);
+            var before = ownedCancelIdentityFacts();
+            var failure =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> {
+                      if (claimed) service.projectClaimed(rollbackTokenPayment(), "worker");
+                      else service.project(rollbackTokenPayment());
+                    });
+            assertEquals("PAY_ORDER_SYNC_UNKNOWN", failure.getCode());
+            assertEquals(202, failure.getHttpStatus());
+            assertEquals(before, ownedCancelIdentityFacts());
+          }
+  }
+
+  /** JSON显式false仍允许三decision的原投影/FAILED重入，payload和其它表保持。 */
+  @Test
+  void explicitNoLedgerProofKeepsBothProjectionPaths() {
+    var store = ownedRollbackTokenStore();
+    for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+      for (String status : List.of("PENDING", "ORDER_SYNC_UNKNOWN", "FAILED"))
+        for (boolean claimed : List.of(false, true)) {
+          seedRollbackTokenProjection(status, decision, "worker");
+          var service = rollbackLedgerPresenceService(store, "false");
+          var before = ownedCancelIdentityFacts();
+          var paymentBefore = fixture.queryForMap("SELECT * FROM pay_record");
+          assertEquals(
+              "FAILED",
+              claimed
+                  ? service.projectClaimed(rollbackTokenPayment(), "worker")
+                  : service.project(rollbackTokenPayment()));
+          var after = ownedCancelIdentityFacts();
+          assertEquals(before.subList(1, before.size()), after.subList(1, after.size()));
+          assertEquals("FAILED", fixture.queryForMap("SELECT * FROM pay_record").get("status"));
+          if (status.equals("FAILED")) assertEquals(before, after);
+          else {
+            var paymentAfter = fixture.queryForMap("SELECT * FROM pay_record");
+            for (String changed : List.of("status", "updated_at")) {
+              paymentBefore.remove(changed);
+              paymentAfter.remove(changed);
+            }
+            assertEquals(paymentBefore, paymentAfter);
+          }
+          var completed = ownedCancelIdentityFacts();
+          assertEquals(
+              "FAILED",
+              claimed
+                  ? service.projectClaimed(rollbackTokenPayment(), "worker")
+                  : service.project(rollbackTokenPayment()));
+          assertEquals(completed, ownedCancelIdentityFacts());
+        }
+  }
+
+  /** 本地proof/User为受控替身，真实JSON解User布尔；只有最终Store写使用owned真实事务。 */
+  private com.cloudmall.pay.service.impl.PayTccRollbackProjectionService
+      rollbackLedgerPresenceService(
+          com.cloudmall.pay.service.impl.PayTccPublicStateStore actualStore, String ledgerVariant) {
+    var payment = rollbackTokenPayment();
+    var proof = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    proof.payNo = payment.payNo;
+    proof.userId = payment.userId;
+    proof.orderNo = payment.orderNo;
+    proof.amount = "10.00";
+    proof.xid = "t187-xid";
+    proof.userBranchId = 31L;
+    proof.operationKey = "tcc-debit:pay-1";
+    proof.ledgerKey = "pay-1";
+    proof.state = "CANCELLED";
+    var user = new com.cloudmall.pay.domain.vo.UserTccStateVO();
+    user.payNo = payment.payNo;
+    user.userId = payment.userId;
+    user.orderNo = payment.orderNo;
+    user.amount = "10.00";
+    user.xid = proof.xid;
+    user.branchId = proof.userBranchId;
+    user.operationKey = proof.operationKey;
+    user.ledgerKey = proof.ledgerKey;
+    user.state = "CANCELLED";
+    user.setLedgerApplied(false);
+    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(user);
+    if (ledgerVariant.equals("missing")) json.remove("ledgerApplied");
+    else if (ledgerVariant.equals("null")) json.putNull("ledgerApplied");
+    else json.put("ledgerApplied", ledgerVariant.equals("true"));
+    com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
+    try {
+      decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
+    } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+      throw new IllegalStateException("owned User DTO decode failed", failure);
+    }
+    assertEquals(
+        ledgerVariant.equals("false") || ledgerVariant.equals("true"),
+        decoded.ledgerAppliedPresent);
+    assertEquals(ledgerVariant.equals("true"), decoded.ledgerApplied);
+    var users = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(users.state(any(), any(), any(), any(), any(), any())).thenReturn(ApiResponse.ok(decoded));
+    var boundary = mock(com.cloudmall.pay.service.impl.PayTccPublicStateStore.class);
+    when(boundary.cancelledProof(any())).thenReturn(proof);
+    org.mockito.Mockito.doAnswer(
+            invocation ->
+                rollbackTokenTransaction(
+                    () ->
+                        actualStore.projectFailed(
+                            invocation.getArgument(0), invocation.getArgument(1))))
+        .when(boundary)
+        .projectFailed(any(), any());
+    org.mockito.Mockito.doAnswer(
+            invocation ->
+                rollbackTokenTransaction(
+                    () ->
+                        actualStore.projectFailedClaimed(
+                            invocation.getArgument(0),
+                            invocation.getArgument(1),
+                            invocation.getArgument(2))))
+        .when(boundary)
+        .projectFailedClaimed(any(), any(), any());
+    return new com.cloudmall.pay.service.impl.PayTccRollbackProjectionService(
+        boundary, users, "internal-token");
+  }
+
   /** 原DDL和实际Pay/Execution/Cancel/Intent Mapper验证本地门，不执行远端证明。 */
   private com.cloudmall.pay.service.impl.PayTccPublicStateStore ownedRollbackTokenStore() {
     ownedCancelRecoveryIdentityStore();

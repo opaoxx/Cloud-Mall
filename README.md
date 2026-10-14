@@ -2506,3 +2506,9 @@ execution恢复收尾与原claim入口沿用同一token域：非NULL、非blank�
 带恢复租约的回滚投影在Service与Store入口同步要求token非NULL、非blank、Java UTF-16长度不超过128。超限token在本地proof、User GET和Pay FAILED写入前沿原202待确认语义拒绝；非blank首尾空格不trim。
 
 公开无租约投影、原证据与lease/状态/decision门保持。emoji65虽数据库可存，仍因Java域超限被拒；历史owner不自动修复，本批隔离本地事务及User替身验证不代表真实TC/User资金链路闭环。
+
+### CM-18 回滚无扣款字段存在性（16T188）
+
+回滚投影消费User状态时，要求ledgerApplied字段明确存在且为false。缺字段或JSON null只能保持待确认，不能利用Java默认false投影Pay FAILED；显式true仍拒绝。
+
+公开与后台租约入口共享该证据门；原状态/载荷/分支/金额校验和DTO绑定保持。本批使用真实JSON解析、隔离Pay本地写与User/证明替身，未替代真实User/TC资金链路验证。

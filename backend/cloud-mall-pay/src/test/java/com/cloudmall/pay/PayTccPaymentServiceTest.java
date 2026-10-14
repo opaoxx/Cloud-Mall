@@ -29,11 +29,22 @@ import org.junit.jupiter.api.Test;
 
 /** TCC payment service 的首次预检、既有执行恢复和交付门控测试。 */
 class PayTccPaymentServiceTest {
+  /** 一次性执行与原事务恢复替身。 */
   private PayTccCoordinatorService coordinator;
+
+  /** 交付结果替身。 */
   private PayTccDeliveryService delivery;
+
+  /** 本地执行/回滚证明与投影替身。 */
   private PayTccPublicStateStore states;
+
+  /** 原订单只读/写入客户端替身。 */
   private OrderClient orders;
+
+  /** User只读资金证明客户端替身。 */
   private UserTccClient users;
+
+  /** 被测公开支付业务入口。 */
   private PayTccPaymentService service;
 
   /** 准备 TCC payment service 依赖。 */
@@ -249,7 +260,7 @@ class PayTccPaymentServiceTest {
     state.xid = "xid-payment-test";
     state.branchId = branchId;
     state.state = "CANCELLED";
-    state.ledgerApplied = ledgerApplied;
+    state.setLedgerApplied(ledgerApplied);
     return state;
   }
 }

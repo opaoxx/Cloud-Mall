@@ -75,6 +75,7 @@ public class PayTccRollbackProjectionService {
     // 3. 逐项核对同一分支与无扣款证明，缺一项即保持未知。
     UserTccStateVO user = response.data;
     if (!"CANCELLED".equals(user.state)
+        || !user.ledgerAppliedPresent
         || user.ledgerApplied
         || !Objects.equals(user.payNo, payment.payNo)
         || !Objects.equals(user.orderNo, payment.orderNo)
