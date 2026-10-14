@@ -5900,11 +5900,12 @@ class PayLegacyRefundLedgerMySqlIT {
     mutateUserEvidenceJson(json, ledgerVariant);
     com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
     try {
-      decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
+      decoded = decodeUserEvidenceJson(mapper, json, ledgerVariant);
     } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
       throw new IllegalStateException("owned User DTO decode failed", failure);
     }
-    if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
+    if (!ledgerVariant.startsWith("duplicate-")
+        && !List.of("number-zero", "text-false").contains(ledgerVariant)) {
       assertEquals(
           ledgerVariant.equals("false")
               || ledgerVariant.equals("true")
@@ -6118,11 +6119,12 @@ class PayLegacyRefundLedgerMySqlIT {
     mutateUserEvidenceJson(json, ledgerVariant);
     com.cloudmall.pay.domain.vo.UserTccStateVO decoded;
     try {
-      decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
+      decoded = decodeUserEvidenceJson(mapper, json, ledgerVariant);
     } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
       throw new IllegalStateException("owned abort User decode failed", failure);
     }
-    if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
+    if (!ledgerVariant.startsWith("duplicate-")
+        && !List.of("number-zero", "text-false").contains(ledgerVariant)) {
       assertEquals(
           ledgerVariant.equals("false")
               || ledgerVariant.equals("true")
@@ -6373,6 +6375,71 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 十个已知字段即使等值重复也不能授权回滚、决议或可信镜像。 */
+  @Test
+  void duplicateKnownUserFieldsCannotAuthorizeAnyConsumer() {
+    for (String variant :
+        List.of(
+            "duplicate-same-userId",
+            "duplicate-same-payNo",
+            "duplicate-same-orderNo",
+            "duplicate-same-amount",
+            "duplicate-same-operationKey",
+            "duplicate-same-ledgerKey",
+            "duplicate-same-xid",
+            "duplicate-same-branchId",
+            "duplicate-same-state",
+            "duplicate-same-ledgerApplied")) {
+      var rollbackStore = ownedRollbackTokenStore();
+      seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+      var projection = rollbackLedgerPresenceService(rollbackStore, variant);
+      var beforeProjection = ownedCancelIdentityFacts();
+      var publicFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> projection.project(rollbackTokenPayment()));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", publicFailure.getCode());
+      assertEquals(202, publicFailure.getHttpStatus());
+      var claimedFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> projection.projectClaimed(rollbackTokenPayment(), "worker"));
+      assertEquals(202, claimedFailure.getHttpStatus());
+      assertEquals(beforeProjection, ownedCancelIdentityFacts());
+      var abortStore = ownedAbortLedgerStore();
+      seedAbortLedgerDecision("RUNNING", "PENDING");
+      var abort = abortLedgerPresenceService(abortStore, variant);
+      var beforeAbort = ownedCancelIdentityFacts();
+      var abortFailure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> abort.requestRollback(rollbackTokenPayment()));
+      assertEquals("PAY_ORDER_SYNC_UNKNOWN", abortFailure.getCode());
+      assertEquals(202, abortFailure.getHttpStatus());
+      assertEquals(beforeAbort, ownedCancelIdentityFacts());
+      var persistence = ownedDispatchPersistence();
+      seedBridgeLedgerRow(false);
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      when(user.state(any(), any(), any(), any(), any(), any()))
+          .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", variant)));
+      var payBefore = rawIntentTimeFacts();
+      var beforeDispatch = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+      var result = bridgeLedgerTransactions(persistence, user).recover("pay-1");
+      assertEquals("TRY_UNKNOWN", result.state);
+      assertNull(result.userBranchId);
+      var afterDispatch = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+      assertEquals("TRY_UNKNOWN", afterDispatch.get("state"));
+      assertNull(afterDispatch.get("user_branch_id"));
+      for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+        beforeDispatch.remove(changed);
+        afterDispatch.remove(changed);
+      }
+      assertEquals(beforeDispatch, afterDispatch);
+      assertEquals(payBefore, rawIntentTimeFacts());
+      verify(user, never()).prepare(any(), any(), any(), any(), any(), any());
+    }
+  }
+
   /** 小数branchId不能截断为原分支并授权Pay FAILED。 */
   @Test
   void fractionalUserBranchCannotAuthorizeRollbackProjection() {
@@ -6464,6 +6531,78 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals("TRY_UNKNOWN", result.state),
         () -> assertEquals("TRY_UNKNOWN", row.state),
         () -> assertNull(row.userBranchId));
+  }
+
+  /** 重复账本字段不能以末次false覆盖前一次true并授权FAILED。 */
+  @Test
+  void duplicateUserLedgerCannotAuthorizeRollbackProjection() {
+    var store = ownedRollbackTokenStore();
+    seedRollbackTokenProjection("PENDING", "ROLLBACK", "worker");
+    var service = rollbackLedgerPresenceService(store, "duplicate-conflict-ledger");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> service.project(rollbackTokenPayment())),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 重复userId不能以末次匹配身份选择ROLLBACK。 */
+  @Test
+  void duplicateUserIdentityCannotAuthorizeAbortDecision() {
+    var store = ownedAbortLedgerStore();
+    seedAbortLedgerDecision("RUNNING", "PENDING");
+    var service = abortLedgerPresenceService(store, "duplicate-conflict-user");
+    var before = ownedCancelIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> service.requestRollback(rollbackTokenPayment())),
+        () -> assertEquals(before, ownedCancelIdentityFacts()));
+  }
+
+  /** 重复state不能只按末次CANCELLED生成可信镜像或学习分支。 */
+  @Test
+  void duplicateUserStateCannotAuthorizeCancelledDispatchMirror() {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(false);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.state(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", "duplicate-conflict-state")));
+    var result = bridgeLedgerTransactions(persistence, user).recover("pay-1");
+    var row = dispatchMirrorMapper.selectByPayNo("pay-1");
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals("TRY_UNKNOWN", result.state),
+        () -> assertEquals("TRY_UNKNOWN", row.state),
+        () -> assertNull(row.userBranchId));
+  }
+
+  /** 原始JSON保留重复字段，不能先经ObjectNode去重再测试decoder。 */
+  private com.cloudmall.pay.domain.vo.UserTccStateVO decodeUserEvidenceJson(
+      com.fasterxml.jackson.databind.ObjectMapper mapper,
+      com.fasterxml.jackson.databind.node.ObjectNode json,
+      String variant)
+      throws com.fasterxml.jackson.core.JsonProcessingException {
+    String payload = mapper.writeValueAsString(json);
+    if (variant.equals("duplicate-conflict-ledger"))
+      payload = "{\"ledgerApplied\":true," + payload.substring(1);
+    else if (variant.equals("duplicate-conflict-user"))
+      payload = "{\"userId\":8," + payload.substring(1);
+    else if (variant.equals("duplicate-conflict-state"))
+      payload = "{\"state\":\"CONFIRMED\"," + payload.substring(1);
+    else if (variant.startsWith("duplicate-same-")) {
+      String field = variant.substring("duplicate-same-".length());
+      payload =
+          "{\""
+              + field
+              + "\":"
+              + mapper.writeValueAsString(json.get(field))
+              + ","
+              + payload.substring(1);
+    }
+    return mapper.readValue(payload, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
   }
 
   /** 只扩受控User JSON身份/金额类型，账本标志仍是明确原生false。 */
@@ -7300,8 +7439,9 @@ class PayLegacyRefundLedgerMySqlIT {
     else json.put("ledgerApplied", ledgerVariant.equals("true"));
     mutateUserEvidenceJson(json, ledgerVariant);
     try {
-      var decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
-      if (!List.of("number-zero", "text-false").contains(ledgerVariant)) {
+      var decoded = decodeUserEvidenceJson(mapper, json, ledgerVariant);
+      if (!ledgerVariant.startsWith("duplicate-")
+          && !List.of("number-zero", "text-false").contains(ledgerVariant)) {
         assertEquals(
             ledgerVariant.equals("false")
                 || ledgerVariant.equals("true")

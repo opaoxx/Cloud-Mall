@@ -2542,3 +2542,9 @@ Pay接收User状态的userId、branchId时，只接受JSON原生整数且值在1
 Pay接收User状态的payNo、orderNo、amount、operationKey、ledgerKey、xid、state时，只接受JSON原生字符串。数字金额不能再强转成文本并匹配原金额；非字符串按缺证处理，沿原待确认/UNKNOWN规则阻断可信结果。
 
 合法文本逐字保留，不trim或新增金额词法；public String赋值/输出、全局ObjectMapper及原Boolean/Long字段规则保持。本批隔离验证覆盖数字金额在回滚、主动决议和派发镜像的影响，其余文本字段由单元测试验证，不代表真实User/TC资金链路闭环。
+
+### CM-18 User状态响应重复字段拒绝（16T194）
+
+User状态响应的十个已知根字段必须唯一；重复字段即使等值，也不能用最后一个值覆盖原始矛盾并生成可信证据。专用对象解析器完整消费重复响应后返回null，回滚/主动决议保持原202，派发桥保持原UNKNOWN诊断。
+
+原生Boolean、正Long和原生文本规则继续复用；Java字段赋值、Boolean setter与输出保持。未知字段及内部presence按原Jackson策略处理，未知嵌套字段不计入根字段重复集合。本批不改变全局解析规则，也不替代真实User/TC链路验证。

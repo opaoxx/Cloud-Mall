@@ -1,49 +1,39 @@
 package com.cloudmall.pay.domain.vo;
 
-import com.cloudmall.pay.util.UserTccLedgerBooleanDeserializer;
-import com.cloudmall.pay.util.UserTccNativeTextDeserializer;
-import com.cloudmall.pay.util.UserTccPositiveLongDeserializer;
+import com.cloudmall.pay.util.UserTccStateDeserializer;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import java.math.BigDecimal;
 
 /** User TCC 只读状态响应。 */
+@JsonDeserialize(using = UserTccStateDeserializer.class)
 public class UserTccStateVO {
   /** 用户主键。 */
-  @JsonDeserialize(using = UserTccPositiveLongDeserializer.class)
   public Long userId;
 
   /** 支付号。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String payNo;
 
   /** 订单号。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String orderNo;
 
   /** 金额字符串。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String amount;
 
   /** TCC 操作键。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String operationKey;
 
   /** 最终账本键。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String ledgerKey;
 
   /** XID。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String xid;
 
   /** User 分支标识。 */
-  @JsonDeserialize(using = UserTccPositiveLongDeserializer.class)
   public Long branchId;
 
   /** User 业务状态。 */
-  @JsonDeserialize(using = UserTccNativeTextDeserializer.class)
   public String state;
 
   /** 是否存在 APPLIED 账本。 */
@@ -54,7 +44,6 @@ public class UserTccStateVO {
 
   /** 保留既有boolean语义，同时区分缺字段/null与明确false。 */
   @JsonSetter("ledgerApplied")
-  @JsonDeserialize(using = UserTccLedgerBooleanDeserializer.class)
   public void setLedgerApplied(Boolean applied) {
     ledgerAppliedPresent = applied != null;
     ledgerApplied = Boolean.TRUE.equals(applied);
