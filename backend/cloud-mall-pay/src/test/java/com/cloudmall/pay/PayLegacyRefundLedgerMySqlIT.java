@@ -7022,6 +7022,132 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 已有POST消耗标记不能新建receipt并触发Pay资源注册。 */
+  @Test
+  void consumedPostEvidenceCannotCreateFreshPayReceipt() {
+    assertFreshReceiptRejected("posted");
+  }
+
+  /** 已观察User分支不能靠PREPARED状态重新获得Pay receipt winner。 */
+  @Test
+  void observedUserBranchCannotCreateFreshPayReceipt() {
+    assertFreshReceiptRejected("observed-branch");
+  }
+
+  /** 首次认领各阶段证据单变异均409，无receipt写和资源尝试。 */
+  @Test
+  void freshReceiptPermissionPredicatesBlockWithoutResourceCalls() {
+    for (String variant :
+        List.of(
+            "posted",
+            "observed-branch",
+            "input-branch",
+            "input-null-state",
+            "input-state",
+            "current-state")) assertFreshReceiptRejected(variant);
+  }
+
+  /** 合法fresh只一次资源尝试；已有四状态在非fresh证据下仍只返回原事实。 */
+  @Test
+  void freshReceiptWinnerAndExistingReplayKeepTheirBoundaries() {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+    when(resource.prepare(any(), any())).thenReturn(true);
+    var facade = receiptClaimFacade(store, dispatch, resource);
+    var request = receiptClaimRequest(dispatch);
+    assertEquals("CLAIMED", facade.prepare(request).state);
+    assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_tcc_receipt", Integer.class));
+    var afterFresh = ownedReceiptClaimFacts();
+    assertEquals("CLAIMED", facade.prepare(request).state);
+    assertEquals(afterFresh, ownedReceiptClaimFacts());
+    verify(resource).prepare(any(), any());
+    fixture.update("UPDATE pay_record SET status='SUCCESS'");
+    fixture.update(
+        "UPDATE pay_tcc_dispatch SET state='CONFIRMED',post_attempted_at='2026-10-15"
+            + " 00:00:00.123',user_branch_id=7");
+    dispatch.state = "UNKNOWN";
+    dispatch.userBranchId = 7L;
+    for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      fixture.update(
+          "UPDATE pay_tcc_receipt SET state=?,branch_id=?",
+          state,
+          state.equals("CLAIMED") ? null : 11L);
+      var before = ownedReceiptClaimFacts();
+      var replayResource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+      var replayFacade = receiptClaimFacade(store, dispatch, replayResource);
+      var result = replayFacade.prepare(request);
+      assertEquals(state, result.state);
+      assertEquals("t171-xid", result.xid);
+      assertEquals(state.equals("CLAIMED") ? null : 11L, result.branchId);
+      assertEquals(before, ownedReceiptClaimFacts());
+      org.mockito.Mockito.verifyNoInteractions(replayResource);
+    }
+  }
+
+  /** 实际claim/四表事实加Facade资源调用边界，不运行真实LocalTCC/TC。 */
+  private void assertFreshReceiptRejected(String variant) {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    mutateFreshReceiptEvidence(dispatch, variant);
+    var before = ownedReceiptClaimFacts();
+    var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+    when(resource.prepare(any(), any())).thenReturn(true);
+    var facade = receiptClaimFacade(store, dispatch, resource);
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> facade.prepare(receiptClaimRequest(dispatch)));
+          assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> org.mockito.Mockito.verifyNoInteractions(resource),
+        () -> assertEquals(before, ownedReceiptClaimFacts()));
+  }
+
+  /** 只变异一个派发阶段证据，其余载荷/Pay/receipt源保持原样。 */
+  private void mutateFreshReceiptEvidence(
+      com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch, String variant) {
+    switch (variant) {
+      case "posted" ->
+          fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at='2026-10-15 00:00:00.123'");
+      case "observed-branch" -> fixture.update("UPDATE pay_tcc_dispatch SET user_branch_id=7");
+      case "input-branch" -> dispatch.userBranchId = 7L;
+      case "input-null-state" -> dispatch.state = null;
+      case "input-state" -> dispatch.state = "TRY_ACCEPTED";
+      case "current-state" -> fixture.update("UPDATE pay_tcc_dispatch SET state='TRY_ACCEPTED'");
+      default -> throw new IllegalArgumentException("unknown fresh receipt fixture variant");
+    }
+  }
+
+  /** claim独立程序化提交，read是真实Mapper，bridge/resource仅为受控替身。 */
+  private com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl receiptClaimFacade(
+      com.cloudmall.pay.service.impl.PayTccReceiptStore actual,
+      com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch,
+      com.cloudmall.pay.service.PayTccReceiptLocalResource resource) {
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    when(bridge.prepare(any())).thenReturn(dispatch);
+    var boundary = mock(com.cloudmall.pay.service.impl.PayTccReceiptStore.class);
+    when(boundary.claim(any()))
+        .thenAnswer(
+            invocation -> dispatchTransaction(() -> actual.claim(invocation.getArgument(0))));
+    when(boundary.read(any())).thenAnswer(invocation -> actual.read(invocation.getArgument(0)));
+    return new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, boundary, resource);
+  }
+
+  /** 仅构造与原锚点匹配的既有DTO，不添加协议字段。 */
+  private com.cloudmall.pay.domain.dto.PayTccDispatchDTO receiptClaimRequest(
+      com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch) {
+    var request = new com.cloudmall.pay.domain.dto.PayTccDispatchDTO();
+    request.payNo = dispatch.payNo;
+    request.userId = dispatch.userId;
+    request.orderNo = dispatch.orderNo;
+    request.amount = new BigDecimal(dispatch.amount);
+    return request;
+  }
+
   /** 原Pay/Dispatch/Receipt实际Mapper共享owned数据源；cancel gate仅为无取消替身。 */
   private com.cloudmall.pay.service.impl.PayTccReceiptStore ownedReceiptClaimStore() {
     ownedDispatchPersistence();
@@ -7051,6 +7177,7 @@ class PayLegacyRefundLedgerMySqlIT {
   private com.cloudmall.pay.domain.vo.PayTccDispatchVO seedOwnedReceiptClaim() {
     seedOwnedDispatch("PREPARED", null);
     fixture.update("UPDATE pay_record SET debit_mode='TCC' WHERE pay_no='pay-1'");
+    fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at=NULL");
     fixture.update("DELETE FROM pay_tcc_receipt");
     return com.cloudmall.pay.domain.vo.PayTccDispatchVO.from(
         dispatchMirrorMapper.selectByPayNo("pay-1"));

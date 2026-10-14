@@ -298,6 +298,114 @@ class PayTccReceiptServiceTest {
         bridge, resource, fixture.paymentRows, fixture.anchorRows, fixture.cancelRows);
   }
 
+  /** 首次认领逐项要求未派发的输入/锚点阶段，不把PREPARED等同于未用过POST。 */
+  @Test
+  void freshReceiptRequiresUnusedDispatchEvidence() {
+    for (String state :
+        java.util.Arrays.asList(
+            null, "UNKNOWN", "POST_ATTEMPTED", "TRY_ACCEPTED", "CONFIRMED", "CANCELLED")) {
+      var fixture = new ReceiptClaimFixture();
+      fixture.dispatch.state = state;
+      assertFreshClaimRejected(fixture);
+    }
+    for (Long branch : java.util.List.of(0L, -1L, 7L)) {
+      var inputBranch = new ReceiptClaimFixture();
+      inputBranch.dispatch.userBranchId = branch;
+      assertFreshClaimRejected(inputBranch);
+      var anchorBranch = new ReceiptClaimFixture();
+      anchorBranch.anchor.userBranchId = branch;
+      assertFreshClaimRejected(anchorBranch);
+    }
+    var posted = new ReceiptClaimFixture();
+    posted.anchor.postAttemptedAt = java.time.LocalDateTime.of(2026, 10, 15, 0, 0);
+    assertFreshClaimRejected(posted);
+    var advanced = new ReceiptClaimFixture();
+    advanced.anchor.state = "TRY_ACCEPTED";
+    assertFreshClaimRejected(advanced);
+    var completedPayment = new ReceiptClaimFixture();
+    completedPayment.payment.status = "SUCCESS";
+    assertFreshClaimRejected(completedPayment);
+  }
+
+  /** 真实Facade/Store拒绝已派发fresh，唯一合法winner只触发一次资源尝试。 */
+  @Test
+  void freshReceiptFacadeCannotRegisterFromConsumedDispatch() {
+    for (boolean marked : java.util.List.of(false, true)) {
+      var fixture = new ReceiptClaimFixture();
+      if (marked) fixture.anchor.postAttemptedAt = java.time.LocalDateTime.of(2026, 10, 15, 0, 0);
+      else fixture.anchor.userBranchId = 7L;
+      var anchorBridge = mock(PayTccBridgeService.class);
+      var localResource = mock(PayTccReceiptLocalResource.class);
+      when(anchorBridge.prepare(any())).thenReturn(fixture.dispatch);
+      var facade = new PayTccReceiptServiceImpl(anchorBridge, fixture.store, localResource);
+      var before = fixture.snapshot();
+      var failure = assertThrows(BizException.class, () -> facade.prepare(request()));
+      assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(before, fixture.snapshot());
+      org.mockito.Mockito.verifyNoInteractions(localResource);
+      verify(fixture.receiptRows, never()).claim(any());
+    }
+    var fresh = new ReceiptClaimFixture();
+    var anchorBridge = mock(PayTccBridgeService.class);
+    var localResource = mock(PayTccReceiptLocalResource.class);
+    when(anchorBridge.prepare(any())).thenReturn(fresh.dispatch);
+    when(localResource.prepare(any(), any())).thenReturn(true);
+    var facade = new PayTccReceiptServiceImpl(anchorBridge, fresh.store, localResource);
+    assertEquals("CLAIMED", facade.prepare(request()).state);
+    var afterFirst = fresh.snapshot();
+    assertEquals("CLAIMED", facade.prepare(request()).state);
+    assertEquals(afterFirst, fresh.snapshot());
+    verify(localResource).prepare(any(), any());
+    verify(fresh.receiptRows).claim(any());
+  }
+
+  /** 已有四状态重放不受fresh阶段门影响，原载荷冲突仍必须校验。 */
+  @Test
+  void existingReceiptReplayPrecedesFreshDispatchGate() {
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      var fixture = new ReceiptClaimFixture();
+      fixture.seedExisting();
+      fixture.stored.state = state;
+      fixture.stored.branchId = state.equals("CLAIMED") ? null : 11L;
+      fixture.payment.status = "SUCCESS";
+      fixture.anchor.state = "CONFIRMED";
+      fixture.anchor.postAttemptedAt = java.time.LocalDateTime.of(2026, 10, 15, 0, 0);
+      fixture.anchor.userBranchId = 7L;
+      fixture.dispatch.state = null;
+      fixture.dispatch.userBranchId = 7L;
+      var before = fixture.snapshot();
+      org.junit.jupiter.api.Assertions.assertFalse(fixture.store.claim(fixture.dispatch));
+      var anchorBridge = mock(PayTccBridgeService.class);
+      var localResource = mock(PayTccReceiptLocalResource.class);
+      when(anchorBridge.prepare(any())).thenReturn(fixture.dispatch);
+      assertEquals(
+          state,
+          new PayTccReceiptServiceImpl(anchorBridge, fixture.store, localResource)
+              .prepare(request())
+              .state);
+      assertEquals(before, fixture.snapshot());
+      org.mockito.Mockito.verifyNoInteractions(localResource);
+      verify(fixture.receiptRows, never()).claim(any());
+    }
+    var conflicting = new ReceiptClaimFixture();
+    conflicting.seedExisting();
+    conflicting.stored.xid = "other-xid";
+    conflicting.anchor.postAttemptedAt = java.time.LocalDateTime.of(2026, 10, 15, 0, 0);
+    assertFreshClaimRejected(conflicting);
+    verify(conflicting.receiptRows).selectByPayNoForUpdate(conflicting.dispatch.payNo);
+  }
+
+  /** 对比输入/源/receipt完整事实并验证没有claim写入，不伪造成功或修复坏场景。 */
+  private void assertFreshClaimRejected(ReceiptClaimFixture fixture) {
+    var before = fixture.snapshot();
+    var failure = assertThrows(BizException.class, () -> fixture.store.claim(fixture.dispatch));
+    assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+    assertEquals(409, failure.getHttpStatus());
+    assertEquals(before, fixture.snapshot());
+    verify(fixture.receiptRows, never()).claim(any());
+  }
+
   /** 真实Store及可独立变异来源；Mapper均为替身，不模拟数据库列可NULL。 */
   private static final class ReceiptClaimFixture {
     /** 已冻结的原派发输入。 */
@@ -342,6 +450,7 @@ class PayTccReceiptServiceTest {
       dispatch.amount = "10.00";
       dispatch.operationKey = "tcc-debit:pay-receipt-test";
       dispatch.ledgerKey = dispatch.payNo;
+      dispatch.state = "PREPARED";
       payment.payNo = dispatch.payNo;
       payment.userId = dispatch.userId;
       payment.orderNo = dispatch.orderNo;

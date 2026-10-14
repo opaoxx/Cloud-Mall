@@ -82,7 +82,13 @@ public class PayTccReceiptStore {
       validate(existing, dispatch);
       return false;
     }
-    if (!"PENDING".equals(payment.status) || !"PREPARED".equals(anchor.state)) throw conflict();
+    // 首次Pay认领必须先于User派发；已存在receipt的重放不受这些fresh条件影响。
+    if (!"PENDING".equals(payment.status)
+        || !"PREPARED".equals(dispatch.state)
+        || dispatch.userBranchId != null
+        || !"PREPARED".equals(anchor.state)
+        || anchor.postAttemptedAt != null
+        || anchor.userBranchId != null) throw conflict();
     // 2. 独立提交唯一认领，只有插入胜者才可在事务外注册 Seata 分支。
     PayTccReceiptPO candidate = toReceipt(dispatch);
     int inserted = receiptMapper.claim(candidate);
