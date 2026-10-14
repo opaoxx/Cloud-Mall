@@ -2530,3 +2530,9 @@ UNKNOWN早返回、branch永久冲突及已有TRY_ACCEPTED不降级规则保持�
 Pay接收User的ledgerApplied时只接受JSON原生true/false；数字、字符串、数组或对象按缺证处理，不再通过Jackson强转获得可信账本标志。缺字段/null和程序化Boolean setter语义保持。
 
 解析器只绑定这一属性，不改全局ObjectMapper、其它字段或输出JSON；各调用方仍沿原待确认/UNKNOWN规则。回滚、主动决议与派发镜像的隔离验证不代表真实User/TC资金链路闭环。
+
+### CM-18 User身份字段原生正整数解析（16T192）
+
+Pay接收User状态的userId、branchId时，只接受JSON原生整数且值在1..Long.MAX_VALUE。小数、数字字符串、非正数或越界值按身份缺证处理，不能再因截断或强转匹配原用户/分支并授权资金投影、回滚决议或可信镜像。
+
+仅这两个字段使用专用解析器，public Long赋值、整数输出、全局ObjectMapper及账本原生布尔规则保持。各调用方沿原待确认/UNKNOWN规则；本批真实Jackson与隔离Pay Mapper验证不替代真实User/TC资金链路验证。

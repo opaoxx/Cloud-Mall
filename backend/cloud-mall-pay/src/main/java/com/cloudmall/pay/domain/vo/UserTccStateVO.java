@@ -1,6 +1,7 @@
 package com.cloudmall.pay.domain.vo;
 
 import com.cloudmall.pay.util.UserTccLedgerBooleanDeserializer;
+import com.cloudmall.pay.util.UserTccPositiveLongDeserializer;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
@@ -9,6 +10,7 @@ import java.math.BigDecimal;
 /** User TCC 只读状态响应。 */
 public class UserTccStateVO {
   /** 用户主键。 */
+  @JsonDeserialize(using = UserTccPositiveLongDeserializer.class)
   public Long userId;
 
   /** 支付号。 */
@@ -30,6 +32,7 @@ public class UserTccStateVO {
   public String xid;
 
   /** User 分支标识。 */
+  @JsonDeserialize(using = UserTccPositiveLongDeserializer.class)
   public Long branchId;
 
   /** User 业务状态。 */
