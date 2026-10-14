@@ -31,7 +31,7 @@
 
 - 复用 T188–T191 owned fixture、真实 Jackson 与既有 Store/Mapper；UserClient/证据替身和程序化事务沿各测试既有边界，不启动业务 App、TC/RM 或真实 User HTTP。
 - 旧 red：rollback CANCELLED 的 branch `31.9` 曾变成31并实际 Pay FAILED；Abort TRYING 的 userId `7.9` 曾变成7并实际提交 ROLLBACK；Bridge GET CANCELLED 的 branch `7.9` 曾变成7并实际终态镜像。修复后四类 malformed identity 在 rollback/Abort/Bridge 入口均阻断，不写可信结果。
-- 修复后覆盖 userId/branchId fractional、text、其它非原生 token；ledger 使用原生 false 并明确 `ledgerAppliedPresent=true`，避免把本批身份缺证与 T191 混淆。既有正整数矩阵、显式 true/false、missing/null 回归保持。
+- 修复后 native 覆盖 userId/branchId 的四类 fractional/text 变体；其它非原生 token 类型由 Unit 覆盖。ledger 使用原生 false 并明确 `ledgerAppliedPresent=true`，避免把本批身份缺证与 T191 混淆。既有正整数矩阵、显式 true/false、missing/null 回归保持。
 - native 只证明 User JSON 进入现有本地证据/Store 前的身份解析，不冒称真实 User/HTTP/TC 或完整资金因果。
 
 ## 5. 明确边界
