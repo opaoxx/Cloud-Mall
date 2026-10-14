@@ -93,7 +93,7 @@ public interface PayTccDeliveryMapper extends BaseMapper<PayTccDeliveryPO> {
           + " execution.pay_no=delivery.pay_no JOIN pay_record payment ON"
           + " payment.pay_no=execution.pay_no SET delivery.lease_owner=#{token},"
           + "delivery.lease_until=#{leaseUntil},delivery.attempts=LEAST(delivery.attempts+1,31),delivery.updated_at=#{now}"
-          + " WHERE delivery.pay_no=#{payNo} AND BINARY delivery.state IN"
+          + " WHERE BINARY delivery.pay_no=BINARY #{payNo} AND BINARY delivery.state IN"
           + " ('READY','CANCEL_REQUESTED','CANCEL_RECONCILING','ORDER_SYNC_UNKNOWN','REFUND_PENDING')"
           + " AND delivery.next_retry_at<=#{now} AND (delivery.lease_until IS NULL OR"
           + " delivery.lease_until<=#{now}) AND BINARY execution.state='COMMITTED' AND BINARY"

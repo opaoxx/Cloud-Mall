@@ -63,6 +63,7 @@ public class PayTccDeliveryStore {
     if (execution == null
         || !"COMMITTED".equals(execution.state)
         || !"COMMIT".equals(execution.decision)) return null;
+    if (execution.payNo == null || !Objects.equals(execution.payNo, payNo)) throw conflict();
     if (records.size() != 1) throw conflict();
     requirePayment(records.get(0), execution);
     PayTccDeliveryPO current = deliveries.selectForUpdate(payNo);
@@ -179,9 +180,12 @@ public class PayTccDeliveryStore {
         now);
   }
 
-  /** 读取原任务，不补建、扣款或调用远程资源。 */
+  /** 读取精确原支付号任务；缺失仍NULL，别名不返回，不补建或调用远程资源。 */
   public PayTccDeliveryPO read(String payNo) {
-    return deliveries.selectByPayNo(payNo);
+    PayTccDeliveryPO current = deliveries.selectByPayNo(payNo);
+    if (current != null && (current.payNo == null || !Objects.equals(current.payNo, payNo)))
+      throw conflict();
+    return current;
   }
 
   /** 返回已落库的交付终态。 */

@@ -77,6 +77,9 @@ class PayLegacyRefundLedgerMySqlIT {
   /** execution观察验收专用owned真实Mapper。 */
   private com.cloudmall.pay.mapper.PayTccExecutionMapper executionObservationMapper;
 
+  /** delivery请求身份验收使用的owned真实Mapper。 */
+  private com.cloudmall.pay.mapper.PayTccDeliveryMapper deliveryIdentityMapper;
+
   /** 取消恢复身份验收使用的owned实际Mapper。 */
   private com.cloudmall.pay.mapper.PayTccCancelMapper cancelRecoveryIdentityMapper;
 
@@ -4683,6 +4686,284 @@ class PayLegacyRefundLedgerMySqlIT {
         decision,
         LocalDateTime.of(2026, 10, 1, 0, 0),
         LocalDateTime.of(2026, 10, 1, 0, 0));
+  }
+
+  /** 原payment/execution一致也不能据其为另一个请求支付号创建交付任务。 */
+  @Test
+  void deliveryEnsureCannotCreateFromAnotherRequestedPayment() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("PAY-1");
+    assertEquals("PAY-1", executionObservationMapper.selectByPayNo("pay-1").payNo);
+    var before = ownedDeliveryIdentityFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      returned.set(deliveryIdentityTransaction(() -> store.ensure("pay-1")).payNo));
+          assertEquals("PAY_TCC_DELIVERY_CONFLICT", failure.getCode());
+        },
+        () ->
+            assertNull(
+                returned.get(), "alias ensure must not create another original payment task"),
+        () -> assertEquals(before, ownedDeliveryIdentityFacts()));
+  }
+
+  /** 精确同源三表不能使别名请求取得另一任务lease或增加attempt。 */
+  @Test
+  void deliveryClaimCannotLeaseAnotherOriginalPayment() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("PAY-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("PAY-1")));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET next_retry_at=?", LocalDateTime.of(2026, 10, 1, 0, 0));
+    var before = ownedDeliveryIdentityFacts();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            assertNull(
+                deliveryIdentityTransaction(() -> store.claim("pay-1", "t182-worker")),
+                "alias request must not lease another original task"),
+        () -> assertEquals(before, ownedDeliveryIdentityFacts()));
+  }
+
+  /** 普通读取不能输出另一个原支付号交付终态。 */
+  @Test
+  void deliveryReadCannotReturnAnotherPaymentTerminal() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("PAY-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("PAY-1")));
+    fixture.update("UPDATE pay_tcc_delivery SET state='SUCCESS'");
+    fixture.update("UPDATE pay_record SET status='SUCCESS'");
+    var before = ownedDeliveryIdentityFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(store.read("pay-1").payNo));
+          assertEquals("PAY_TCC_DELIVERY_CONFLICT", failure.getCode());
+        },
+        () -> assertNull(returned.get(), "alias read must not supply another original terminal"),
+        () -> assertEquals(before, ownedDeliveryIdentityFacts()));
+  }
+
+  /** 两方向大小写请求×七状态，ensure/read拒绝，claim精确零行且四表不动。 */
+  @Test
+  void deliveryIdentityRejectsAliasesAcrossEveryState() {
+    var store = ownedDeliveryIdentityStore();
+    for (boolean uppercaseOriginal : List.of(false, true)) {
+      String original = uppercaseOriginal ? "PAY-1" : "pay-1";
+      String requested = uppercaseOriginal ? "pay-1" : "PAY-1";
+      for (String state :
+          List.of(
+              "READY",
+              "CANCEL_REQUESTED",
+              "CANCEL_RECONCILING",
+              "ORDER_SYNC_UNKNOWN",
+              "REFUND_PENDING",
+              "SUCCESS",
+              "REFUNDED")) {
+        seedOwnedDeliveryIdentity(original);
+        assertNotNull(deliveryIdentityTransaction(() -> store.ensure(original)));
+        fixture.update(
+            "UPDATE pay_tcc_delivery SET state=?,next_retry_at=?",
+            state,
+            LocalDateTime.of(2026, 10, 1, 0, 0));
+        var before = ownedDeliveryIdentityFacts();
+        assertEquals(
+            "PAY_TCC_DELIVERY_CONFLICT",
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> deliveryIdentityTransaction(() -> store.ensure(requested)))
+                .getCode());
+        assertEquals(
+            "PAY_TCC_DELIVERY_CONFLICT",
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class, () -> store.read(requested))
+                .getCode());
+        var currentTime = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
+        deliveryIdentityTransaction(
+            () -> {
+              assertEquals(
+                  0,
+                  deliveryIdentityMapper.claim(
+                      requested, "t182-direct", currentTime.plusSeconds(60), currentTime));
+              return null;
+            });
+        assertNull(deliveryIdentityTransaction(() -> store.claim(requested, "t182-worker")));
+        assertEquals(before, ownedDeliveryIdentityFacts());
+      }
+    }
+  }
+
+  /** 精确原键保持唯一READY/重入、七状态只读、五活动lease/31上限及原阻断。 */
+  @Test
+  void canonicalDeliveryIdentityKeepsEnsureClaimAndReadSemantics() {
+    var store = ownedDeliveryIdentityStore();
+    seedOwnedDeliveryIdentity("pay-1");
+    var before = ownedDeliveryIdentityFacts();
+    var created = deliveryIdentityTransaction(() -> store.ensure("pay-1"));
+    assertEquals("pay-1", created.payNo);
+    assertEquals("READY", created.state);
+    assertEquals("refund:pay-1", created.refundOperationKey);
+    assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM pay_tcc_delivery", Integer.class));
+    var after = ownedDeliveryIdentityFacts();
+    for (int tableIndex : List.of(0, 1, 2))
+      assertEquals(before.get(tableIndex), after.get(tableIndex));
+    assertEquals(created.id, deliveryIdentityTransaction(() -> store.ensure("pay-1")).id);
+    assertEquals(after, ownedDeliveryIdentityFacts());
+    var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+    for (String state :
+        List.of(
+            "READY",
+            "CANCEL_REQUESTED",
+            "CANCEL_RECONCILING",
+            "ORDER_SYNC_UNKNOWN",
+            "REFUND_PENDING",
+            "SUCCESS",
+            "REFUNDED")) {
+      seedOwnedDeliveryIdentity("pay-1");
+      assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+      fixture.update(
+          "UPDATE pay_tcc_delivery SET state=?,next_retry_at=?,last_error='owned-old-error'",
+          state,
+          LocalDateTime.of(2026, 10, 1, 0, 0));
+      String paymentState =
+          List.of("ORDER_SYNC_UNKNOWN", "REFUND_PENDING", "SUCCESS", "REFUNDED").contains(state)
+              ? state
+              : "PENDING";
+      fixture.update("UPDATE pay_record SET status=?", paymentState);
+      var sourceFacts = ownedDeliveryIdentityFacts();
+      var ensured = deliveryIdentityTransaction(() -> store.ensure("pay-1"));
+      assertEquals(state, ensured.state);
+      assertEquals(json.valueToTree(ensured), json.valueToTree(store.read("pay-1")));
+      assertEquals(sourceFacts, ownedDeliveryIdentityFacts());
+      if (state.equals("SUCCESS") || state.equals("REFUNDED")) {
+        assertNull(deliveryIdentityTransaction(() -> store.claim("pay-1", "t182-worker")));
+        assertEquals(sourceFacts, ownedDeliveryIdentityFacts());
+      } else {
+        var claimed = deliveryIdentityTransaction(() -> store.claim("pay-1", "t182-worker"));
+        assertNotNull(claimed);
+        assertEquals(state, claimed.state);
+        assertEquals("t182-worker", claimed.leaseOwner);
+        assertEquals(1, claimed.attempts);
+        assertEquals(claimed.updatedAt.plusSeconds(60), claimed.leaseUntil);
+        assertEquals("owned-old-error", claimed.lastError);
+        var claimedFacts = ownedDeliveryIdentityFacts();
+        assertNull(deliveryIdentityTransaction(() -> store.claim("pay-1", "t182-second")));
+        assertEquals(claimedFacts, ownedDeliveryIdentityFacts());
+      }
+    }
+    seedOwnedDeliveryIdentity("pay-1");
+    assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+    fixture.update(
+        "UPDATE pay_tcc_delivery SET attempts=31,next_retry_at=?",
+        LocalDateTime.of(2026, 10, 1, 0, 0));
+    assertEquals(31, deliveryIdentityTransaction(() -> store.claim("pay-1", "t182-cap")).attempts);
+    for (String blocked :
+        List.of(
+            "future",
+            "held",
+            "execution-state",
+            "decision",
+            "legacy",
+            "order-tuple",
+            "refund-key",
+            "missing")) {
+      seedOwnedDeliveryIdentity("pay-1");
+      assertNotNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+      fixture.update(
+          "UPDATE pay_tcc_delivery SET next_retry_at=?", LocalDateTime.of(2026, 10, 1, 0, 0));
+      switch (blocked) {
+        case "future" ->
+            fixture.update(
+                "UPDATE pay_tcc_delivery SET next_retry_at=?",
+                LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+        case "held" ->
+            fixture.update(
+                "UPDATE pay_tcc_delivery SET lease_owner='held-worker',lease_until=?",
+                LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")).plusDays(1));
+        case "execution-state" -> fixture.update("UPDATE pay_tcc_execution SET state='RUNNING'");
+        case "decision" -> fixture.update("UPDATE pay_tcc_execution SET decision='ROLLBACK'");
+        case "legacy" -> fixture.update("UPDATE pay_record SET debit_mode='LEGACY'");
+        case "order-tuple" -> fixture.update("UPDATE pay_record SET order_no='ORDER-1'");
+        case "refund-key" ->
+            fixture.update("UPDATE pay_tcc_delivery SET refund_operation_key='refund:other-pay'");
+        default -> fixture.update("DELETE FROM pay_tcc_delivery");
+      }
+      var facts = ownedDeliveryIdentityFacts();
+      assertNull(deliveryIdentityTransaction(() -> store.claim("pay-1", "t182-blocked")), blocked);
+      assertEquals(facts, ownedDeliveryIdentityFacts());
+    }
+    for (String state : List.of("CLAIMED", "RUNNING", "ROLLEDBACK")) {
+      seedOwnedDeliveryIdentity("PAY-1");
+      fixture.update("UPDATE pay_tcc_execution SET state=?", state);
+      var facts = ownedDeliveryIdentityFacts();
+      assertNull(deliveryIdentityTransaction(() -> store.ensure("pay-1")));
+      assertEquals(facts, ownedDeliveryIdentityFacts());
+    }
+    assertNull(store.read("absent-pay"));
+  }
+
+  /** 原Execution/Delivery DDL只克隆到owned，真实三Mapper同源，不启应用/TC。 */
+  private com.cloudmall.pay.service.impl.PayTccDeliveryStore ownedDeliveryIdentityStore() {
+    ownedExecutionObservationStore();
+    fixture.execute("DROP TABLE IF EXISTS pay_tcc_delivery");
+    fixture.execute(
+        (String) source.queryForMap("SHOW CREATE TABLE pay_tcc_delivery").get("Create Table"));
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccDeliveryMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      deliveryIdentityMapper =
+          session.getMapper(com.cloudmall.pay.mapper.PayTccDeliveryMapper.class);
+      return new com.cloudmall.pay.service.impl.PayTccDeliveryStore(
+          deliveryIdentityMapper,
+          records,
+          executionObservationMapper,
+          mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),
+          mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class));
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned delivery identity factory failed", failure);
+    }
+  }
+
+  /** 同一个原支付号的TCC payment/COMMITTED execution，操作键也按原拼写保存。 */
+  private void seedOwnedDeliveryIdentity(String originalPayNo) {
+    seedOwnedExecution("COMMITTED", "COMMIT", "t182-xid");
+    fixture.update("DELETE FROM pay_debit_intent");
+    fixture.update("UPDATE pay_record SET pay_no=?,debit_mode='TCC'", originalPayNo);
+    fixture.update(
+        "UPDATE pay_tcc_execution SET pay_no=?,operation_key=?,ledger_key=?",
+        originalPayNo,
+        "tcc-debit:" + originalPayNo,
+        originalPayNo);
+    fixture.update("DELETE FROM pay_tcc_delivery");
+  }
+
+  /** 程序化短事务验证实际FOR UPDATE/INSERT/claim，不代理Spring REQUIRES_NEW。 */
+  private com.cloudmall.pay.domain.po.PayTccDeliveryPO deliveryIdentityTransaction(
+      java.util.function.Supplier<com.cloudmall.pay.domain.po.PayTccDeliveryPO> action) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    return template.execute(transactionStatus -> action.get());
+  }
+
+  /** 原Pay/Intent/Execution/Delivery四表完整facts。 */
+  private List<List<Map<String, Object>>> ownedDeliveryIdentityFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
+    for (String table : List.of("pay_tcc_execution", "pay_tcc_delivery"))
+      facts.add(fixture.queryForList("SELECT * FROM " + table + " ORDER BY id"));
+    return facts;
   }
 
   /** 输入别名不能领取另一原支付号任务，更不能改变其租约/attempt。 */
