@@ -21,14 +21,14 @@ if (!"TRYING".equals(user.state)
 ### 3.1 Unit
 
 - 用真实 Jackson DTO 验证 missing/null/true/false 的 `ledgerApplied` 与 `ledgerAppliedPresent` 组合；missing/null/true 必须在最终 Store 前被拒，false 保持一次 proof→User GET→requestRollback。
-- 覆盖 User state、tuple、金额、XID/branch、preparedProof 失败、RootContext 非空等既有优先级；缺字段门不能抢在这些既有更高优先级之前，也不能绕过 RootContext/preparedProof。
+- 覆盖 User state、tuple、金额、XID/branch、preparedProof 失败、RootContext 非空等既有优先级；RootContext、preparedProof、User GET wrapper/state 是更早门，Presence 位于 TRYING 状态门之后、primitive `ledgerApplied` 门之前，tuple/金额/分支等后续字段门顺序保持。
 - Presence 字段为 `@JsonIgnore`，不会改变响应 JSON；既有 public/claimed 或非 Abort 消费者的语义不改。
 
 ### 3.2 Owned native
 
 - 复用 T187 owned fixture，使用真实 AbortService/AbortStore 与 Pay/Execution/Cancel/Intent Mapper；`dispatch`/`receipt`/Evidence classify 与 UserClient 为受控替身，不启动业务 App、TC/RM 或真实 Feign/User。
-- 旧 red：真实 Jackson missing public 与 null claimed 曾在 Pay PENDING 上提交回滚并改变 rollback facts；修复后 missing/null/true × `NONE/COMMIT/ROLLBACK` decision × Pay `PENDING/ORDER_SYNC_UNKNOWN/FAILED` 的 public/claimed 入口均无六表写入。
-- 显式 false 覆盖四种原合法场景，保持 `ROLLBACK_REQUESTED`/`ROLLBACK`、`nextRecovery`、owner/lease/attempts 不变且不把 Pay 置 FAILED；重复/COMMIT 既有门优先。
+- 旧 red：missing 为 execution.state=`RUNNING`、execution.decision=`NONE`、Pay.status=`PENDING`、User.state=`TRYING`；null 为 execution.state=`UNKNOWN`、execution.decision=`NONE`、Pay.status=`ORDER_SYNC_UNKNOWN`、User.state=`TRYING`，两者均曾提交回滚。修复后 missing/null/true × execution.state(`RUNNING`,`UNKNOWN`) × Pay.status(`PENDING`,`ORDER_SYNC_UNKNOWN`) 共12组，User.state 固定 `TRYING`、decision 固定 `NONE`，均无六表写入。本批只有 `requestRollback` 入口，不使用 public/claimed 分类。
+- 显式 false 覆盖四种原合法场景，保持 `ROLLBACK_REQUESTED`/`ROLLBACK`；`nextRecovery` 按原逻辑更新为 `LEAST(原未来值,本次 now)`，owner/lease/attempts 与 Pay/其它表不变且不把 Pay 置 FAILED。重复/COMMIT 仍由原拒绝门优先。
 - native 只证明程序化本地 AbortStore 写入保护；不冒称真实 Fence、User 网络、TC 或完整回滚因果。原库指纹、owned 清理和资源关闭保持。
 
 ## 4. 明确边界
