@@ -72,6 +72,22 @@ EOF、超时或错误响应返回失败；Redis `NOAUTH` 表示协议可达，�
 原端口；未改端口、镜像、数据卷或 WSL 配置。此恢复不能保证故障不会再次出现。
 恢复时应先记录证据和备份，再按单服务操作，勿以 `down -v` 或清空数据卷排障。
 
+Docker Desktop 自身未启动、`dockerDesktopLinuxEngine` 管道不存在，且 backend
+日志报 `sailor-ingest.sock` / `The file cannot be accessed by the system` （错误 1920）时，
+先检查 Desktop 的启动上下文。2026-10-14 本机只读对照中，相同用户、程序和
+中等完整性级别访问同一逻辑 socket 路径，Agent 命令行报 1920，经 Windows WMI
+启动的进程可正常打开；两端包身份 API 均报无包身份。这证实了访问上下文差异，
+底层 Windows/MSIX 机制仍未确证。[上游问题记录](https://github.com/openai/codex/issues/52698)
+可作排查线索。
+
+遇到该现象，保留日志和数据，从 Windows 开始菜单正常启动 Docker Desktop，再用
+`docker info` 和上述协议探测确认恢复。如需先退出 Desktop，使用官方
+[`docker desktop stop --timeout 30`](https://docs.docker.com/reference/cli/docker/desktop/stop/)
+并确认完成；超时或结果不明时停止后续启停。避免在失败的 Agent 上下文中反复
+`Start-Process` 拉起 Desktop，也不要删除 socket/数据卷、改 ACL 或重置 Docker/WSL。
+本次观察到 Desktop 由 Explorer 启动后引擎可用，12 个常驻容器 healthy；
+`nacos-bootstrap` 为一次性容器，成功退出码 0 属正常状态。这些是本次运行态验证，不保证下次启动不再复发。
+
 2026-10-08 本机排除范围覆盖 8088/8091，且无残留
 Java/javaw 进程，因此本次映射改为上述高位端口。业务固定 8080–8086 当时也在
 排除范围内；中间件启动成功不代表这些 IDEA 端口已经可绑定，启动业务前须另行
