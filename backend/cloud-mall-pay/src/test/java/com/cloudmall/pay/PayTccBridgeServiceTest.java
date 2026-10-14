@@ -217,6 +217,136 @@ class PayTccBridgeServiceTest {
     org.mockito.Mockito.verifyNoInteractions(userTccClient, persistence, payRecordMapper);
   }
 
+  /** 两入口的missing/null不能请求可信镜像或学习branch，POST消费后只GET。 */
+  @Test
+  void missingBridgeLedgerFieldsOnlyRequestUnknownMirrors() throws Exception {
+    for (String userStateName : List.of("TRYING", "CANCELLED"))
+      for (String variant : List.of("missing", "null"))
+        for (boolean post : List.of(false, true)) {
+          setUp();
+          var decoded = decodedBridgeLedgerState(userStateName, variant, 7L);
+          org.junit.jupiter.api.Assertions.assertFalse(decoded.ledgerApplied);
+          org.junit.jupiter.api.Assertions.assertFalse(decoded.ledgerAppliedPresent);
+          var row = arrangeBridgeLedgerReply(post, decoded, null);
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "TRY_UNKNOWN", callBridgeLedgerReply(post).state);
+          org.junit.jupiter.api.Assertions.assertNull(row.userBranchId);
+          verify(persistence)
+              .mirror(
+                  org.mockito.ArgumentMatchers.eq("pay-test"),
+                  any(),
+                  org.mockito.ArgumentMatchers.eq("TRY_UNKNOWN"),
+                  org.mockito.ArgumentMatchers.isNull(),
+                  org.mockito.ArgumentMatchers.eq("BizException"),
+                  any());
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "TRY_UNKNOWN", service.recover("pay-test").state);
+          verify(userTccClient, org.mockito.Mockito.times(post ? 1 : 0))
+              .prepare(any(), any(), any(), any(), any(), any());
+          verify(userTccClient, org.mockito.Mockito.times(post ? 1 : 2))
+              .state(any(), any(), any(), any(), any(), any());
+        }
+  }
+
+  /** 明确false/true的原镜像与UNKNOWN早返保持，内部presence不进入JSON。 */
+  @Test
+  void explicitLedgerProofAndUnknownEarlyReturnKeepMappings() throws Exception {
+    for (String userStateName : List.of("TRYING", "CANCELLED", "CONFIRMED", "UNKNOWN"))
+      for (boolean post : List.of(false, true)) {
+        setUp();
+        String variant =
+            userStateName.equals("UNKNOWN")
+                ? "missing"
+                : userStateName.equals("CONFIRMED") ? "true" : "false";
+        var decoded = decodedBridgeLedgerState(userStateName, variant, 7L);
+        org.junit.jupiter.api.Assertions.assertEquals(
+            !userStateName.equals("UNKNOWN"), decoded.ledgerAppliedPresent);
+        org.junit.jupiter.api.Assertions.assertFalse(
+            new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsString(decoded)
+                .contains("ledgerAppliedPresent"));
+        arrangeBridgeLedgerReply(post, decoded, null);
+        String target =
+            userStateName.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : userStateName.equals("UNKNOWN") ? "TRY_UNKNOWN" : userStateName;
+        var result = callBridgeLedgerReply(post);
+        org.junit.jupiter.api.Assertions.assertEquals(target, result.state);
+        if (userStateName.equals("UNKNOWN")) {
+          org.junit.jupiter.api.Assertions.assertNull(result.userBranchId);
+          org.junit.jupiter.api.Assertions.assertEquals(
+              post ? "User POST 状态未知" : "User 状态仍未知", result.lastError);
+        } else {
+          org.junit.jupiter.api.Assertions.assertEquals(7L, result.userBranchId);
+          org.junit.jupiter.api.Assertions.assertNull(result.lastError);
+        }
+        verify(persistence)
+            .mirror(
+                org.mockito.ArgumentMatchers.eq("pay-test"),
+                any(),
+                org.mockito.ArgumentMatchers.eq(target),
+                any(),
+                any(),
+                any());
+      }
+  }
+
+  /** 原永久branch冲突先于缺失presence，不能吞成普通未知镜像。 */
+  @Test
+  void branchConflictPrecedesMissingLedgerPresence() throws Exception {
+    for (boolean post : List.of(false, true)) {
+      setUp();
+      var row =
+          arrangeBridgeLedgerReply(post, decodedBridgeLedgerState("TRYING", "missing", 9L), 7L);
+      var failure = assertThrows(BizException.class, () -> callBridgeLedgerReply(post));
+      org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+      org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+      org.junit.jupiter.api.Assertions.assertEquals(7L, row.userBranchId);
+      verify(persistence, never()).mirror(any(), any(), any(), any(), any(), any());
+    }
+  }
+
+  /** 保Bridge逻辑和参数，持久化为替身；真实CAS由owned native另验。 */
+  private PayTccDispatchPO arrangeBridgeLedgerReply(
+      boolean post, UserTccStateVO reply, Long existingBranch) {
+    var row = dispatch(post ? "PREPARED" : "POST_ATTEMPTED");
+    row.userBranchId = existingBranch;
+    when(dispatchMapper.selectByPayNo("pay-test")).thenReturn(row);
+    when(payRecordMapper.selectByPayNo("pay-test")).thenReturn(List.of(payment("TCC", "PENDING")));
+    when(persistence.markPostAttempted(any(), any())).thenReturn(true);
+    when(persistence.mirror(any(), any(), any(), any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              row.state = invocation.getArgument(2);
+              Long branch = invocation.getArgument(3);
+              if (row.userBranchId == null && branch != null) row.userBranchId = branch;
+              row.lastError = invocation.getArgument(4);
+              return true;
+            });
+    when(userTccClient.prepare(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(reply));
+    when(userTccClient.state(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(reply));
+    return row;
+  }
+
+  /** 两条真实public入口，POST使用@BeforeEach提供的原XID。 */
+  private com.cloudmall.pay.domain.vo.PayTccDispatchVO callBridgeLedgerReply(boolean post) {
+    return post ? service.dispatch(request()) : service.recover("pay-test");
+  }
+
+  /** 实际Jackson解DTO，以原注解区分缺字段/null/明确boolean。 */
+  private UserTccStateVO decodedBridgeLedgerState(String userStateName, String variant, Long branch)
+      throws com.fasterxml.jackson.core.JsonProcessingException {
+    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.node.ObjectNode json =
+        mapper.valueToTree(state(userStateName, branch, false));
+    if (variant.equals("missing")) json.remove("ledgerApplied");
+    else if (variant.equals("null")) json.putNull("ledgerApplied");
+    else json.put("ledgerApplied", variant.equals("true"));
+    return mapper.treeToValue(json, UserTccStateVO.class);
+  }
+
   private void verifyNoInteractionsForDisabledPath() {
     verify(payRecordMapper, never()).selectByPayNo(any());
     verify(dispatchMapper, never()).selectByPayNo(any());
@@ -267,7 +397,7 @@ class PayTccBridgeServiceTest {
     response.xid = "xid-pay-test";
     response.branchId = branchId;
     response.state = state;
-    response.ledgerApplied = ledgerApplied;
+    response.setLedgerApplied(ledgerApplied);
     return response;
   }
 }

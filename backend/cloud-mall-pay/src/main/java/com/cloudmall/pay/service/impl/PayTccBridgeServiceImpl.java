@@ -266,6 +266,7 @@ public class PayTccBridgeServiceImpl implements PayTccBridgeService {
     if (state.branchId == null || state.branchId <= 0) throw unavailable("User 分支标识缺失");
     if (dispatch.userBranchId != null && !dispatch.userBranchId.equals(state.branchId))
       throw new BizException("PAY_TCC_DISPATCH_CONFLICT", "User 分支标识不一致", 409);
+    if (!state.ledgerAppliedPresent) throw unavailable("User账本证据缺失");
     if ("CONFIRMED".equals(state.state) && !state.ledgerApplied) {
       throw unavailable("User CONFIRMED 缺少 APPLIED 账本");
     }

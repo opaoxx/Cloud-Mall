@@ -2518,3 +2518,9 @@ execution恢复收尾与原claim入口沿用同一token域：非NULL、非blank�
 主动回滚消费User TRYING状态时，要求ledgerApplied明确存在且为false；缺字段或JSON null保持原202待确认，不选择ROLLBACK决议，显式true仍拒绝。
 
 显式false仍按原证明和CAS选择ROLLBACK_REQUESTED，不代表回滚完成或Pay FAILED。原RootContext、双段本地事务与远端字段校验保持；本批隔离Mapper/程序化事务和受控User/Fence证据不替代真实TC/User链路验证。
+
+### CM-18 派发桥账本字段存在性（16T190）
+
+派发桥消费可确认的User状态时，要求ledgerApplied明确存在。TRYING/CANCELLED缺字段或JSON null沿原未知镜像路径处理，不学习新branch；已消费的Try POST权限不归还，后续仍只GET。
+
+UNKNOWN早返回、branch永久冲突及已有TRY_ACCEPTED不降级规则保持，明确false/true沿原状态映射。本批只修Bridge证据门，隔离Mapper与User替身验证不代表真实User/TC链路闭环。

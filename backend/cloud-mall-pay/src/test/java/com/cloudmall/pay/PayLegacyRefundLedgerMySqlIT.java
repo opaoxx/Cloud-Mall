@@ -6718,7 +6718,7 @@ class PayLegacyRefundLedgerMySqlIT {
       proof.amount = "10.00";
       proof.branchId = 7L;
       proof.state = "CONFIRMED";
-      proof.ledgerApplied = true;
+      proof.setLedgerApplied(true);
       when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(ApiResponse.ok(proof));
       var bridge = ownedDispatchBridge(persistence, user);
       var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch WHERE id=1");
@@ -6781,6 +6781,253 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(404, missingMirror.getHttpStatus());
     assertEquals(before, ownedDispatchLookupFacts());
     org.mockito.Mockito.verifyNoInteractions(user);
+  }
+
+  /** GET缺ledgerApplied的TRYING不能成为新的受理镜像或学习User branch。 */
+  @Test
+  void bridgeMissingLedgerGetCannotMirrorAcceptedState() {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(false);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.state(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("TRYING", "missing")));
+    var bridge = bridgeLedgerTransactions(persistence, user);
+    var result = bridge.recover("pay-1");
+    var row = dispatchMirrorMapper.selectByPayNo("pay-1");
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals("TRY_UNKNOWN", result.state),
+        () -> assertEquals("TRY_UNKNOWN", row.state),
+        () -> assertNull(row.userBranchId));
+  }
+
+  /** POST null布尔的CANCELLED不能成为新的终态；首次POST权限仍须消耗。 */
+  @Test
+  void bridgeNullLedgerPostCannotMirrorCancelledState() {
+    var persistence = ownedDispatchPersistence();
+    seedBridgeLedgerRow(true);
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.prepare(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(bridgeLedgerReply("CANCELLED", "null")));
+    var result = bridgeLedgerPost(bridgeLedgerTransactions(persistence, user));
+    var row = dispatchMirrorMapper.selectByPayNo("pay-1");
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals("TRY_UNKNOWN", result.state),
+        () -> assertEquals("TRY_UNKNOWN", row.state),
+        () -> assertNull(row.userBranchId),
+        () -> assertNotNull(row.postAttemptedAt));
+    verify(user).prepare(any(), any(), any(), any(), any(), any());
+  }
+
+  /** 缺字段/null跨GET/POST及TRYING/CANCELLED只镜像未知，不学习新branch或重发。 */
+  @Test
+  void incompleteBridgeLedgerEvidenceKeepsUnknownAndOnePost() {
+    var persistence = ownedDispatchPersistence();
+    for (String state : List.of("TRYING", "CANCELLED"))
+      for (String variant : List.of("missing", "null"))
+        for (boolean post : List.of(false, true)) {
+          seedBridgeLedgerRow(post);
+          var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+          var response = ApiResponse.ok(bridgeLedgerReply(state, variant));
+          when(user.prepare(any(), any(), any(), any(), any(), any())).thenReturn(response);
+          when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(response);
+          var bridge = bridgeLedgerTransactions(persistence, user);
+          var payBefore = rawIntentTimeFacts();
+          var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+          var result = post ? bridgeLedgerPost(bridge) : bridge.recover("pay-1");
+          assertEquals("TRY_UNKNOWN", result.state);
+          assertNull(result.userBranchId);
+          assertEquals("BizException", result.lastError);
+          var after = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+          assertEquals("TRY_UNKNOWN", after.get("state"));
+          assertNull(after.get("user_branch_id"));
+          if (post) assertNotNull(after.get("post_attempted_at"));
+          else assertEquals(before.get("post_attempted_at"), after.get("post_attempted_at"));
+          for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+            before.remove(changed);
+            after.remove(changed);
+          }
+          if (post) {
+            before.remove("post_attempted_at");
+            after.remove("post_attempted_at");
+          }
+          assertEquals(before, after);
+          assertEquals(payBefore, rawIntentTimeFacts());
+          assertEquals("TRY_UNKNOWN", bridge.recover("pay-1").state);
+          assertNull(dispatchMirrorMapper.selectByPayNo("pay-1").userBranchId);
+          verify(user, org.mockito.Mockito.times(post ? 1 : 2))
+              .state(any(), any(), any(), any(), any(), any());
+          verify(user, org.mockito.Mockito.times(post ? 1 : 0))
+              .prepare(any(), any(), any(), any(), any(), any());
+          assertEquals(payBefore, rawIntentTimeFacts());
+        }
+  }
+
+  /** 显式布尔的原可信镜像保持，已有受理不降级/UNKNOWN早返/branch冲突不变。 */
+  @Test
+  void explicitBridgeLedgerEvidenceAndEarlierGuardsRemainUnchanged() {
+    var persistence = ownedDispatchPersistence();
+    for (String state : List.of("TRYING", "CANCELLED", "CONFIRMED"))
+      for (boolean post : List.of(false, true)) {
+        seedBridgeLedgerRow(post);
+        var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+        var response =
+            ApiResponse.ok(bridgeLedgerReply(state, state.equals("CONFIRMED") ? "true" : "false"));
+        when(user.prepare(any(), any(), any(), any(), any(), any())).thenReturn(response);
+        when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(response);
+        var bridge = bridgeLedgerTransactions(persistence, user);
+        var payBefore = rawIntentTimeFacts();
+        var before = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+        var result = post ? bridgeLedgerPost(bridge) : bridge.recover("pay-1");
+        assertEquals(state.equals("TRYING") ? "TRY_ACCEPTED" : state, result.state);
+        assertEquals(7L, result.userBranchId);
+        assertNull(result.lastError);
+        var after = fixture.queryForMap("SELECT * FROM pay_tcc_dispatch");
+        for (String changed : List.of("state", "user_branch_id", "last_error", "updated_at")) {
+          before.remove(changed);
+          after.remove(changed);
+        }
+        if (post) {
+          assertNotNull(after.get("post_attempted_at"));
+          before.remove("post_attempted_at");
+          after.remove("post_attempted_at");
+        }
+        assertEquals(before, after);
+        assertEquals(payBefore, rawIntentTimeFacts());
+      }
+    for (String state : List.of("TRYING", "CANCELLED"))
+      for (String variant : List.of("missing", "null")) {
+        seedBridgeLedgerRow(false);
+        fixture.update("UPDATE pay_tcc_dispatch SET state='TRY_ACCEPTED',user_branch_id=7");
+        var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+        when(user.state(any(), any(), any(), any(), any(), any()))
+            .thenReturn(ApiResponse.ok(bridgeLedgerReply(state, variant)));
+        var before = ownedDispatchLookupFacts();
+        assertEquals(
+            "TRY_ACCEPTED", bridgeLedgerTransactions(persistence, user).recover("pay-1").state);
+        assertEquals(before, ownedDispatchLookupFacts());
+        verify(user, never()).prepare(any(), any(), any(), any(), any(), any());
+      }
+    for (boolean post : List.of(false, true)) {
+      seedBridgeLedgerRow(post);
+      var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+      var response = ApiResponse.ok(bridgeLedgerReply("UNKNOWN", "missing"));
+      when(user.prepare(any(), any(), any(), any(), any(), any())).thenReturn(response);
+      when(user.state(any(), any(), any(), any(), any(), any())).thenReturn(response);
+      var bridge = bridgeLedgerTransactions(persistence, user);
+      var result = post ? bridgeLedgerPost(bridge) : bridge.recover("pay-1");
+      assertEquals("TRY_UNKNOWN", result.state);
+      assertNull(result.userBranchId);
+      assertEquals(post ? "User POST 状态未知" : "User 状态仍未知", result.lastError);
+    }
+    seedBridgeLedgerRow(false);
+    fixture.update("UPDATE pay_tcc_dispatch SET user_branch_id=7");
+    var conflicting = bridgeLedgerReply("TRYING", "missing");
+    conflicting.branchId = 9L;
+    var user = mock(com.cloudmall.pay.feign.UserTccClient.class);
+    when(user.state(any(), any(), any(), any(), any(), any()))
+        .thenReturn(ApiResponse.ok(conflicting));
+    var before = ownedDispatchLookupFacts();
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class,
+            () -> bridgeLedgerTransactions(persistence, user).recover("pay-1"));
+    assertEquals("PAY_TCC_DISPATCH_CONFLICT", failure.getCode());
+    assertEquals(409, failure.getHttpStatus());
+    assertEquals(before, ownedDispatchLookupFacts());
+  }
+
+  /** 只在owned准备TCC原支付与派发，POST场景明确尚未消耗权限。 */
+  private void seedBridgeLedgerRow(boolean post) {
+    seedOwnedDispatch(post ? "PREPARED" : "POST_ATTEMPTED", null);
+    fixture.update("UPDATE pay_record SET debit_mode='TCC'");
+    fixture.update("DELETE FROM pay_debit_intent");
+    if (post) fixture.update("UPDATE pay_tcc_dispatch SET post_attempted_at=NULL");
+  }
+
+  /** 实际Jackson解析字段存在性，User状态为受控TRYING/CANCELLED/CONFIRMED/UNKNOWN。 */
+  private com.cloudmall.pay.domain.vo.UserTccStateVO bridgeLedgerReply(
+      String state, String ledgerVariant) {
+    var user = new com.cloudmall.pay.domain.vo.UserTccStateVO();
+    user.payNo = "pay-1";
+    user.userId = 7L;
+    user.orderNo = "order-1";
+    user.amount = "10.00";
+    user.xid = "t171-xid";
+    user.operationKey = "tcc-debit:pay-1";
+    user.ledgerKey = "pay-1";
+    user.branchId = 7L;
+    user.state = state;
+    user.setLedgerApplied(false);
+    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    com.fasterxml.jackson.databind.node.ObjectNode json = mapper.valueToTree(user);
+    if (ledgerVariant.equals("missing")) json.remove("ledgerApplied");
+    else if (ledgerVariant.equals("null")) json.putNull("ledgerApplied");
+    else json.put("ledgerApplied", ledgerVariant.equals("true"));
+    try {
+      var decoded = mapper.treeToValue(json, com.cloudmall.pay.domain.vo.UserTccStateVO.class);
+      assertEquals(
+          ledgerVariant.equals("false") || ledgerVariant.equals("true"),
+          decoded.ledgerAppliedPresent);
+      return decoded;
+    } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+      throw new IllegalStateException("owned bridge User decode failed", failure);
+    }
+  }
+
+  /** 真实Persistence的三个方法各自进入短事务，未运行Spring REQUIRES_NEW代理。 */
+  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
+      com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
+      com.cloudmall.pay.feign.UserTccClient user) {
+    var boundary = mock(com.cloudmall.pay.service.impl.PayTccDispatchPersistence.class);
+    var transactions =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    org.mockito.Mockito.doAnswer(
+            invocation ->
+                transactions.execute(
+                    transactionStatus -> actual.prepare(invocation.getArgument(0))))
+        .when(boundary)
+        .prepare(any());
+    org.mockito.Mockito.doAnswer(
+            invocation ->
+                dispatchTransaction(
+                    () ->
+                        actual.markPostAttempted(
+                            invocation.getArgument(0), invocation.getArgument(1))))
+        .when(boundary)
+        .markPostAttempted(any(), any());
+    org.mockito.Mockito.doAnswer(
+            invocation ->
+                dispatchTransaction(
+                    () ->
+                        actual.mirror(
+                            invocation.getArgument(0),
+                            invocation.getArgument(1),
+                            invocation.getArgument(2),
+                            invocation.getArgument(3),
+                            invocation.getArgument(4),
+                            invocation.getArgument(5))))
+        .when(boundary)
+        .mirror(any(), any(), any(), any(), any(), any());
+    return ownedDispatchBridge(boundary, user);
+  }
+
+  /** 公开dispatch重用原prepared锚点，只为一次POST提供原XID上下文并finally还原。 */
+  private com.cloudmall.pay.domain.vo.PayTccDispatchVO bridgeLedgerPost(
+      com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridge) {
+    String original = io.seata.core.context.RootContext.unbind();
+    io.seata.core.context.RootContext.bind("t171-xid");
+    try {
+      var request = new com.cloudmall.pay.domain.dto.PayTccDispatchDTO();
+      request.payNo = "pay-1";
+      request.userId = 7L;
+      request.orderNo = "order-1";
+      request.amount = BigDecimal.TEN;
+      return bridge.dispatch(request);
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+      if (original != null) io.seata.core.context.RootContext.bind(original);
+    }
   }
 
   /** 仅构造真实Bridge逻辑及owned Mapper，User为替身，不启用应用或真实网络。 */
