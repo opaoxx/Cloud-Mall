@@ -28,8 +28,8 @@
 
 ### 3.2 Owned MySQL
 
-- 使用原 execution DDL 与真实 Recovery/PublicState Mapper/Store；取消表缺失时只在 owned schema 调用实际 `ensureTable`，不复制生产 SQL。原 Pay/Intent/Execution/Cancel 指纹只读保持，不启动业务 App、TC/RM 或真实远端 User。
-- 旧 red：emoji65 owner 在 `ROLLEDBACK` 状态的 `NONE`、`COMMIT`、`ROLLBACK` decision 下实际可令 Store 投影 FAILED；`RUNNING` 状态保留原有 pending 拒绝控制。修复后六类数据库可存非法 token均不改变 Pay、Intent、Execution、Cancel 四表事实。
+- 使用原 execution DDL 与真实 PublicState Mapper/Store 及 Pay/Execution/Cancel/Intent Mapper；本批 native 不使用 RecoveryMapper，取消表缺失时只在 owned schema 调用实际 `ensureTable`，不复制生产 SQL。原 Pay/Intent/Execution/Cancel 指纹只读保持，不启动业务 App、TC/RM 或真实远端 User。
+- 旧 red 已实际覆盖 `ROLLEDBACK` 状态、`ROLLBACK` decision 下的 emoji65 owner 投影 FAILED；`NONE`/`COMMIT` 由修复后矩阵与原控制覆盖，不能写成旧 red 已实测。`RUNNING` 状态保留原有 pending 拒绝控制。修复后六类数据库可存非法 token均不改变 Pay、Intent、Execution、Cancel 四表事实。
 - native 只直接使用 PublicStateStore 与 Pay/Execution/Cancel/Intent Mapper；RecoveryMapper、Dispatch/Evidence 替身不参与本批 native。Service 超长 token 在 proof/User GET 前的提前拒绝由 Unit 验证，不将其写成 native 已证明的远端行为。
 - 合法四类 token 保留两种可写状态及 FAILED 重入；错 owner、过期 lease、资金门、别名支付和缺失事实保持原结果。
 - emoji65 的拒绝是 Java token 域约束，不是数据库字符容量错误；native 只使用列可表示的 token，ASCII129 仅 Unit。
