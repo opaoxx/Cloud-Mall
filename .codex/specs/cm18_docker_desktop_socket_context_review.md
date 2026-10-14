@@ -56,3 +56,11 @@ Issue 链接、Docker 日志和上下文差异只能分别作为线索、运行�
 ## 6. 明确不在范围
 
 不修改业务代码、Compose、Docker 镜像、端口、账号、named volume、ACL、Windows/WSL 配置、安装包或系统网络；不执行 force/kill、升级、重置、删卷、重命名 socket/目录或启动业务服务。允许 README 增加本机人工恢复说明：建议从 Windows 开始菜单正常启动 Docker Desktop，先执行只读上下文对照再操作，禁止反复 `Start-Process` 拉起失败实例、删除 socket 或重置环境，并要求恢复后重新验证现有 ports；不得新增自动启停脚本。该规格不证明 Docker Desktop 根因、不承诺 TC/RM/Java 或资金链路健康，也不改变 16T184 业务验证历史证据。
+
+## 7. 本轮结果与证据限制
+
+本轮记录的两轮同路径对照可复现：当前 Shell 的 `CreateFileW`/`fsutil` 结果为 error 1920/reparse=1，Hidden PowerShell 结果可读且 tag 为 `0x80000023`；两端用户、父 ACL、可执行文件和 package 信息一致，package 为 `15700`。因此结论仅为启动上下文访问差异，不能归因于 Explorer、WMI、MSIX 或 Docker Desktop 的具体内部机制。
+
+引擎随后恢复，且已完成只读验证：12 个原 cloud-mall 容器 healthy、bootstrap 一次性退出容器单独计数；原业务表清单/8 个 Pay checksum、Redis `88488` keys 与 2 个 expiry、原 ID/image/ports/network/mount 均保持，T184 两个 owned schema 不存在，MySQL/Redis 协议与 Nginx 三地址 HTTP 验证通过。该结果证明当前状态已恢复并保持数据一致，不证明恢复动作本身的完整因果链。
+
+操作证据存在限制：仅执行了 WMI stop helper，stdout 只有 `StoppingDesktop`，缺少完整 stop-result/退出码，未执行 WMI Start；恢复后观察到的 Desktop 父进程为 `explorer.exe`，因此不能把恢复归因于 WMI 启动。首次 IWR 复用旧 response 产生的无效 JSON、首次 CSV label 比较错误和 `docker ps -a` 混入 bootstrap 的记录均须保留为无效尝试/修正证据；正式验证使用 SID 比较、严格 12 healthy+1 bootstrap 分类和 Python direct 三地址协议结果。无需再次主动重启或 Compose start/recreate。
