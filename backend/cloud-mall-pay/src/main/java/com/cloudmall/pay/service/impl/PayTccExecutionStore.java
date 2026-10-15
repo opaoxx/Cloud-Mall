@@ -157,7 +157,7 @@ public class PayTccExecutionStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 读取原执行事实有效域和创建载荷；NULL XID保留prebegin，坏行不进入恢复。 */
+  /** 读取原执行事实与匹配的TCC支付来源；NULL XID保留prebegin，坏行不进入恢复。 */
   public PayTccExecutionPO read(String payNo) {
     // 1. 读取原支付号执行事实，缺失保留原404。
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
@@ -165,8 +165,23 @@ public class PayTccExecutionStore {
       throw new BizException("PAY_TCC_EXECUTION_NOT_FOUND", "TCC execution 不存在", 404);
     // 2. 与锁内写入口共用同一有效域，保持原校验顺序。
     validatePersistedExecution(execution, payNo);
-    // 3. 返回原执行事实，不改写任何字段。
+    // 3. 只读核对唯一原Pay及不可变载荷，不以当前支付进度限制恢复。
+    validatePaymentSource(execution, payNo);
     return execution;
+  }
+
+  /** 校验此读取窗口的原Pay来源，不加锁、不推断资金结果或读后的事实稳定性。 */
+  private void validatePaymentSource(PayTccExecutionPO execution, String payNo) {
+    List<PayRecordPO> records = payments.selectByPayNo(payNo);
+    if (records.size() != 1) throw conflict();
+    PayRecordPO payment = records.get(0);
+    if (payment == null
+        || !Objects.equals(payment.payNo, payNo)
+        || !"TCC".equals(payment.debitMode)
+        || !Objects.equals(payment.userId, execution.userId)
+        || !Objects.equals(payment.orderNo, execution.orderNo)
+        || payment.amount == null
+        || payment.amount.compareTo(execution.amount) != 0) throw conflict();
   }
 
   /** 返回有持久证据的两端终态或需人工核验的矛盾状态。 */

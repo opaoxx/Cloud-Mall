@@ -426,6 +426,8 @@ class PayTccExecutionStoreTest {
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var before = snapshotExecution(row);
+    org.mockito.Mockito.reset(payments);
+    when(payments.selectByPayNo(row.payNo)).thenReturn(List.of(matchingReadPayment(row)));
     var recovered = coordinator.recover(row.payNo);
     org.junit.jupiter.api.Assertions.assertNull(recovered.xid);
     org.junit.jupiter.api.Assertions.assertEquals("BEGIN_UNKNOWN", recovered.state);
@@ -437,7 +439,9 @@ class PayTccExecutionStoreTest {
                 org.mockito.ArgumentMatchers.eq("BEGIN_UNKNOWN"),
             org.mockito.ArgumentMatchers.eq("begin XID 尚无持久证据"), any());
     org.mockito.Mockito.verifyNoInteractions(
-        bridge, receiptService, evidence, transactions, payments, dispatches, receipts, cancels);
+        bridge, receiptService, evidence, transactions, dispatches, receipts, cancels);
+    verify(payments).selectByPayNo(row.payNo);
+    org.mockito.Mockito.verifyNoMoreInteractions(payments);
   }
 
   /** 单字段坏域在NULL/已绑定XID下均冲突，不将别名或未知值改成正常状态。 */
@@ -537,7 +541,8 @@ class PayTccExecutionStoreTest {
           org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
           verify(executions).selectByPayNo(row.payNo);
           org.mockito.Mockito.verifyNoMoreInteractions(executions);
-          org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+          org.mockito.Mockito.verifyNoMoreInteractions(payments);
+          org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
         }
     org.mockito.Mockito.reset(executions);
     var unavailable = new IllegalStateException("owned execution lookup fault");
@@ -685,7 +690,8 @@ class PayTccExecutionStoreTest {
           org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
           verify(executions).selectByPayNo(row.payNo);
           org.mockito.Mockito.verifyNoMoreInteractions(executions);
-          org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+          org.mockito.Mockito.verifyNoMoreInteractions(payments);
+          org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
         }
   }
 
@@ -1267,7 +1273,7 @@ class PayTccExecutionStoreTest {
         when(executions.selectForUpdate(row.payNo)).thenReturn(row);
         if ("read".equals(action)) {
           when(executions.selectByPayNo(row.payNo)).thenReturn(row);
-          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          assertReadUnderUnboundContract(row);
           verify(executions).selectByPayNo(row.payNo);
         } else if ("claim".equals(action)) {
           when(payments.selectForUpdate(row.payNo)).thenReturn(List.of(payment("TCC")));
@@ -1305,7 +1311,7 @@ class PayTccExecutionStoreTest {
         org.mockito.Mockito.reset(executions);
         var row = execution(state, decision, "xid-store-1");
         when(executions.selectByPayNo(row.payNo)).thenReturn(row);
-        org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+        assertReadUnderUnboundContract(row);
         verify(executions).selectByPayNo(row.payNo);
         org.mockito.Mockito.verifyNoMoreInteractions(executions);
       }
@@ -1350,8 +1356,16 @@ class PayTccExecutionStoreTest {
 
   /** 旧矩阵保留所有样本，将非法NULL关联改为409且不规范化原行。 */
   private void assertReadUnderUnboundContract(PayTccExecutionPO row) {
-    if (invalidUnboundFixture(row)) assertExecutionConflict(() -> store.read(row.payNo));
-    else org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+    org.mockito.Mockito.reset(payments);
+    if (invalidUnboundFixture(row)) {
+      assertExecutionConflict(() -> store.read(row.payNo));
+      org.mockito.Mockito.verifyNoInteractions(payments);
+    } else {
+      when(payments.selectByPayNo(row.payNo)).thenReturn(List.of(matchingReadPayment(row)));
+      org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+      verify(payments).selectByPayNo(row.payNo);
+      org.mockito.Mockito.verifyNoMoreInteractions(payments);
+    }
   }
 
   /** 统一核对原冲突码与HTTP状态。 */
@@ -1371,6 +1385,149 @@ class PayTccExecutionStoreTest {
       case "claim" -> store.claim(request());
       default -> throw new IllegalArgumentException(action);
     }
+  }
+
+  /** 来源缺失、歧义或不匹配在prebegin、决议中与缓存终态均按409拒绝。 */
+  @Test
+  void invalidExecutionPaymentSourcesRejectWithoutWrites() {
+    for (String state : List.of("BEGIN_UNKNOWN", "COMMIT_REQUESTED", "COMMITTED"))
+      for (String mutation :
+          List.of(
+              "missing",
+              "duplicate",
+              "null-row",
+              "pay-null",
+              "pay-other",
+              "pay-case",
+              "pay-space",
+              "mode-null",
+              "mode-legacy",
+              "mode-case",
+              "mode-space",
+              "user-null",
+              "user-other",
+              "order-null",
+              "order-other",
+              "order-case",
+              "order-space",
+              "amount-null",
+              "amount-other")) {
+        org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+        var row = sourceExecution(state);
+        var payment = matchingReadPayment(row);
+        switch (mutation) {
+          case "pay-null" -> payment.payNo = null;
+          case "pay-other" -> payment.payNo = "another-pay";
+          case "pay-case" -> payment.payNo = "PAY-STORE-1";
+          case "pay-space" -> payment.payNo += " ";
+          case "mode-null" -> payment.debitMode = null;
+          case "mode-legacy" -> payment.debitMode = "LEGACY";
+          case "mode-case" -> payment.debitMode = "tcc";
+          case "mode-space" -> payment.debitMode = "TCC ";
+          case "user-null" -> payment.userId = null;
+          case "user-other" -> payment.userId = 8L;
+          case "order-null" -> payment.orderNo = null;
+          case "order-other" -> payment.orderNo = "another-order";
+          case "order-case" -> payment.orderNo = "ORDER-STORE-1";
+          case "order-space" -> payment.orderNo += " ";
+          case "amount-null" -> payment.amount = null;
+          case "amount-other" -> payment.amount = new BigDecimal("10.01");
+          default -> {}
+        }
+        List<PayRecordPO> candidates =
+            switch (mutation) {
+              case "missing" -> List.of();
+              case "duplicate" -> List.of(payment, matchingReadPayment(row));
+              case "null-row" -> java.util.Collections.singletonList(null);
+              default -> List.of(payment);
+            };
+        when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+        when(payments.selectByPayNo(row.payNo)).thenReturn(candidates);
+        var executionBefore = snapshotExecution(row);
+        var paymentBefore = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(payment);
+        assertExecutionConflict(() -> store.read(row.payNo));
+        org.junit.jupiter.api.Assertions.assertEquals(executionBefore, snapshotExecution(row));
+        org.junit.jupiter.api.Assertions.assertEquals(
+            paymentBefore, new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(payment));
+        var order = org.mockito.Mockito.inOrder(executions, payments);
+        order.verify(executions).selectByPayNo(row.payNo);
+        order.verify(payments).selectByPayNo(row.payNo);
+        org.mockito.Mockito.verifyNoMoreInteractions(executions, payments);
+        org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+      }
+  }
+
+  /** 原Pay进度不限制恢复；等价金额与原对象/表示无损保持。 */
+  @Test
+  void matchingExecutionSourcesKeepProgressAndNumericIdentity() {
+    for (String state : List.of("BEGIN_UNKNOWN", "COMMIT_REQUESTED", "COMMITTED"))
+      for (String status :
+          List.of(
+              "PENDING", "SUCCESS", "REFUNDED", "FAILED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING"))
+        for (String amount : List.of("10", "10.000", "1E+1")) {
+          org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+          var row = sourceExecution(state);
+          var payment = matchingReadPayment(row);
+          payment.status = status;
+          payment.amount = new BigDecimal(amount);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          when(payments.selectByPayNo(row.payNo)).thenReturn(List.of(payment));
+          var before = snapshotExecution(row);
+          var paymentBefore =
+              new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(payment);
+          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              paymentBefore,
+              new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(payment));
+          var order = org.mockito.Mockito.inOrder(executions, payments);
+          order.verify(executions).selectByPayNo(row.payNo);
+          order.verify(payments).selectByPayNo(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions, payments);
+          org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+        }
+  }
+
+  /** 缺行和原持久域先于来源查询；来源DAO异常原样传播，不降级为合法读取。 */
+  @Test
+  void executionReadDomainAndDaoFailuresKeepPriority() {
+    var row = execution("COMMITTED", "COMMIT", "xid-store-1");
+    when(executions.selectByPayNo(row.payNo)).thenReturn(null);
+    var missing = assertThrows(BizException.class, () -> store.read(row.payNo));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_EXECUTION_NOT_FOUND", missing.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(404, missing.getHttpStatus());
+    org.mockito.Mockito.verifyNoInteractions(payments);
+    row.xid = null;
+    when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+    assertExecutionConflict(() -> store.read(row.payNo));
+    org.mockito.Mockito.verifyNoInteractions(payments);
+    row.xid = "xid-store-1";
+    var unavailable = new IllegalStateException("owned Pay source lookup unavailable");
+    when(payments.selectByPayNo(row.payNo)).thenThrow(unavailable);
+    org.junit.jupiter.api.Assertions.assertSame(
+        unavailable, assertThrows(IllegalStateException.class, () -> store.read(row.payNo)));
+    verify(executions, org.mockito.Mockito.times(3)).selectByPayNo(row.payNo);
+    verify(payments).selectByPayNo(row.payNo);
+    org.mockito.Mockito.verifyNoMoreInteractions(executions, payments);
+    org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+  }
+
+  /** 三种恢复上下文的合法原执行事实。 */
+  private PayTccExecutionPO sourceExecution(String state) {
+    return execution(
+        state,
+        state.equals("BEGIN_UNKNOWN") ? "NONE" : "COMMIT",
+        state.equals("BEGIN_UNKNOWN") ? null : "xid-store-1");
+  }
+
+  /** 独立构造匹配原Pay，供既有正例继续验证其原有字段边界。 */
+  private PayRecordPO matchingReadPayment(PayTccExecutionPO row) {
+    var payment = payment("TCC");
+    payment.payNo = row.payNo;
+    payment.userId = row.userId;
+    payment.orderNo = row.orderNo;
+    payment.amount = row.amount;
+    return payment;
   }
 
   /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */

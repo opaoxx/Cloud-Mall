@@ -4251,6 +4251,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = ownedExecutionObservationStore();
     for (String terminal : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
       seedOwnedExecution(terminal, "COMMIT", "t175-xid");
+      alignOwnedExecutionReadSource();
       var before = ownedExecutionLookupFacts();
       assertEquals(terminal, store.read("pay-1").state);
       assertEquals(
@@ -4258,6 +4259,7 @@ class PayLegacyRefundLedgerMySqlIT {
       assertEquals(before, ownedExecutionLookupFacts());
     }
     seedOwnedExecution("CLAIMED", "NONE", null);
+    alignOwnedExecutionReadSource();
     var payBefore = rawIntentTimeFacts();
     executionTransaction(
         () -> {
@@ -5251,6 +5253,7 @@ class PayLegacyRefundLedgerMySqlIT {
         java.util.Arrays.asList(null, "x", " xid-with-space ", "x".repeat(128), "事务:one"))
       for (String state : List.of("CLAIMED", "RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
         seedOwnedExecution(state, "NONE", xid);
+        alignOwnedExecutionReadSource();
         var before = executionReadFacts();
         if (invalidUnboundFixture(xid, state, "NONE")) {
           assertNativeUnboundReadConflict(store, "pay-1");
@@ -5269,6 +5272,7 @@ class PayLegacyRefundLedgerMySqlIT {
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     seedOwnedExecution("CLAIMED", "NONE", null);
+    alignOwnedExecutionReadSource();
     var paymentBefore = rawIntentTimeFacts();
     var prebegin = coordinator.recover("pay-1");
     assertNull(prebegin.xid);
@@ -5277,6 +5281,7 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(paymentBefore, rawIntentTimeFacts());
     for (String state : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
       seedOwnedExecution(state, "NONE", " xid-with-space ");
+      alignOwnedExecutionReadSource();
       var before = executionReadFacts();
       assertEquals(state, coordinator.recover("pay-1").state);
       assertEquals(before, executionReadFacts());
@@ -5356,6 +5361,7 @@ class PayLegacyRefundLedgerMySqlIT {
       for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
         for (String xid : java.util.Arrays.asList(null, "t211-xid")) {
           seedOwnedExecution(state, decision, xid);
+          alignOwnedExecutionReadSource();
           var before = executionReadFacts();
           if (invalidUnboundFixture(xid, state, decision)) {
             assertNativeUnboundReadConflict(store, "pay-1");
@@ -5370,6 +5376,7 @@ class PayLegacyRefundLedgerMySqlIT {
     for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
       seedOwnedExecution(
           decision.equals("NONE") ? "RUNNING" : decision + "_REQUESTED", decision, "t211-xid");
+      alignOwnedExecutionReadSource();
       var paymentBefore = rawIntentTimeFacts();
       var executionBefore = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
       var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
@@ -5459,7 +5466,7 @@ class PayLegacyRefundLedgerMySqlIT {
         }
   }
 
-  /** 创建域边界及原文本只读保持，不把state/XID组合或原Pay来源当作已验证。 */
+  /** 创建域边界及原文本只读保持；正例原Pay显式对齐，不作为完整资金证明。 */
   @Test
   void validReadPayloadBoundsKeepOriginalFieldsAndText() {
     var store = ownedExecutionObservationStore();
@@ -5467,7 +5474,9 @@ class PayLegacyRefundLedgerMySqlIT {
       for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT"))
         for (String xid : java.util.Arrays.asList(null, "t212-xid")) {
           seedOwnedExecution(state, "NONE", xid);
+          alignOwnedExecutionReadSource();
           String payNo = applyOwnedReadPayloadVariant(variant);
+          alignOwnedExecutionReadSource();
           var before = executionReadFacts();
           var expected = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
           if (invalidUnboundFixture(xid, state, "NONE")) {
@@ -6088,6 +6097,138 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = ownedExecutionObservationStore();
     prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
+  }
+
+  /** 原Pay缺失不能使合法缓存执行被当作终态返回。 */
+  @Test
+  void orphanedCachedExecutionCannotEscapeRecovery() {
+    var store = ownedExecutionObservationStore();
+    prepareOwnedClaimReplay("COMMITTED", "COMMIT", "t217-xid", "PENDING");
+    fixture.update("DELETE FROM pay_record");
+    assertOwnedSourceConflictStopsRecovery(store);
+  }
+
+  /** Legacy原Pay不能授权已有TCC决议继续桥恢复或TC重试。 */
+  @Test
+  void legacySourceCannotAuthorizeRecoveryRetry() {
+    var store = ownedExecutionObservationStore();
+    prepareOwnedClaimReplay("COMMIT_REQUESTED", "COMMIT", "t217-xid", "PENDING");
+    fixture.update("UPDATE pay_record SET debit_mode='LEGACY'");
+    assertOwnedSourceConflictStopsRecovery(store);
+  }
+
+  /** 持久表允许的来源偏差在未绑定、决议中与缓存终态均阻止恢复，无三表写或RPC。 */
+  @Test
+  void invalidOwnedExecutionSourcesStopRecoveryBeforeSideEffects() {
+    var store = ownedExecutionObservationStore();
+    for (String state : List.of("BEGIN_UNKNOWN", "COMMIT_REQUESTED", "COMMITTED"))
+      for (String mutation :
+          List.of(
+              "missing",
+              "pay-other",
+              "pay-case",
+              "pay-space",
+              "mode-legacy",
+              "mode-case",
+              "mode-space",
+              "user-other",
+              "order-other",
+              "order-case",
+              "order-space",
+              "amount-other")) {
+        prepareOwnedClaimReplay(
+            state,
+            state.equals("BEGIN_UNKNOWN") ? "NONE" : "COMMIT",
+            state.equals("BEGIN_UNKNOWN") ? null : "t217-xid",
+            "PENDING");
+        switch (mutation) {
+          case "missing" -> fixture.update("DELETE FROM pay_record");
+          case "pay-other" -> fixture.update("UPDATE pay_record SET pay_no='another-pay'");
+          case "pay-case" -> fixture.update("UPDATE pay_record SET pay_no='PAY-1'");
+          case "pay-space" -> fixture.update("UPDATE pay_record SET pay_no='pay-1 '");
+          case "mode-legacy" -> fixture.update("UPDATE pay_record SET debit_mode='LEGACY'");
+          case "mode-case" -> fixture.update("UPDATE pay_record SET debit_mode='tcc'");
+          case "mode-space" -> fixture.update("UPDATE pay_record SET debit_mode='TCC '");
+          case "user-other" -> fixture.update("UPDATE pay_record SET user_id=8");
+          case "order-other" -> fixture.update("UPDATE pay_record SET order_no='another-order'");
+          case "order-case" -> fixture.update("UPDATE pay_record SET order_no='ORDER-1'");
+          case "order-space" -> fixture.update("UPDATE pay_record SET order_no='order-1 '");
+          case "amount-other" -> fixture.update("UPDATE pay_record SET amount=10.01");
+          default -> throw new IllegalArgumentException(mutation);
+        }
+        var before = executionReadFacts();
+        assertNativeUnboundReadConflict(store, "pay-1");
+        assertEquals(before, executionReadFacts());
+        assertOwnedSourceConflictStopsRecovery(store);
+      }
+  }
+
+  /** 匹配来源保原载荷边界及各支付进度，真实MySQL读取不写三表。 */
+  @Test
+  void matchingOwnedExecutionSourcesKeepPayloadAndPaymentProgress() {
+    var store = ownedExecutionObservationStore();
+    for (String state : List.of("BEGIN_UNKNOWN", "COMMIT_REQUESTED", "COMMITTED"))
+      for (String status :
+          List.of(
+              "PENDING", "SUCCESS", "REFUNDED", "FAILED", "ORDER_SYNC_UNKNOWN", "REFUND_PENDING"))
+        for (String variant : List.of("minimum", "maximum", "raw-text", "unicode-order")) {
+          prepareOwnedClaimReplay(
+              state,
+              state.equals("BEGIN_UNKNOWN") ? "NONE" : "COMMIT",
+              state.equals("BEGIN_UNKNOWN") ? null : "t217-xid",
+              status);
+          String payNo = applyOwnedReadPayloadVariant(variant);
+          alignOwnedExecutionReadSource();
+          var before = executionReadFacts();
+          var expected = executionObservationMapper.selectByPayNo(payNo);
+          var read = store.read(payNo);
+          var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+          assertEquals(json.valueToTree(expected), json.valueToTree(read));
+          assertEquals(status, records.selectByPayNo(payNo).get(0).status);
+          assertEquals(before, executionReadFacts());
+        }
+  }
+
+  /** 只在旧正例/新正例初始化时对齐owned原Pay，保留负例的独立变异。 */
+  private void alignOwnedExecutionReadSource() {
+    fixture.update(
+        "UPDATE pay_record payment JOIN pay_tcc_execution execution ON execution.id=1 SET"
+            + " payment.pay_no=execution.pay_no,payment.user_id=execution.user_id,payment.order_no=execution.order_no,payment.amount=execution.amount,payment.debit_mode='TCC'"
+            + " WHERE payment.id=1");
+  }
+
+  /** 实际Coordinator在原Pay来源冲突时停止，Bridge的503替身不能触发观察或TC重试。 */
+  private void assertOwnedSourceConflictStopsRecovery(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store) {
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    when(bridge.recover("pay-1"))
+        .thenThrow(
+            new com.cloudmall.common.error.BizException(
+                "REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var before = executionReadFacts();
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(coordinator.recover("pay-1")));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, executionReadFacts()),
+        () ->
+            org.mockito.Mockito.verifyNoInteractions(
+                bridge, receiptService, evidence, transactions));
   }
 
   /** 保留全部NULL组合样本，非法组合在所有入口拒绝；合法prebegin拒绝三个终态。 */
