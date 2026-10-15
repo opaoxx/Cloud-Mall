@@ -22,16 +22,17 @@ decision ∈ {NONE, COMMIT, ROLLBACK}
 
 ### 3.1 Unit/真实 Coordinator
 
-- 覆盖 bad state/decision 的 case、trailing、empty、unknown、NULL；read 在 payNo/XID 后 409，不进入 Bridge/Evidence/observe/TC。
-- 正域 raw state 9值 × decision 3值仅证明域读取，不证明组合合法；active/terminal、XID NULL/valid、payNo alias/404 控制保持。
-- 真实 Coordinator 使用真实 Store/Mapper，Bridge/Evidence/TC/receipt 为 mock；COMMIT/ROLLBACK × bad state/decision 验证不 observe、不发送 decision、不调用 receiptTry。Evidence 直接传入 bad state 的行为不在本批修改。
+- Unit 覆盖 state 坏值5种（空、space、RUNNING尾space、lower running、BROKEN）+NULL × decision3 × XID NULL/valid=36，以及 decision 坏值5种（空、space、commit、COMMIT尾space、ABORT）+NULL × state9 × XID NULL/valid=108；Unit 使用 mock Mapper，均在 read payNo/XID 后 409、不进入 Bridge/Evidence/observe/TC。另有 stateunknown/statealias/decisionlower/decisionNULL × XID2 的8个 no-follow-up 控制。
+- 正域 raw state9 × decision3 × XID2=54 只证明字段域读取，不证明组合合法；positive read 同对象快照保持，DAO 异常原样，active/terminal、NULL/valid XID、payNo alias/404 控制保持。
+- Unit使用真实Coordinator和Store，Mapper及Bridge/Evidence/TC/receipt为mock；上述8组拒绝在Bridge和缓存终态返回之前，不调用observe/TC/receiptTry。Evidence直接传入bad字段的行为不在本批修改。
 
 ### 3.2 Owned native
 
 - 使用真实 ExecutionStore/Mapper 与 owned execution/Pay/Intent 三表；Coordinator 真实，Bridge/Evidence/TC/receipt 为 mock；不启动业务 App、TC/RM、新监听或官方 FenceHandler。
-- 旧 red：state BROKEN+COMMIT 经 Bridge 503 曾 observe/继续 COMMIT；terminal COMMITTED + decision 小写/未知曾直接返回。修复后 state/decision bad × active/terminal 矩阵均 409/不返回坏 execution，三表 facts 不变。
-- 正域 9 state × 3 decision 控制保持 raw read；合法 `NONE` active、COMMIT/ROLLBACK 重试、NULL prebegin 与 missing/alias/404 控制保持。native 只证明单字段域，不宣称组合/Fence/TC/source 全因果。
+- 旧red：BROKEN+COMMIT经Bridge503曾观察改写并继续TC commit，5个断言失败；缓存COMMITTED+小写commit曾直接返回VO，2个断言失败。修复后state坏5×decision3×XID2=30，decision坏5×四state（RUNNING/COMMITTED/ROLLEDBACK/CONFLICT）×XID2=40，共70 read/recover均409、三表不变、无Bridge/Evidence/TC。NULL字段仅Unit，不改NOT NULL DDL。
+- 正域 9 state × 3 decision × XID2=54 保持 raw read；另真实 Coordinator+Store/Mapper 的 Bridge503流程保留：NONE→UNKNOWN/Bridge1/TC0，COMMIT/ROLLBACK→原 REQUESTED/Bridge2/对应 TC 各1，Pay/Intent保持，execution 仅 state/error/updatedAt 可变。native 只证明单字段域，不宣称组合/Fence/TC/source 全因果。
+- 新增native未套Spring事务代理，read原无事务注解；同owned数据源实际Mapper，不证明完整事务隔离。原T210 NULL prebegin、404、支付号别名及201–210整体回归。原库全表指纹、owned精确DROP与有界池关闭保持。
 
 ## 4. 明确边界
 
-本批不改变 state/decision 组合规则、Coordinator execute 旧异常决议流程、Evidence.classify、observe/decide/claim/bind、SQL、事务、API 或历史数据；不撤回 Bridge 前读取/镜像，不调用官方 FenceHandler，不把 raw domain controls 当作业务状态机证明。
+本批不改变state/decision组合规则、Coordinator execute旧异常决议流程、Evidence.classify、其它Store方法、SQL、事务、API或历史数据。坏初始字段在read处早于Bridge阻断，合法值仍原流程；不扩其它Mapper/locked入口或读后变化窗口，不调用官方FenceHandler，不把raw域控制当作完整状态机或资金因果证明。
