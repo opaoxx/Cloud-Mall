@@ -19,16 +19,20 @@
 
 ### 3.1 Owned native
 
-- 使用真实 TransactionTemplate、ExecutionStore/Mapper 与 owned execution/Pay/Intent 三表；不启动业务 App、TC/RM、新监听或 Docker。
-- red：invalid amount=0 的 observe(COMMITTED) 旧实现写终态；current XID 空串且入参同空串的 decide(COMMIT) 旧实现持久化 decision。修复后坏域 × bind/decide/observe 均在 SQL/CAS 前 conflict、无三表写。
-- 读取/锁定坏域覆盖 NULL 字段由 Unit；native 仅使用 schema 可存值。合法状态/字段、affected=1、SQL0、NULL prebegin、404、locked conflict、terminal 幂等保持。
+- 使用真实程序化 TransactionTemplate、ExecutionStore/Mapper 与 owned execution/Pay/Intent 三表；不套 Spring 代理，不启动业务 App、TC/RM、新监听或 Docker。
+- red：amount=0的observe(COMMITTED)原实现写终态，空串XID+同空串入参的decide(COMMIT)原实现写请求态和COMMIT决议，两测试各3断言失败。修后28坏变体（payload17/XID空白3/state4/decision4）×两seed state×三action=168组409/三表不变。bind输入固定有效t213-xid，decide输入取当前XID（可为空白）；某些bind组合旧版已有mismatch拒绝，不声称168组旧版全放行。
+- 读取/锁定坏域覆盖 NULL 字段由 Unit；native 仅使用 schema 可存值。4 个合法 payload 边界 × bind/decide/observe=12 组验证实际 TransactionTemplate/Mapper 写入与重复幂等；合法状态/字段、affected=1、SQL0、NULL prebegin、404、locked conflict、terminal 幂等保持。
 - T172 旧 `executionObservationZeroRowsDoNotReturnStaleRecord` 的 CI/PAD 坏 state 现由 locked validator 先拒绝，应改断言为 SQL 未调用/门前拒绝；不得弱化。`executionObservationSqlZeroRollsBackWithoutReadback` 使用 valid locked row，在同事务受控 DB 变化导致 SQL0 时继续保留原 rollback/readback 断言。
 
 ### 3.2 Unit
 
-- 真实 Store，Mapper mock；覆盖 read/locked 的坏 payload、bind/decide/observe 的 no-follow-up、合法状态和 SQL0/异常对象优先级。
+- 真实Store、mock Mapper：44坏变体（payload28/XID4/state6/decision6）×两seed state×XID NULL/valid×三action=528组，只有selectForUpdate，无更新或readback、无其它Mapper动作，原对象不改。NULL/ASCII129/极端金额只PO mock，不改DDL。
+- 正6载荷模板×三action=18个early-return/幂等控制，无更新/readback；bind为void，不把测试helper返回当业务返回。另3个fresh bind/decide/observe控制保持原SQL1和所需readback，无新查询。
+- PayTccErrorUnicodeTest的EXECUTION夹具补齐user/order/amount/operation/ledger五个合法字段，原Unicode诊断和异常断言不改，无新增测试方法。
 - 断言 shared validator 保持原 read 顺序与 error code，不把 helper 变成新的组合状态机或来源证明。
 
 ## 4. 明确边界
 
 本批不改 public API、Mapper SQL、锁类型、REQUIRES_NEW、claim/validateRequest、Coordinator/Evidence、状态/decision 组合或历史数据；不保证合法但异源行、read→RPC 窗口或完整 fencing。重点是 locked 入口在任何写/early-return 前拒绝已知坏 persisted domains。
+
+程序化事务验证本地锁与commit/rollback，不证明Spring代理的REQUIRES_NEW传播或Seata事务。调用参数target/decision等其它额外规则不扩；不增加原Pay/User来源或资金因果证明。
