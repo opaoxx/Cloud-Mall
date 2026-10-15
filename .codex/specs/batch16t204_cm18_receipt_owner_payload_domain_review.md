@@ -25,7 +25,7 @@ owner.amount != null && owner.amount.signum() > 0
 
 - 复用 T201–T203 official Fence static scope、真实 Receipt/Fence Mapper、Store、Callback、LocalResource 与程序化本地事务；static datasource/transactionTemplate finally 恢复，记录空队列，不启动项目服务、TC/RM、新监听。
 - 旧 red：owner xid 空字符串或 amount=0、context branch=7/Fence4/owner TRYING/owner key 精确时旧实现 ACK；修复后 false，Pay/Intent/Dispatch/Receipt/Fence facts 不变。
-- native 覆盖 3 advanced state × 10 owned payload 变体：xid 空/空格/TAB/换行、userId 0/-1、orderNo 空/空格/TAB/换行、amount 0/-0.01；均不得提前 ACK。NOT NULL 字段的 null 只通过 actual Mapper `delegatesTo` 返回 PO 的 seam 验证，不改 DDL、不冒称物理 DB 可存 null。
+- native 覆盖 3 advanced state × 10 owned payload 变体：xid 三类（空、ASCII 空格、控制字符集合 TAB/LF）、userId 0/-1、orderNo 同样三类、amount 0/-0.01；均不得提前 ACK。TAB 与 LF 属同一控制字符变体集合，不计作两个独立变体。NOT NULL 字段的 null 只通过 actual Mapper `delegatesTo` 返回 PO 的 seam 验证，不改 DDL、不冒称物理 DB 可存 null。
 - 正控制覆盖合法域但与 incoming 不同的 user/order/amount/xid、Long.MAX_VALUE userId、DECIMAL 最大正金额；按 T203 OR 语义保持 ACK，T201–T203 矩阵回归。
 
 ### 3.2 Unit/query 边界
