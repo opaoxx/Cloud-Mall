@@ -5882,6 +5882,158 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals(before, executionReadFacts()));
   }
 
+  /** 载荷相等的空白XID不能被claim当作有效已有记录重放。 */
+  @Test
+  void claimReplayRejectsBlankStoredXid() {
+    var store = ownedExecutionObservationStore();
+    var request = prepareOwnedClaimReplay("RUNNING", "NONE", "", "PENDING");
+    assertOwnedClaimReplayConflict(store, request);
+  }
+
+  /** 载荷相等的未知状态不能绕过持久域检查直接返回false。 */
+  @Test
+  void claimReplayRejectsUnknownStoredState() {
+    var store = ownedExecutionObservationStore();
+    var request = prepareOwnedClaimReplay("BROKEN", "NONE", "t215-xid", "PENDING");
+    assertOwnedClaimReplayConflict(store, request);
+  }
+
+  /** 非载荷坏域在原Pay进度和活动/终态seed下均先409，不更改原记录。 */
+  @Test
+  void claimReplayRejectsBadStoredDomainsAcrossPaymentProgress() {
+    var store = ownedExecutionObservationStore();
+    for (String mutation :
+        List.of(
+            "xid-empty",
+            "xid-space",
+            "xid-controls",
+            "state-empty",
+            "state-lower",
+            "state-space",
+            "state-unknown",
+            "decision-empty",
+            "decision-lower",
+            "decision-space",
+            "decision-unknown"))
+      for (String state : List.of("RUNNING", "COMMITTED"))
+        for (String paymentStatus : List.of("PENDING", "SUCCESS", "REFUNDED")) {
+          var request = prepareOwnedClaimReplay(state, "NONE", "t215-xid", paymentStatus);
+          applyOwnedLockedDomainVariant(mutation);
+          assertOwnedClaimReplayConflict(store, request);
+        }
+  }
+
+  /** 合法raw重放不新认领；实际首次插入成功后再次请求只有原一条execution。 */
+  @Test
+  void validClaimReplayAndFreshWinnerKeepExistingSemantics() {
+    var store = ownedExecutionObservationStore();
+    for (String state :
+        List.of(
+            "CLAIMED",
+            "BEGIN_UNKNOWN",
+            "RUNNING",
+            "COMMIT_REQUESTED",
+            "ROLLBACK_REQUESTED",
+            "UNKNOWN",
+            "COMMITTED",
+            "ROLLEDBACK",
+            "CONFLICT"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String xid : java.util.Arrays.asList(null, "t215-xid"))
+          for (String paymentStatus : List.of("PENDING", "SUCCESS", "REFUNDED")) {
+            var request = prepareOwnedClaimReplay(state, decision, xid, paymentStatus);
+            var before = executionReadFacts();
+            org.junit.jupiter.api.Assertions.assertFalse(claimOwnedTransaction(store, request));
+            assertEquals(before, executionReadFacts());
+          }
+    for (String variant : List.of("minimum", "maximum", "raw-text", "unicode-order")) {
+      prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+      String payNo = applyOwnedReadPayloadVariant(variant);
+      var original = executionObservationMapper.selectByPayNo(payNo);
+      fixture.update(
+          "UPDATE pay_record SET pay_no=?,user_id=?,order_no=?,amount=?",
+          payNo,
+          original.userId,
+          original.orderNo,
+          original.amount);
+      fixture.update(
+          "UPDATE pay_debit_intent SET pay_no=?,user_id=?,order_no=?,amount=?",
+          payNo,
+          original.userId,
+          original.orderNo,
+          original.amount);
+      fixture.update("DELETE FROM pay_tcc_execution");
+      var request = new com.cloudmall.pay.domain.dto.PayTccDispatchDTO();
+      request.payNo = payNo;
+      request.userId = original.userId;
+      request.orderNo = original.orderNo;
+      request.amount = original.amount;
+      var paymentBefore = rawIntentTimeFacts();
+      org.junit.jupiter.api.Assertions.assertTrue(claimOwnedTransaction(store, request));
+      var stored = executionObservationMapper.selectByPayNo(payNo);
+      assertEquals(request.payNo, stored.payNo);
+      assertEquals(request.userId, stored.userId);
+      assertEquals(request.orderNo, stored.orderNo);
+      assertEquals(request.amount, stored.amount);
+      assertEquals("tcc-debit:" + payNo, stored.operationKey);
+      assertEquals(payNo, stored.ledgerKey);
+      assertEquals("CLAIMED", stored.state);
+      assertEquals("NONE", stored.decision);
+      assertNull(stored.xid);
+      assertEquals(0, stored.recoveryAttempts);
+      org.junit.jupiter.api.Assertions.assertNotNull(stored.nextRecoveryAt);
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_tcc_execution", Integer.class));
+      assertEquals(paymentBefore, rawIntentTimeFacts());
+      var beforeReplay = executionReadFacts();
+      org.junit.jupiter.api.Assertions.assertFalse(claimOwnedTransaction(store, request));
+      assertEquals(beforeReplay, executionReadFacts());
+    }
+  }
+
+  /** owned原Pay/Intent显式TCC并与request匹配，不把其它模拟gate当真实集成。 */
+  private com.cloudmall.pay.domain.dto.PayTccDispatchDTO prepareOwnedClaimReplay(
+      String state, String decision, String xid, String paymentStatus) {
+    seedOwnedExecution(state, decision, xid);
+    fixture.update("UPDATE pay_record SET debit_mode='TCC',status=?", paymentStatus);
+    fixture.update("UPDATE pay_debit_intent SET debit_mode='TCC'");
+    var request = new com.cloudmall.pay.domain.dto.PayTccDispatchDTO();
+    request.payNo = "pay-1";
+    request.userId = 7L;
+    request.orderNo = "order-1";
+    request.amount = new BigDecimal("10.00");
+    return request;
+  }
+
+  /** 在同owned数据源真实事务中调用claim，保Boolean返回而不更改其它事务helper。 */
+  private boolean claimOwnedTransaction(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store,
+      com.cloudmall.pay.domain.dto.PayTccDispatchDTO request) {
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    return template.execute(transactionStatus -> store.claim(request));
+  }
+
+  /** 核409、无Boolean返回和三表不变，避免false重放被当作合法拒绝。 */
+  private void assertOwnedClaimReplayConflict(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store,
+      com.cloudmall.pay.domain.dto.PayTccDispatchDTO request) {
+    var before = executionReadFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<Boolean>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(claimOwnedTransaction(store, request)));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, executionReadFacts()));
+  }
+
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
   private void assertExecutionReadConflictStopsRecovery(
       com.cloudmall.pay.service.impl.PayTccExecutionStore store) {

@@ -67,9 +67,11 @@ public class PayTccExecutionStore {
         || !Objects.equals(payment.payNo, request.payNo)
         || !Objects.equals(payment.userId, request.userId)
         || !Objects.equals(payment.orderNo, request.orderNo)
+        || payment.amount == null
         || payment.amount.compareTo(request.amount) != 0) throw conflict();
     PayTccExecutionPO existing = executions.selectForUpdate(request.payNo);
     if (existing != null) {
+      validatePersistedExecution(existing, request.payNo);
       validate(existing, request);
       return false;
     }

@@ -1096,6 +1096,122 @@ class PayTccExecutionStoreTest {
     return store.decide(current.payNo, xid, decision);
   }
 
+  /** 原Pay或existing金额缺失须受控409，不能在compareTo时泄漏NPE。 */
+  @Test
+  void missingClaimAmountsAreControlledConflicts() {
+    org.junit.jupiter.api.Assertions.assertAll(
+        List.of("payment", "execution").stream()
+            .map(
+                missing ->
+                    (org.junit.jupiter.api.function.Executable)
+                        () -> {
+                          org.mockito.Mockito.reset(
+                              executions, payments, dispatches, receipts, cancels);
+                          var request = request();
+                          var payment = payment("TCC");
+                          var existing = execution("RUNNING", "NONE", "xid-store-1");
+                          if (missing.equals("payment")) payment.amount = null;
+                          else existing.amount = null;
+                          when(payments.selectForUpdate(request.payNo))
+                              .thenReturn(List.of(payment));
+                          when(executions.selectForUpdate(request.payNo)).thenReturn(existing);
+                          var before = snapshotExecution(existing);
+                          var failure =
+                              assertThrows(BizException.class, () -> store.claim(request));
+                          org.junit.jupiter.api.Assertions.assertEquals(
+                              "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+                          org.junit.jupiter.api.Assertions.assertEquals(
+                              409, failure.getHttpStatus());
+                          org.junit.jupiter.api.Assertions.assertEquals(
+                              before, snapshotExecution(existing));
+                          verify(payments).selectForUpdate(request.payNo);
+                          if (missing.equals("execution"))
+                            verify(executions).selectForUpdate(request.payNo);
+                          org.mockito.Mockito.verifyNoMoreInteractions(executions, payments);
+                          org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+                        }));
+  }
+
+  /** 已有执行的坏非载荷域必须先409，不进入fresh gate或重新插入。 */
+  @Test
+  void claimReplayRejectsBadDomainsWithoutFreshGateQueries() {
+    for (String mutation :
+        List.of(
+            "xid-empty",
+            "xid-space",
+            "xid-controls",
+            "xid-length",
+            "state-null",
+            "state-empty",
+            "state-blank",
+            "state-space",
+            "state-lower",
+            "state-unknown",
+            "decision-null",
+            "decision-empty",
+            "decision-blank",
+            "decision-space",
+            "decision-lower",
+            "decision-unknown"))
+      for (String state : List.of("RUNNING", "COMMITTED"))
+        for (String paymentStatus : List.of("PENDING", "SUCCESS", "REFUNDED")) {
+          org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+          var request = request();
+          var payment = payment("TCC");
+          payment.status = paymentStatus;
+          var existing = execution(state, "NONE", "xid-store-1");
+          applyLockedDomainVariant(existing, mutation);
+          when(payments.selectForUpdate(request.payNo)).thenReturn(List.of(payment));
+          when(executions.selectForUpdate(request.payNo)).thenReturn(existing);
+          var before = snapshotExecution(existing);
+          var failure = assertThrows(BizException.class, () -> store.claim(request), mutation);
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(existing));
+          verify(payments).selectForUpdate(request.payNo);
+          verify(executions).selectForUpdate(request.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(payments, executions);
+          org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+        }
+  }
+
+  /** 匹配的raw域重放保持false，Pay进度和请求金额等价表示不能触发fresh gate。 */
+  @Test
+  void validClaimReplayKeepsPaymentProgressAndNumericEquivalence() {
+    for (String state :
+        List.of(
+            "CLAIMED",
+            "BEGIN_UNKNOWN",
+            "RUNNING",
+            "COMMIT_REQUESTED",
+            "ROLLBACK_REQUESTED",
+            "UNKNOWN",
+            "COMMITTED",
+            "ROLLEDBACK",
+            "CONFLICT"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1"))
+          for (String paymentStatus : List.of("PENDING", "SUCCESS", "REFUNDED"))
+            for (String amount : List.of("10", "10.000", "1E+1")) {
+              org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+              var request = request();
+              request.amount = new BigDecimal(amount);
+              var payment = payment("TCC");
+              payment.status = paymentStatus;
+              var existing = execution(state, decision, xid);
+              when(payments.selectForUpdate(request.payNo)).thenReturn(List.of(payment));
+              when(executions.selectForUpdate(request.payNo)).thenReturn(existing);
+              var before = snapshotExecution(existing);
+              org.junit.jupiter.api.Assertions.assertFalse(store.claim(request));
+              org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(existing));
+              verify(payments).selectForUpdate(request.payNo);
+              verify(executions).selectForUpdate(request.payNo);
+              org.mockito.Mockito.verifyNoMoreInteractions(payments, executions);
+              org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+            }
+  }
+
   /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */
   private String snapshotExecution(PayTccExecutionPO execution) {
     return org.junit.jupiter.api.Assertions.assertDoesNotThrow(
