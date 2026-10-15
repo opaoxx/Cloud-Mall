@@ -5394,14 +5394,157 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** 缓存资金终态不能直接返回非正金额的执行载荷。 */
+  @Test
+  void invalidAmountCannotEscapeWithCachedExecutionTerminal() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("COMMITTED", "COMMIT", "t212-xid");
+    fixture.update("UPDATE pay_tcc_execution SET amount=0 WHERE id=1");
+    assertExecutionReadConflictStopsRecovery(store);
+  }
+
+  /** 错误操作键不能借Bridge不可用绕过Evidence而继续TC决议。 */
+  @Test
+  void wrongExecutionKeysCannotReachTcAfterBridgeUnavailable() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("COMMIT_REQUESTED", "COMMIT", "t212-xid");
+    fixture.update("UPDATE pay_tcc_execution SET operation_key='tcc-debit:another-pay' WHERE id=1");
+    assertExecutionReadConflictStopsRecovery(store);
+  }
+
+  /** 可持久化的坏载荷在活动/终态和NULL/已绑定XID下均应拒绝，不改三表事实。 */
+  @Test
+  void invalidReadPayloadRejectsBeforeAnyRecoverySideEffects() {
+    var store = ownedExecutionObservationStore();
+    for (String mutation :
+        List.of(
+            "pay-empty",
+            "pay-punctuation",
+            "user-zero",
+            "user-negative",
+            "order-empty",
+            "order-space",
+            "order-utf16-length",
+            "amount-zero",
+            "amount-negative",
+            "operation-empty",
+            "operation-other",
+            "operation-case",
+            "operation-space",
+            "ledger-empty",
+            "ledger-other",
+            "ledger-case",
+            "ledger-space"))
+      for (String state : List.of("COMMIT_REQUESTED", "COMMITTED"))
+        for (String xid : java.util.Arrays.asList(null, "t212-xid")) {
+          seedOwnedExecution(state, "COMMIT", xid);
+          String payNo = applyOwnedReadPayloadVariant(mutation);
+          var before = executionReadFacts();
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class, () -> store.read(payNo), mutation);
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertExecutionReadConflictStopsRecovery(store, payNo);
+          assertEquals(before, executionReadFacts());
+        }
+  }
+
+  /** 创建域边界及原文本只读保持，不把state/XID组合或原Pay来源当作已验证。 */
+  @Test
+  void validReadPayloadBoundsKeepOriginalFieldsAndText() {
+    var store = ownedExecutionObservationStore();
+    for (String variant : List.of("minimum", "maximum", "raw-text", "unicode-order"))
+      for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT"))
+        for (String xid : java.util.Arrays.asList(null, "t212-xid")) {
+          seedOwnedExecution(state, "NONE", xid);
+          String payNo = applyOwnedReadPayloadVariant(variant);
+          var before = executionReadFacts();
+          var expected = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+          var read = store.read(payNo);
+          assertEquals(payNo, read.payNo);
+          assertEquals(expected.get("user_id"), read.userId);
+          assertEquals(expected.get("order_no"), read.orderNo);
+          assertEquals(expected.get("amount"), read.amount);
+          assertEquals("tcc-debit:" + payNo, read.operationKey);
+          assertEquals(payNo, read.ledgerKey);
+          assertEquals(state, read.state);
+          assertEquals(xid, read.xid);
+          assertEquals(before, executionReadFacts());
+        }
+  }
+
+  /** 只在owned execution变更载荷；Pay/Intent仍保持原种子，非来源/资金证明。 */
+  private String applyOwnedReadPayloadVariant(String mutation) {
+    var execution = executionObservationMapper.selectByPayNo("pay-1");
+    switch (mutation) {
+      case "pay-empty" -> execution.payNo = "";
+      case "pay-punctuation" -> execution.payNo = "pay.1";
+      case "user-zero" -> execution.userId = 0L;
+      case "user-negative" -> execution.userId = -1L;
+      case "order-empty" -> execution.orderNo = "";
+      case "order-space" -> execution.orderNo = "   ";
+      case "order-utf16-length" -> execution.orderNo = "🙂".repeat(33);
+      case "amount-zero" -> execution.amount = BigDecimal.ZERO;
+      case "amount-negative" -> execution.amount = new BigDecimal("-0.01");
+      case "operation-empty" -> execution.operationKey = "";
+      case "operation-other" -> execution.operationKey = "tcc-debit:another-pay";
+      case "operation-case" -> execution.operationKey = "TCC-DEBIT:pay-1";
+      case "operation-space" -> execution.operationKey = "tcc-debit:pay-1 ";
+      case "ledger-empty" -> execution.ledgerKey = "";
+      case "ledger-other" -> execution.ledgerKey = "another-pay";
+      case "ledger-case" -> execution.ledgerKey = "PAY-1";
+      case "ledger-space" -> execution.ledgerKey = "pay-1 ";
+      case "minimum" -> {
+        execution.payNo = "A";
+        execution.userId = 1L;
+        execution.orderNo = "A";
+        execution.amount = new BigDecimal("0.01");
+      }
+      case "maximum" -> {
+        execution.payNo = "P_" + "a".repeat(62);
+        execution.userId = Long.MAX_VALUE;
+        execution.orderNo = "o".repeat(64);
+        execution.amount = new BigDecimal("9999999999999999.99");
+      }
+      case "raw-text" -> {
+        execution.payNo = "Pay_1-a";
+        execution.orderNo = " order-with-space ";
+      }
+      case "unicode-order" -> execution.orderNo = "🙂".repeat(32);
+      default -> throw new IllegalArgumentException("unknown read payload variant");
+    }
+    if (mutation.startsWith("pay-")
+        || List.of("minimum", "maximum", "raw-text").contains(mutation)) {
+      execution.operationKey = "tcc-debit:" + execution.payNo;
+      execution.ledgerKey = execution.payNo;
+    }
+    fixture.update(
+        "UPDATE pay_tcc_execution SET"
+            + " pay_no=?,user_id=?,order_no=?,amount=?,operation_key=?,ledger_key=? WHERE id=1",
+        execution.payNo,
+        execution.userId,
+        execution.orderNo,
+        execution.amount,
+        execution.operationKey,
+        execution.ledgerKey);
+    return execution.payNo;
+  }
+
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
   private void assertExecutionReadConflictStopsRecovery(
       com.cloudmall.pay.service.impl.PayTccExecutionStore store) {
+    assertExecutionReadConflictStopsRecovery(store, "pay-1");
+  }
+
+  /** 按变异后的原支付号恢复，避免将查询不到记录误作有效域拒绝。 */
+  private void assertExecutionReadConflictStopsRecovery(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
-    when(bridge.recover("pay-1"))
+    when(bridge.recover(payNo))
         .thenThrow(
             new com.cloudmall.common.error.BizException(
                 "REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
@@ -5417,7 +5560,7 @@ class PayLegacyRefundLedgerMySqlIT {
           var failure =
               org.junit.jupiter.api.Assertions.assertThrows(
                   com.cloudmall.common.error.BizException.class,
-                  () -> returned.set(coordinator.recover("pay-1")));
+                  () -> returned.set(coordinator.recover(payNo)));
           assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
           assertEquals(409, failure.getHttpStatus());
         },

@@ -563,6 +563,192 @@ class PayTccExecutionStoreTest {
     org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
   }
 
+  /** 坏创建载荷及固定键在活动/终态、原三决议与NULL/绑定XID下均先拒绝。 */
+  @Test
+  void invalidReadPayloadDomainsRejectWithoutAnySideEffects() {
+    for (String mutation :
+        List.of(
+            "pay-empty",
+            "pay-punctuation",
+            "user-zero",
+            "user-negative",
+            "order-empty",
+            "order-space",
+            "order-utf16-length",
+            "amount-zero",
+            "amount-negative",
+            "operation-empty",
+            "operation-other",
+            "operation-case",
+            "operation-space",
+            "ledger-empty",
+            "ledger-other",
+            "ledger-case",
+            "ledger-space",
+            "pay-null",
+            "user-null",
+            "order-null",
+            "amount-null",
+            "operation-null",
+            "ledger-null",
+            "pay-length",
+            "order-length",
+            "amount-fraction",
+            "amount-overmax",
+            "amount-extreme-scale"))
+      for (String state : List.of("COMMIT_REQUESTED", "COMMITTED"))
+        for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+          for (String xid : java.util.Arrays.asList(null, "xid-store-1")) {
+            org.mockito.Mockito.reset(executions);
+            var row = execution(state, decision, xid);
+            applyReadPayloadVariant(row, mutation);
+            when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+            var before = snapshotExecution(row);
+            var failure = assertThrows(BizException.class, () -> store.read(row.payNo), mutation);
+            org.junit.jupiter.api.Assertions.assertEquals(
+                "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+            org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+            verify(executions).selectByPayNo(row.payNo);
+            org.mockito.Mockito.verifyNoMoreInteractions(executions);
+            org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+          }
+  }
+
+  /** 真实Store/Coordinator拒绝坏载荷，先于桥503、观察写入与缓存终态返回。 */
+  @Test
+  void coordinatorRejectsBadReadPayloadBeforeBridgeOrCachedTerminal() {
+    for (String mutation :
+        List.of(
+            "amount-null",
+            "amount-zero",
+            "user-zero",
+            "order-space",
+            "operation-other",
+            "ledger-other",
+            "pay-punctuation",
+            "order-utf16-length"))
+      for (String state : List.of("COMMIT_REQUESTED", "COMMITTED"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1")) {
+          org.mockito.Mockito.reset(executions);
+          var row = execution(state, "COMMIT", xid);
+          applyReadPayloadVariant(row, mutation);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+          var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+          var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+          var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+          when(bridge.recover(row.payNo))
+              .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
+          var coordinator =
+              new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+                  store, receiptService, bridge, evidence, transactions);
+          var before = snapshotExecution(row);
+          var failure = assertThrows(BizException.class, () -> coordinator.recover(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          verify(executions).selectByPayNo(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions);
+          org.mockito.Mockito.verifyNoInteractions(
+              bridge,
+              receiptService,
+              evidence,
+              transactions,
+              payments,
+              dispatches,
+              receipts,
+              cancels);
+        }
+  }
+
+  /** 创建边界和原金额scale/指数文本无损保留，raw域不证明state/XID组合合法。 */
+  @Test
+  void validReadPayloadBoundsPreserveRawFieldsAndNumericRepresentation() {
+    for (String variant :
+        List.of(
+            "minimum",
+            "maximum",
+            "raw-text",
+            "unicode-order",
+            "equivalent-money",
+            "scientific-money"))
+      for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1")) {
+          org.mockito.Mockito.reset(executions);
+          var row = execution(state, "NONE", xid);
+          applyReadPayloadVariant(row, variant);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          var before = snapshotExecution(row);
+          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          verify(executions).selectByPayNo(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions);
+          org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+        }
+  }
+
+  /** 独立变异原载荷；NULL、ASCII超长和不可存金额仅PO mock，不变更生产DDL。 */
+  private void applyReadPayloadVariant(PayTccExecutionPO execution, String mutation) {
+    switch (mutation) {
+      case "pay-empty" -> execution.payNo = "";
+      case "pay-punctuation" -> execution.payNo = "pay.1";
+      case "pay-null" -> execution.payNo = null;
+      case "pay-length" -> execution.payNo = "p".repeat(65);
+      case "user-zero" -> execution.userId = 0L;
+      case "user-negative" -> execution.userId = -1L;
+      case "user-null" -> execution.userId = null;
+      case "order-empty" -> execution.orderNo = "";
+      case "order-space" -> execution.orderNo = "   ";
+      case "order-null" -> execution.orderNo = null;
+      case "order-length" -> execution.orderNo = "o".repeat(65);
+      case "order-utf16-length" -> execution.orderNo = "🙂".repeat(33);
+      case "amount-zero" -> execution.amount = BigDecimal.ZERO;
+      case "amount-negative" -> execution.amount = new BigDecimal("-0.01");
+      case "amount-null" -> execution.amount = null;
+      case "amount-fraction" -> execution.amount = new BigDecimal("0.001");
+      case "amount-overmax" -> execution.amount = new BigDecimal("10000000000000000.00");
+      case "amount-extreme-scale" ->
+          execution.amount = new BigDecimal(java.math.BigInteger.TEN, Integer.MIN_VALUE);
+      case "operation-empty" -> execution.operationKey = "";
+      case "operation-other" -> execution.operationKey = "tcc-debit:another-pay";
+      case "operation-case" -> execution.operationKey = "TCC-DEBIT:pay-store-1";
+      case "operation-space" -> execution.operationKey = "tcc-debit:pay-store-1 ";
+      case "operation-null" -> execution.operationKey = null;
+      case "ledger-empty" -> execution.ledgerKey = "";
+      case "ledger-other" -> execution.ledgerKey = "another-pay";
+      case "ledger-case" -> execution.ledgerKey = "PAY-STORE-1";
+      case "ledger-space" -> execution.ledgerKey = "pay-store-1 ";
+      case "ledger-null" -> execution.ledgerKey = null;
+      case "minimum" -> {
+        execution.payNo = "A";
+        execution.userId = 1L;
+        execution.orderNo = "A";
+        execution.amount = new BigDecimal("0.01");
+      }
+      case "maximum" -> {
+        execution.payNo = "P_" + "a".repeat(62);
+        execution.userId = Long.MAX_VALUE;
+        execution.orderNo = "o".repeat(64);
+        execution.amount = new BigDecimal("9999999999999999.99");
+      }
+      case "raw-text" -> {
+        execution.payNo = "Pay_1-a";
+        execution.orderNo = " order-with-space ";
+      }
+      case "unicode-order" -> execution.orderNo = "🙂".repeat(32);
+      case "equivalent-money" -> execution.amount = new BigDecimal("10.000");
+      case "scientific-money" -> execution.amount = new BigDecimal("1E+1");
+      default -> throw new IllegalArgumentException("unknown read payload variant");
+    }
+    if (mutation.startsWith("pay-")
+        || List.of("minimum", "maximum", "raw-text").contains(mutation)) {
+      execution.operationKey = "tcc-debit:" + execution.payNo;
+      execution.ledgerKey = execution.payNo;
+    }
+  }
+
   /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */
   private String snapshotExecution(PayTccExecutionPO execution) {
     return org.junit.jupiter.api.Assertions.assertDoesNotThrow(

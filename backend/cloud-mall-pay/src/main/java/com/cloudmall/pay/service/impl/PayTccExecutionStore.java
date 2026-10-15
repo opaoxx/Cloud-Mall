@@ -143,7 +143,7 @@ public class PayTccExecutionStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 读取原支付号、XID及状态/决议有效域；NULL XID保留prebegin，坏行不进入恢复。 */
+  /** 读取原执行事实有效域和创建载荷；NULL XID保留prebegin，坏行不进入恢复。 */
   public PayTccExecutionPO read(String payNo) {
     // 1. 按原支付号读取，并核对查询身份与已绑定XID。
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
@@ -167,7 +167,9 @@ public class PayTccExecutionStore {
             .contains(execution.state)
         || execution.decision == null
         || !Set.of("NONE", "COMMIT", "ROLLBACK").contains(execution.decision)) throw conflict();
-    // 3. 返回原执行事实，后续恢复继续沿原规则处理。
+    // 3. 核原创建载荷和固定键，只拒绝坏值，不改写历史字段。
+    if (!hasValidRecoveryPayload(execution)) throw conflict();
+    // 4. 返回原执行事实，后续恢复继续沿原规则处理。
     return execution;
   }
 
@@ -181,6 +183,23 @@ public class PayTccExecutionStore {
     PayTccExecutionPO row = executions.selectForUpdate(payNo);
     if (row == null || row.payNo == null || !Objects.equals(row.payNo, payNo)) throw conflict();
     return row;
+  }
+
+  /** 复核创建域和派生键；先限金额上界再查scale，避免极端指数溢出，不规范化原字段。 */
+  private boolean hasValidRecoveryPayload(PayTccExecutionPO execution) {
+    return execution.payNo != null
+        && execution.payNo.matches("[A-Za-z0-9_-]{1,64}")
+        && execution.userId != null
+        && execution.userId > 0
+        && execution.orderNo != null
+        && !execution.orderNo.isBlank()
+        && execution.orderNo.length() <= 64
+        && execution.amount != null
+        && execution.amount.signum() > 0
+        && execution.amount.compareTo(new BigDecimal("9999999999999999.99")) <= 0
+        && execution.amount.stripTrailingZeros().scale() <= 2
+        && Objects.equals(execution.operationKey, "tcc-debit:" + execution.payNo)
+        && Objects.equals(execution.ledgerKey, execution.payNo);
   }
 
   /** 重放只核对原完整载荷，不受当前配置或支付终态变化影响。 */
