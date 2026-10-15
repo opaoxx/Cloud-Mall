@@ -20,12 +20,12 @@
 
 - 使用 actual Coordinator/Store/Mapper/owned execution/Pay/Intent 与本地 proxy；Bridge/Evidence/TC/receipt mock，不启动 App、TC/RM、新监听。
 - 两 red：execute final callback 将 COMMIT 改 ROLLBACK、recover 初次 callback 将 ROLLBACK 改 COMMIT；旧实现可能返回 VO/污染 peer/下游 observation-readback，修复后 409，三表不变，已发 TC 计数如实保持。
-- 覆盖 execute/recover 双方向 × 反向/NONE × Bridge terminal/UNKNOWN/Runtime/BizNULL/Biz普通 与 RPC failure 方向变更；相同方向 terminal/UNKNOWN 控制保持。native manifest 沿 T225 38项加本批4项=42，逐名核 XML，不把无关矩阵计入。
+- 覆盖 execute/recover 双入口 × 两原方向 × 反向/NONE × 7结果（COMMITTED、ROLLEDBACK、UNKNOWN、BridgeRuntime、BizNULL、Biz普通、RPCerror）=56，其中 Bridge/Evidence 48、TC failure 8；拒绝先于 terminal 与 merge。相同方向控制为两方向×5观察=10，另6 terminal 控制核 UNKNOWN 幂等/反向终态冲突，以及 NONE→COMMIT 进度1。native manifest 沿 T225 38项加本批4项=42，逐名核 XML，不把无关矩阵计入。
 - 本地 peer 交错不证明真实 TC/远端返回窗口、资金 source 或完整 fencing；已发 TC/Bridge 不撤回。
 
 ### 3.2 Unit
 
-- Owner 单元覆盖 decided/legacy direction、NULL/异常与拒绝优先；旧 Recovery mocks 精确适配 NONE 旧门与已决新门，保留原样本。
+- Owner 单元覆盖两方向×11拒绝=22（方向/NONE/expectedNONE/null/currentmissing/id/source/域/入参/SQL0）、两方向×5进度=10及 NONE→COMMIT 进度1；旧 Recovery mocks 精确适配 NONE 旧门与已决新门，保留原样本。预检 fixture/stub 问题必须单独归档，不计业务结果。
 - 直接新 Store 方法的 Unit 只在实现存在后增加；不在 red 前引用不存在 API。其它 T218–T225 矩阵保留。
 
 ## 4. 明确边界
