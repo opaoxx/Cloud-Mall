@@ -142,11 +142,12 @@ public class PayTccExecutionStore {
     return mergeObservation(current, state, error);
   }
 
-  /** 将读关联观察只写回同一执行身份；漂移先于终态早返回和任何更新被拒绝。 */
+  /** 锁内核对原Pay来源和执行身份，读后漂移先于终态早返回及更新被拒绝。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO observeSnapshot(PayTccExecutionPO expected, String state, String error) {
-    // 1. 拒绝缺失快照，再按原支付号锁读并校验当前持久域。
+    // 1. 拒绝缺失快照，按Pay→execution锁序取当前事实，避免与claim反向取锁。
     if (expected == null) throw conflict();
+    List<PayRecordPO> sourcePayments = payments.selectForUpdate(expected.payNo);
     PayTccExecutionPO current = locked(expected.payNo);
     // 2. 核对原快照有效域和不可变身份；金额数值等价，可变进度不作版本条件。
     validatePersistedExecution(expected, expected.payNo);
@@ -158,7 +159,8 @@ public class PayTccExecutionStore {
         || current.amount.compareTo(expected.amount) != 0
         || !Objects.equals(current.operationKey, expected.operationKey)
         || !Objects.equals(current.ledgerKey, expected.ledgerKey)) throw conflict();
-    // 3. 用锁定行的最新进度合并，保留终态、防倒退和原SQL影响行保护。
+    // 3. 核锁定原Pay的来源及载荷，再以当前进度合并；两锁随独立事务一起释放。
+    validatePaymentSource(current, expected.payNo, sourcePayments);
     return mergeObservation(current, state, error);
   }
 
@@ -200,7 +202,12 @@ public class PayTccExecutionStore {
 
   /** 校验此读取窗口的原Pay来源，不加锁、不推断资金结果或读后的事实稳定性。 */
   private void validatePaymentSource(PayTccExecutionPO execution, String payNo) {
-    List<PayRecordPO> records = payments.selectByPayNo(payNo);
+    validatePaymentSource(execution, payNo, payments.selectByPayNo(payNo));
+  }
+
+  /** 读取与观察共用原Pay来源规则；调用方分别提供无锁或锁内事实，不限制支付进度。 */
+  private void validatePaymentSource(
+      PayTccExecutionPO execution, String payNo, List<PayRecordPO> records) {
     if (records.size() != 1) throw conflict();
     PayRecordPO payment = records.get(0);
     if (payment == null

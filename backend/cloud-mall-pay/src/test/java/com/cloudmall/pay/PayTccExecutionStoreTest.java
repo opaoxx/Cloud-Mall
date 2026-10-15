@@ -428,6 +428,7 @@ class PayTccExecutionStoreTest {
     var before = snapshotExecution(row);
     org.mockito.Mockito.reset(payments);
     when(payments.selectByPayNo(row.payNo)).thenReturn(List.of(matchingReadPayment(row)));
+    when(payments.selectForUpdate(row.payNo)).thenReturn(List.of(matchingReadPayment(row)));
     var recovered = coordinator.recover(row.payNo);
     org.junit.jupiter.api.Assertions.assertNull(recovered.xid);
     org.junit.jupiter.api.Assertions.assertEquals("BEGIN_UNKNOWN", recovered.state);
@@ -441,6 +442,7 @@ class PayTccExecutionStoreTest {
     org.mockito.Mockito.verifyNoInteractions(
         bridge, receiptService, evidence, transactions, dispatches, receipts, cancels);
     verify(payments).selectByPayNo(row.payNo);
+    verify(payments).selectForUpdate(row.payNo);
     org.mockito.Mockito.verifyNoMoreInteractions(payments);
   }
 

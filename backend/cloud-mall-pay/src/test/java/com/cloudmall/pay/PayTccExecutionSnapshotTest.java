@@ -56,7 +56,7 @@ class PayTccExecutionSnapshotTest {
           assertConflict(() -> fixture.store.observeSnapshot(expected, observation, "old result"));
           assertEquals(before, snapshot(current));
           verify(fixture.executions).selectForUpdate(expected.payNo);
-          fixture.assertNoOtherInteractions();
+          fixture.assertNoOtherInteractions(expected.payNo);
         }
   }
 
@@ -99,7 +99,7 @@ class PayTccExecutionSnapshotTest {
       }
       assertEquals(before, snapshot(current));
       verify(fixture.executions).selectForUpdate(expected.payNo);
-      fixture.assertNoOtherInteractions();
+      fixture.assertNoOtherInteractions(expected.payNo);
     }
     for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN"))
       for (String observation : List.of("UNKNOWN", "TRYING")) {
@@ -115,7 +115,7 @@ class PayTccExecutionSnapshotTest {
         verify(fixture.executions)
             .updateObservation(eq(expected.payNo), eq("BEGIN_UNKNOWN"), eq(null), any());
         verify(fixture.executions).selectByPayNo(expected.payNo);
-        fixture.assertNoOtherInteractions();
+        fixture.assertNoOtherInteractions(expected.payNo);
       }
   }
 
@@ -163,7 +163,7 @@ class PayTccExecutionSnapshotTest {
       if (mutation.equals("zero-update"))
         verify(fixture.executions)
             .updateObservation(eq(expected.payNo), eq("COMMITTED"), eq("diagnostic"), any());
-      fixture.assertNoOtherInteractions();
+      fixture.assertNoOtherInteractions(input == null ? null : expected.payNo);
     }
   }
 
@@ -255,12 +255,12 @@ class PayTccExecutionSnapshotTest {
     assertEquals(409, failure.getHttpStatus());
   }
 
-  /** 显式区分唯一执行锁与未参与本观察门的其它持久资源。 */
+  /** 显式区分Pay与execution锁，以及未参与本观察门的其它资源。 */
   private static final class Fixture {
     /** 执行Mapper替身。 */
     private final PayTccExecutionMapper executions = mock(PayTccExecutionMapper.class);
 
-    /** 原PayMapper，快照写回不新增来源查询或锁。 */
+    /** 原PayMapper，快照写回先锁原Pay并核对来源。 */
     private final PayRecordMapper payments = mock(PayRecordMapper.class);
 
     /** 派发资源替身。 */
@@ -276,10 +276,24 @@ class PayTccExecutionSnapshotTest {
     private final PayTccExecutionStore store =
         new PayTccExecutionStore(executions, payments, dispatches, receipts, cancels);
 
-    /** 已核过的调用之外不允许SQL或其它资源交互。 */
-    private void assertNoOtherInteractions() {
-      verifyNoMoreInteractions(executions);
-      verifyNoInteractions(payments, dispatches, receipts, cancels);
+    /** 历史正例提供独立匹配来源，坏anchor用例仍由原anchor门拒绝。 */
+    private Fixture() {
+      var payment = new com.cloudmall.pay.domain.po.PayRecordPO();
+      payment.payNo = "pay-snapshot-1";
+      payment.userId = 7L;
+      payment.orderNo = "order-snapshot-1";
+      payment.amount = new BigDecimal("10.00");
+      payment.debitMode = "TCC";
+      payment.status = "PENDING";
+      when(payments.selectForUpdate(any())).thenReturn(List.of(payment));
+    }
+
+    /** 已核过的调用之外不允许SQL或其它资源交互；NULL快照不查Pay。 */
+    private void assertNoOtherInteractions(String sourcePayNo) {
+      if (sourcePayNo == null) verifyNoInteractions(payments);
+      else verify(payments).selectForUpdate(sourcePayNo);
+      verifyNoMoreInteractions(executions, payments);
+      verifyNoInteractions(dispatches, receipts, cancels);
     }
   }
 }
