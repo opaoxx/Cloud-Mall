@@ -194,6 +194,90 @@ class PayTccExecuteConflictTest {
     assertNull(RootContext.getXID());
   }
 
+  /** 调用回包和普通异常中丢失原XID，不能继续下一步或诊断写回。 */
+  @Test
+  void contextDriftStopsAtOwnedCallBoundaries() throws Exception {
+    for (String phase :
+        List.of(
+            "bind",
+            "receipt",
+            "receipt-declined",
+            "bridge",
+            "evidence",
+            "receipt-error",
+            "bridge-error",
+            "evidence-error",
+            "diagnostic",
+            "decide"))
+      for (boolean clear : List.of(false, true)) {
+        boolean ordinaryError = phase.endsWith("-error") || phase.equals("diagnostic");
+        String failurePhase = phase.equals("diagnostic") ? "receipt" : phase.replace("-error", "");
+        var fixture =
+            new Fixture(
+                ordinaryError ? failurePhase : "none",
+                ordinaryError ? new IllegalStateException("ordinary unavailable") : null);
+        fixture.declinedReceipt = phase.equals("receipt-declined");
+        String checkpoint =
+            phase.equals("diagnostic")
+                ? "observation"
+                : phase.equals("receipt-declined") ? "receipt" : phase;
+        var changed = new java.util.concurrent.atomic.AtomicBoolean();
+        var after = new java.util.ArrayList<String>();
+        fixture.checkpoint =
+            point -> {
+              if (changed.get()) after.add(point);
+              if (point.equals(checkpoint) && changed.compareAndSet(false, true)) {
+                if (clear) RootContext.unbind();
+                else RootContext.bind("foreign-unit-xid");
+              }
+            };
+        var failure =
+            assertThrows(BizException.class, () -> fixture.coordinator.execute(fixture.request));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        org.junit.jupiter.api.Assertions.assertTrue(changed.get());
+        assertEquals(List.of(), after);
+        verify(fixture.store, times(phase.equals("diagnostic") ? 1 : 0))
+            .observeSnapshot(any(), any(), any());
+        verify(fixture.store, never()).observeDecidedSnapshot(any(), any(), any());
+        verify(fixture.store, times(phase.equals("decide") ? 1 : 0))
+            .decideOwned(any(), any(), any());
+        verify(
+                fixture.store,
+                times(List.of("evidence", "evidence-error", "decide").contains(phase) ? 1 : 0))
+            .read(fixture.request.payNo);
+        verify(fixture.transactions).begin();
+        verifyNoMoreInteractions(fixture.transactions);
+        assertNull(RootContext.getXID());
+      }
+  }
+
+  /** 原业务冲突优先于随后发现的context变化，finally仍清理本次上下文。 */
+  @Test
+  void businessConflictsKeepPriorityOverContextDrift() throws Exception {
+    for (String phase : List.of("receipt", "bridge", "evidence"))
+      for (boolean clear : List.of(false, true)) {
+        var original = new BizException("USER_TCC_RECEIVE_CONFLICT", "original conflict", 422);
+        var fixture = new Fixture(phase, original);
+        fixture.checkpoint =
+            point -> {
+              if (point.equals(phase + "-error")) {
+                if (clear) RootContext.unbind();
+                else RootContext.bind("foreign-unit-xid");
+              }
+            };
+        assertSame(
+            original,
+            assertThrows(BizException.class, () -> fixture.coordinator.execute(fixture.request)));
+        verify(fixture.store, never()).observeSnapshot(any(), any(), any());
+        verify(fixture.store, never()).observeDecidedSnapshot(any(), any(), any());
+        verify(fixture.store, never()).decideOwned(any(), any(), any());
+        verify(fixture.transactions).begin();
+        verifyNoMoreInteractions(fixture.transactions);
+        assertNull(RootContext.getXID());
+      }
+  }
+
   /** 每例独立编排依赖；故障仅抛一次，避免末次恢复故障掩盖先前副作用。 */
   private static final class Fixture {
     /** 实例内故障阶段。 */
@@ -207,6 +291,9 @@ class PayTccExecuteConflictTest {
 
     /** receipt明确非TRYING的健康回滚控制。 */
     private boolean declinedReceipt;
+
+    /** 受控回包/异常检查点；旧用例默认不改变上下文。 */
+    private java.util.function.Consumer<String> checkpoint = point -> {};
 
     /** 执行事实Store替身。 */
     private final PayTccExecutionStore store = mock(PayTccExecutionStore.class);
@@ -269,6 +356,7 @@ class PayTccExecuteConflictTest {
                 failAt("bind");
                 execution.xid = invocation.getArgument(1);
                 execution.state = "RUNNING";
+                checkpoint.accept("bind");
                 return execution;
               });
       when(receipts.prepare(request))
@@ -277,12 +365,14 @@ class PayTccExecuteConflictTest {
                 failAt("receipt");
                 var receipt = new PayTccReceiptVO();
                 receipt.state = declinedReceipt ? "DECLINED" : "TRYING";
+                checkpoint.accept("receipt");
                 return receipt;
               });
       when(bridge.dispatch(request))
           .thenAnswer(
               invocation -> {
                 failAt("bridge");
+                checkpoint.accept("bridge");
                 return user;
               });
       when(bridge.recover(request.payNo)).thenReturn(user);
@@ -290,6 +380,7 @@ class PayTccExecuteConflictTest {
           .thenAnswer(
               invocation -> {
                 failAt("evidence");
+                checkpoint.accept("evidence");
                 return "TRYING";
               });
       when(store.decideOwned(any(), any(), any()))
@@ -298,12 +389,14 @@ class PayTccExecuteConflictTest {
                 failAt("decide");
                 execution.decision = invocation.getArgument(2);
                 execution.state = execution.decision + "_REQUESTED";
+                checkpoint.accept("decide");
                 return execution;
               });
       org.mockito.stubbing.Answer<PayTccExecutionPO> observation =
           invocation -> {
             if ("UNKNOWN".equals(invocation.getArgument(1)) && invocation.getArgument(2) != null)
               execution.state = execution.xid == null ? "BEGIN_UNKNOWN" : "UNKNOWN";
+            checkpoint.accept("observation");
             return execution;
           };
       when(store.observeSnapshot(any(), any(), any())).thenAnswer(observation);
@@ -314,6 +407,7 @@ class PayTccExecuteConflictTest {
     private void failAt(String point) throws Exception {
       if (failure != null && phase.equals(point) && !raised) {
         raised = true;
+        checkpoint.accept(point + "-error");
         throw failure;
       }
     }

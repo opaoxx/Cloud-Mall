@@ -6099,6 +6099,213 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** 绑定已提交后换成foreign上下文，旧线程不得开始receipt或User Try。 */
+  @Test
+  void changedContextAfterBindingCannotStartReceipt() throws Exception {
+    assertOwnedExecutionContext("bind", "foreign", true);
+  }
+
+  /** receipt回包清上下文后不能继续User Try或自动决议。 */
+  @Test
+  void clearedContextAfterReceiptCannotStartUserTry() throws Exception {
+    assertOwnedExecutionContext("receipt", "clear", true);
+  }
+
+  /** 原XID在调用边界丢失时停止后续动作，已提交的绑定/诊断/决议仍保留。 */
+  @Test
+  void ownedExecutionRejectsContextDriftAtCallBoundaries() throws Exception {
+    for (String phase :
+        List.of(
+            "bind",
+            "receipt",
+            "receipt-declined",
+            "bridge",
+            "evidence",
+            "receipt-error",
+            "bridge-error",
+            "evidence-error",
+            "diagnostic",
+            "decide"))
+      for (String replacement : List.of("clear", "foreign"))
+        assertOwnedExecutionContext(phase, replacement, true);
+  }
+
+  /** 原context保持时沿原提交/回滚；既有明确业务冲突不被context冲突遮盖。 */
+  @Test
+  void ownedExecutionKeepsSameContextAndConflictPriority() throws Exception {
+    for (String phase :
+        List.of(
+            "bind",
+            "receipt",
+            "receipt-declined",
+            "bridge",
+            "evidence",
+            "receipt-error",
+            "bridge-error",
+            "evidence-error",
+            "diagnostic",
+            "decide")) assertOwnedExecutionContext(phase, "same", false);
+    for (String replacement : List.of("clear", "foreign"))
+      assertOwnedExecutionContext("receipt-conflict", replacement, true);
+  }
+
+  /** actual Store事务边界与受控ThreadLocal变化；不冒称真实Seata上下文丢失。 */
+  private void assertOwnedExecutionContext(String phase, String replacement, boolean reject)
+      throws Exception {
+    ownedExecutionObservationStore();
+    var request = prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+    fixture.update("DELETE FROM pay_tcc_execution");
+    var driftFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var afterDrift = new java.util.ArrayList<String>();
+    org.junit.jupiter.api.function.Executable changeContext =
+        () -> {
+          org.junit.jupiter.api.Assertions.assertFalse(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          if (replacement.equals("clear")) io.seata.core.context.RootContext.unbind();
+          else
+            io.seata.core.context.RootContext.bind(
+                replacement.equals("same") ? "t227-owned-xid" : "t227-foreign-xid");
+          driftFacts.set(executionReadFacts());
+        };
+    var transactional =
+        proxyExecutionObservationStore(executionObservationStore(executionObservationMapper));
+    // 仅包装现有实际Store，返回前的advice不改变业务事务边界。
+    var handoff = new org.springframework.aop.framework.ProxyFactory(transactional);
+    handoff.setProxyTargetClass(true);
+    handoff.addAdvice(
+        (org.aopalliance.intercept.MethodInterceptor)
+            invocation -> {
+              String method = invocation.getMethod().getName();
+              if (driftFacts.get() != null
+                  && List.of(
+                          "read",
+                          "decideOwned",
+                          "observeSnapshot",
+                          "observeDecidedSnapshot",
+                          "verifyDecisionSnapshot",
+                          "claimOwned",
+                          "bindOwnedXid")
+                      .contains(method)) afterDrift.add("store." + method);
+              var result = invocation.proceed();
+              boolean checkpoint =
+                  phase.equals("bind") && method.equals("bindOwnedXid")
+                      || phase.equals("decide") && method.equals("decideOwned")
+                      || phase.equals("diagnostic") && method.equals("observeSnapshot");
+              if (checkpoint && driftFacts.get() == null) changeContext.execute();
+              return result;
+            });
+    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
+    var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var originalConflict =
+        new com.cloudmall.common.error.BizException(
+            "PAY_TCC_RECEIPT_CONFLICT", "original branch conflict", 422);
+    when(transactions.begin())
+        .thenAnswer(
+            invocation -> {
+              io.seata.core.context.RootContext.bind("t227-owned-xid");
+              return "t227-owned-xid";
+            });
+    var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+    receipt.state = phase.equals("receipt-declined") ? "CLAIMED" : "TRYING";
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    when(receipts.prepare(request))
+        .thenAnswer(
+            invocation -> {
+              if (driftFacts.get() != null)
+                afterDrift.add("receipt.prepare:" + io.seata.core.context.RootContext.getXID());
+              if (phase.startsWith("receipt") && driftFacts.get() == null) changeContext.execute();
+              if (phase.equals("receipt-conflict")) throw originalConflict;
+              if (phase.equals("receipt-error") || phase.equals("diagnostic"))
+                throw new IllegalStateException("receipt unavailable");
+              return receipt;
+            });
+    when(bridge.dispatch(request))
+        .thenAnswer(
+            invocation -> {
+              if (driftFacts.get() != null)
+                afterDrift.add("bridge.dispatch:" + io.seata.core.context.RootContext.getXID());
+              if (phase.startsWith("bridge") && driftFacts.get() == null) changeContext.execute();
+              if (phase.equals("bridge-error"))
+                throw new IllegalStateException("User Try unavailable");
+              return user;
+            });
+    when(bridge.recover(request.payNo))
+        .thenAnswer(
+            invocation -> {
+              if (driftFacts.get() != null) afterDrift.add("bridge.recover");
+              return user;
+            });
+    when(evidence.classify(any(), any()))
+        .thenAnswer(
+            invocation -> {
+              if (driftFacts.get() != null) afterDrift.add("evidence.classify");
+              if (phase.startsWith("evidence") && driftFacts.get() == null) changeContext.execute();
+              if (phase.equals("evidence-error"))
+                throw new IllegalStateException("evidence unavailable");
+              return "TRYING";
+            });
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receipts, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    String decision =
+        phase.contains("error") || phase.equals("diagnostic") || phase.equals("receipt-declined")
+            ? "ROLLBACK"
+            : "COMMIT";
+    try {
+      org.junit.jupiter.api.Assertions.assertAll(
+          () -> {
+            if (reject) {
+              var failure =
+                  org.junit.jupiter.api.Assertions.assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () -> returned.set(coordinator.execute(request)));
+              assertEquals(
+                  phase.equals("receipt-conflict")
+                      ? originalConflict.getCode()
+                      : "PAY_TCC_EXECUTION_CONFLICT",
+                  failure.getCode());
+              assertEquals(phase.equals("receipt-conflict") ? 422 : 409, failure.getHttpStatus());
+              if (phase.equals("receipt-conflict"))
+                org.junit.jupiter.api.Assertions.assertSame(originalConflict, failure);
+            } else {
+              returned.set(coordinator.execute(request));
+              assertEquals(decision + "_REQUESTED", returned.get().state);
+              assertEquals("t227-owned-xid", returned.get().xid);
+            }
+          },
+          () -> {
+            if (reject) assertNull(returned.get());
+          },
+          () -> {
+            assertNotNull(driftFacts.get());
+            if (reject) assertEquals(driftFacts.get(), executionReadFacts());
+            else assertEquals(driftFacts.get().subList(0, 2), executionReadFacts().subList(0, 2));
+          },
+          () -> {
+            if (reject) assertEquals(List.of(), afterDrift);
+          },
+          () -> {
+            verify(transactions).begin();
+            if (!reject) {
+              if (decision.equals("COMMIT")) verify(transactions).commit("t227-owned-xid");
+              else verify(transactions).rollback("t227-owned-xid");
+            }
+            org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+          },
+          () -> assertNull(io.seata.core.context.RootContext.getXID()));
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
   /** COMMIT旧观察不能将terminal写入已改成ROLLBACK的当前执行。 */
   @Test
   void oldCommitObservationCannotCompleteReversedDecision() throws Exception {

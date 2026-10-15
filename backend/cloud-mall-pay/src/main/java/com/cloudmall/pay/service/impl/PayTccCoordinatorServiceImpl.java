@@ -5,6 +5,7 @@ import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
+import com.cloudmall.pay.domain.vo.PayTccReceiptVO;
 import com.cloudmall.pay.service.PayTccBridgeService;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccReceiptService;
@@ -60,19 +61,26 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
       if (xid == null || !Objects.equals(xid, RootContext.getXID()))
         throw new IllegalStateException("TC begin 未绑定原 XID");
       owned = executions.bindOwnedXid(owned, xid);
+      requireOwnedContext(xid);
       // 2. 两分支仅初次执行；明确冲突停止，普通失败请求回滚而非声称已回滚。
       String decision = "ROLLBACK";
       try {
-        if ("TRYING".equals(receipts.prepare(request).state)) {
+        PayTccReceiptVO receipt = receipts.prepare(request);
+        requireOwnedContext(xid);
+        if ("TRYING".equals(receipt.state)) {
           PayTccDispatchVO user = bridge.dispatch(request);
+          requireOwnedContext(xid);
           if ("TRYING".equals(evidence.classify(executions.read(request.payNo), user)))
             decision = "COMMIT";
         }
       } catch (RuntimeException tryFailure) {
         rethrowConflict(tryFailure);
+        requireOwnedContext(xid);
         recordObservation(owned, "UNKNOWN", tryFailure.getClass().getSimpleName());
       }
+      requireOwnedContext(xid);
       owned = executions.decideOwned(owned, xid, decision);
+      requireOwnedContext(xid);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
       sendDecision(owned);
     } catch (Exception beginOrPersistenceFailure) {
@@ -147,6 +155,12 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     if ("NONE".equals(execution.decision))
       return executions.observeSnapshot(execution, state, error);
     return executions.observeDecidedSnapshot(execution, state, error);
+  }
+
+  /** 初次线程只在原begin上下文仍匹配时继续，冲突不降级为普通失败诊断。 */
+  private void requireOwnedContext(String xid) {
+    if (xid == null || !Objects.equals(xid, RootContext.getXID()))
+      throw new BizException("PAY_TCC_EXECUTION_CONFLICT", "Coordinator 原XID上下文已变化", 409);
   }
 
   /** 禁止把新的全局事务误加入别人的 XID 或尚未提交的本地事务。 */
