@@ -18,14 +18,16 @@
 
 ### 3.1 Owned native
 
-- 使用 actual Coordinator、Store/Mapper、owned Pay/Intent/Execution 表与程序化本地 proxy；receipt/Bridge/Evidence/TC 为 mock，不启动 App、TC/RM、新监听。
-- 注入 receipt/Bridge/Evidence 载荷冲突与 bind/persistence conflict：冲突原对象传播，冲突发现时三表 facts 保持，不 observe、不新增 decide、不发 TC、不执行末次 readback；RootContext finally 清理。
+- 使用 actual Coordinator、Store/Mapper、owned Pay/Intent/Execution 表与 Spring ProxyFactory + TransactionInterceptor/AnnotationTx 的本地 REQUIRES_NEW；receipt/Bridge/Evidence/TC 为 mock，不启动 App、TC/RM、新监听。
+- 5 个阶段（begin、receipt、bridge、evidence、decide）×3 个明确 conflict code=15，冲突原对象传播，冲突发现时三表 facts 保持，不 observe、不新增 decide、不发 TC、不执行末次 readback；RootContext finally 清理。
+- bind guard 场景由 begin callback 后同线程独立 JDBC autocommit 修改已认领行再继续验证，属于本地故障注入，不是新 worker、真实 TC 或远端并发；claim/bind/已发 Try 在发现冲突前的事实保留。
 - NULL/其它 Business code/普通 Runtime 仍沿原 UNKNOWN/ROLLBACK/TC 语义；正常 commit/rollback、context reject、重入健康回归保持。TC 可能后续 timeout，不称其已回滚。
-- native 只证明 catch 传播与本地写入保护，不证明真实 TC/远端 source/完整资金因果。
+- native 只证明 catch 传播与本地写入保护，不证明真实 TC/远端 source/完整资金因果；TC 依赖仅 mock，TC 只有 begin/调用计数证据。
 
 ### 3.2 Unit
 
-- 用真实 Coordinator/Store orchestration 与 mock 依赖覆盖 inner/outer 两 catch、Biz conflict/non-conflict/Runtime、claim/bind 前置、已发 Try、finally unbind；不把 mock 视为真实 TC。
+- 用真实 Coordinator，Store/receipt/Bridge/Evidence/TC 均为 mock 依赖，覆盖 inner/outer 两 catch、Biz conflict/non-conflict/Runtime、claim/bind 前置、已发 Try、finally unbind；6阶段×3 conflict=18，原对象/状态保持；不把 mock 视为真实 TC。实际 Store 事务由 native 覆盖。
+- 另覆盖6阶段×4普通异常/OTHER409/NULL code/lowercase conflict=24，及 checked begin、健康 commit、receipt 非 TRYING 回滚等27控制；ambient RootContext/local transaction、replay、claimConflict 四边界保持。
 - 断言 conflict 不调用 observe/decide/TC，非 conflict 保持原流程；其它 ErrorCodes、HTTP语义、private observe 冲突分支不扩展。
 
 ## 4. 明确边界
