@@ -33,8 +33,13 @@ public class PayTccExecutionEvidence {
   /** 缺失一端只能未知；TC 响应和网络超时不参与本方法的资金结论。 */
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public String classify(PayTccExecutionPO execution, PayTccDispatchVO user) {
-    // 1. 原执行金额须为正，User镜像必须匹配完整载荷，不可只看状态字串。
+    // 1. 先核原金额、用户和订单的有效域，再比较User镜像完整载荷。
     require(execution != null && execution.amount != null && execution.amount.signum() > 0);
+    require(
+        execution.userId != null
+            && execution.userId > 0
+            && execution.orderNo != null
+            && !execution.orderNo.isBlank());
     if (user != null)
       require(
           Objects.equals(user.payNo, execution.payNo)

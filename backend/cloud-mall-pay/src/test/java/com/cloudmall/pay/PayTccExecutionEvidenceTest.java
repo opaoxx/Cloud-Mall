@@ -604,6 +604,151 @@ class PayTccExecutionEvidenceTest {
     }
   }
 
+  /** 三方相等不代表身份有效，缺端也不能掩盖无效execution身份。 */
+  @Test
+  void invalidExecutionIdentityCannotProduceEvidenceWithMissingSides() {
+    for (String mutation :
+        List.of(
+            "user-null",
+            "user-zero",
+            "user-negative",
+            "order-null",
+            "order-empty",
+            "order-space",
+            "order-controls"))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED"))
+        for (boolean missingSides : List.of(false, true)) {
+          var fixture = new EvidenceFixture();
+          mutateMatchingExecutionIdentity(fixture, mutation);
+          fixture.pay.state = payState;
+          fixture.user.state =
+              payState.equals("TRYING")
+                  ? "TRY_ACCEPTED"
+                  : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+          fixture.fence.status =
+              payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1;
+          if (missingSides) {
+            fixture.user = null;
+            when(fixture.receipts.selectByPayNo(any())).thenReturn(null);
+          }
+          var before = fixture.snapshot();
+          var failure =
+              assertThrows(
+                  BizException.class,
+                  () -> fixture.evidence.classify(fixture.execution, fixture.user));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          verifyNoInteractions(fixture.receipts, fixture.fences);
+          assertEquals(before, fixture.snapshot());
+        }
+  }
+
+  /** 真实恢复入口对无效身份不降级观察，也不继续已持久化的TC决议。 */
+  @Test
+  void coordinatorStopsInvalidExecutionIdentityBeforeObservationAndTc() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String mutation : List.of("user-zero", "order-empty")) {
+        var fixture = new EvidenceFixture();
+        mutateMatchingExecutionIdentity(fixture, mutation);
+        fixture.execution.decision = decision;
+        var store = mock(PayTccExecutionStore.class);
+        var bridge = mock(PayTccBridgeService.class);
+        var receiptService = mock(PayTccReceiptService.class);
+        var transactions = mock(PayTccTransactionClient.class);
+        when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
+        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
+        var coordinator =
+            new PayTccCoordinatorServiceImpl(
+                store, receiptService, bridge, fixture.evidence, transactions);
+        var before = fixture.snapshot();
+        var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        verify(store, never()).observe(any(), any(), any());
+        verifyNoInteractions(transactions, receiptService, fixture.receipts, fixture.fences);
+        assertEquals(before, fixture.snapshot());
+      }
+  }
+
+  /** 正用户上下界、订单边空格/长度保持，正域缺端和未绑定XID仍UNKNOWN。 */
+  @Test
+  void validExecutionIdentityKeepsRawTextAndMissingSideSemantics() {
+    for (String variant : List.of("original", "different-positive", "positive-bounds"))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED")) {
+        var fixture = new EvidenceFixture();
+        Long userId =
+            variant.equals("positive-bounds")
+                ? Long.MAX_VALUE
+                : variant.equals("different-positive") ? 1L : 7L;
+        String orderNo =
+            variant.equals("positive-bounds")
+                ? "o".repeat(64)
+                : variant.equals("different-positive") ? " other-order " : "order-evidence-1";
+        fixture.execution.userId = userId;
+        fixture.pay.userId = userId;
+        fixture.user.userId = userId;
+        fixture.execution.orderNo = orderNo;
+        fixture.pay.orderNo = orderNo;
+        fixture.user.orderNo = orderNo;
+        fixture.pay.state = payState;
+        fixture.user.state =
+            payState.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+        fixture.fence.status =
+            payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1;
+        String expected =
+            payState.equals("CONFIRMED")
+                ? "COMMITTED"
+                : payState.equals("CANCELLED")
+                    ? "ROLLEDBACK"
+                    : payState.equals("TRYING") ? "TRYING" : "UNKNOWN";
+        var before = fixture.snapshot();
+        assertEquals(expected, fixture.evidence.classify(fixture.execution, fixture.user));
+        assertEquals(before, fixture.snapshot());
+      }
+    for (boolean missingUser : List.of(false, true)) {
+      var fixture = new EvidenceFixture();
+      if (missingUser) fixture.user = null;
+      else when(fixture.receipts.selectByPayNo(any())).thenReturn(null);
+      var before = fixture.snapshot();
+      assertEquals("UNKNOWN", fixture.evidence.classify(fixture.execution, fixture.user));
+      assertEquals(before, fixture.snapshot());
+    }
+    var prebegin = new EvidenceFixture();
+    prebegin.execution.xid = null;
+    prebegin.execution.state = "BEGIN_UNKNOWN";
+    prebegin.user = null;
+    when(prebegin.receipts.selectByPayNo(any())).thenReturn(null);
+    var beforePrebegin = prebegin.snapshot();
+    assertEquals("UNKNOWN", prebegin.evidence.classify(prebegin.execution, prebegin.user));
+    verifyNoInteractions(prebegin.fences);
+    assertEquals(beforePrebegin, prebegin.snapshot());
+  }
+
+  /** 独立变异三方相等的身份；NULL只模拟PO读取，不改生产表约束。 */
+  private void mutateMatchingExecutionIdentity(EvidenceFixture fixture, String mutation) {
+    Long userId = 7L;
+    String orderNo = "order-evidence-1";
+    switch (mutation) {
+      case "user-null" -> userId = null;
+      case "user-zero" -> userId = 0L;
+      case "user-negative" -> userId = -1L;
+      case "order-null" -> orderNo = null;
+      case "order-empty" -> orderNo = "";
+      case "order-space" -> orderNo = "   ";
+      case "order-controls" -> orderNo = "\t\n";
+      default -> throw new IllegalArgumentException("unknown execution identity mutation");
+    }
+    fixture.execution.userId = userId;
+    fixture.pay.userId = userId;
+    fixture.user.userId = userId;
+    fixture.execution.orderNo = orderNo;
+    fixture.pay.orderNo = orderNo;
+    fixture.user.orderNo = orderNo;
+  }
+
   /** 独立完整两端载荷及查询替身，状态和输入对象均不在测试间共享。 */
   private static final class EvidenceFixture {
     /** 当前原execution金额与不可变身份。 */

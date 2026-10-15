@@ -4562,6 +4562,113 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals(before, ownedFenceFacts()));
   }
 
+  /** 一致的零用户号不能在CONFIRMED状态下被分类为COMMITTED。 */
+  @Test
+  void zeroExecutionUserCannotProduceCommittedEvidence() {
+    assertExecutionIdentityRejected("user-zero", "CONFIRMED", false);
+  }
+
+  /** 一致的空订单号不能在CANCELLED状态下被分类为ROLLEDBACK。 */
+  @Test
+  void blankExecutionOrderCannotProduceRolledBackEvidence() {
+    assertExecutionIdentityRejected("order-empty", "CANCELLED", false);
+  }
+
+  /** 非正用户与空白订单在四receipt态及缺失receipt时均须冲突。 */
+  @Test
+  void invalidExecutionIdentityRejectsStateAndMissingControls() {
+    for (String mutation :
+        List.of("user-zero", "user-negative", "order-empty", "order-space", "order-controls")) {
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED"))
+        assertExecutionIdentityRejected(mutation, payState, false);
+      assertExecutionIdentityRejected(mutation, "CONFIRMED", true);
+    }
+  }
+
+  /** 正用户范围和原订单文本不归一化，合法域与正金额缺失UNKNOWN保持。 */
+  @Test
+  void validExecutionIdentityKeepsOriginalConclusionsAndText() {
+    for (String variant : List.of("original", "different-positive", "positive-bounds"))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED")) {
+        var evidence = ownedFenceIdentityEvidence();
+        seedOwnedFenceEvidence(
+            payState,
+            payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1,
+            "t174-xid",
+            11L);
+        Long userId =
+            variant.equals("positive-bounds")
+                ? Long.MAX_VALUE
+                : variant.equals("different-positive") ? 1L : 7L;
+        String orderNo =
+            variant.equals("positive-bounds")
+                ? "o".repeat(64)
+                : variant.equals("different-positive") ? " other-order " : "order-1";
+        fixture.update("UPDATE pay_tcc_execution SET user_id=?,order_no=?", userId, orderNo);
+        fixture.update("UPDATE pay_tcc_receipt SET user_id=?,order_no=?", userId, orderNo);
+        String userState =
+            payState.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+        String expected =
+            payState.equals("CONFIRMED")
+                ? "COMMITTED"
+                : payState.equals("CANCELLED")
+                    ? "ROLLEDBACK"
+                    : payState.equals("TRYING") ? "TRYING" : "UNKNOWN";
+        var before = ownedFenceFacts();
+        assertEquals(expected, classifyOwnedFence(evidence, userState));
+        assertEquals(before, ownedFenceFacts());
+      }
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence("CONFIRMED", 2, "t174-xid", 11L);
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    var before = ownedFenceFacts();
+    assertEquals("UNKNOWN", classifyOwnedFence(evidence, "CONFIRMED"));
+    assertEquals(before, ownedFenceFacts());
+  }
+
+  /** 只变更owned exec/receipt，镜像取同字段；原Pay/Intent保持用户7和order-1。 */
+  private void assertExecutionIdentityRejected(
+      String mutation, String payState, boolean missingReceipt) {
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence(
+        payState,
+        payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1,
+        "t174-xid",
+        11L);
+    Long userId = 7L;
+    String orderNo = "order-1";
+    switch (mutation) {
+      case "user-zero" -> userId = 0L;
+      case "user-negative" -> userId = -1L;
+      case "order-empty" -> orderNo = "";
+      case "order-space" -> orderNo = "   ";
+      case "order-controls" -> orderNo = "\t\n";
+      default -> throw new IllegalArgumentException("unknown execution identity mutation");
+    }
+    fixture.update("UPDATE pay_tcc_execution SET user_id=?,order_no=?", userId, orderNo);
+    fixture.update("UPDATE pay_tcc_receipt SET user_id=?,order_no=?", userId, orderNo);
+    if (missingReceipt) fixture.update("DELETE FROM pay_tcc_receipt");
+    String userState =
+        payState.equals("TRYING")
+            ? "TRY_ACCEPTED"
+            : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+    var before = ownedFenceFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(classifyOwnedFence(evidence, userState)));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, ownedFenceFacts()));
+  }
+
   /** 原execution/receipt/Fence表只在owned克隆，通过实际Mapper同RR快照读取。 */
   private com.cloudmall.pay.service.impl.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
     ownedExecutionObservationStore();
