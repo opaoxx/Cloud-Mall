@@ -2,7 +2,7 @@
 
 ## 1. 评审结论与范围
 
-本批 **GO**。`PayTccReceiptLocalResourceImpl.finish` 目前只核 Fence actionName，CI 查询返回的异源 `xid/branch` 可被当作当前 context 的 Fence；rejected 分支 helper 的第二次 Fence 读取也有同样问题，可能让 alias Fence 与另一 owner 提前 ACK。本批只收紧 Fence 身份，不改 receipt owner、Store、callback、SQL 或状态机。
+本批 **GO**。`PayTccReceiptLocalResourceImpl.finish` 目前只核 Fence actionName，CI 查询返回的异源 xid（真实 native 覆盖 xid 大小写别名）可被当作当前 context 的 Fence；rejected 分支 helper 的第二次 Fence 读取也有同样问题，可能让 alias Fence 与另一 owner 提前 ACK。本批只收紧 Fence 身份，不改 receipt owner、Store、callback、SQL 或状态机。branch/null/action 异常对象由第二读 Mapper wrapper 覆盖，不表述为数据库 CI branch/null/action 别名。
 
 ## 2. 共享 Fence 身份门
 
