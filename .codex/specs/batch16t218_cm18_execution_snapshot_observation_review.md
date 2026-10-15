@@ -6,7 +6,7 @@
 
 ## 2. Snapshot observe API
 
-在 ExecutionStore 增加内部 public 语义方法 `observeSnapshot(PayTccExecutionPO expected, String state, String error)`，`expected == null` 沿既有 conflict。方法保持 `REQUIRES_NEW`、Pay→execution 锁序、error 截断、state/decision/terminal merge 与原 SQL affected-row 语义：
+在 ExecutionStore 增加内部 public 语义方法 `observeSnapshot(PayTccExecutionPO expected, String state, String error)`，`expected == null` 沿既有 conflict。方法保持 `REQUIRES_NEW`、现有 execution `FOR UPDATE` 锁序（不新增 Pay 锁）、error 截断、state/decision/terminal merge 与原 SQL affected-row 语义：
 
 1. 使用 `expected.payNo` 锁当前行；缺行沿既有 conflict；
 2. 先对当前行复用既有 `validatePersistedExecution`，再对 expected 做同域验证；
@@ -32,12 +32,12 @@
 
 - 使用真实 Store/Mapper/Coordinator 与 owned execution/Pay/Intent 三表；Bridge/Evidence/TC 为 mock，使用 Spring ProxyFactory + AnnotationTransactionAttributeSource 验证实际事务传播，不启动业务 App、TC/RM、新监听。
 - 两条 red：Bridge answer 在返回旧结论/抛 503 前，由另一 owned JDBC 事务替换并提交 execution；旧实现按 payNo 写新行。修复后 id/xid/user/order/amount/op/ledger 任一漂移均 409，三表 snapshot 不被旧结果改写。
-- 覆盖合法 snapshot 的 incoming state/error、当前 mutable state/decision/diagnostic/recovery 进度变化；保持原 merge、terminal 防倒退、SQL affected=1/0、错误截断和 readback。
-- literal expected null、替换行及其它异常对象仅 Unit seam；native 不冒称真实并发/TOCTOU fencing、TC、远端 User 或历史 repair。
+- 覆盖5类合法 anchor 漂移（id、xid、userId、orderNo、amount）× COMMITTED/ROLLEDBACK/UNKNOWN 三种 incoming 结果=15组；PayNo/operationKey/ledgerKey 漂移由原 persisted 域门优先拒绝，不计作 snapshot 独立证据。另覆盖合法 snapshot 的 incoming state/error、当前 mutable state/decision/diagnostic/recovery 进度变化；保持原 merge、terminal 防倒退、SQL affected=1/0、错误截断和 readback。
+- literal expected null、缺行/异常 PO 与 SQL0 等由 Unit seam 覆盖；native 覆盖 peer 替换与提交后的 anchor 变化。本地有界工作线程事务交错不证明真实 TC/远端并发或完整 TOCTOU fencing、远端 User 或历史 repair。
 
 ### 4.2 Unit
 
-- 覆盖 NULL expected、缺行、八字段单边/多边 drift、金额数值等价、incoming state/error、当前 mutable 进度与旧 merge kernel；snapshot mismatch 无 update/observe 后续调用。
+- 覆盖 NULL expected、缺行、5类合法 anchor drift（id/xid/userId/orderNo/amount）、金额数值等价、incoming state/error、当前 mutable 进度与旧 merge kernel；PayNo/operationKey/ledgerKey 坏值由原域门优先，snapshot mismatch 无 update/observe 后续调用。
 - 保持旧 `observe(payNo,...)` 非 snapshot 诊断行为与其它 Coordinator/Store API；不把合法 snapshot proof 当完整 source 证明。
 
 ## 5. 明确边界
