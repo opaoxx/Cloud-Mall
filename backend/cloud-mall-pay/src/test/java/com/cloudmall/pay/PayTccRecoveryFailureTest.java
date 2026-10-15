@@ -242,7 +242,7 @@ class PayTccRecoveryFailureTest {
       when(store.claimOwned(request)).thenReturn(initialOwner);
       when(store.bindOwnedXid(any(), any())).thenReturn(original);
       when(store.read(original.payNo)).thenReturn(original);
-      when(store.decide(any(), any(), any())).thenReturn(chosen);
+      when(store.decideOwned(any(), any(), any())).thenReturn(chosen);
       when(store.observeSnapshot(any(), any(), any()))
           .thenAnswer(
               invocation -> {

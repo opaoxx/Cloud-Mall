@@ -59,7 +59,7 @@ class PayTccExecuteConflictTest {
           verify(fixture.evidence).classify(fixture.execution, fixture.user);
         }
         if (phase.equals("decide"))
-          verify(fixture.store).decide(fixture.request.payNo, "unit-execute-xid", "COMMIT");
+          verify(fixture.store).decideOwned(fixture.execution, "unit-execute-xid", "COMMIT");
         verifyNoMoreInteractions(
             fixture.store,
             fixture.receipts,
@@ -88,7 +88,7 @@ class PayTccExecuteConflictTest {
       String decision = declined ? "ROLLBACK" : "COMMIT";
       assertEquals(decision, result.decision);
       assertEquals(decision + "_REQUESTED", result.state);
-      verify(fixture.store).decide(fixture.request.payNo, "unit-execute-xid", decision);
+      verify(fixture.store).decideOwned(fixture.execution, "unit-execute-xid", decision);
       verify(fixture.transactions).begin();
       if (declined) verify(fixture.transactions).rollback("unit-execute-xid");
       else verify(fixture.transactions).commit("unit-execute-xid");
@@ -165,11 +165,11 @@ class PayTccExecuteConflictTest {
             same(fixture.execution), eq("UNKNOWN"), eq(failure.getClass().getSimpleName()));
     verify(fixture.transactions).begin();
     if (decision.equals("ROLLBACK")) {
-      verify(fixture.store).decide(fixture.request.payNo, "unit-execute-xid", "ROLLBACK");
+      verify(fixture.store).decideOwned(fixture.execution, "unit-execute-xid", "ROLLBACK");
       verify(fixture.transactions).rollback("unit-execute-xid");
     } else if (phase.equals("decide"))
-      verify(fixture.store).decide(fixture.request.payNo, "unit-execute-xid", "COMMIT");
-    else verify(fixture.store, never()).decide(any(), any(), any());
+      verify(fixture.store).decideOwned(fixture.execution, "unit-execute-xid", "COMMIT");
+    else verify(fixture.store, never()).decideOwned(any(), any(), any());
     verifyNoMoreInteractions(fixture.transactions);
     assertNull(RootContext.getXID());
   }
@@ -271,7 +271,7 @@ class PayTccExecuteConflictTest {
                 failAt("evidence");
                 return "TRYING";
               });
-      when(store.decide(any(), any(), any()))
+      when(store.decideOwned(any(), any(), any()))
           .thenAnswer(
               invocation -> {
                 failAt("decide");

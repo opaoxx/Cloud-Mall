@@ -72,7 +72,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
         rethrowConflict(tryFailure);
         executions.observeSnapshot(owned, "UNKNOWN", tryFailure.getClass().getSimpleName());
       }
-      PayTccExecutionPO chosen = executions.decide(request.payNo, xid, decision);
+      PayTccExecutionPO chosen = executions.decideOwned(owned, xid, decision);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
       sendDecision(chosen);
     } catch (Exception beginOrPersistenceFailure) {

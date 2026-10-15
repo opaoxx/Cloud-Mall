@@ -162,6 +162,129 @@ class PayTccExecutionOwnerTest {
     }
   }
 
+  /** 原owner校验先于决议参数/终态幂等，不允许漂移借同XID决议。 */
+  @Test
+  void ownedDecisionRejectsDriftBeforeDecisionAndTerminalShortcuts() {
+    for (String mutation :
+        List.of("id", "xid", "user", "order", "amount", "mode", "missing", "null")) {
+      var fixture = new Fixture();
+      var owned = execution("RUNNING", "owned-xid");
+      var current = execution("COMMITTED", "owned-xid");
+      current.decision = "COMMIT";
+      switch (mutation) {
+        case "id" -> current.id = 2L;
+        case "xid" -> current.xid = "peer-xid";
+        case "user" -> current.userId = fixture.source.userId = 8L;
+        case "order" -> current.orderNo = fixture.source.orderNo = "peer-order";
+        case "amount" -> current.amount = fixture.source.amount = new BigDecimal("10.01");
+        case "mode" -> fixture.source.debitMode = "LEGACY";
+        case "missing" -> when(fixture.payments.selectForUpdate(owned.payNo)).thenReturn(List.of());
+        default -> {}
+      }
+      when(fixture.executions.selectForUpdate(owned.payNo)).thenReturn(current);
+      var input = mutation.equals("null") ? null : owned;
+      var before = snapshot(owned);
+      var failure =
+          assertThrows(
+              BizException.class, () -> fixture.store.decideOwned(input, owned.xid, "COMMIT"));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(before, snapshot(owned));
+      if (input == null) verifyNoInteractions(fixture.payments, fixture.executions);
+      else {
+        var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+        order.verify(fixture.payments).selectForUpdate(owned.payNo);
+        order.verify(fixture.executions).selectForUpdate(owned.payNo);
+      }
+      fixture.verifyNoOtherInteractions();
+    }
+  }
+
+  /** 新决议与旧内核共享双向CAS、同向/终态幂等，原快照不因当前进度而改变。 */
+  @Test
+  void ownedDecisionKeepsDirectionAndMutableProgress() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String state :
+          List.of("RUNNING", decision + "_REQUESTED", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+        var fixture = new Fixture();
+        var owned = execution("RUNNING", "owned-xid");
+        var current = execution(state, "owned-xid");
+        current.decision = state.equals("RUNNING") ? "NONE" : decision;
+        fixture.source.status = "SUCCESS";
+        var chosen = execution(decision + "_REQUESTED", "owned-xid");
+        chosen.decision = decision;
+        when(fixture.executions.selectForUpdate(owned.payNo)).thenReturn(current);
+        when(fixture.executions.setDecision(any(), any(), any(), any(), any())).thenReturn(1);
+        when(fixture.executions.selectByPayNo(owned.payNo)).thenReturn(chosen);
+        var before = snapshot(owned);
+        assertSame(
+            state.equals("RUNNING") ? chosen : current,
+            fixture.store.decideOwned(owned, owned.xid, decision));
+        assertEquals(before, snapshot(owned));
+        var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+        order.verify(fixture.payments).selectForUpdate(owned.payNo);
+        order.verify(fixture.executions).selectForUpdate(owned.payNo);
+        if (state.equals("RUNNING")) {
+          order
+              .verify(fixture.executions)
+              .setDecision(
+                  eq(owned.payNo), eq(owned.xid), eq(decision), eq(decision + "_REQUESTED"), any());
+          order.verify(fixture.executions).selectByPayNo(owned.payNo);
+        }
+        fixture.verifyNoOtherInteractions();
+      }
+  }
+
+  /** 坏参数/反向/SQL0/NULL读回仍冲突；unit只验调用契约，事务由native验。 */
+  @Test
+  void ownedDecisionKeepsInputAndPersistenceConflicts() {
+    for (String mutation :
+        List.of(
+            "null-xid",
+            "blank-xid",
+            "long-xid",
+            "different-xid",
+            "null-decision",
+            "bad-decision",
+            "opposite",
+            "zero-update",
+            "null-readback")) {
+      var fixture = new Fixture();
+      var owned = execution("RUNNING", "owned-xid");
+      var current = execution("RUNNING", "owned-xid");
+      if (mutation.equals("opposite")) current.decision = "ROLLBACK";
+      when(fixture.executions.selectForUpdate(owned.payNo)).thenReturn(current);
+      if (mutation.equals("null-readback"))
+        when(fixture.executions.setDecision(any(), any(), any(), any(), any())).thenReturn(1);
+      String xid =
+          switch (mutation) {
+            case "null-xid" -> null;
+            case "blank-xid" -> " ";
+            case "long-xid" -> "x".repeat(129);
+            case "different-xid" -> "other-xid";
+            default -> owned.xid;
+          };
+      String decision =
+          mutation.equals("null-decision")
+              ? null
+              : mutation.equals("bad-decision") ? "commit" : "COMMIT";
+      var failure =
+          assertThrows(BizException.class, () -> fixture.store.decideOwned(owned, xid, decision));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+      order.verify(fixture.payments).selectForUpdate(owned.payNo);
+      order.verify(fixture.executions).selectForUpdate(owned.payNo);
+      if (List.of("zero-update", "null-readback").contains(mutation))
+        order
+            .verify(fixture.executions)
+            .setDecision(
+                eq(owned.payNo), eq(owned.xid), eq("COMMIT"), eq("COMMIT_REQUESTED"), any());
+      if (mutation.equals("null-readback"))
+        order.verify(fixture.executions).selectByPayNo(owned.payNo);
+      fixture.verifyNoOtherInteractions();
+    }
+  }
+
   /** 有效请求与固定键共享原创建域。 */
   private static PayTccDispatchDTO request() {
     var request = new PayTccDispatchDTO();

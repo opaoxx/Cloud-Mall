@@ -155,6 +155,24 @@ public class PayTccExecutionStore {
   public PayTccExecutionPO decide(String payNo, String xid, String decision) {
     // 1. 先核锁定行，再校验本次决议参数，保留原持久域优先级。
     PayTccExecutionPO current = locked(payNo);
+    // 2. 保原决议和读回行为，不改变旧调用方的锁及来源契约。
+    return decideCurrent(current, xid, decision);
+  }
+
+  /** 原owner及Pay来源仍匹配时才提交决议；身份核对先于终态和同向幂等。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public PayTccExecutionPO decideOwned(PayTccExecutionPO expected, String xid, String decision) {
+    // 1. 按Pay→execution锁序核对原bound快照，不从最新行接管owner。
+    PayTccExecutionPO current = lockedSnapshot(expected);
+    // 2. 复用原输入、方向、终态及CAS规则。
+    PayTccExecutionPO chosen = decideCurrent(current, xid, decision);
+    // 3. 缺失锁内读回不作为决议成功，冲突回滚本地写入。
+    if (chosen == null) throw conflict();
+    return chosen;
+  }
+
+  /** 锁定行的原决议内核；同向/终态不写，相反方向冲突，更新必须恰好一行。 */
+  private PayTccExecutionPO decideCurrent(PayTccExecutionPO current, String xid, String decision) {
     if (xid == null
         || xid.isBlank()
         || xid.length() > 128
@@ -165,9 +183,9 @@ public class PayTccExecutionStore {
     if (!"NONE".equals(current.decision) && !decision.equals(current.decision)) throw conflict();
     if (terminal(current.state) || decision.equals(current.decision)) return current;
     // 3. 沿原CAS独立持久化决议并读回，不猜测TC结果。
-    if (executions.setDecision(payNo, xid, decision, decision + "_REQUESTED", now()) != 1)
+    if (executions.setDecision(current.payNo, xid, decision, decision + "_REQUESTED", now()) != 1)
       throw conflict();
-    return executions.selectByPayNo(payNo);
+    return executions.selectByPayNo(current.payNo);
   }
 
   /** 观察结果锁内合并，写入须恰好一行；迟到未知/相反终态不能覆盖既有终态。 */
