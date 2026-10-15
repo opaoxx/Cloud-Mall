@@ -20,15 +20,15 @@ BizException catch 复用 T220 `rethrowConflict(failure)`，安全处理 `code =
 
 ### 3.1 Owned native
 
-- 使用 actual Coordinator、Store/Mapper、owned execution/Pay/Intent 三表与本地 proxy；TC/Bridge/Evidence/receipt 为 mock，不启动 App、TC/RM、新监听。
-- recovery `execute/recover × COMMIT/ROLLBACK × 5 anchor drift（id/xid/user/order/amount）+3 Pay-only drift（mode/order/amount）=32` 组合：peer 通过独立工作线程/TT 在故障窗口提交变化，snapshot conflict、三表保持，已发 TC 调用计数如实记录，不伪称为零。
-- sendDecision TC failure 后使用旧 execution snapshot；Bridge BizException code null 不 NPE，沿 UNKNOWN snapshot；健康相同 identity/terminal、NULL/OTHER/lowercase/conflict 分类保持。
+- 使用 actual Coordinator、Store/Mapper、owned execution/Pay/Intent 三表与本地 REQUIRES_NEW proxy；TC/Bridge/Evidence/receipt 为 mock，不启动 App、TC/RM、新监听。
+- recovery `execute/recover × COMMIT/ROLLBACK × 5 anchor drift（id/xid/user/order/amount）+3 Pay-only drift（mode/order/amount）=32` 组合：peer 通过独立工作线程/TT 在故障窗口提交变化，snapshot conflict、三表保持。Pay/user/order/amount peer 变化通过 PayNo 对齐 Pay；execution id 为随机值，不以固定 id 假设匹配。已发 TC 调用计数如实记录且非零，不伪称为零。
+- healthy `execute/recover × COMMIT/ROLLBACK × UNCHANGED/COMMITTED/ROLLEDBACK/CONFLICT=16` 控制保持；terminal mock TC callback 的同线程 JDBC autocommit 注入仅验证缓存返回，不是真实 TC 证明。sendDecision TC failure 后使用旧 execution snapshot；Bridge BizException code null 不 NPE，沿 UNKNOWN snapshot；NULL code 场景仅 NONE 方向保 UNKNOWN/SQL NULL 且 immutable/recovery/Pay/Intent 不变。
 - native 仅证明本地 snapshot/Pay source 保护与异常分类，不证明真实 TC/外部资金/完整 fencing；peer 交错不是生产并发证明。
 
 ### 3.2 Unit
 
-- actual Coordinator 配 mock Store/TC/Bridge/Evidence，断言诊断使用原 chosen execution 对象；冲突终止末次 read/observe/execute 写回，finally 清理 RootContext。
-- 覆盖 conflict/non-conflict/NULL code/ordinary Runtime、sendDecision 与 private observe 两路径，旧决议/未知流程保持。
+- actual Coordinator 配 mock Store/TC/Bridge/Evidence，断言诊断使用原 chosen execution 对象；两入口×双方向×诊断接受/拒绝=8，冲突终止末次 read/observe/execute 写回，finally 清理 RootContext。
+- 覆盖三决议×NULL/OTHER/lower/conflict=12 business 控制，TC Runtime/BizNULL/TC_CONFLICT=3与 BridgeRuntime/EvidenceConflict/缓存终态=3 控制，旧决议/未知流程保持。
 
 ## 4. 明确边界
 
