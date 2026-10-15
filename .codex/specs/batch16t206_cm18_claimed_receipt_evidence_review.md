@@ -32,10 +32,10 @@ Fence 读取、User state/branch、terminal 映射和 COMMIT/ROLLBACK decision �
 ### 3.2 Owned native
 
 - 使用实际 Evidence/Receipt/Execution/Fence Mapper 与只读 RR 程序化 wrapper；不启动业务 App、TC/RM、新监听或官方 Fence handler。本批不冒称真实 TC/远端 User。
-- red：CLAIMED branch 0/-1/MIN_VALUE 在旧代码为 UNKNOWN 并可能继续 observe；修复后 3×4 User state 组合共12组 409、五表 facts 不变。
+- red：旧代码已实际覆盖 CLAIMED branch 0/-1 为 UNKNOWN 并可能继续 observe；MIN_VALUE 纳入修复后矩阵，不写成旧 red 已实测。修复后 3×4 User state 组合共12组 409、五表 facts 不变。
 - healthy：CLAIMED null/1/MAX ×四 User states 共12组 UNKNOWN；missing receipt 保持 UNKNOWN；其它 advanced 正 branch/Fence 矩阵与 T200–T205 回归保持。
-- native 只证明 CLAIMED state/branch 本地域门，不证明 CLAIMED branch 正数已有 Fence/owner/资金注册或完整 source 因果。
+- native 只证明 CLAIMED state/branch 本地域门，不证明 CLAIMED branch 正数已有 Fence/owner/资金注册或完整 source 因果；本批新增场景不调用官方 FenceHandler，旧专项 201–204 的回归证据另行记录。
 
 ## 4. 明确边界
 
-本批不改变 CLAIMED 的 UNKNOWN 语义，不读取 Fence、不新增分支注册、不修历史 receipt、不改变其它 receipt state/branch helper、Coordinator 状态机、SQL、事务、API 或 TC/RM。合法 CLAIMED 仍是未注册/未完成状态，不能被本批升级为资金事实。
+本批不改变 CLAIMED 的 UNKNOWN 语义，不读取 Fence、不新增分支注册、不修历史 receipt、不改变其它 receipt state/branch helper、Coordinator 状态机、SQL、事务、API 或 TC/RM。Evidence 之后只保护 `execution.observe`/TC 继续入口；不撤回 Evidence 之前 Bridge recover 的读取或镜像，也不扩展 execute 的原异常决议流程。合法 UNKNOWN 在既有 decision 下仍沿原 TC 重试行为；本批不能据此推断 CLAIMED 是否已登记或已有资金事实。
