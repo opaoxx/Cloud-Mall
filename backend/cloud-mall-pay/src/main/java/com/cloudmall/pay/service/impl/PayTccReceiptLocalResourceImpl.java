@@ -11,7 +11,6 @@ import io.seata.rm.tcc.TCCFenceHandler;
 import io.seata.rm.tcc.api.BusinessActionContext;
 import java.lang.reflect.Method;
 import java.util.Objects;
-import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -142,8 +141,8 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
     for (PayTccReceiptPO owner :
         receipts.findOwners(
             request.payNo, context.getXid(), "tcc-debit:" + request.payNo, request.payNo))
-      if (owner.branchId != null
-          && Set.of("TRYING", "CONFIRMED", "CANCELLED").contains(owner.state)
+      if (PayTccReceiptStore.hasValidStateAndBranch(owner)
+          && !"CLAIMED".equals(owner.state)
           && (!Objects.equals(owner.xid, context.getXid())
               || !Objects.equals(owner.branchId, context.getBranchId()))) return true;
     return false;

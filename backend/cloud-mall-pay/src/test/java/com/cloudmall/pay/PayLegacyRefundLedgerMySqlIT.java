@@ -86,6 +86,9 @@ class PayLegacyRefundLedgerMySqlIT {
   /** Fence身份验收的owned真实读取入口。 */
   private com.cloudmall.pay.mapper.PayTccFenceMapper fenceIdentityMapper;
 
+  /** 真实receipt访问的接口委托计数器，仅回滚owner证据验收使用。 */
+  private com.cloudmall.pay.mapper.PayTccReceiptMapper receiptRollbackMapper;
+
   @BeforeAll
   static void setupDatabase() {
     String url = System.getProperty("cloudmall.pay.mysql.test.url");
@@ -7435,6 +7438,234 @@ class PayLegacyRefundLedgerMySqlIT {
                     : returned.get().state + "|" + returned.get().branchId),
         () -> assertEquals(before, ownedReceiptClaimFacts()),
         () -> org.mockito.Mockito.verifyNoInteractions(resource));
+  }
+
+  /** 零owner分支不构成另一有效资源，不得提前ACK被拒回滚。 */
+  @Test
+  void rejectedReceiptRollbackCannotAckZeroOwnerBranch() {
+    assertRejectedReceiptOwner("TRYING", 0L, false);
+  }
+
+  /** 负owner分支即使已标终态也不能证明有效分支归属。 */
+  @Test
+  void rejectedReceiptRollbackCannotAckNegativeOwnerBranch() {
+    assertRejectedReceiptOwner("CONFIRMED", -1L, false);
+  }
+
+  /** 原拒绝控制与非正branch均不ACK，同/异XID分别验证而不改owned事实。 */
+  @Test
+  void rejectedReceiptRollbackRejectsInvalidOwnerMatrix() {
+    for (boolean otherXid : List.of(false, true)) {
+      for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+        for (Long branch : java.util.Arrays.asList(null, 0L, -1L))
+          assertRejectedReceiptOwner(state, branch, otherXid);
+      for (Long branch : java.util.Arrays.asList(null, 0L, -1L, 11L, Long.MAX_VALUE)) {
+        // 同XID的CLAIMED/null由原callback合法空取消，不属于另一owner提前ACK。
+        if (!otherXid && branch == null) continue;
+        assertRejectedReceiptOwner("CLAIMED", branch, otherXid);
+      }
+      for (String state : List.of("UNKNOWN", "", "trying", "TRYING "))
+        assertRejectedReceiptOwner(state, 11L, otherXid);
+    }
+  }
+
+  /** 合法另一owner可ACK，Fence/当前分支归属短路继续由原真实流程处理。 */
+  @Test
+  void rejectedReceiptRollbackKeepsValidOwnersAndPreconditionQueries() {
+    for (boolean otherXid : List.of(false, true))
+      for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+        for (Long branch : List.of(8L, Long.MAX_VALUE)) {
+          var resource = ownedReceiptRollbackResource();
+          var context = seedOwnedRejectedReceiptOwner(state, branch, otherXid);
+          var before = ownedReceiptRollbackFacts();
+          assertTrue(withOwnedReceiptFence(() -> resource.rollback(context)));
+          assertEquals(before, ownedReceiptRollbackFacts());
+          assertReceiptOwnerQueryOrder(context);
+        }
+    var emptyCancelResource = ownedReceiptRollbackResource();
+    var emptyCancelContext = seedOwnedRejectedReceiptOwner("CLAIMED", null, false);
+    var beforeEmptyCancel = ownedReceiptRollbackFacts();
+    assertTrue(withOwnedReceiptFence(() -> emptyCancelResource.rollback(emptyCancelContext)));
+    var afterEmptyCancel = ownedReceiptRollbackFacts();
+    assertEquals(beforeEmptyCancel.subList(0, 3), afterEmptyCancel.subList(0, 3));
+    assertEquals(beforeEmptyCancel.get(4), afterEmptyCancel.get(4));
+    var expectedReceipt = new java.util.LinkedHashMap<>(beforeEmptyCancel.get(3).get(0));
+    var actualReceipt = afterEmptyCancel.get(3).get(0);
+    expectedReceipt.put("state", "CANCELLED");
+    expectedReceipt.put("branch_id", 7L);
+    expectedReceipt.put("updated_at", actualReceipt.get("updated_at"));
+    assertEquals(expectedReceipt, actualReceipt);
+    assertTrue(
+        ((LocalDateTime) actualReceipt.get("updated_at"))
+            .isAfter((LocalDateTime) beforeEmptyCancel.get(3).get(0).get("updated_at")));
+    assertReceiptOwnerQueryOrder(emptyCancelContext);
+    for (String gate :
+        List.of(
+            "fence-action", "fence-confirmed", "fence-cancelled", "own-receipt", "missing-fence")) {
+      var resource = ownedReceiptRollbackResource();
+      var context = seedOwnedRejectedReceiptOwner("CONFIRMED", 8L, false);
+      switch (gate) {
+        case "fence-action" ->
+            fixture.update("UPDATE tcc_fence_log SET action_name='other-action'");
+        case "fence-confirmed" -> fixture.update("UPDATE tcc_fence_log SET status=2");
+        case "fence-cancelled" -> fixture.update("UPDATE tcc_fence_log SET status=3");
+        case "own-receipt" -> fixture.update("UPDATE pay_tcc_receipt SET branch_id=7");
+        case "missing-fence" -> {
+          fixture.update("DELETE FROM tcc_fence_log");
+          fixture.update("UPDATE pay_tcc_receipt SET branch_id=0");
+        }
+        default -> throw new IllegalArgumentException("unknown receipt rollback gate");
+      }
+      var before = ownedReceiptRollbackFacts();
+      org.junit.jupiter.api.Assertions.assertFalse(
+          withOwnedReceiptFence(() -> resource.rollback(context)));
+      assertEquals(before, ownedReceiptRollbackFacts());
+      if (gate.equals("missing-fence")) assertReceiptOwnerQueryOrder(context);
+      else {
+        verify(receiptRollbackMapper, never()).findOwners(any(), any(), any(), any());
+        verify(receiptRollbackMapper, times(gate.equals("own-receipt") ? 1 : 0))
+            .countByBranch(context.getXid(), context.getBranchId());
+      }
+    }
+  }
+
+  /** public rollback的返回、五表事实和真实owner查询计数同时断言。 */
+  private void assertRejectedReceiptOwner(String state, Long branch, boolean otherXid) {
+    var resource = ownedReceiptRollbackResource();
+    var context = seedOwnedRejectedReceiptOwner(state, branch, otherXid);
+    var before = ownedReceiptRollbackFacts();
+    boolean accepted = withOwnedReceiptFence(() -> resource.rollback(context));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> org.junit.jupiter.api.Assertions.assertFalse(accepted),
+        () -> assertEquals(before, ownedReceiptRollbackFacts()),
+        () -> assertReceiptOwnerQueryOrder(context));
+  }
+
+  /** 每个计数wrapper都转发真实Mapper；锁和事务仍由同一owned数据源执行。 */
+  private com.cloudmall.pay.service.impl.PayTccReceiptLocalResourceImpl
+      ownedReceiptRollbackResource() {
+    var store = ownedReceiptClaimStore();
+    fixture.execute("DROP TABLE IF EXISTS tcc_fence_log");
+    fixture.execute(
+        (String) source.queryForMap("SHOW CREATE TABLE tcc_fence_log").get("Create Table"));
+    var configuration = new MybatisConfiguration();
+    configuration.setMapUnderscoreToCamelCase(true);
+    configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class);
+    configuration.addMapper(com.cloudmall.pay.mapper.PayTccFenceMapper.class);
+    var factory = new MybatisSqlSessionFactoryBean();
+    factory.setDataSource(ownedPool);
+    factory.setConfiguration(configuration);
+    try {
+      var session = new SqlSessionTemplate(factory.getObject());
+      receiptRollbackMapper =
+          mock(
+              com.cloudmall.pay.mapper.PayTccReceiptMapper.class,
+              org.mockito.AdditionalAnswers.delegatesTo(
+                  session.getMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class)));
+      fenceIdentityMapper =
+          mock(
+              com.cloudmall.pay.mapper.PayTccFenceMapper.class,
+              org.mockito.AdditionalAnswers.delegatesTo(
+                  session.getMapper(com.cloudmall.pay.mapper.PayTccFenceMapper.class)));
+      return new com.cloudmall.pay.service.impl.PayTccReceiptLocalResourceImpl(
+          new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool),
+          new com.cloudmall.pay.service.impl.PayTccReceiptBusinessCallback(store),
+          fenceIdentityMapper,
+          receiptRollbackMapper);
+    } catch (Exception failure) {
+      throw new IllegalStateException("owned receipt rollback factory failed", failure);
+    }
+  }
+
+  /** owner与被拒分支同payNo，原source保持；仅owned注入分支/状态或另一XID。 */
+  private io.seata.rm.tcc.api.BusinessActionContext seedOwnedRejectedReceiptOwner(
+      String state, Long branch, boolean otherXid) {
+    var dispatch = seedOwnedReceiptClaim();
+    var candidate = new com.cloudmall.pay.domain.po.PayTccReceiptPO();
+    candidate.id = 1L;
+    candidate.payNo = dispatch.payNo;
+    candidate.xid = otherXid ? "other-owner-xid" : dispatch.xid;
+    candidate.userId = dispatch.userId;
+    candidate.orderNo = dispatch.orderNo;
+    candidate.amount = new BigDecimal(dispatch.amount);
+    candidate.operationKey = dispatch.operationKey;
+    candidate.ledgerKey = dispatch.ledgerKey;
+    candidate.createdAt = LocalDateTime.of(2026, 10, 15, 0, 0);
+    candidate.updatedAt = candidate.createdAt;
+    assertEquals(1, receiptRollbackMapper.claim(candidate));
+    fixture.update("UPDATE pay_tcc_receipt SET state=?,branch_id=?", state, branch);
+    var context = new io.seata.rm.tcc.api.BusinessActionContext();
+    context.setXid(dispatch.xid);
+    context.setBranchId(7L);
+    context.setActionName(com.cloudmall.pay.service.PayTccReceiptLocalResource.ACTION_NAME);
+    context.setActionContext(Map.of("request", receiptClaimRequest(dispatch)));
+    fixture.update(
+        "INSERT INTO tcc_fence_log(xid,branch_id,action_name,status,gmt_create,gmt_modified)"
+            + " VALUES(?,?,?,4,NOW(3),NOW(3))",
+        context.getXid(),
+        context.getBranchId(),
+        context.getActionName());
+    org.mockito.Mockito.clearInvocations(receiptRollbackMapper, fenceIdentityMapper);
+    return context;
+  }
+
+  /** 读取前后五表全字段，不只比较状态，以核实拒绝没有补写或覆盖owner。 */
+  private List<List<Map<String, Object>>> ownedReceiptRollbackFacts() {
+    var facts = new ArrayList<List<Map<String, Object>>>(ownedReceiptClaimFacts());
+    facts.add(fixture.queryForList("SELECT * FROM tcc_fence_log ORDER BY xid,branch_id"));
+    return facts;
+  }
+
+  /** 首次Fence→receipt读→二次Fence→count0→owner锁，验证原查询门顺序和次数。 */
+  private void assertReceiptOwnerQueryOrder(io.seata.rm.tcc.api.BusinessActionContext context) {
+    var ordered = org.mockito.Mockito.inOrder(fenceIdentityMapper, receiptRollbackMapper);
+    ordered.verify(fenceIdentityMapper).findByBranch(context.getXid(), context.getBranchId());
+    ordered.verify(receiptRollbackMapper).selectByPayNo("pay-1");
+    ordered.verify(fenceIdentityMapper).findByBranch(context.getXid(), context.getBranchId());
+    ordered.verify(receiptRollbackMapper).countByBranch(context.getXid(), context.getBranchId());
+    ordered
+        .verify(receiptRollbackMapper)
+        .findOwners("pay-1", context.getXid(), "tcc-debit:pay-1", "pay-1");
+    ordered.verifyNoMoreInteractions();
+  }
+
+  /** 官方handler仅绑定owned同步事务；finally恢复static，空队列不触发异步清理写。 */
+  private boolean withOwnedReceiptFence(java.util.function.Supplier<Boolean> action) {
+    Class<?> handler = io.seata.rm.tcc.TCCFenceHandler.class;
+    var previousDataSource =
+        (DataSource)
+            org.springframework.test.util.ReflectionTestUtils.getField(handler, "dataSource");
+    var previousTemplate =
+        (org.springframework.transaction.support.TransactionTemplate)
+            org.springframework.test.util.ReflectionTestUtils.getField(
+                handler, "transactionTemplate");
+    var queue =
+        (java.util.concurrent.BlockingQueue<?>)
+            org.springframework.test.util.ReflectionTestUtils.getField(handler, "LOG_QUEUE");
+    assertTrue(queue.isEmpty());
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    io.seata.rm.tcc.TCCFenceHandler.setDataSource(ownedPool);
+    io.seata.rm.tcc.TCCFenceHandler.setTransactionTemplate(template);
+    try {
+      return action.get();
+    } finally {
+      io.seata.rm.tcc.TCCFenceHandler.setDataSource(previousDataSource);
+      io.seata.rm.tcc.TCCFenceHandler.setTransactionTemplate(previousTemplate);
+      org.junit.jupiter.api.Assertions.assertSame(
+          previousDataSource,
+          org.springframework.test.util.ReflectionTestUtils.getField(handler, "dataSource"));
+      org.junit.jupiter.api.Assertions.assertSame(
+          previousTemplate,
+          org.springframework.test.util.ReflectionTestUtils.getField(
+              handler, "transactionTemplate"));
+      assertTrue(queue.isEmpty());
+      org.junit.jupiter.api.Assertions.assertFalse(
+          org.springframework.transaction.support.TransactionSynchronizationManager
+              .isActualTransactionActive());
+    }
   }
 
   /** 原Pay/Dispatch/Receipt实际Mapper共享owned数据源；cancel gate仅为无取消替身。 */

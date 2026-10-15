@@ -2584,3 +2584,9 @@ receipt准备后的非空读回必须仍匹配原dispatch的payNo、xid、userId
 receipt重放校验和prepare末次读回共用状态/分支有效域门：状态只允许CLAIMED、TRYING、CONFIRMED、CANCELLED，非空分支号必须为正数；后三种状态必须已有正分支，CLAIMED可为空或已有正分支。坏证据返回原409，空状态也明确拒绝。
 
 CLAIMED不能据此推断分支未登记或资金结果。原载荷校验优先、缺行503、合法进展与资源尝试次数保持；本批仅验证本地Store/Facade，未改变公开read、回调、SQL或事务，不代表完整TC链路验证。
+
+### CM-18 被拒Pay分支的回滚确认依据（16T201）
+
+被拒分支只有在Fence为SUSPENDED、本分支没有receipt，且另一owner处于TRYING/CONFIRMED/CANCELLED并持有正分支号时，才可沿原逻辑提前确认回滚。零或负分支号不能作为有效owner证据，CLAIMED及未知状态继续拒绝。
+
+复用receipt状态/分支校验，保留原查询顺序、事务及callback；隔离数据库验证使用官方Fence与本地资源，不代表真实TC、远端User或完整资金因果验证。
