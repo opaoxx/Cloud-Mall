@@ -27,10 +27,10 @@ execution tuple、receipt/User matching、state/decision、Fence、Coordinator�
 ### 3.2 Owned native
 
 - 使用 owned execution/receipt 表实际只读 RR Mapper，User 镜像、Fence 与 Coordinator 受控；不启动业务 App、TC/RM、官方 FenceHandler 或新监听。
-- 旧 red：execution/receipt 金额一致为0且 confirmed/Fence2/Userconfirmed 曾 COMMITTED；-0.01 且 cancelled/Fence3/Usercancelled 曾 ROLLEDBACK。修复后非正金额 × execution state `CONFIRMED/CANCELLED/TRYING/CLAIMED` 共12组均409，五表 facts 不变。
+- 旧 red：execution/receipt 金额一致为0且 receipt confirmed/Fence2/Userconfirmed 曾 COMMITTED；-0.01 且 receipt cancelled/Fence3/Usercancelled 曾 ROLLEDBACK。修复后非正金额 × receipt state `CONFIRMED/CANCELLED/TRYING/CLAIMED` 共12组均409，execution 仍使用既有 RUNNING/NONE fixture，五表 facts 不变。
 - 非正金额缺 receipt 的控制也必须在入口 409；正金额 receipt missing 仍 UNKNOWN。正金额 `.01/10/MAX` × 四状态保留原映射。
-- Native 只证明 Evidence 本地入口的正金额域门；执行/receipt owned 金额变更不代表 Pay 原 source 或 User/TC 真实资金链路已被证明。
+- Native 只证明 Evidence 本地入口的正金额域门；User 是已传入的镜像对象，不在本方法重新查询远端；Fence 使用实际 owned Mapper 而非官方 handler，执行/receipt owned 金额变更不代表 Pay 原 source 或 User/TC 真实资金链路已被证明。Coordinator/TC 仅用 mock 验证 recover 后续不调用，不能扩展 execute 的旧异常决议。
 
 ## 4. 明确边界
 
-本批不改变金额文本词法、scale/precision/上界、normalize、receipt/User/Fence 查询或状态机，不修历史非正金额，不改变 Coordinator execute 的旧异常决议流程；不撤回 Evidence 之前 Bridge 读取/镜像。新增场景不调用官方 FenceHandler，旧 201–204 仅保留整体专项回归证据。
+本批不改变金额文本词法、scale/precision/上界、normalize、receipt/User/Fence 查询或状态机，不修历史非正金额，不改变 Coordinator execute 的旧异常决议流程；入口门早于本方法的 User tuple 比较与 receipt/Fence 查询，不撤回 Evidence 之前 Bridge 读取/镜像。新增场景不调用官方 FenceHandler，旧 201–204 仅保留整体专项回归证据。
