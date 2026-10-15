@@ -17,7 +17,7 @@ Objects.equals(owner.ledgerKey, request.payNo)
 
 owner 进入该门后仍按 T201 的 `hasValidStateAndBranch(owner)`、排除 CLAIMED、state advanced、与当前 context 分支不同等既有条件判断。四键均不精确匹配时不得提前 ACK；只要一个键精确匹配，保留原 OR 语义，即使其它字段不同或 owner 是合法不同请求，也不新增 payload/资金因果校验。
 
-不修改 `findOwners` SQL、Fence/status/count 查询、锁序、receipt callback、Store、prepare/commit、事务、API 或状态机；不新增查询，不改变 T201/T202 Fence 身份门。
+不修改 `findOwners` SQL、Fence/status/count 查询、锁序、receipt callback、Store、prepare/commit、事务、API 或状态机；纯 predicate 不新增显式 Mapper 调用，owner gate 查询顺序/次数保持，不改变 T201/T202 Fence 身份门。纯 alias owner 被拒后仍可进入原 verify callback，因此不得把“不新增查询”理解为所有输入的整条 callback SQL 总数与旧 ACK 完全相同。
 
 ## 3. 验收矩阵
 
@@ -35,4 +35,4 @@ owner 进入该门后仍按 T201 的 `hasValidStateAndBranch(owner)`、排除 CL
 
 ## 4. 明确边界
 
-本批不增加 SQL/锁/查询、修历史 receipt、不做四字段全等、source/Fence/资金因果闭环，不改变 owner OR 查询、回调、Store、prepare/commit、API、TC/RM 或全局唯一键。native 只证明本地 exact-key 门，不宣称真实并发 fencing。
+本批不增加 SQL/锁/显式 Mapper 调用、修历史 receipt、不做四字段全等、source/Fence/资金因果闭环，不改变 owner OR 查询、回调、Store、prepare/commit、API、TC/RM 或全局唯一键。native 计数仅覆盖 LocalResource/Fence/receipt wrapper 门，不代表 Store 原 callback 的整条 SQL 计数；只证明本地 exact-key 门，不宣称真实并发 fencing。
