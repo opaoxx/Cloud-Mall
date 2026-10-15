@@ -7529,6 +7529,121 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** CI匹配另一XID的SUSPENDED不能用于原分支的被拒回滚ACK。 */
+  @Test
+  void receiptRollbackCannotBorrowAliasFence() {
+    assertReceiptInitialFenceAliasRejected(false, "T171-XID");
+  }
+
+  /** 即使已有本分支CONFIRMED receipt，异拼写Fence也不能作为提交证明。 */
+  @Test
+  void receiptCommitCannotBorrowAliasFence() {
+    assertReceiptInitialFenceAliasRejected(true, "T171-XID");
+  }
+
+  /** 首读SQL别名与二读异常Mapper结果分别阻断，不能回落callback成功。 */
+  @Test
+  void receiptSettlementRejectsFenceIdentityMismatchAtBothReads() {
+    for (boolean committing : List.of(false, true))
+      for (String alias : List.of("T171-XID", "t171-XID"))
+        assertReceiptInitialFenceAliasRejected(committing, alias);
+    for (String field :
+        List.of("xid", "branch", "action", "null-xid", "null-branch", "null-action")) {
+      var resource = ownedReceiptRollbackResource();
+      var context = seedOwnedRejectedReceiptOwner("CANCELLED", 7L, false);
+      var before = ownedReceiptRollbackFacts();
+      var readCount = new java.util.concurrent.atomic.AtomicInteger();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                var current =
+                    (com.cloudmall.pay.domain.po.PayTccFencePO)
+                        org.mockito.Mockito.mockingDetails(fenceIdentityMapper)
+                            .getMockCreationSettings()
+                            .getDefaultAnswer()
+                            .answer(invocation);
+                if (readCount.incrementAndGet() == 2) {
+                  switch (field) {
+                    case "xid" -> current.xid = "T171-XID";
+                    case "branch" -> current.branchId = 8L;
+                    case "action" -> current.actionName = "other-action";
+                    case "null-xid" -> current.xid = null;
+                    case "null-branch" -> current.branchId = null;
+                    case "null-action" -> current.actionName = null;
+                    default ->
+                        throw new IllegalArgumentException("unknown returned Fence identity field");
+                  }
+                }
+                return current;
+              })
+          .when(fenceIdentityMapper)
+          .findByBranch(context.getXid(), context.getBranchId());
+      org.junit.jupiter.api.Assertions.assertFalse(
+          withOwnedReceiptFence(() -> resource.rollback(context)));
+      assertEquals(2, readCount.get());
+      assertEquals(before, ownedReceiptRollbackFacts());
+      verify(receiptRollbackMapper, never()).countByBranch(any(), any());
+      verify(receiptRollbackMapper, never()).findOwners(any(), any(), any(), any());
+    }
+  }
+
+  /** 精确终态与Fence缺失永久终态保持，错误方向false且不补写Fence。 */
+  @Test
+  void receiptSettlementKeepsExactAndMissingFenceTerminalEvidence() {
+    for (String fenceMode : List.of("exact", "missing", "nonmatching-padding"))
+      for (boolean committing : List.of(false, true)) {
+        var resource = ownedReceiptRollbackResource();
+        var context =
+            seedOwnedRejectedReceiptOwner(committing ? "CONFIRMED" : "CANCELLED", 7L, false);
+        if (fenceMode.equals("missing")) fixture.update("DELETE FROM tcc_fence_log");
+        else fixture.update("UPDATE tcc_fence_log SET status=?", committing ? 2 : 3);
+        if (fenceMode.equals("nonmatching-padding")) {
+          fixture.update("UPDATE tcc_fence_log SET xid=?", context.getXid() + " ");
+          assertNull(fenceIdentityMapper.findByBranch(context.getXid(), context.getBranchId()));
+          org.mockito.Mockito.clearInvocations(fenceIdentityMapper, receiptRollbackMapper);
+        }
+        var before = ownedReceiptRollbackFacts();
+        assertTrue(
+            withOwnedReceiptFence(
+                () -> committing ? resource.commit(context) : resource.rollback(context)));
+        assertEquals(before, ownedReceiptRollbackFacts());
+        verify(receiptRollbackMapper, never()).findOwners(any(), any(), any(), any());
+      }
+    for (boolean committing : List.of(false, true)) {
+      var resource = ownedReceiptRollbackResource();
+      var context =
+          seedOwnedRejectedReceiptOwner(committing ? "CANCELLED" : "CONFIRMED", 7L, false);
+      fixture.update("UPDATE tcc_fence_log SET status=?", committing ? 3 : 2);
+      var before = ownedReceiptRollbackFacts();
+      org.junit.jupiter.api.Assertions.assertFalse(
+          withOwnedReceiptFence(
+              () -> committing ? resource.commit(context) : resource.rollback(context)));
+      assertEquals(before, ownedReceiptRollbackFacts());
+    }
+  }
+
+  /** 只在owned改变Fence XID，先证真实CI查询命中别名，再核公开入口false与全表不变。 */
+  private void assertReceiptInitialFenceAliasRejected(boolean committing, String alias) {
+    var resource = ownedReceiptRollbackResource();
+    var context =
+        seedOwnedRejectedReceiptOwner(
+            committing ? "CONFIRMED" : "TRYING", committing ? 7L : 8L, false);
+    fixture.update("UPDATE tcc_fence_log SET xid=?,status=?", alias, committing ? 2 : 4);
+    var matched = fenceIdentityMapper.findByBranch(context.getXid(), context.getBranchId());
+    assertNotNull(matched);
+    assertEquals(alias, matched.xid);
+    assertNotEquals(context.getXid(), matched.xid);
+    org.mockito.Mockito.clearInvocations(fenceIdentityMapper, receiptRollbackMapper);
+    var before = ownedReceiptRollbackFacts();
+    boolean accepted =
+        withOwnedReceiptFence(
+            () -> committing ? resource.commit(context) : resource.rollback(context));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> org.junit.jupiter.api.Assertions.assertFalse(accepted),
+        () -> assertEquals(before, ownedReceiptRollbackFacts()));
+    verify(fenceIdentityMapper).findByBranch(context.getXid(), context.getBranchId());
+    org.mockito.Mockito.verifyNoInteractions(receiptRollbackMapper);
+  }
+
   /** public rollback的返回、五表事实和真实owner查询计数同时断言。 */
   private void assertRejectedReceiptOwner(String state, Long branch, boolean otherXid) {
     var resource = ownedReceiptRollbackResource();

@@ -91,7 +91,7 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
               status -> {
                 // 1. Fence 被清理时只核验已有永久终态，不复活未知分支。
                 PayTccFencePO fence = fences.findByBranch(context.getXid(), context.getBranchId());
-                if (fence != null && !ACTION_NAME.equals(fence.actionName)) return false;
+                if (fence != null && !hasSameFenceIdentity(fence, context)) return false;
                 PayTccReceiptPO receipt = receipts.selectByPayNo(request.payNo);
                 if (fence == null
                     && receipt != null
@@ -135,6 +135,8 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
   private boolean rejectedBranchHasNoReceipt(
       BusinessActionContext context, PayTccDispatchDTO request) {
     PayTccFencePO fence = fences.findByBranch(context.getXid(), context.getBranchId());
+    if (fence != null && !hasSameFenceIdentity(fence, context))
+      throw new IllegalStateException("Pay receipt Fence 分支身份不一致");
     if (fence == null
         || !Integer.valueOf(4).equals(fence.status)
         || receipts.countByBranch(context.getXid(), context.getBranchId()) != 0) return false;
@@ -151,6 +153,13 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
   /** 完整载荷核对不能被 Fence 的重复 ACK 跳过。 */
   private boolean verify(BusinessActionContext context, boolean committing) {
     return committing ? callback.confirmBusiness(context) : callback.cancelBusiness(context);
+  }
+
+  /** 精确核对当前分支的Fence读回身份，CI查询别名不能充当原分支事实。 */
+  private boolean hasSameFenceIdentity(PayTccFencePO fence, BusinessActionContext context) {
+    return Objects.equals(fence.xid, context.getXid())
+        && Objects.equals(fence.branchId, context.getBranchId())
+        && ACTION_NAME.equals(fence.actionName);
   }
 
   /** 固定只反射本项目公开 callback 方法。 */

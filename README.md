@@ -2590,3 +2590,9 @@ CLAIMED不能据此推断分支未登记或资金结果。原载荷校验优先�
 被拒分支只有在Fence为SUSPENDED、本分支没有receipt，且另一owner处于TRYING/CONFIRMED/CANCELLED并持有正分支号时，才可沿原逻辑提前确认回滚。零或负分支号不能作为有效owner证据，CLAIMED及未知状态继续拒绝。
 
 复用receipt状态/分支校验，保留原查询顺序、事务及callback；隔离数据库验证使用官方Fence与本地资源，不代表真实TC、远端User或完整资金因果验证。
+
+### CM-18 Pay receipt清算的Fence身份（16T202）
+
+提交、回滚入口读到的Fence必须精确匹配当前XID、分支号和Pay动作名；数据库忽略大小写匹配出的别名记录不能作为当前分支证据。被拒分支的二次Fence读回也须满足同一条件，冲突时整个本地清算返回false，等待原分支重试。
+
+Fence缺失时的原终态核验、合法空回滚和owner规则保持。本批未修改SQL或事务，也未证明真实TC、远端事实或读取后的完整fencing。
