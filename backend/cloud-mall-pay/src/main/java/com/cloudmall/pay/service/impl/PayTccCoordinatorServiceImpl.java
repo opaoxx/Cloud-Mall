@@ -108,15 +108,15 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     }
   }
 
-  /** RPC 结果只影响重试诊断，不能直接写资金终态。 */
+  /** RPC失败诊断只写回原执行快照；已发请求不作为资金终态证据。 */
   private void sendDecision(PayTccExecutionPO execution) {
     if (PayTccExecutionStore.terminal(execution.state)) return;
     try {
       if ("COMMIT".equals(execution.decision)) transactions.commit(execution.xid);
       else if ("ROLLBACK".equals(execution.decision)) transactions.rollback(execution.xid);
     } catch (Exception decisionResponseLost) {
-      executions.observe(
-          execution.payNo, "UNKNOWN", decisionResponseLost.getClass().getSimpleName());
+      executions.observeSnapshot(
+          execution, "UNKNOWN", decisionResponseLost.getClass().getSimpleName());
     }
   }
 
@@ -132,7 +132,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
       return executions.observeSnapshot(
           execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
     } catch (BizException failure) {
-      if (failure.getCode().contains("CONFLICT")) throw failure;
+      rethrowConflict(failure);
       return executions.observeSnapshot(execution, "UNKNOWN", failure.getCode());
     } catch (RuntimeException unavailable) {
       return executions.observeSnapshot(

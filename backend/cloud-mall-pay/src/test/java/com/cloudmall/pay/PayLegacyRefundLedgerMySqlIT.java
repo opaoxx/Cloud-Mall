@@ -6099,6 +6099,271 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** TC旧请求的失败诊断不能改写已经换XID的执行记录。 */
+  @Test
+  void lostDecisionResponseCannotRewriteReplacementExecution() throws Exception {
+    assertLostDecisionResponseKeepsPeerFacts("recover", "COMMIT", "execution-xid");
+  }
+
+  /** 缺失业务码仍是可观察的未知，不能在catch分支泄漏NPE。 */
+  @Test
+  void missingRecoveryBusinessCodeRemainsUnknown() {
+    var store = proxiedExecutionObservationStore();
+    prepareOwnedClaimReplay("RUNNING", "NONE", "t221-old-xid", "PENDING");
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    when(bridge.recover("pay-1"))
+        .thenThrow(new com.cloudmall.common.error.BizException(null, "owned code missing", 503));
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var paymentBefore = rawIntentTimeFacts();
+    var expected = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+    var recovered =
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> coordinator.recover("pay-1"));
+    assertEquals("UNKNOWN", recovered.state);
+    assertEquals("NONE", recovered.decision);
+    assertEquals("t221-old-xid", recovered.xid);
+    assertNull(recovered.lastError);
+    assertEquals(paymentBefore, rawIntentTimeFacts());
+    var current = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
+    for (String field : List.of("state", "last_error", "updated_at")) {
+      expected.remove(field);
+      current.remove(field);
+    }
+    assertEquals(expected, current);
+    org.mockito.Mockito.verifyNoInteractions(receiptService, evidence, transactions);
+  }
+
+  /** 两入口和原双向决议的TC失败都不能修改不同身份或已变来源的现场。 */
+  @Test
+  void lostDecisionResponsesRespectExecutionAndPaymentSnapshots() throws Exception {
+    for (String entry : List.of("execute", "recover"))
+      for (String decision : List.of("COMMIT", "ROLLBACK"))
+        for (String mutation :
+            List.of(
+                "execution-id",
+                "execution-xid",
+                "execution-user",
+                "execution-order",
+                "execution-amount",
+                "payment-mode",
+                "payment-order",
+                "payment-amount"))
+          assertLostDecisionResponseKeepsPeerFacts(entry, decision, mutation);
+  }
+
+  /** 相同身份保原双向重试诊断；TC期间注入的既有终态不得被失败诊断回退。 */
+  @Test
+  void sameDecisionSnapshotKeepsUnknownAndTerminalProgress() throws Exception {
+    for (String entry : List.of("execute", "recover"))
+      for (String decision : List.of("COMMIT", "ROLLBACK"))
+        for (String terminal : List.of("UNCHANGED", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+          var store = proxiedExecutionObservationStore();
+          var request =
+              prepareOwnedClaimReplay(
+                  decision + "_REQUESTED", decision, "t221-stable-xid", "PENDING");
+          if (entry.equals("execute")) fixture.update("DELETE FROM pay_tcc_execution");
+          var paymentBefore = rawIntentTimeFacts();
+          var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+          var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+          var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+          var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+          var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+          receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
+          var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+          when(receipts.prepare(request)).thenReturn(receipt);
+          when(bridge.dispatch(request)).thenReturn(user);
+          when(bridge.recover(request.payNo)).thenReturn(user);
+          when(evidence.classify(any(), any())).thenReturn("TRYING");
+          when(transactions.begin())
+              .thenAnswer(
+                  invocation -> {
+                    io.seata.core.context.RootContext.bind("t221-stable-xid");
+                    return "t221-stable-xid";
+                  });
+          var peerFacts =
+              new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+          org.mockito.stubbing.Answer<Void> responseLost =
+              invocation -> {
+                if (!terminal.equals("UNCHANGED"))
+                  fixture.update(
+                      "UPDATE pay_tcc_execution SET state=?,last_error='peer-terminal'", terminal);
+                peerFacts.set(executionReadFacts());
+                throw new Exception("owned unchanged identity response lost");
+              };
+          if (decision.equals("COMMIT"))
+            org.mockito.Mockito.doAnswer(responseLost).when(transactions).commit("t221-stable-xid");
+          else
+            org.mockito.Mockito.doAnswer(responseLost)
+                .when(transactions)
+                .rollback("t221-stable-xid");
+          var coordinator =
+              new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+                  store, receipts, bridge, evidence, transactions);
+          try {
+            var result =
+                entry.equals("execute")
+                    ? coordinator.execute(request)
+                    : coordinator.recover(request.payNo);
+            assertEquals(
+                terminal.equals("UNCHANGED") ? decision + "_REQUESTED" : terminal, result.state);
+            assertEquals(decision, result.decision);
+            assertEquals("t221-stable-xid", result.xid);
+            assertEquals(paymentBefore, rawIntentTimeFacts());
+            if (!terminal.equals("UNCHANGED")) assertEquals(peerFacts.get(), executionReadFacts());
+            if (entry.equals("execute")) verify(transactions).begin();
+            if (decision.equals("COMMIT")) verify(transactions).commit("t221-stable-xid");
+            else verify(transactions).rollback("t221-stable-xid");
+            org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+            assertNull(io.seata.core.context.RootContext.getXID());
+          } finally {
+            io.seata.core.context.RootContext.unbind();
+          }
+        }
+  }
+
+  /** TC调用已经发出；只比较peer提交后现场，拒绝其后的旧诊断和末次恢复读回。 */
+  private void assertLostDecisionResponseKeepsPeerFacts(
+      String entry, String decision, String mutation) throws Exception {
+    ownedExecutionObservationStore();
+    var request =
+        prepareOwnedClaimReplay(decision + "_REQUESTED", decision, "t221-old-xid", "PENDING");
+    if (entry.equals("execute")) fixture.update("DELETE FROM pay_tcc_execution");
+    var peerFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var downstream = new java.util.ArrayList<String>();
+    var actualMapper = executionObservationMapper;
+    var decorated =
+        (com.cloudmall.pay.mapper.PayTccExecutionMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                com.cloudmall.pay.mapper.PayTccExecutionMapper.class.getClassLoader(),
+                new Class<?>[] {com.cloudmall.pay.mapper.PayTccExecutionMapper.class},
+                (proxy, method, arguments) -> {
+                  if (peerFacts.get() != null
+                      && List.of("updateObservation", "selectByPayNo").contains(method.getName()))
+                    downstream.add(method.getName());
+                  try {
+                    return method.invoke(actualMapper, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException failure) {
+                    throw failure.getCause();
+                  }
+                });
+    var store = proxyExecutionObservationStore(executionObservationStore(decorated));
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+    receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    when(receiptService.prepare(request)).thenReturn(receipt);
+    when(bridge.dispatch(request)).thenReturn(user);
+    when(bridge.recover(request.payNo)).thenReturn(user);
+    when(evidence.classify(any(), any())).thenReturn("TRYING");
+    when(transactions.begin())
+        .thenAnswer(
+            invocation -> {
+              io.seata.core.context.RootContext.bind("t221-old-xid");
+              return "t221-old-xid";
+            });
+    org.mockito.stubbing.Answer<Void> lostResponse =
+        invocation -> {
+          changeDecisionFailurePeer(mutation);
+          peerFacts.set(executionReadFacts());
+          throw new Exception("owned decision response lost");
+        };
+    if (decision.equals("COMMIT"))
+      org.mockito.Mockito.doAnswer(lostResponse).when(transactions).commit("t221-old-xid");
+    else org.mockito.Mockito.doAnswer(lostResponse).when(transactions).rollback("t221-old-xid");
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    try {
+      org.junit.jupiter.api.Assertions.assertAll(
+          () -> {
+            var failure =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () ->
+                        returned.set(
+                            entry.equals("execute")
+                                ? coordinator.execute(request)
+                                : coordinator.recover(request.payNo)));
+            assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+          },
+          () -> assertNull(returned.get()),
+          () -> {
+            assertNotNull(peerFacts.get());
+            assertEquals(peerFacts.get(), executionReadFacts());
+          },
+          () -> assertEquals(List.of(), downstream),
+          () -> assertNull(io.seata.core.context.RootContext.getXID()));
+      if (entry.equals("execute")) verify(transactions).begin();
+      if (decision.equals("COMMIT")) verify(transactions).commit("t221-old-xid");
+      else verify(transactions).rollback("t221-old-xid");
+      org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
+  /** 独立worker本地事务变更身份或来源；execution变更附带peer诊断以核对不被覆盖。 */
+  private void changeDecisionFailurePeer(String mutation) throws Exception {
+    var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    try {
+      worker
+          .submit(
+              () -> {
+                var transaction =
+                    new org.springframework.transaction.support.TransactionTemplate(
+                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(
+                            ownedPool));
+                transaction.executeWithoutResult(
+                    status -> {
+                      switch (mutation) {
+                        case "execution-id" -> fixture.update("UPDATE pay_tcc_execution SET id=2");
+                        case "execution-xid" ->
+                            fixture.update("UPDATE pay_tcc_execution SET xid='t221-peer-xid'");
+                        case "execution-user" ->
+                            fixture.update("UPDATE pay_tcc_execution SET user_id=8");
+                        case "execution-order" ->
+                            fixture.update(
+                                "UPDATE pay_tcc_execution SET order_no='t221-peer-order'");
+                        case "execution-amount" ->
+                            fixture.update("UPDATE pay_tcc_execution SET amount=10.01");
+                        case "payment-mode" ->
+                            fixture.update("UPDATE pay_record SET debit_mode='LEGACY'");
+                        case "payment-order" ->
+                            fixture.update("UPDATE pay_record SET order_no='t221-peer-order'");
+                        case "payment-amount" ->
+                            fixture.update("UPDATE pay_record SET amount=10.01");
+                        default -> throw new IllegalArgumentException(mutation);
+                      }
+                      if (List.of("execution-user", "execution-order", "execution-amount")
+                          .contains(mutation))
+                        fixture.update(
+                            "UPDATE pay_record payment JOIN pay_tcc_execution execution ON"
+                                + " payment.pay_no=execution.pay_no SET"
+                                + " payment.user_id=execution.user_id,payment.order_no=execution.order_no,payment.amount=execution.amount");
+                      if (mutation.startsWith("execution-"))
+                        fixture.update(
+                            "UPDATE pay_tcc_execution SET last_error='peer-owned-diagnostic'");
+                    });
+              })
+          .get(10, java.util.concurrent.TimeUnit.SECONDS);
+    } finally {
+      worker.shutdownNow();
+      assertTrue(worker.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS));
+    }
+  }
+
   /** Try已明确冲突不能写UNKNOWN并自动选择ROLLBACK。 */
   @Test
   void receiptConflictCannotChooseRollbackOrOverwriteExecution() throws Exception {
