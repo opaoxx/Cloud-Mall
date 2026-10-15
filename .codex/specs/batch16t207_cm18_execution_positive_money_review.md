@@ -21,7 +21,7 @@ execution tuple、receipt/User matching、state/decision、Fence、Coordinator�
 ### 3.1 Unit/受控 Coordinator
 
 - 覆盖 amount 0、-0.01、-10，execution/receipt/User 其它字段合法，以及 receipt/User 缺失；均在入口 409、无 receipt/Fence 读取。
-- recover 使用 mock Store/Bridge/TC 在持久 COMMIT/ROLLBACK 与各状态组合下验证非正金额不执行 `execution.observe`、不发 TC、不调用 receiptTry；Evidence 之前 Bridge 读取/镜像不声称被撤回。
+- 真实 `Coordinator.recover` 使用 mock Store/Bridge/TC 依赖，覆盖 COMMIT/ROLLBACK × amount 0/-0.01 共4组（receipt 默认 CONFIRMED）；另由 Evidence 独立域矩阵覆盖四种 receipt state 与缺端的24组，验证非正金额不执行 `execution.observe`、不发 TC、不调用 receiptTry。Evidence 之前 Bridge 读取/镜像不声称被撤回。
 - 正金额 `.01/10/MAX DECIMAL(18,2)`、尾零/指数文本保留原映射；正常缺端仍 UNKNOWN。
 
 ### 3.2 Owned native
@@ -33,4 +33,4 @@ execution tuple、receipt/User matching、state/decision、Fence、Coordinator�
 
 ## 4. 明确边界
 
-本批不改变金额文本词法、scale/precision/上界、normalize、receipt/User/Fence 查询或状态机，不修历史非正金额，不改变 Coordinator execute 的旧异常决议流程；入口门早于本方法的 User tuple 比较与 receipt/Fence 查询，不撤回 Evidence 之前 Bridge 读取/镜像。新增场景不调用官方 FenceHandler，旧 201–204 仅保留整体专项回归证据。
+本批不改变金额文本词法、scale/precision/上界、normalize、receipt/User/Fence 查询或状态机，不修历史非正金额，不改变 Coordinator execute 的旧异常决议流程；入口门早于本方法的 User tuple 比较与 receipt/Fence 查询，不撤回 Evidence 之前 Bridge 读取/镜像。新增场景使用真实 Coordinator 与 mock Store/Bridge/TC 依赖，不调用官方 FenceHandler；旧 201–204 仅保留整体专项回归证据。
