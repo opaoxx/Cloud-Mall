@@ -22,15 +22,15 @@ claim、locked、observe、bind、decide、Coordinator、SQL、API 和其它 Sto
 
 ### 3.1 Owned native
 
-- 使用真实 ExecutionStore、Execution Mapper、PayRecordMapper 与 owned execution/Pay/Intent 三表；Coordinator/Bridge/Evidence/TC 为受控依赖，不启动业务 App、TC/RM、新监听或 Docker。
-- 覆盖孤儿、重复 Pay、payNo alias、Legacy mode、user/order/amount NULL 或错误、金额不等；cached terminal 与非 terminal recover 在 read 前均 409，三表无写、无外部 RPC。
+- 使用真实 ExecutionStore、Execution Mapper、PayRecordMapper 与 owned execution/Pay/Intent 三表；Coordinator 使用真实实例，Bridge/receipt/Evidence/transactions/TC 为 mock，不启动业务 App、TC/RM、新监听或 Docker。
+- native 覆盖可持久的约12种 source 变体 × BEGIN_UNKNOWN/COMMIT_REQUESTED/COMMITTED 三上下文=36，read 与真实 Coordinator 均409、三表无写、无外部 RPC；合法4 payload × 6 Pay status × 3上下文=72保持原读无写。PayRecord DDL 的 pay_no/order_no UNIQUE 与 tuple NOT NULL 不改，重复/NULL/空行元素只在 Unit mock，不在 native DROP 索引或伪造 NULL。
 - 合法 TCC Pay 的 PENDING、SUCCESS、REFUNDED 等 status 均保留；tuple/金额数值等价保持，status 不成为拒绝条件。原 Pay/Intent source 指纹与 owned cleanup 保持。
 - 该门只证明当前本地 read 窗口的 Pay 来源，不证明 read→RPC/CAS fencing、真实资金因果或历史修复。
 
 ### 3.2 Unit/Coordinator
 
-- Unit mock PayRecordMapper 覆盖 0/1/2 行、foreign/alias、mode、tuple、amount、DAO 异常和优先级；断言 read 无写、无新增锁/事务。
-- 真实 Coordinator 使用 Store/Mapper 或受控依赖验证 source conflict 在 Bridge/Evidence/observe/TC 前阻断；合法 TCC status/缺端既有 UNKNOWN/terminal 语义保持。
+- Unit mock PayRecordMapper 覆盖19种坏来源（含 missing/2 rows/null row）× 3上下文=57拒绝；3种金额表示 × 6 status × 3上下文=54保持，另有 missing404、NULL-XID/坏 persisted 域优先不查 Pay、source DAO 异常原样。断言 read 无写、无新增锁/事务。
+- 真实 Coordinator 使用 Store/Mapper 与 mock 外部依赖验证 source conflict 在 Bridge/Evidence/observe/TC 前阻断；合法 TCC status/缺端既有 UNKNOWN/terminal 语义保持。专项测试未完成前不得宣称闭环。
 
 ## 4. 明确边界
 
