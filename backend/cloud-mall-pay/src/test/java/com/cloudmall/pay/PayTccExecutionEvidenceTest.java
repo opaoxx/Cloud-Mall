@@ -89,7 +89,7 @@ class PayTccExecutionEvidenceTest {
       var receiptService = mock(PayTccReceiptService.class);
       var transactions = mock(PayTccTransactionClient.class);
       when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-      when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+      when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
       when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
       var coordinator =
           new PayTccCoordinatorServiceImpl(
@@ -98,6 +98,7 @@ class PayTccExecutionEvidenceTest {
       var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
       assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
       verify(store, never()).observe(any(), any(), any());
+      verify(store, never()).observeSnapshot(any(), any(), any());
       verifyNoInteractions(transactions, receiptService);
       assertEquals(before, fixture.snapshot());
     }
@@ -246,7 +247,7 @@ class PayTccExecutionEvidenceTest {
       var receiptService = mock(PayTccReceiptService.class);
       var transactions = mock(PayTccTransactionClient.class);
       when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-      when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+      when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
       when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
       var coordinator =
           new PayTccCoordinatorServiceImpl(
@@ -255,6 +256,7 @@ class PayTccExecutionEvidenceTest {
       var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
       assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
       verify(store, never()).observe(any(), any(), any());
+      verify(store, never()).observeSnapshot(any(), any(), any());
       verifyNoInteractions(transactions, receiptService);
       assertEquals(before, fixture.snapshot());
     }
@@ -332,7 +334,7 @@ class PayTccExecutionEvidenceTest {
       var receiptService = mock(PayTccReceiptService.class);
       var transactions = mock(PayTccTransactionClient.class);
       when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-      when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+      when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
       when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
       var coordinator =
           new PayTccCoordinatorServiceImpl(
@@ -345,6 +347,7 @@ class PayTccExecutionEvidenceTest {
             assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
           });
       assertions.add(() -> verify(store, never()).observe(any(), any(), any()));
+      assertions.add(() -> verify(store, never()).observeSnapshot(any(), any(), any()));
       assertions.add(() -> verifyNoInteractions(transactions, receiptService));
       assertions.add(() -> assertEquals(before, fixture.snapshot()));
     }
@@ -448,7 +451,7 @@ class PayTccExecutionEvidenceTest {
         var receiptService = mock(PayTccReceiptService.class);
         var transactions = mock(PayTccTransactionClient.class);
         when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
         when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
         var coordinator =
             new PayTccCoordinatorServiceImpl(
@@ -458,6 +461,7 @@ class PayTccExecutionEvidenceTest {
         assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
         assertEquals(409, failure.getHttpStatus());
         verify(store, never()).observe(any(), any(), any());
+        verify(store, never()).observeSnapshot(any(), any(), any());
         verifyNoInteractions(transactions, receiptService, fixture.fences);
         assertEquals(before, fixture.snapshot());
       }
@@ -547,7 +551,7 @@ class PayTccExecutionEvidenceTest {
         var receiptService = mock(PayTccReceiptService.class);
         var transactions = mock(PayTccTransactionClient.class);
         when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
         when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
         var coordinator =
             new PayTccCoordinatorServiceImpl(
@@ -557,6 +561,7 @@ class PayTccExecutionEvidenceTest {
         assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
         assertEquals(409, failure.getHttpStatus());
         verify(store, never()).observe(any(), any(), any());
+        verify(store, never()).observeSnapshot(any(), any(), any());
         verifyNoInteractions(transactions, receiptService, fixture.receipts, fixture.fences);
         assertEquals(before, fixture.snapshot());
       }
@@ -656,7 +661,7 @@ class PayTccExecutionEvidenceTest {
         var receiptService = mock(PayTccReceiptService.class);
         var transactions = mock(PayTccTransactionClient.class);
         when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
         when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
         var coordinator =
             new PayTccCoordinatorServiceImpl(
@@ -666,6 +671,7 @@ class PayTccExecutionEvidenceTest {
         assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
         assertEquals(409, failure.getHttpStatus());
         verify(store, never()).observe(any(), any(), any());
+        verify(store, never()).observeSnapshot(any(), any(), any());
         verifyNoInteractions(transactions, receiptService, fixture.receipts, fixture.fences);
         assertEquals(before, fixture.snapshot());
       }
@@ -811,7 +817,7 @@ class PayTccExecutionEvidenceTest {
         var receiptService = mock(PayTccReceiptService.class);
         var transactions = mock(PayTccTransactionClient.class);
         when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
-        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(store.observeSnapshot(any(), any(), any())).thenReturn(fixture.execution);
         when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
         var coordinator =
             new PayTccCoordinatorServiceImpl(
@@ -821,6 +827,7 @@ class PayTccExecutionEvidenceTest {
         assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
         assertEquals(409, failure.getHttpStatus());
         verify(store, never()).observe(any(), any(), any());
+        verify(store, never()).observeSnapshot(any(), any(), any());
         verifyNoInteractions(transactions, receiptService, fixture.receipts, fixture.fences);
         assertEquals(before, fixture.snapshot());
       }

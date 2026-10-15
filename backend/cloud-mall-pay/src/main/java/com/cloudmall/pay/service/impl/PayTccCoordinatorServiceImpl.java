@@ -109,20 +109,23 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     }
   }
 
-  /** 网络未知只留待查询；完整载荷冲突不覆盖既有 execution。 */
+  /** 读关联结果锁内核对原执行快照，网络未知不覆盖已替换的 execution。 */
   private PayTccExecutionPO observe(String payNo) {
     PayTccExecutionPO execution = executions.read(payNo);
     if (PayTccExecutionStore.terminal(execution.state)) return execution;
-    if (execution.xid == null) return executions.observe(payNo, "UNKNOWN", "begin XID 尚无持久证据");
+    if (execution.xid == null)
+      return executions.observeSnapshot(execution, "UNKNOWN", "begin XID 尚无持久证据");
     try {
       PayTccDispatchVO user = bridge.recover(payNo);
       String state = evidence.classify(execution, user);
-      return executions.observe(payNo, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
+      return executions.observeSnapshot(
+          execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
     } catch (BizException failure) {
       if (failure.getCode().contains("CONFLICT")) throw failure;
-      return executions.observe(payNo, "UNKNOWN", failure.getCode());
+      return executions.observeSnapshot(execution, "UNKNOWN", failure.getCode());
     } catch (RuntimeException unavailable) {
-      return executions.observe(payNo, "UNKNOWN", unavailable.getClass().getSimpleName());
+      return executions.observeSnapshot(
+          execution, "UNKNOWN", unavailable.getClass().getSimpleName());
     }
   }
 

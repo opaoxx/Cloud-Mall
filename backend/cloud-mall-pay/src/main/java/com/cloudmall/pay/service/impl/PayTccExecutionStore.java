@@ -136,8 +136,36 @@ public class PayTccExecutionStore {
   /** 观察结果锁内合并，写入须恰好一行；迟到未知/相反终态不能覆盖既有终态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO observe(String payNo, String state, String error) {
-    // 1. 先核锁定行，再拒绝缺失的观察入参。
+    // 1. 保留按支付号记录诊断的原锁定入口。
     PayTccExecutionPO current = locked(payNo);
+    // 2. 复用原合并规则，不在此入口推断先前读取快照。
+    return mergeObservation(current, state, error);
+  }
+
+  /** 将读关联观察只写回同一执行身份；漂移先于终态早返回和任何更新被拒绝。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public PayTccExecutionPO observeSnapshot(PayTccExecutionPO expected, String state, String error) {
+    // 1. 拒绝缺失快照，再按原支付号锁读并校验当前持久域。
+    if (expected == null) throw conflict();
+    PayTccExecutionPO current = locked(expected.payNo);
+    // 2. 核对原快照有效域和不可变身份；金额数值等价，可变进度不作版本条件。
+    validatePersistedExecution(expected, expected.payNo);
+    if (!Objects.equals(current.id, expected.id)
+        || !Objects.equals(current.payNo, expected.payNo)
+        || !Objects.equals(current.xid, expected.xid)
+        || !Objects.equals(current.userId, expected.userId)
+        || !Objects.equals(current.orderNo, expected.orderNo)
+        || current.amount.compareTo(expected.amount) != 0
+        || !Objects.equals(current.operationKey, expected.operationKey)
+        || !Objects.equals(current.ledgerKey, expected.ledgerKey)) throw conflict();
+    // 3. 用锁定行的最新进度合并，保留终态、防倒退和原SQL影响行保护。
+    return mergeObservation(current, state, error);
+  }
+
+  /** 两个观察入口共用原锁内合并，不覆盖既有终态或改变当前决议方向。 */
+  private PayTccExecutionPO mergeObservation(
+      PayTccExecutionPO current, String state, String error) {
+    // 1. 保留观察入参和未绑定XID的终态限制。
     if (state == null) throw conflict();
     if (current.xid == null && terminal(state)) throw conflict();
     // 2. 保留原终态和非终态合并规则，不给非NULL观察增加白名单。
@@ -153,8 +181,8 @@ public class PayTccExecutionStore {
               : "NONE".equals(current.decision) ? "UNKNOWN" : current.decision + "_REQUESTED";
     // 3. 沿原诊断截断和影响行保护写入，再读回最新事实。
     error = PayErrorMessages.truncate(error);
-    if (executions.updateObservation(payNo, target, error, now()) != 1) throw conflict();
-    return executions.selectByPayNo(payNo);
+    if (executions.updateObservation(current.payNo, target, error, now()) != 1) throw conflict();
+    return executions.selectByPayNo(current.payNo);
   }
 
   /** 读取原执行事实与匹配的TCC支付来源；NULL XID保留prebegin，坏行不进入恢复。 */

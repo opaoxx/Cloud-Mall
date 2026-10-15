@@ -6099,6 +6099,188 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** 旧XID的终态证据不能完成另一个已提交的新XID execution。 */
+  @Test
+  void staleTerminalObservationCannotCompleteReplacementXid() {
+    assertRecoveryPeerChangeRejected("xid", "COMMITTED", false);
+  }
+
+  /** Bridge失败后的UNKNOWN诊断也不能写进已被另一事务改载荷的execution。 */
+  @Test
+  void staleUnknownAfterBridgeFailureCannotRewriteReplacement() {
+    assertRecoveryPeerChangeRejected("amount", "UNKNOWN", true);
+  }
+
+  /** 五种合法不可变anchor变化与三类旧观察，在真实本地事务交错后均拒绝。 */
+  @Test
+  void changedExecutionAnchorsRejectReadBasedObservation() {
+    for (String mutation : List.of("id", "xid", "user", "order", "amount"))
+      for (String observation : List.of("COMMITTED", "ROLLEDBACK", "UNKNOWN"))
+        assertRecoveryPeerChangeRejected(mutation, observation, false);
+  }
+
+  /** 身份不变时以当前进度合并，真实代理事务保终态与prebegin语义，不改Pay/Intent。 */
+  @Test
+  void matchingSnapshotKeepsCurrentProgressAndTransaction() {
+    var store = proxiedExecutionObservationStore();
+    String[][] cases = {
+      {"RUNNING", "NONE", "UNKNOWN", "UNKNOWN"},
+      {"COMMIT_REQUESTED", "COMMIT", "UNKNOWN", "COMMIT_REQUESTED"},
+      {"ROLLBACK_REQUESTED", "ROLLBACK", "UNKNOWN", "ROLLBACK_REQUESTED"},
+      {"COMMITTED", "COMMIT", "UNKNOWN", "COMMITTED"},
+      {"ROLLEDBACK", "ROLLBACK", "UNKNOWN", "ROLLEDBACK"},
+      {"CONFLICT", "NONE", "UNKNOWN", "CONFLICT"},
+      {"ROLLBACK_REQUESTED", "ROLLBACK", "COMMITTED", "COMMITTED"}
+    };
+    for (String[] scenario : cases) {
+      prepareOwnedClaimReplay("RUNNING", "NONE", "t218-old-xid", "PENDING");
+      var expected = store.read("pay-1");
+      expected.amount = new BigDecimal("10.000");
+      fixture.update(
+          "UPDATE pay_tcc_execution SET"
+              + " state=?,decision=?,last_error='peer-diagnostic',recovery_owner='peer-worker',recovery_attempts=9",
+          scenario[0],
+          scenario[1]);
+      var before = executionReadFacts();
+      var paymentBefore = rawIntentTimeFacts();
+      var observed = store.observeSnapshot(expected, scenario[2], "snapshot-observation");
+      assertEquals(scenario[3], observed.state);
+      assertEquals(scenario[1], observed.decision);
+      assertEquals("t218-old-xid", observed.xid);
+      assertEquals("peer-worker", observed.recoveryOwner);
+      assertEquals(9, observed.recoveryAttempts);
+      assertEquals(paymentBefore, rawIntentTimeFacts());
+      if (com.cloudmall.pay.service.impl.PayTccExecutionStore.terminal(scenario[0])) {
+        assertEquals(before, executionReadFacts());
+        assertEquals("peer-diagnostic", observed.lastError);
+      } else assertEquals("snapshot-observation", observed.lastError);
+    }
+    for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN")) {
+      prepareOwnedClaimReplay(state, "NONE", null, "PENDING");
+      var expected = store.read("pay-1");
+      var paymentBefore = rawIntentTimeFacts();
+      var observed = store.observeSnapshot(expected, "UNKNOWN", "same-prebegin");
+      assertEquals("BEGIN_UNKNOWN", observed.state);
+      assertEquals("NONE", observed.decision);
+      assertNull(observed.xid);
+      assertEquals(paymentBefore, rawIntentTimeFacts());
+    }
+    assertTrue(
+        !org.springframework.transaction.support.TransactionSynchronizationManager
+            .isActualTransactionActive());
+  }
+
+  /** 真正Spring事务代理包裹实际Store；不启动应用或Seata，不改变原Mapper。 */
+  private com.cloudmall.pay.service.impl.PayTccExecutionStore proxiedExecutionObservationStore() {
+    var target = ownedExecutionObservationStore();
+    var proxy = new org.springframework.aop.framework.ProxyFactory(target);
+    proxy.setProxyTargetClass(true);
+    proxy.addAdvice(
+        new org.springframework.transaction.interceptor.TransactionInterceptor(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool),
+            new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource()));
+    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) proxy.getProxy();
+    assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(store));
+    return store;
+  }
+
+  /** 独立线程事务在Bridge窗口提交peer变更，随后旧查询不得改写peer提交的三表事实。 */
+  private void assertRecoveryPeerChangeRejected(
+      String mutation, String observation, boolean bridgeUnavailable) {
+    var store = proxiedExecutionObservationStore();
+    prepareOwnedClaimReplay("RUNNING", "NONE", "t218-old-xid", "PENDING");
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    user.payNo = "pay-1";
+    user.xid = "t218-old-xid";
+    var peerFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    when(bridge.recover("pay-1"))
+        .thenAnswer(
+            invocation -> {
+              changeOwnedExecutionInPeerTransaction(mutation);
+              peerFacts.set(executionReadFacts());
+              if (bridgeUnavailable)
+                throw new com.cloudmall.common.error.BizException(
+                    "REMOTE_UNAVAILABLE", "owned Bridge 503", 503);
+              return user;
+            });
+    when(evidence.classify(any(), eq(user)))
+        .thenAnswer(
+            invocation -> {
+              var original =
+                  (com.cloudmall.pay.domain.po.PayTccExecutionPO) invocation.getArgument(0);
+              assertEquals("t218-old-xid", original.xid);
+              assertEquals(0, original.amount.compareTo(new BigDecimal("10")));
+              return observation;
+            });
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(coordinator.recover("pay-1")));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> {
+          assertNotNull(peerFacts.get());
+          assertEquals(peerFacts.get(), executionReadFacts());
+        },
+        () -> org.mockito.Mockito.verifyNoInteractions(transactions, receiptService));
+    verify(bridge).recover("pay-1");
+    if (bridgeUnavailable) org.mockito.Mockito.verifyNoInteractions(evidence);
+    else verify(evidence).classify(any(), eq(user));
+    assertTrue(
+        !org.springframework.transaction.support.TransactionSynchronizationManager
+            .isActualTransactionActive());
+  }
+
+  /** 有界peer工作线程只在owned库提交新事实，收尾释放线程和事务连接。 */
+  private void changeOwnedExecutionInPeerTransaction(String mutation) throws Exception {
+    var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    try {
+      worker
+          .submit(
+              () -> {
+                var template =
+                    new org.springframework.transaction.support.TransactionTemplate(
+                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(
+                            ownedPool));
+                template.executeWithoutResult(
+                    status -> {
+                      switch (mutation) {
+                        case "id" -> fixture.update("UPDATE pay_tcc_execution SET id=2");
+                        case "xid" ->
+                            fixture.update("UPDATE pay_tcc_execution SET xid='t218-new-xid'");
+                        case "user" -> fixture.update("UPDATE pay_tcc_execution SET user_id=8");
+                        case "order" ->
+                            fixture.update("UPDATE pay_tcc_execution SET order_no='peer-order'");
+                        case "amount" ->
+                            fixture.update("UPDATE pay_tcc_execution SET amount=10.01");
+                        default -> throw new IllegalArgumentException(mutation);
+                      }
+                      if (List.of("user", "order", "amount").contains(mutation))
+                        alignOwnedExecutionReadSource();
+                    });
+              })
+          .get(10, java.util.concurrent.TimeUnit.SECONDS);
+    } finally {
+      worker.shutdownNow();
+      assertTrue(worker.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS));
+    }
+  }
+
   /** 原Pay缺失不能使合法缓存执行被当作终态返回。 */
   @Test
   void orphanedCachedExecutionCannotEscapeRecovery() {
