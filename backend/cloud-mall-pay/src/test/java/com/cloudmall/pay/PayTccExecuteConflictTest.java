@@ -5,7 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -45,10 +46,10 @@ class PayTccExecuteConflictTest {
             assertThrows(BizException.class, () -> fixture.coordinator.execute(fixture.request)));
         assertEquals(422, failure.getHttpStatus());
         assertNull(RootContext.getXID());
-        verify(fixture.store).claim(fixture.request);
+        verify(fixture.store).claimOwned(fixture.request);
         verify(fixture.transactions).begin();
         if (!phase.equals("begin"))
-          verify(fixture.store).bindXid(fixture.request.payNo, "unit-execute-xid");
+          verify(fixture.store).bindOwnedXid(same(fixture.execution), eq("unit-execute-xid"));
         if (List.of("receipt", "bridge", "evidence", "decide").contains(phase))
           verify(fixture.receipts).prepare(fixture.request);
         if (List.of("bridge", "evidence", "decide").contains(phase))
@@ -125,22 +126,22 @@ class PayTccExecuteConflictTest {
           .setActualTransactionActive(previousTransaction);
     }
     var replay = new Fixture("none", null);
-    when(replay.store.claim(replay.request)).thenReturn(false);
+    when(replay.store.claimOwned(replay.request)).thenReturn(null);
     replay.execution.xid = "original-xid";
     replay.execution.state = "COMMITTED";
     replay.execution.decision = "COMMIT";
     assertEquals("COMMITTED", replay.coordinator.execute(replay.request).state);
-    verify(replay.store).claim(replay.request);
+    verify(replay.store).claimOwned(replay.request);
     verify(replay.store).read(replay.request.payNo);
     verifyNoMoreInteractions(replay.store);
     verifyNoInteractions(replay.receipts, replay.bridge, replay.evidence, replay.transactions);
     var rejected = new Fixture("none", null);
     var conflict = new BizException("PAY_TCC_EXECUTION_CONFLICT", "claim conflict", 409);
-    when(rejected.store.claim(rejected.request)).thenThrow(conflict);
+    when(rejected.store.claimOwned(rejected.request)).thenThrow(conflict);
     assertSame(
         conflict,
         assertThrows(BizException.class, () -> rejected.coordinator.execute(rejected.request)));
-    verify(rejected.store).claim(rejected.request);
+    verify(rejected.store).claimOwned(rejected.request);
     verifyNoMoreInteractions(rejected.store);
     verifyNoInteractions(
         rejected.receipts, rejected.bridge, rejected.evidence, rejected.transactions);
@@ -160,7 +161,8 @@ class PayTccExecuteConflictTest {
             : decision.equals("NONE") ? "UNKNOWN" : "ROLLBACK_REQUESTED",
         result.state);
     verify(fixture.store)
-        .observe(fixture.request.payNo, "UNKNOWN", failure.getClass().getSimpleName());
+        .observeSnapshot(
+            same(fixture.execution), eq("UNKNOWN"), eq(failure.getClass().getSimpleName()));
     verify(fixture.transactions).begin();
     if (decision.equals("ROLLBACK")) {
       verify(fixture.store).decide(fixture.request.payNo, "unit-execute-xid", "ROLLBACK");
@@ -231,7 +233,7 @@ class PayTccExecuteConflictTest {
       execution.ledgerKey = request.payNo;
       execution.state = "CLAIMED";
       execution.decision = "NONE";
-      when(store.claim(request)).thenReturn(true);
+      when(store.claimOwned(request)).thenReturn(execution);
       when(store.read(request.payNo)).thenReturn(execution);
       when(transactions.begin())
           .thenAnswer(
@@ -240,15 +242,14 @@ class PayTccExecuteConflictTest {
                 failAt("begin");
                 return "unit-execute-xid";
               });
-      doAnswer(
+      when(store.bindOwnedXid(any(), any()))
+          .thenAnswer(
               invocation -> {
                 failAt("bind");
                 execution.xid = invocation.getArgument(1);
                 execution.state = "RUNNING";
-                return null;
-              })
-          .when(store)
-          .bindXid(any(), any());
+                return execution;
+              });
       when(receipts.prepare(request))
           .thenAnswer(
               invocation -> {
@@ -278,13 +279,14 @@ class PayTccExecuteConflictTest {
                 execution.state = execution.decision + "_REQUESTED";
                 return execution;
               });
-      when(store.observe(any(), any(), any()))
+      when(store.observeSnapshot(any(), any(), any()))
           .thenAnswer(
               invocation -> {
-                execution.state = execution.xid == null ? "BEGIN_UNKNOWN" : "UNKNOWN";
+                if ("UNKNOWN".equals(invocation.getArgument(1))
+                    && invocation.getArgument(2) != null)
+                  execution.state = execution.xid == null ? "BEGIN_UNKNOWN" : "UNKNOWN";
                 return execution;
               });
-      when(store.observeSnapshot(any(), any(), any())).thenReturn(execution);
     }
 
     /** 故障后不再注入第二错误，便于检测不应发生的后续动作。 */

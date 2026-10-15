@@ -6099,6 +6099,200 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** begin普通失败不能把UNKNOWN写进另一个执行主键。 */
+  @Test
+  void ordinaryBeginFailureCannotAdoptReplacementOwner() throws Exception {
+    assertOrdinaryExecuteFailureKeepsOwner("begin", "execution-id");
+  }
+
+  /** Try普通失败不能先改写新XID、再到decide阶段才报冲突。 */
+  @Test
+  void ordinaryTryFailureCannotDirtyReplacementXid() throws Exception {
+    assertOrdinaryExecuteFailureKeepsOwner("receipt", "execution-xid");
+  }
+
+  /** begin及两Try/证据普通错误中的八类身份/来源变化不能被旧线程接管。 */
+  @Test
+  void ordinaryExecuteFailuresKeepOriginalClaimAndBoundSnapshots() throws Exception {
+    for (String phase : List.of("begin", "receipt", "bridge", "evidence"))
+      for (String mutation :
+          List.of(
+              "execution-id",
+              "execution-xid",
+              "execution-user",
+              "execution-order",
+              "execution-amount",
+              "payment-mode",
+              "payment-order",
+              "payment-amount")) assertOrdinaryExecuteFailureKeepsOwner(phase, mutation);
+  }
+
+  /** actual owner返回值保原主键，prebegin进度与旧接口兼容；变更后不允许owned绑定。 */
+  @Test
+  void ownedClaimAndBindKeepWinnerReplayAndPrebeginProgress() throws Exception {
+    for (boolean prebeginProgress : List.of(false, true)) {
+      var store = proxiedExecutionObservationStore();
+      var request = prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+      fixture.update("DELETE FROM pay_tcc_execution");
+      var owned = store.claimOwned(request);
+      assertNotNull(owned);
+      assertEquals(owned.id, executionObservationMapper.selectByPayNo(request.payNo).id);
+      assertEquals("CLAIMED", owned.state);
+      assertEquals("NONE", owned.decision);
+      assertNull(owned.xid);
+      var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+      var originalOwner = json.valueToTree(owned);
+      if (prebeginProgress) fixture.update("UPDATE pay_tcc_execution SET state='BEGIN_UNKNOWN'");
+      var bound = store.bindOwnedXid(owned, "t222-bound-xid");
+      assertEquals(owned.id, bound.id);
+      assertEquals("RUNNING", bound.state);
+      assertEquals("t222-bound-xid", bound.xid);
+      assertEquals(originalOwner, json.valueToTree(owned));
+      fixture.update("UPDATE pay_record SET status='SUCCESS'");
+      var beforeReplay = executionReadFacts();
+      assertNull(store.claimOwned(request));
+      org.junit.jupiter.api.Assertions.assertFalse(store.claim(request));
+      store.bindXid(request.payNo, bound.xid);
+      assertEquals(bound.id, store.bindOwnedXid(bound, bound.xid).id);
+      assertEquals(beforeReplay, executionReadFacts());
+      assertEquals(
+          1, fixture.queryForObject("SELECT COUNT(*) FROM pay_tcc_execution", Integer.class));
+    }
+    for (String mutation :
+        List.of(
+            "execution-id",
+            "execution-xid",
+            "execution-user",
+            "execution-order",
+            "execution-amount",
+            "payment-mode",
+            "payment-order",
+            "payment-amount")) {
+      var store = proxiedExecutionObservationStore();
+      var request = prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+      fixture.update("DELETE FROM pay_tcc_execution");
+      var owned = store.claimOwned(request);
+      changeDecisionFailurePeer(mutation);
+      var beforeBind = executionReadFacts();
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> store.bindOwnedXid(owned, "t222-unconfirmed-xid"));
+      assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(beforeBind, executionReadFacts());
+      assertNull(owned.xid);
+    }
+  }
+
+  /** 两catch必须携带fresh claim/绑定的原owner，peer现场从普通故障发现时起保持。 */
+  private void assertOrdinaryExecuteFailureKeepsOwner(String phase, String mutation)
+      throws Exception {
+    ownedExecutionObservationStore();
+    var request = prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+    fixture.update("DELETE FROM pay_tcc_execution");
+    var peerFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var downstream = new java.util.ArrayList<String>();
+    var actualMapper = executionObservationMapper;
+    var decorated =
+        (com.cloudmall.pay.mapper.PayTccExecutionMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                com.cloudmall.pay.mapper.PayTccExecutionMapper.class.getClassLoader(),
+                new Class<?>[] {com.cloudmall.pay.mapper.PayTccExecutionMapper.class},
+                (proxy, method, arguments) -> {
+                  if (peerFacts.get() != null
+                      && List.of("setDecision", "updateObservation", "selectByPayNo")
+                          .contains(method.getName())) downstream.add(method.getName());
+                  try {
+                    return method.invoke(actualMapper, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException failure) {
+                    throw failure.getCause();
+                  }
+                });
+    var store = proxyExecutionObservationStore(executionObservationStore(decorated));
+    var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    org.junit.jupiter.api.function.Executable changePeer =
+        () -> {
+          changeDecisionFailurePeer(mutation);
+          peerFacts.set(executionReadFacts());
+        };
+    when(transactions.begin())
+        .thenAnswer(
+            invocation -> {
+              io.seata.core.context.RootContext.bind("t222-owner-xid");
+              if (phase.equals("begin")) {
+                changePeer.execute();
+                throw new Exception("owned ordinary begin failure");
+              }
+              return "t222-owner-xid";
+            });
+    var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+    receipt.state = "TRYING";
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    when(receipts.prepare(request))
+        .thenAnswer(
+            invocation -> {
+              if (phase.equals("receipt")) {
+                changePeer.execute();
+                throw new IllegalStateException("owned ordinary receipt failure");
+              }
+              return receipt;
+            });
+    when(bridge.dispatch(request))
+        .thenAnswer(
+            invocation -> {
+              if (phase.equals("bridge")) {
+                changePeer.execute();
+                throw new IllegalStateException("owned ordinary bridge failure");
+              }
+              return user;
+            });
+    when(bridge.recover(request.payNo)).thenReturn(user);
+    when(evidence.classify(any(), any()))
+        .thenAnswer(
+            invocation -> {
+              if (phase.equals("evidence")) {
+                changePeer.execute();
+                throw new IllegalStateException("owned ordinary evidence failure");
+              }
+              return "TRYING";
+            });
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receipts, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    try {
+      org.junit.jupiter.api.Assertions.assertAll(
+          () -> {
+            var failure =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> returned.set(coordinator.execute(request)));
+            assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+          },
+          () -> assertNull(returned.get()),
+          () -> {
+            assertNotNull(peerFacts.get());
+            assertEquals(peerFacts.get(), executionReadFacts());
+          },
+          () -> assertEquals(List.of(), downstream),
+          () -> {
+            verify(transactions).begin();
+            org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+          },
+          () -> assertNull(io.seata.core.context.RootContext.getXID()));
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
   /** TC旧请求的失败诊断不能改写已经换XID的执行记录。 */
   @Test
   void lostDecisionResponseCannotRewriteReplacementExecution() throws Exception {

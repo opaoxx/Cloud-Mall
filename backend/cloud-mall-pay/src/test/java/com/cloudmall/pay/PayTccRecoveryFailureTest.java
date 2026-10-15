@@ -237,7 +237,10 @@ class PayTccRecoveryFailureTest {
       request.userId = original.userId;
       request.orderNo = original.orderNo;
       request.amount = original.amount;
-      when(store.claim(request)).thenReturn(true);
+      var initialOwner = execution("CLAIMED", "NONE");
+      initialOwner.xid = null;
+      when(store.claimOwned(request)).thenReturn(initialOwner);
+      when(store.bindOwnedXid(any(), any())).thenReturn(original);
       when(store.read(original.payNo)).thenReturn(original);
       when(store.decide(any(), any(), any())).thenReturn(chosen);
       when(store.observeSnapshot(any(), any(), any()))

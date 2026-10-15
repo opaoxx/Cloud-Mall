@@ -58,6 +58,17 @@ public class PayTccExecutionStore {
   /** 支付行锁保护首次插入，唯一胜者获得不可转移的一次性 begin 权。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean claim(PayTccDispatchDTO request) {
+    return claimWinner(request) != null;
+  }
+
+  /** 首次插入胜者取得原执行快照；已有合法重放返回NULL，不转移begin权。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public PayTccExecutionPO claimOwned(PayTccDispatchDTO request) {
+    return claimWinner(request);
+  }
+
+  /** 两个认领入口复用同一事务内核，保原Pay锁、重放校验和fresh gate。 */
+  private PayTccExecutionPO claimWinner(PayTccDispatchDTO request) {
     // 1. 校验无损载荷和原支付；所有查询均通过 Mapper。
     validateRequest(request);
     List<PayRecordPO> records = payments.selectForUpdate(request.payNo);
@@ -73,7 +84,7 @@ public class PayTccExecutionStore {
     if (existing != null) {
       validatePersistedExecution(existing, request.payNo);
       validate(existing, request);
-      return false;
+      return null;
     }
     if (cancels.selectForUpdate(request.payNo) != null)
       throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "取消已持久受理，不能开始扣款", 202);
@@ -97,20 +108,46 @@ public class PayTccExecutionStore {
     execution.nextRecoveryAt = execution.createdAt.plusSeconds(30);
     // 3. 独立提交先于任何 TC 网络调用；失败不调用 begin。
     if (executions.insert(execution) != 1) throw new IllegalStateException("execution claim 未成功");
-    return true;
+    return execution;
   }
 
   /** 只有原首次执行线程把已确认的 XID 写入，不允许改绑。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void bindXid(String payNo, String xid) {
-    if (xid == null || xid.isBlank() || xid.length() > 128) throw conflict();
+    // 1. 保原输入优先与execution锁入口。
+    requireValidXid(xid);
     PayTccExecutionPO current = locked(payNo);
+    // 2. 保原绑定和幂等语义，不额外读取或接管owner。
+    bindCurrent(current, xid);
+  }
+
+  /** 仅将持有的原执行快照绑定XID，返回独立提交的bound事实供后续异常核对。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public PayTccExecutionPO bindOwnedXid(PayTccExecutionPO expected, String xid) {
+    // 1. 输入有效后按Pay→execution锁定，核原anchor与来源。
+    requireValidXid(xid);
+    PayTccExecutionPO current = lockedSnapshot(expected);
+    // 2. 沿原SQL绑定，保合法BEGIN_UNKNOWN进度及同XID幂等。
+    bindCurrent(current, xid);
+    // 3. 锁内读回原bound行；缺失不能被当作丢弃执行权的成功。
+    PayTccExecutionPO bound = executions.selectByPayNo(current.payNo);
+    if (bound == null) throw conflict();
+    return bound;
+  }
+
+  /** 两个绑定入口共享已绑定XID的原字符域。 */
+  private void requireValidXid(String xid) {
+    if (xid == null || xid.isBlank() || xid.length() > 128) throw conflict();
+  }
+
+  /** 原绑定内核只对锁定行执行一次CAS，原相同XID保持幂等。 */
+  private void bindCurrent(PayTccExecutionPO current, String xid) {
     if (current.xid != null) {
       if (!current.xid.equals(xid)) throw conflict();
       return;
     }
     if (!"NONE".equals(current.decision) || terminal(current.state)) throw conflict();
-    if (executions.bindXid(payNo, xid, now()) != 1) throw conflict();
+    if (executions.bindXid(current.payNo, xid, now()) != 1) throw conflict();
   }
 
   /** 决议必须在 TC 请求前独立提交，相反方向永远冲突。 */
@@ -145,6 +182,14 @@ public class PayTccExecutionStore {
   /** 锁内核对原Pay来源和执行身份，读后漂移先于终态早返回及更新被拒绝。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO observeSnapshot(PayTccExecutionPO expected, String state, String error) {
+    // 1. 与owned绑定复用同一原快照及来源门。
+    PayTccExecutionPO current = lockedSnapshot(expected);
+    // 2. 沿锁定行最新进度合并，不改变原观察规则。
+    return mergeObservation(current, state, error);
+  }
+
+  /** 锁内复核持有的原anchor与原Pay，不从当前行重新授予一次性执行权。 */
+  private PayTccExecutionPO lockedSnapshot(PayTccExecutionPO expected) {
     // 1. 拒绝缺失快照，按Pay→execution锁序取当前事实，避免与claim反向取锁。
     if (expected == null) throw conflict();
     List<PayRecordPO> sourcePayments = payments.selectForUpdate(expected.payNo);
@@ -159,9 +204,9 @@ public class PayTccExecutionStore {
         || current.amount.compareTo(expected.amount) != 0
         || !Objects.equals(current.operationKey, expected.operationKey)
         || !Objects.equals(current.ledgerKey, expected.ledgerKey)) throw conflict();
-    // 3. 核锁定原Pay的来源及载荷，再以当前进度合并；两锁随独立事务一起释放。
+    // 3. 核锁定原Pay来源；两锁随调用方独立事务一起释放。
     validatePaymentSource(current, expected.payNo, sourcePayments);
-    return mergeObservation(current, state, error);
+    return current;
   }
 
   /** 两个观察入口共用原锁内合并，不覆盖既有终态或改变当前决议方向。 */

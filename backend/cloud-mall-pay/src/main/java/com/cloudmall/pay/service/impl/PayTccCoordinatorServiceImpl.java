@@ -53,12 +53,13 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
   public PayTccExecutionVO execute(PayTccDispatchDTO request) {
     requireNoContext();
     // 1. 持久化执行权先于 begin，重放不能继承初次线程的执行权。
-    if (!executions.claim(request)) return recover(request.payNo);
+    PayTccExecutionPO owned = executions.claimOwned(request);
+    if (owned == null) return recover(request.payNo);
     try {
       String xid = transactions.begin();
       if (xid == null || !Objects.equals(xid, RootContext.getXID()))
         throw new IllegalStateException("TC begin 未绑定原 XID");
-      executions.bindXid(request.payNo, xid);
+      owned = executions.bindOwnedXid(owned, xid);
       // 2. 两分支仅初次执行；明确冲突停止，普通失败请求回滚而非声称已回滚。
       String decision = "ROLLBACK";
       try {
@@ -69,15 +70,15 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
         }
       } catch (RuntimeException tryFailure) {
         rethrowConflict(tryFailure);
-        executions.observe(request.payNo, "UNKNOWN", tryFailure.getClass().getSimpleName());
+        executions.observeSnapshot(owned, "UNKNOWN", tryFailure.getClass().getSimpleName());
       }
       PayTccExecutionPO chosen = executions.decide(request.payNo, xid, decision);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
       sendDecision(chosen);
     } catch (Exception beginOrPersistenceFailure) {
       rethrowConflict(beginOrPersistenceFailure);
-      executions.observe(
-          request.payNo, "UNKNOWN", beginOrPersistenceFailure.getClass().getSimpleName());
+      executions.observeSnapshot(
+          owned, "UNKNOWN", beginOrPersistenceFailure.getClass().getSimpleName());
     } finally {
       // 4. 入口已拒绝继承上下文，因此只清理本次 begin 建立的绑定。
       RootContext.unbind();
