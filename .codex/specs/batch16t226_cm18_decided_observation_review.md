@@ -31,3 +31,5 @@
 ## 4. 明确边界
 
 本批只保护已决 observation 写的本地锁内方向，不改变旧 observe/SQL/API、决议算法、TC client、历史数据或 NONE legacy 语义，不撤回已发动作，不宣称真实 TC/远端并发/完整资金或 fencing。专项未完成前不得宣称闭环。
+
+T224 旧 native helper 的 recover checkpoint 必须同步实际新路径 `observeDecidedSnapshot`；保持内层事务提交后 peer 注入位置、原样本和断言语义，不是放宽断言或删除覆盖。首次 focused 29 类/414 方法的3个失败（0 error/skip）属于旧 helper 路径与新 decided observation 路径不一致，原日志/XML/counts 与失败 owned schema 清理证据保留；最终验收须分别核对 red、focused-initial、focused 三个 owned schema 的精确 DROP、指纹与池关闭。
