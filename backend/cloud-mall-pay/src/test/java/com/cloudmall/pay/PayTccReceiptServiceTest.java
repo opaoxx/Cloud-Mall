@@ -605,6 +605,82 @@ class PayTccReceiptServiceTest {
       }
   }
 
+  /** 独立read复用同一有效域，拒绝坏状态/分支且不触发认领或资源。 */
+  @Test
+  void publicReadRequiresValidStateAndBranch() {
+    for (var mutation : receiptEvidenceMutations()) {
+      setUp();
+      var current = receipt("CLAIMED");
+      mutation.accept(current);
+      when(receipts.read("pay-receipt-test")).thenReturn(current);
+      var before =
+          org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+              () ->
+                  new com.fasterxml.jackson.databind.ObjectMapper()
+                      .findAndRegisterModules()
+                      .writeValueAsString(current));
+      var failure = assertThrows(BizException.class, () -> service.read("pay-receipt-test"));
+      assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+      assertEquals(409, failure.getHttpStatus());
+      assertEquals(
+          before,
+          org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+              () ->
+                  new com.fasterxml.jackson.databind.ObjectMapper()
+                      .findAndRegisterModules()
+                      .writeValueAsString(current)));
+      verify(receipts).read("pay-receipt-test");
+      org.mockito.Mockito.verifyNoMoreInteractions(receipts);
+      org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+    }
+  }
+
+  /** CLAIMED未知/正branch及其它三态正branch均保持原视图字段。 */
+  @Test
+  void publicReadKeepsValidClaimedAndBoundEvidence() {
+    for (String state : java.util.List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED"))
+      for (Long branch : java.util.Arrays.asList(null, 1L, Long.MAX_VALUE)) {
+        if (branch == null && !state.equals("CLAIMED")) continue;
+        setUp();
+        var current = receipt(state);
+        current.branchId = branch;
+        when(receipts.read("pay-receipt-test")).thenReturn(current);
+        var result = service.read("pay-receipt-test");
+        assertEquals(current.payNo, result.payNo);
+        assertEquals(current.xid, result.xid);
+        assertEquals(current.operationKey, result.operationKey);
+        assertEquals(current.ledgerKey, result.ledgerKey);
+        assertEquals(state, result.state);
+        assertEquals(branch, result.branchId);
+        verify(receipts).read("pay-receipt-test");
+        org.mockito.Mockito.verifyNoMoreInteractions(receipts);
+        org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+      }
+  }
+
+  /** 缺失404及Store identity/DAO原异常保持先级，只查询一次。 */
+  @Test
+  void publicReadKeepsMissingAndLookupFailurePriority() {
+    var missing = assertThrows(BizException.class, () -> service.read("missing-pay"));
+    assertEquals("PAY_TCC_RECEIPT_NOT_FOUND", missing.getCode());
+    assertEquals(404, missing.getHttpStatus());
+    verify(receipts).read("missing-pay");
+    org.mockito.Mockito.verifyNoMoreInteractions(receipts);
+    org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+    for (RuntimeException original :
+        java.util.List.of(
+            new BizException("PAY_TCC_RECEIPT_CONFLICT", "original lookup identity conflict", 409),
+            new IllegalStateException("original lookup failure"))) {
+      setUp();
+      org.mockito.Mockito.doThrow(original).when(receipts).read("pay-receipt-test");
+      var failure = assertThrows(RuntimeException.class, () -> service.read("pay-receipt-test"));
+      org.junit.jupiter.api.Assertions.assertSame(original, failure);
+      verify(receipts).read("pay-receipt-test");
+      org.mockito.Mockito.verifyNoMoreInteractions(receipts);
+      org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+    }
+  }
+
   /** 独立变异stored事实；null状态仅模拟异常Mapper结果，不宣称DB允许NULL。 */
   private java.util.List<java.util.function.Consumer<PayTccReceiptPO>> receiptEvidenceMutations() {
     var mutations = new java.util.ArrayList<java.util.function.Consumer<PayTccReceiptPO>>();

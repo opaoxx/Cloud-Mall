@@ -53,12 +53,17 @@ public class PayTccReceiptServiceImpl implements PayTccReceiptService {
     return PayTccReceiptVO.from(receipt);
   }
 
-  /** 读取原 Pay receipt，不猜测未知状态。 */
+  /** 读取原 Pay receipt；缺失404，状态或分支证据非法409。 */
   @Override
   public PayTccReceiptVO read(String payNo) {
+    // 1. 读取原支付号事实，保留Store异常与缺失语义。
     PayTccReceiptPO receipt = receipts.read(payNo);
     if (receipt == null)
       throw new BizException("PAY_TCC_RECEIPT_NOT_FOUND", "Pay receipt 不存在", 404);
+    // 2. 校验状态与分支，非法证据不能发布为有效视图。
+    if (!PayTccReceiptStore.hasValidStateAndBranch(receipt))
+      throw new BizException("PAY_TCC_RECEIPT_CONFLICT", "Pay receipt 状态或分支证据不合法", 409);
+    // 3. 只用同一次读取生成返回视图。
     return PayTccReceiptVO.from(receipt);
   }
 }

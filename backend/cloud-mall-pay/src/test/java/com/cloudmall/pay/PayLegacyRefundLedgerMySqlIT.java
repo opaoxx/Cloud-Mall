@@ -7827,6 +7827,110 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertReceiptOwnerQueryOrder(context));
   }
 
+  /** 独立read不能把未知状态当作有效receipt事实发布。 */
+  @Test
+  void publicReceiptReadCannotPublishUnknownState() {
+    assertReceiptPublicReadRejected("UNKNOWN", 8L);
+  }
+
+  /** 独立read不能发布零分支号的CONFIRMED终态。 */
+  @Test
+  void publicReceiptReadCannotPublishZeroConfirmedBranch() {
+    assertReceiptPublicReadRejected("CONFIRMED", 0L);
+  }
+
+  /** 四态的坏分支、缺失分支与未知/别名状态均保守409，无写入或资源调用。 */
+  @Test
+  void publicReceiptReadRejectsInvalidStateBranchMatrix() {
+    for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
+      for (Long branch : List.of(0L, -1L)) assertReceiptPublicReadRejected(state, branch);
+      if (!state.equals("CLAIMED")) assertReceiptPublicReadRejected(state, null);
+    }
+    for (String state : List.of("UNKNOWN", "", "trying", "TRYING "))
+      assertReceiptPublicReadRejected(state, 8L);
+  }
+
+  /** 四态合法分支、missing404与先于域门的原payNo身份拒绝均保持。 */
+  @Test
+  void publicReceiptReadKeepsValidEvidenceAndLookupPriority() {
+    for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED"))
+      for (Long branch : java.util.Arrays.asList(null, 1L, Long.MAX_VALUE)) {
+        if (branch == null && !state.equals("CLAIMED")) continue;
+        var store = ownedReceiptClaimStore();
+        var dispatch = seedOwnedReceiptClaim();
+        assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+        fixture.update("UPDATE pay_tcc_receipt SET state=?,branch_id=?", state, branch);
+        var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+        var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+        var facade =
+            new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+        var before = ownedReceiptClaimFacts();
+        var result = facade.read(dispatch.payNo);
+        assertEquals(dispatch.payNo, result.payNo);
+        assertEquals(dispatch.xid, result.xid);
+        assertEquals(state, result.state);
+        assertEquals(branch, result.branchId);
+        assertEquals(dispatch.operationKey, result.operationKey);
+        assertEquals(dispatch.ledgerKey, result.ledgerKey);
+        assertEquals(before, ownedReceiptClaimFacts());
+        org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+      }
+    for (String scenario : List.of("missing", "alias-and-invalid")) {
+      var store = ownedReceiptClaimStore();
+      var dispatch = seedOwnedReceiptClaim();
+      assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+      if (scenario.equals("missing")) fixture.update("DELETE FROM pay_tcc_receipt");
+      else fixture.update("UPDATE pay_tcc_receipt SET pay_no='PAY-1',state='UNKNOWN',branch_id=0");
+      var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+      var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+      var facade =
+          new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+      var before = ownedReceiptClaimFacts();
+      var failure =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.cloudmall.common.error.BizException.class, () -> facade.read(dispatch.payNo));
+      assertEquals(
+          scenario.equals("missing") ? "PAY_TCC_RECEIPT_NOT_FOUND" : "PAY_TCC_RECEIPT_CONFLICT",
+          failure.getCode());
+      assertEquals(scenario.equals("missing") ? 404 : 409, failure.getHttpStatus());
+      if (!scenario.equals("missing")) assertEquals("Pay receipt 原事实不一致", failure.getMessage());
+      assertEquals(before, ownedReceiptClaimFacts());
+      org.mockito.Mockito.verifyNoInteractions(bridge, resource);
+    }
+  }
+
+  /** actual Store一次读取，错误不返回VO，源与receipt四表保持注入后的原样。 */
+  private void assertReceiptPublicReadRejected(String state, Long branch) {
+    var store = ownedReceiptClaimStore();
+    var dispatch = seedOwnedReceiptClaim();
+    assertTrue(dispatchTransaction(() -> store.claim(dispatch)));
+    fixture.update("UPDATE pay_tcc_receipt SET state=?,branch_id=?", state, branch);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
+    var facade =
+        new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+    var before = ownedReceiptClaimFacts();
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccReceiptVO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(facade.read(dispatch.payNo)));
+          assertEquals("PAY_TCC_RECEIPT_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () ->
+            assertNull(
+                returned.get() == null
+                    ? null
+                    : returned.get().state + "|" + returned.get().branchId),
+        () -> assertEquals(before, ownedReceiptClaimFacts()),
+        () -> org.mockito.Mockito.verifyNoInteractions(bridge, resource));
+  }
+
   /** public rollback的返回、五表事实和真实owner查询计数同时断言。 */
   private void assertRejectedReceiptOwner(String state, Long branch, boolean otherXid) {
     var resource = ownedReceiptRollbackResource();
