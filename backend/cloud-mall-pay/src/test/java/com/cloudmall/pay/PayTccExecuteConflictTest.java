@@ -234,6 +234,7 @@ class PayTccExecuteConflictTest {
       execution.state = "CLAIMED";
       execution.decision = "NONE";
       when(store.claimOwned(request)).thenReturn(execution);
+      when(store.verifyDecisionSnapshot(execution)).thenReturn(execution);
       when(store.read(request.payNo)).thenReturn(execution);
       when(transactions.begin())
           .thenAnswer(

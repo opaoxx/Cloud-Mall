@@ -109,9 +109,10 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     }
   }
 
-  /** RPC失败诊断只写回原执行快照；已发请求不作为资金终态证据。 */
+  /** 发送前复核原决议快照；RPC失败诊断仍关联原快照，不推断资金终态。 */
   private void sendDecision(PayTccExecutionPO execution) {
-    if (PayTccExecutionStore.terminal(execution.state)) return;
+    PayTccExecutionPO current = executions.verifyDecisionSnapshot(execution);
+    if (PayTccExecutionStore.terminal(current.state)) return;
     try {
       if ("COMMIT".equals(execution.decision)) transactions.commit(execution.xid);
       else if ("ROLLBACK".equals(execution.decision)) transactions.rollback(execution.xid);

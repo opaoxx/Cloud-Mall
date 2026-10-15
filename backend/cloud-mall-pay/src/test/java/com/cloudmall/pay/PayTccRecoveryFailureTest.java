@@ -76,6 +76,7 @@ class PayTccRecoveryFailureTest {
         var failure = new BizException(code, "controlled Bridge failure", 409);
         when(store.read(current.payNo)).thenReturn(current);
         when(store.observeSnapshot(any(), any(), any())).thenReturn(updated);
+        when(store.verifyDecisionSnapshot(updated)).thenReturn(updated);
         when(bridge.recover(current.payNo)).thenThrow(failure);
         var coordinator =
             new PayTccCoordinatorServiceImpl(store, receipts, bridge, evidence, transactions);
@@ -88,6 +89,7 @@ class PayTccRecoveryFailureTest {
         verify(store, times(conflict ? 1 : observations)).read(current.payNo);
         verify(bridge, times(conflict ? 1 : observations)).recover(current.payNo);
         verify(store, times(observations)).observeSnapshot(same(current), eq("UNKNOWN"), eq(code));
+        if (!conflict && !decision.equals("NONE")) verify(store).verifyDecisionSnapshot(updated);
         verifyNoMoreInteractions(store, bridge);
         verifyNoInteractions(receipts, evidence);
         if (!conflict && decision.equals("COMMIT")) verify(transactions).commit(current.xid);
@@ -123,6 +125,7 @@ class PayTccRecoveryFailureTest {
       var user = new PayTccDispatchVO();
       when(store.read(current.payNo)).thenReturn(current);
       when(store.observeSnapshot(any(), any(), any())).thenReturn(current);
+      when(store.verifyDecisionSnapshot(current)).thenReturn(current);
       var conflict = new BizException("PAY_TCC_EXECUTION_CONFLICT", "evidence conflict", 409);
       if (evidenceConflict) {
         when(bridge.recover(current.payNo)).thenReturn(user);
@@ -162,6 +165,44 @@ class PayTccRecoveryFailureTest {
     verify(store).read(terminal.payNo);
     verifyNoMoreInteractions(store);
     verifyNoInteractions(receipts, bridge, evidence, transactions);
+  }
+
+  /** gate在TC异常catch之外；原冲突传播，最新同向终态不再发TC。 */
+  @Test
+  void decisionGateConflictsAndLatestTerminalStopBeforeRpc() throws Exception {
+    for (String entry : List.of("execute", "recover"))
+      for (String decision : List.of("COMMIT", "ROLLBACK"))
+        for (boolean reject : List.of(false, true)) {
+          var fixture = new DecisionFixture(entry, decision, false, new Exception("must not send"));
+          var terminal = execution("COMMITTED", decision);
+          var verified = new java.util.concurrent.atomic.AtomicBoolean();
+          when(fixture.store.read(fixture.request.payNo))
+              .thenAnswer(invocation -> verified.get() ? terminal : fixture.original);
+          when(fixture.store.verifyDecisionSnapshot(fixture.chosen))
+              .thenAnswer(
+                  invocation -> {
+                    if (reject) throw fixture.conflict;
+                    verified.set(true);
+                    return terminal;
+                  });
+          if (reject) assertSame(fixture.conflict, assertThrows(BizException.class, fixture::call));
+          else assertEquals("COMMITTED", fixture.call().state);
+          verify(fixture.store).verifyDecisionSnapshot(same(fixture.chosen));
+          assertEquals(0, fixture.diagnosticCalls);
+          if (entry.equals("execute")) verify(fixture.transactions).begin();
+          verifyNoMoreInteractions(fixture.transactions);
+          assertNull(RootContext.getXID());
+        }
+    var fixture = new DecisionFixture("recover", "COMMIT", false, new Exception("must not send"));
+    var unavailable =
+        new org.springframework.dao.DataAccessResourceFailureException("gate read unavailable");
+    when(fixture.store.verifyDecisionSnapshot(fixture.chosen)).thenThrow(unavailable);
+    assertSame(
+        unavailable,
+        assertThrows(
+            org.springframework.dao.DataAccessResourceFailureException.class, fixture::call));
+    assertEquals(0, fixture.diagnosticCalls);
+    verifyNoInteractions(fixture.transactions);
   }
 
   /** 完整原执行载荷，用独立对象区分read结果与观察返回的已决议chosen。 */
@@ -243,6 +284,7 @@ class PayTccRecoveryFailureTest {
       when(store.bindOwnedXid(any(), any())).thenReturn(original);
       when(store.read(original.payNo)).thenReturn(original);
       when(store.decideOwned(any(), any(), any())).thenReturn(chosen);
+      when(store.verifyDecisionSnapshot(chosen)).thenReturn(chosen);
       when(store.observeSnapshot(any(), any(), any()))
           .thenAnswer(
               invocation -> {

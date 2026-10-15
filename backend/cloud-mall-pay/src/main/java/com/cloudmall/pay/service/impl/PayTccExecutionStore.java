@@ -206,6 +206,17 @@ public class PayTccExecutionStore {
     return mergeObservation(current, state, error);
   }
 
+  /** TC发送前只读复核原身份、来源与方向，返回当前进度；事务外才允许发RPC。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public PayTccExecutionPO verifyDecisionSnapshot(PayTccExecutionPO expected) {
+    // 1. 沿原Pay→execution锁与snapshot门拒绝身份或来源变化。
+    PayTccExecutionPO current = lockedSnapshot(expected);
+    // 2. 原决议方向必须保持，不用旧快照授权另一方向或已清空的决议。
+    if (!Objects.equals(current.decision, expected.decision)) throw conflict();
+    // 3. 只返回最新进度，不写状态，不在本地锁内发送TC请求。
+    return current;
+  }
+
   /** 锁内复核持有的原anchor与原Pay，不从当前行重新授予一次性执行权。 */
   private PayTccExecutionPO lockedSnapshot(PayTccExecutionPO expected) {
     // 1. 拒绝缺失快照，按Pay→execution锁序取当前事实，避免与claim反向取锁。

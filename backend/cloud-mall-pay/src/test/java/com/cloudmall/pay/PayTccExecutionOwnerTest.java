@@ -285,6 +285,112 @@ class PayTccExecutionOwnerTest {
     }
   }
 
+  /** 发送门先核原snapshot/source，再核方向；终态也不能绕过原owner校验。 */
+  @Test
+  void decisionVerificationRejectsOwnerSourceAndDirectionChanges() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String mutation :
+          List.of(
+              "id",
+              "xid",
+              "user",
+              "order",
+              "amount",
+              "mode",
+              "missing",
+              "opposite",
+              "none",
+              "missing-current",
+              "null",
+              "bad-expected")) {
+        var fixture = new Fixture();
+        var expected = execution(decision + "_REQUESTED", "owned-xid");
+        expected.decision = decision;
+        var current = execution("COMMITTED", "owned-xid");
+        current.decision = decision;
+        switch (mutation) {
+          case "id" -> current.id = 2L;
+          case "xid" -> current.xid = "peer-xid";
+          case "user" -> current.userId = fixture.source.userId = 8L;
+          case "order" -> current.orderNo = fixture.source.orderNo = "peer-order";
+          case "amount" -> current.amount = fixture.source.amount = new BigDecimal("10.01");
+          case "mode" -> fixture.source.debitMode = "LEGACY";
+          case "missing" ->
+              when(fixture.payments.selectForUpdate(expected.payNo)).thenReturn(List.of());
+          case "opposite" -> current.decision = decision.equals("COMMIT") ? "ROLLBACK" : "COMMIT";
+          case "none" -> current.decision = "NONE";
+          case "bad-expected" -> expected.amount = null;
+          default -> {}
+        }
+        when(fixture.executions.selectForUpdate(expected.payNo))
+            .thenReturn(mutation.equals("missing-current") ? null : current);
+        var input = mutation.equals("null") ? null : expected;
+        var before = snapshot(expected);
+        var failure =
+            assertThrows(BizException.class, () -> fixture.store.verifyDecisionSnapshot(input));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals(before, snapshot(expected));
+        if (input == null) verifyNoInteractions(fixture.payments, fixture.executions);
+        else {
+          var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+          order.verify(fixture.payments).selectForUpdate(expected.payNo);
+          order.verify(fixture.executions).selectForUpdate(expected.payNo);
+        }
+        fixture.verifyNoOtherInteractions();
+      }
+    var fixture = new Fixture();
+    var expected = execution("COMMIT_REQUESTED", "owned-xid");
+    expected.decision = "COMMIT";
+    var unavailable =
+        new org.springframework.dao.DataAccessResourceFailureException("read unavailable");
+    when(fixture.payments.selectForUpdate(expected.payNo)).thenThrow(unavailable);
+    assertSame(
+        unavailable,
+        assertThrows(
+            org.springframework.dao.DataAccessResourceFailureException.class,
+            () -> fixture.store.verifyDecisionSnapshot(expected)));
+    verify(fixture.payments).selectForUpdate(expected.payNo);
+    fixture.verifyNoOtherInteractions();
+  }
+
+  /** 只读gate返回最新进度，金额scale与Pay进度不成为版本；NONE/prebegin保持。 */
+  @Test
+  void decisionVerificationKeepsReadOnlyMutableProgress() {
+    for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+      for (String state : List.of("RUNNING", "UNKNOWN", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+        var fixture = new Fixture();
+        var expected = execution("RUNNING", "owned-xid");
+        expected.decision = decision;
+        var current = execution(state, "owned-xid");
+        current.decision = decision;
+        current.amount = new BigDecimal("10.000");
+        current.recoveryAttempts = 9;
+        current.lastError = "peer-progress";
+        fixture.source.status = "SUCCESS";
+        when(fixture.executions.selectForUpdate(expected.payNo)).thenReturn(current);
+        var before = snapshot(expected);
+        var currentBefore = snapshot(current);
+        assertSame(current, fixture.store.verifyDecisionSnapshot(expected));
+        assertEquals(before, snapshot(expected));
+        assertEquals(currentBefore, snapshot(current));
+        var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+        order.verify(fixture.payments).selectForUpdate(expected.payNo);
+        order.verify(fixture.executions).selectForUpdate(expected.payNo);
+        fixture.verifyNoOtherInteractions();
+      }
+    for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN")) {
+      var fixture = new Fixture();
+      var expected = execution("CLAIMED", null);
+      var current = execution(state, null);
+      when(fixture.executions.selectForUpdate(expected.payNo)).thenReturn(current);
+      assertSame(current, fixture.store.verifyDecisionSnapshot(expected));
+      verify(fixture.payments).selectForUpdate(expected.payNo);
+      verify(fixture.executions).selectForUpdate(expected.payNo);
+      fixture.verifyNoOtherInteractions();
+    }
+  }
+
   /** 有效请求与固定键共享原创建域。 */
   private static PayTccDispatchDTO request() {
     var request = new PayTccDispatchDTO();

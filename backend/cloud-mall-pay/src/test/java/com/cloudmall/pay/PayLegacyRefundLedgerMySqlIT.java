@@ -6099,6 +6099,179 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** 决议事务提交后身份变更，首次线程不能继续发送旧TC请求。 */
+  @Test
+  void decisionCommitCannotSendAfterOwnerReplacement() throws Exception {
+    assertDecisionSendSnapshot("execute", "COMMIT", "execution-id", null);
+  }
+
+  /** 恢复观察提交后原Pay变化，不能先发送回滚再末次报冲突。 */
+  @Test
+  void recoveryObservationCannotSendAfterPaymentChange() throws Exception {
+    assertDecisionSendSnapshot("recover", "ROLLBACK", "payment-amount", null);
+  }
+
+  /** 双入口双方向的八类来源/身份和反向或清空决议都应在发送前拒绝。 */
+  @Test
+  void decisionSendRejectsCommittedSnapshotAndDirectionDrift() throws Exception {
+    for (String entry : List.of("execute", "recover"))
+      for (String decision : List.of("COMMIT", "ROLLBACK")) {
+        for (String mutation :
+            List.of(
+                "execution-id",
+                "execution-xid",
+                "execution-user",
+                "execution-order",
+                "execution-amount",
+                "payment-mode",
+                "payment-order",
+                "payment-amount")) assertDecisionSendSnapshot(entry, decision, mutation, null);
+        assertDecisionSendSnapshot(
+            entry,
+            decision,
+            decision.equals("COMMIT") ? "decision-ROLLBACK" : "decision-COMMIT",
+            null);
+        assertDecisionSendSnapshot(entry, decision, "decision-NONE", null);
+      }
+  }
+
+  /** 发送前最新同向终态可免RPC；只读gate允许合法可变进度而不改三表。 */
+  @Test
+  void decisionSendKeepsLatestTerminalAndReadOnlyProgress() throws Exception {
+    for (String entry : List.of("execute", "recover"))
+      for (String decision : List.of("COMMIT", "ROLLBACK"))
+        for (String state : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT"))
+          assertDecisionSendSnapshot(entry, decision, "state-" + state, state);
+    var store = proxiedExecutionObservationStore();
+    for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
+      prepareOwnedClaimReplay("RUNNING", decision, "t224-progress-xid", "PENDING");
+      var expected = store.read("pay-1");
+      fixture.update("UPDATE pay_record SET status='SUCCESS'");
+      fixture.update(
+          "UPDATE pay_tcc_execution SET"
+              + " state='UNKNOWN',recovery_attempts=9,last_error='peer-progress'");
+      var before = executionReadFacts();
+      var verified = store.verifyDecisionSnapshot(expected);
+      assertEquals("UNKNOWN", verified.state);
+      assertEquals(decision, verified.decision);
+      assertEquals(9, verified.recoveryAttempts);
+      assertEquals("RUNNING", expected.state);
+      assertEquals(before, executionReadFacts());
+    }
+  }
+
+  /** 外层测试advice在实际内层事务提交后变更peer；不在业务锁内发RPC。 */
+  private void assertDecisionSendSnapshot(
+      String entry, String decision, String mutation, String terminalState) throws Exception {
+    ownedExecutionObservationStore();
+    var request =
+        prepareOwnedClaimReplay(
+            entry.equals("execute") ? "CLAIMED" : decision + "_REQUESTED",
+            entry.equals("execute") ? "NONE" : decision,
+            entry.equals("execute") ? null : "t224-owner-xid",
+            "PENDING");
+    if (entry.equals("execute")) fixture.update("DELETE FROM pay_tcc_execution");
+    var peerFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var downstream = new java.util.ArrayList<String>();
+    var actualMapper = executionObservationMapper;
+    var decorated =
+        (com.cloudmall.pay.mapper.PayTccExecutionMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                com.cloudmall.pay.mapper.PayTccExecutionMapper.class.getClassLoader(),
+                new Class<?>[] {com.cloudmall.pay.mapper.PayTccExecutionMapper.class},
+                (proxy, method, arguments) -> {
+                  if (peerFacts.get() != null
+                      && List.of("setDecision", "updateObservation", "selectByPayNo")
+                          .contains(method.getName())) downstream.add(method.getName());
+                  try {
+                    return method.invoke(actualMapper, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException failure) {
+                    throw failure.getCause();
+                  }
+                });
+    var transactional = proxyExecutionObservationStore(executionObservationStore(decorated));
+    var handoff = new org.springframework.aop.framework.ProxyFactory(transactional);
+    handoff.setProxyTargetClass(true);
+    handoff.addAdvice(
+        (org.aopalliance.intercept.MethodInterceptor)
+            invocation -> {
+              var result = invocation.proceed();
+              String checkpoint = entry.equals("execute") ? "decideOwned" : "observeSnapshot";
+              if (invocation.getMethod().getName().equals(checkpoint) && peerFacts.get() == null) {
+                org.junit.jupiter.api.Assertions.assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                changeDecisionFailurePeer(mutation);
+                peerFacts.set(executionReadFacts());
+              }
+              return result;
+            });
+    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
+    var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    when(transactions.begin())
+        .thenAnswer(
+            invocation -> {
+              io.seata.core.context.RootContext.bind("t224-owner-xid");
+              return "t224-owner-xid";
+            });
+    var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+    receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    when(receipts.prepare(request)).thenReturn(receipt);
+    when(bridge.dispatch(request)).thenReturn(user);
+    when(bridge.recover(request.payNo)).thenReturn(user);
+    when(evidence.classify(any(), any())).thenReturn("TRYING");
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receipts, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    try {
+      org.junit.jupiter.api.Assertions.assertAll(
+          () -> {
+            if (terminalState == null) {
+              var failure =
+                  org.junit.jupiter.api.Assertions.assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () ->
+                          returned.set(
+                              entry.equals("execute")
+                                  ? coordinator.execute(request)
+                                  : coordinator.recover(request.payNo)));
+              assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+              assertEquals(409, failure.getHttpStatus());
+              assertNull(returned.get());
+            } else {
+              returned.set(
+                  entry.equals("execute")
+                      ? coordinator.execute(request)
+                      : coordinator.recover(request.payNo));
+              assertEquals(terminalState, returned.get().state);
+            }
+          },
+          () -> {
+            assertNotNull(peerFacts.get());
+            assertEquals(peerFacts.get(), executionReadFacts());
+          },
+          () -> {
+            if (terminalState == null) assertEquals(List.of(), downstream);
+            else assertEquals(List.of("selectByPayNo"), downstream);
+          },
+          () -> {
+            if (entry.equals("execute")) verify(transactions).begin();
+            org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+          },
+          () -> assertNull(io.seata.core.context.RootContext.getXID()));
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
   /** 成功Try后的旧线程不能决议同XID但已替换主键的执行。 */
   @Test
   void successfulTryCannotDecideReplacementOwner() throws Exception {
@@ -6718,6 +6891,23 @@ class PayLegacyRefundLedgerMySqlIT {
                             fixture.update("UPDATE pay_record SET order_no='t221-peer-order'");
                         case "payment-amount" ->
                             fixture.update("UPDATE pay_record SET amount=10.01");
+                        case "decision-COMMIT" ->
+                            fixture.update(
+                                "UPDATE pay_tcc_execution SET"
+                                    + " decision='COMMIT',state='COMMIT_REQUESTED'");
+                        case "decision-ROLLBACK" ->
+                            fixture.update(
+                                "UPDATE pay_tcc_execution SET"
+                                    + " decision='ROLLBACK',state='ROLLBACK_REQUESTED'");
+                        case "decision-NONE" ->
+                            fixture.update(
+                                "UPDATE pay_tcc_execution SET decision='NONE',state='RUNNING'");
+                        case "state-COMMITTED" ->
+                            fixture.update("UPDATE pay_tcc_execution SET state='COMMITTED'");
+                        case "state-ROLLEDBACK" ->
+                            fixture.update("UPDATE pay_tcc_execution SET state='ROLLEDBACK'");
+                        case "state-CONFLICT" ->
+                            fixture.update("UPDATE pay_tcc_execution SET state='CONFLICT'");
                         default -> throw new IllegalArgumentException(mutation);
                       }
                       if (List.of("execution-user", "execution-order", "execution-amount")
