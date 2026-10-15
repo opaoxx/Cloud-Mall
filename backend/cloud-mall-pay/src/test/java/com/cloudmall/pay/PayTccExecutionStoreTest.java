@@ -326,6 +326,126 @@ class PayTccExecutionStoreTest {
     }
   }
 
+  /** 非NULL坏XID在活动/终态和所有决议中均拒绝，read只有一次原查询。 */
+  @Test
+  void invalidBoundXidReadRejectsBeforeAnyRecoveryAction() {
+    for (String xid : List.of("", "   ", "\t\n", "x".repeat(129)))
+      for (String state :
+          List.of(
+              "RUNNING",
+              "COMMIT_REQUESTED",
+              "ROLLBACK_REQUESTED",
+              "COMMITTED",
+              "ROLLEDBACK",
+              "CONFLICT"))
+        for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
+          org.mockito.Mockito.reset(executions);
+          var row = execution(state, decision, xid);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          var before = snapshotExecution(row);
+          var failure = assertThrows(BizException.class, () -> store.read(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          verify(executions).selectByPayNo(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions);
+          org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+        }
+  }
+
+  /** 真实Store/Coordinator拒绝坏已绑定XID，先于桥503、观察SQL和TC同向重试。 */
+  @Test
+  void coordinatorRejectsBadBoundXidBeforeBridgeEvenWhenUnavailable() {
+    for (String xid : List.of("", "   ", "\t\n", "x".repeat(129)))
+      for (String decision : List.of("COMMIT", "ROLLBACK"))
+        for (boolean terminal : List.of(false, true)) {
+          org.mockito.Mockito.reset(executions);
+          String state =
+              terminal
+                  ? decision.equals("COMMIT") ? "COMMITTED" : "ROLLEDBACK"
+                  : decision + "_REQUESTED";
+          var row = execution(state, decision, xid);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+          var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+          var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+          var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+          when(bridge.recover(row.payNo))
+              .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
+          var coordinator =
+              new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+                  store, receiptService, bridge, evidence, transactions);
+          var before = snapshotExecution(row);
+          var failure = assertThrows(BizException.class, () -> coordinator.recover(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals(
+              "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          verify(executions).selectByPayNo(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions);
+          org.mockito.Mockito.verifyNoInteractions(
+              bridge,
+              receiptService,
+              evidence,
+              transactions,
+              payments,
+              dispatches,
+              receipts,
+              cancels);
+        }
+  }
+
+  /** NULL及非空白原文本保持；NULL恢复仍只观察BEGIN_UNKNOWN，不begin/桥/TC。 */
+  @Test
+  void validReadXidTextAndNullPrebeginSemanticsRemain() {
+    for (String xid :
+        java.util.Arrays.asList(null, "x", " xid-with-space ", "x".repeat(128), "事务:one"))
+      for (String state : List.of("CLAIMED", "RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+        org.mockito.Mockito.reset(executions);
+        var row = execution(state, "NONE", xid);
+        when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+        var before = snapshotExecution(row);
+        org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+        org.junit.jupiter.api.Assertions.assertEquals(xid, row.xid);
+        org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+        verify(executions).selectByPayNo(row.payNo);
+        org.mockito.Mockito.verifyNoMoreInteractions(executions);
+      }
+    org.mockito.Mockito.reset(executions);
+    var row = execution("CLAIMED", "NONE", null);
+    var observed = execution("BEGIN_UNKNOWN", "NONE", null);
+    when(executions.selectByPayNo(row.payNo)).thenReturn(row, observed);
+    when(executions.selectForUpdate(row.payNo)).thenReturn(row);
+    when(executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var before = snapshotExecution(row);
+    var recovered = coordinator.recover(row.payNo);
+    org.junit.jupiter.api.Assertions.assertNull(recovered.xid);
+    org.junit.jupiter.api.Assertions.assertEquals("BEGIN_UNKNOWN", recovered.state);
+    org.junit.jupiter.api.Assertions.assertEquals("NONE", recovered.decision);
+    org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+    verify(executions)
+        .updateObservation(
+            org.mockito.ArgumentMatchers.eq(row.payNo),
+                org.mockito.ArgumentMatchers.eq("BEGIN_UNKNOWN"),
+            org.mockito.ArgumentMatchers.eq("begin XID 尚无持久证据"), any());
+    org.mockito.Mockito.verifyNoInteractions(
+        bridge, receiptService, evidence, transactions, payments, dispatches, receipts, cancels);
+  }
+
+  /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */
+  private String snapshotExecution(PayTccExecutionPO execution) {
+    return org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+        () -> new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(execution));
+  }
+
   private PayTccDispatchDTO request() {
     PayTccDispatchDTO request = new PayTccDispatchDTO();
     request.payNo = "pay-store-1";

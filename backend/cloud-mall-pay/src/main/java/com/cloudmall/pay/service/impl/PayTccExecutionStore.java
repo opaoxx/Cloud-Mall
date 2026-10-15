@@ -143,12 +143,14 @@ public class PayTccExecutionStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 读取原支付号的唯一执行事实；查询别名行冲突，不创建或改绑记录。 */
+  /** 读取原支付号及有效已绑定XID；NULL保留prebegin语义，坏行不进入后续恢复。 */
   public PayTccExecutionPO read(String payNo) {
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
     if (execution == null)
       throw new BizException("PAY_TCC_EXECUTION_NOT_FOUND", "TCC execution 不存在", 404);
     if (execution.payNo == null || !Objects.equals(execution.payNo, payNo)) throw conflict();
+    if (execution.xid != null && (execution.xid.isBlank() || execution.xid.length() > 128))
+      throw conflict();
     return execution;
   }
 
