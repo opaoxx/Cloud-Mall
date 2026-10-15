@@ -5737,6 +5737,151 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals(before, executionReadFacts()));
   }
 
+  /** NULL观察输入应返回业务冲突，不泄漏Set.contains的空指针异常。 */
+  @Test
+  void nullObservationStateIsConflictInsteadOfNullPointer() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("RUNNING", "NONE", "t214-xid");
+    assertNativeCommandArgumentConflict(store, "observation-null");
+  }
+
+  /** NULL决议输入应返回业务冲突，不泄漏Set.contains的空指针异常。 */
+  @Test
+  void nullDecisionIsConflictInsteadOfNullPointer() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("RUNNING", "NONE", "t214-xid");
+    assertNativeCommandArgumentConflict(store, "decision-null");
+  }
+
+  /** 各非法命令在活动/终态和原决议/XID域下都只锁读，无更新或readback。 */
+  @Test
+  void invalidCommandArgumentsRejectBeforeSqlAcrossCurrentRows() {
+    ownedExecutionObservationStore();
+    for (String argument :
+        List.of(
+            "observation-null",
+            "decision-null",
+            "decision-empty",
+            "decision-blank",
+            "decision-lower",
+            "decision-space",
+            "decision-unknown",
+            "xid-null",
+            "xid-empty",
+            "xid-blank",
+            "xid-length"))
+      for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT"))
+        for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+          for (String xid : java.util.Arrays.asList(null, "t214-xid")) {
+            seedOwnedExecution(state, decision, xid);
+            var actual = executionObservationMapper;
+            var guarded =
+                mock(
+                    com.cloudmall.pay.mapper.PayTccExecutionMapper.class,
+                    org.mockito.AdditionalAnswers.delegatesTo(actual));
+            assertNativeCommandArgumentConflict(executionObservationStore(guarded), argument);
+            verify(guarded).selectForUpdate("pay-1");
+            org.mockito.Mockito.verifyNoMoreInteractions(guarded);
+          }
+  }
+
+  /** 非NULL观察原映射、合法决议与NULL prebegin在真实事务中保持。 */
+  @Test
+  void validCommandArgumentsKeepExistingObservationAndDecisionRules() {
+    var store = ownedExecutionObservationStore();
+    for (String observedState :
+        List.of("UNKNOWN", "TRYING", "COMMITTED", "ROLLEDBACK", "CONFLICT", "opaque-observation"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
+        seedOwnedExecution(
+            decision.equals("NONE") ? "RUNNING" : decision + "_REQUESTED", decision, "t214-xid");
+        var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+        var paymentBefore = rawIntentTimeFacts();
+        var observed =
+            executionTransaction(
+                () -> store.observe("pay-1", observedState, "owned-command-observation"));
+        boolean terminal = List.of("COMMITTED", "ROLLEDBACK", "CONFLICT").contains(observedState);
+        assertEquals(
+            terminal
+                ? observedState
+                : decision.equals("NONE") ? "UNKNOWN" : decision + "_REQUESTED",
+            observed.state);
+        assertEquals(decision, observed.decision);
+        assertEquals("t214-xid", observed.xid);
+        assertEquals("owned-command-observation", observed.lastError);
+        var after = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+        for (String field : List.of("state", "last_error", "updated_at")) {
+          before.remove(field);
+          after.remove(field);
+        }
+        assertEquals(before, after);
+        assertEquals(paymentBefore, rawIntentTimeFacts());
+      }
+    for (String decision : List.of("COMMIT", "ROLLBACK")) {
+      seedOwnedExecution("RUNNING", "NONE", "t214-xid");
+      var paymentBefore = rawIntentTimeFacts();
+      var chosen = executionTransaction(() -> store.decide("pay-1", "t214-xid", decision));
+      assertEquals(decision, chosen.decision);
+      assertEquals(decision + "_REQUESTED", chosen.state);
+      assertEquals(paymentBefore, rawIntentTimeFacts());
+      var beforeRepeat = executionReadFacts();
+      executionTransaction(() -> store.decide("pay-1", "t214-xid", decision));
+      assertEquals(beforeRepeat, executionReadFacts());
+    }
+    seedOwnedExecution("CLAIMED", "NONE", null);
+    var paymentBefore = rawIntentTimeFacts();
+    var prebegin = executionTransaction(() -> store.observe("pay-1", "UNKNOWN", "prebegin"));
+    assertNull(prebegin.xid);
+    assertEquals("BEGIN_UNKNOWN", prebegin.state);
+    assertEquals("NONE", prebegin.decision);
+    assertEquals(paymentBefore, rawIntentTimeFacts());
+  }
+
+  /** 只将Java调用参数传入实际Store事务；三表不变与无返回同时核验。 */
+  private void assertNativeCommandArgumentConflict(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String argument) {
+    var before = executionReadFacts();
+    String currentXid =
+        (String) fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1").get("xid");
+    String incomingXid =
+        switch (argument) {
+          case "xid-null" -> null;
+          case "xid-empty" -> "";
+          case "xid-blank" -> " ";
+          case "xid-length" -> "x".repeat(129);
+          default -> currentXid;
+        };
+    String decision =
+        switch (argument) {
+          case "decision-null" -> null;
+          case "decision-empty" -> "";
+          case "decision-blank" -> " ";
+          case "decision-lower" -> "commit";
+          case "decision-space" -> "COMMIT ";
+          case "decision-unknown" -> "ABORT";
+          default -> "COMMIT";
+        };
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.po.PayTccExecutionPO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      returned.set(
+                          executionTransaction(
+                              () ->
+                                  argument.equals("observation-null")
+                                      ? store.observe("pay-1", null, "invalid-command-observation")
+                                      : store.decide("pay-1", incomingXid, decision))));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, executionReadFacts()));
+  }
+
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
   private void assertExecutionReadConflictStopsRecovery(
       com.cloudmall.pay.service.impl.PayTccExecutionStore store) {

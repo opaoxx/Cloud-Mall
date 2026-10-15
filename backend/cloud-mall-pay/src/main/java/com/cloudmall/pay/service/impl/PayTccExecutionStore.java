@@ -114,11 +114,18 @@ public class PayTccExecutionStore {
   /** 决议必须在 TC 请求前独立提交，相反方向永远冲突。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO decide(String payNo, String xid, String decision) {
+    // 1. 先核锁定行，再校验本次决议参数，保留原持久域优先级。
     PayTccExecutionPO current = locked(payNo);
-    if (!Set.of("COMMIT", "ROLLBACK").contains(decision) || !Objects.equals(current.xid, xid))
-      throw conflict();
+    if (xid == null
+        || xid.isBlank()
+        || xid.length() > 128
+        || decision == null
+        || !Set.of("COMMIT", "ROLLBACK").contains(decision)
+        || !Objects.equals(current.xid, xid)) throw conflict();
+    // 2. 方向不可逆，原终态或同向重复决议保持幂等。
     if (!"NONE".equals(current.decision) && !decision.equals(current.decision)) throw conflict();
     if (terminal(current.state) || decision.equals(current.decision)) return current;
+    // 3. 沿原CAS独立持久化决议并读回，不猜测TC结果。
     if (executions.setDecision(payNo, xid, decision, decision + "_REQUESTED", now()) != 1)
       throw conflict();
     return executions.selectByPayNo(payNo);
@@ -127,7 +134,10 @@ public class PayTccExecutionStore {
   /** 观察结果锁内合并，写入须恰好一行；迟到未知/相反终态不能覆盖既有终态。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO observe(String payNo, String state, String error) {
+    // 1. 先核锁定行，再拒绝缺失的观察入参。
     PayTccExecutionPO current = locked(payNo);
+    if (state == null) throw conflict();
+    // 2. 保留原终态和非终态合并规则，不给非NULL观察增加白名单。
     if (terminal(current.state)) {
       if (terminal(state) && !current.state.equals(state)) throw conflict();
       return current;
@@ -138,6 +148,7 @@ public class PayTccExecutionStore {
           current.xid == null
               ? "BEGIN_UNKNOWN"
               : "NONE".equals(current.decision) ? "UNKNOWN" : current.decision + "_REQUESTED";
+    // 3. 沿原诊断截断和影响行保护写入，再读回最新事实。
     error = PayErrorMessages.truncate(error);
     if (executions.updateObservation(payNo, target, error, now()) != 1) throw conflict();
     return executions.selectByPayNo(payNo);
@@ -232,8 +243,8 @@ public class PayTccExecutionStore {
         || request.orderNo.length() > 64
         || request.amount == null
         || request.amount.signum() <= 0
-        || request.amount.stripTrailingZeros().scale() > 2
-        || request.amount.compareTo(new BigDecimal("9999999999999999.99")) > 0) throw conflict();
+        || request.amount.compareTo(new BigDecimal("9999999999999999.99")) > 0
+        || request.amount.stripTrailingZeros().scale() > 2) throw conflict();
   }
 
   /** 使用固定数据库业务时区，避免系统时区影响审计顺序。 */
