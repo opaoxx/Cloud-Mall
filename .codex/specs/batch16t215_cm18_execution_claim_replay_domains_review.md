@@ -18,14 +18,14 @@ existing execution 非 null 时，在原 `validate(existing, request)` 之前调
 
 - 使用真实 ExecutionStore/Mapper/TransactionTemplate 与 owned Pay/Intent/Execution 三表；Pay/Intent 模式与 tuple 显式匹配 request，不启动 App、TC/RM、新监听或 Docker。
 - 旧 red：空 XID/未知 state 等 tuple 匹配 existing 原本静默 false；修复后 existing claim 返回 409，三表事实不变。
-- bad replay 域覆盖 11 变体（XID blank3、state坏4、decision坏4）×两 seed state ×三 Pay status =66，均在 replay/写入前 409；positive raw state9 × decision3 × XID NULL/valid ×三 Pay status =162，仅验证域读取/replay false，不证明组合合法或 TC/资金因果。
+- bad replay 域覆盖 11 非 payload 变体 ×两 seed state ×三 Pay status =66，均在 replay/写入前 409；positive raw state9 × decision3 × XID NULL/valid ×三 Pay status =162，仅验证域读取/replay false，不证明组合合法或 TC/资金因果。已有 Pay status 不要求 PENDING。
 - 四个合法 payload 模板覆盖真实首次 claim insert=1/winner=true，再 replay=false；唯一 execution 与 Pay/Intent 保持。其它 cancel/dispatch/receipt 为受控依赖，不重新认领或 begin。
-- payment/existing amount NULL 只在 Unit PO seam 验证，不改 NOT NULL DDL；原库指纹、owned DROP、池关闭保持。
+- payment/existing amount NULL 只在 Unit PO seam 验证，不改 NOT NULL DDL；原库完整表清单/checksum、owned DROP、池关闭保持。native 使用 actual Mapper/程序化 TransactionTemplate，不套 Spring 代理、不证 REQUIRES_NEW/真实 TC。
 
 ### 3.2 Unit
 
-- 覆盖 payment.amount null、existing.amount null，均在 compareTo 前既有 409，无 NPE、无后续 Mapper 写；existing bad XID/state/decision 门优先。
-- 覆盖 replay raw 域、Pay status、合法 payload fresh/replay 与 tuple 数值等价；Unit Mapper 可 mock，断言不查 cancel/dispatch/receipt、不改变 existing replay false。
+- 覆盖 payment.amount null、existing.amount null，均在 compareTo 前既有 409，无 NPE；payment 缺失只完成 Pay 锁，existing 缺失完成 Pay+execution 锁，均无后续写。
+- Unit Mapper 为 mock：16坏域（XID4/state6/decision6）×两 seed state×三 Pay status=96，无 fresh gate/写入/对象变化；raw state9×decision3×XID2×三 Pay status×三 request amount（10/10.000/1E+1）=486，replay false、仅 Pay→execution 锁，保 BigDecimal 数值等价，无 cancel/dispatch/receipt 查询。NULL/ASCII129 仅 Unit。
 
 ## 4. 明确边界
 
