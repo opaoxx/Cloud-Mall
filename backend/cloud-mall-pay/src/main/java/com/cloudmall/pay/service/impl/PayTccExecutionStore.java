@@ -145,10 +145,32 @@ public class PayTccExecutionStore {
 
   /** 读取原执行事实有效域和创建载荷；NULL XID保留prebegin，坏行不进入恢复。 */
   public PayTccExecutionPO read(String payNo) {
-    // 1. 按原支付号读取，并核对查询身份与已绑定XID。
+    // 1. 读取原支付号执行事实，缺失保留原404。
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
     if (execution == null)
       throw new BizException("PAY_TCC_EXECUTION_NOT_FOUND", "TCC execution 不存在", 404);
+    // 2. 与锁内写入口共用同一有效域，保持原校验顺序。
+    validatePersistedExecution(execution, payNo);
+    // 3. 返回原执行事实，不改写任何字段。
+    return execution;
+  }
+
+  /** 返回有持久证据的两端终态或需人工核验的矛盾状态。 */
+  public static boolean terminal(String state) {
+    return Set.of("COMMITTED", "ROLLEDBACK", "CONFLICT").contains(state);
+  }
+
+  /** 锁定后先核原身份及完整有效域，再允许bind/decide/observe早返回或写入。 */
+  private PayTccExecutionPO locked(String payNo) {
+    PayTccExecutionPO row = executions.selectForUpdate(payNo);
+    if (row == null) throw conflict();
+    validatePersistedExecution(row, payNo);
+    return row;
+  }
+
+  /** 对非NULL持久行按原payNo→XID→状态/决议→载荷顺序拒绝坏值，不推断组合或改写。 */
+  private void validatePersistedExecution(PayTccExecutionPO execution, String payNo) {
+    // 1. 查询身份和已绑定XID必须有效；NULL XID仍保留prebegin语义。
     if (execution.payNo == null || !Objects.equals(execution.payNo, payNo)) throw conflict();
     if (execution.xid != null && (execution.xid.isBlank() || execution.xid.length() > 128))
       throw conflict();
@@ -168,25 +190,11 @@ public class PayTccExecutionStore {
         || execution.decision == null
         || !Set.of("NONE", "COMMIT", "ROLLBACK").contains(execution.decision)) throw conflict();
     // 3. 核原创建载荷和固定键，只拒绝坏值，不改写历史字段。
-    if (!hasValidRecoveryPayload(execution)) throw conflict();
-    // 4. 返回原执行事实，后续恢复继续沿原规则处理。
-    return execution;
-  }
-
-  /** 返回有持久证据的两端终态或需人工核验的矛盾状态。 */
-  public static boolean terminal(String state) {
-    return Set.of("COMMITTED", "ROLLEDBACK", "CONFLICT").contains(state);
-  }
-
-  /** 当前读核对原支付号后串行化 XID、决议与观察；缺失或别名行不得补建/改绑。 */
-  private PayTccExecutionPO locked(String payNo) {
-    PayTccExecutionPO row = executions.selectForUpdate(payNo);
-    if (row == null || row.payNo == null || !Objects.equals(row.payNo, payNo)) throw conflict();
-    return row;
+    if (!hasValidExecutionPayload(execution)) throw conflict();
   }
 
   /** 复核创建域和派生键；先限金额上界再查scale，避免极端指数溢出，不规范化原字段。 */
-  private boolean hasValidRecoveryPayload(PayTccExecutionPO execution) {
+  private boolean hasValidExecutionPayload(PayTccExecutionPO execution) {
     return execution.payNo != null
         && execution.payNo.matches("[A-Za-z0-9_-]{1,64}")
         && execution.userId != null

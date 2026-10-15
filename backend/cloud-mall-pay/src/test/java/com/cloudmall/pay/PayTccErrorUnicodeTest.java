@@ -190,6 +190,11 @@ class PayTccErrorUnicodeTest {
     if (path.equals("EXECUTION")) {
       var execution = new PayTccExecutionPO();
       execution.payNo = "pay-1";
+      execution.userId = 7L;
+      execution.orderNo = "order-1";
+      execution.amount = new BigDecimal("10.00");
+      execution.operationKey = "tcc-debit:pay-1";
+      execution.ledgerKey = "pay-1";
       execution.xid = "xid-1";
       execution.decision = "COMMIT";
       execution.state = mutation.equals("terminal") ? "COMMITTED" : "COMMIT_REQUESTED";

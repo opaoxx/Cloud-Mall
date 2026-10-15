@@ -749,6 +749,200 @@ class PayTccExecutionStoreTest {
     }
   }
 
+  /** 三种写入口在锁内拒绝全部既有坏域，NULL仅PO mock，无更新或readback。 */
+  @Test
+  void invalidLockedDomainsRejectBeforeAllWritesAndEarlyReturns() {
+    for (String mutation :
+        List.of(
+            "pay-empty",
+            "pay-punctuation",
+            "user-zero",
+            "user-negative",
+            "order-empty",
+            "order-space",
+            "order-utf16-length",
+            "amount-zero",
+            "amount-negative",
+            "operation-empty",
+            "operation-other",
+            "operation-case",
+            "operation-space",
+            "ledger-empty",
+            "ledger-other",
+            "ledger-case",
+            "ledger-space",
+            "pay-null",
+            "user-null",
+            "order-null",
+            "amount-null",
+            "operation-null",
+            "ledger-null",
+            "pay-length",
+            "order-length",
+            "amount-fraction",
+            "amount-overmax",
+            "amount-extreme-scale",
+            "xid-empty",
+            "xid-space",
+            "xid-controls",
+            "xid-length",
+            "state-null",
+            "state-empty",
+            "state-blank",
+            "state-space",
+            "state-lower",
+            "state-unknown",
+            "decision-null",
+            "decision-empty",
+            "decision-blank",
+            "decision-space",
+            "decision-lower",
+            "decision-unknown"))
+      for (String state : List.of("RUNNING", "COMMITTED"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1"))
+          for (String action : List.of("bind", "decide", "observe")) {
+            org.mockito.Mockito.reset(executions);
+            var row = execution(state, "NONE", xid);
+            applyLockedDomainVariant(row, mutation);
+            when(executions.selectForUpdate(row.payNo)).thenReturn(row);
+            var before = snapshotExecution(row);
+            var failure =
+                assertThrows(
+                    BizException.class,
+                    () -> executeLockedStoreAction(row, action),
+                    mutation + "/" + action);
+            org.junit.jupiter.api.Assertions.assertEquals(
+                "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+            org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+            verify(executions).selectForUpdate(row.payNo);
+            org.mockito.Mockito.verifyNoMoreInteractions(executions);
+            org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+          }
+  }
+
+  /** 合法载荷边界仍保留三个early-return分支的原对象与幂等语义。 */
+  @Test
+  void validLockedPayloadsKeepExistingIdempotentBranches() {
+    for (String variant :
+        List.of(
+            "minimum",
+            "maximum",
+            "raw-text",
+            "unicode-order",
+            "equivalent-money",
+            "scientific-money"))
+      for (String action : List.of("bind", "decide", "observe")) {
+        org.mockito.Mockito.reset(executions);
+        String state =
+            action.equals("bind")
+                ? "RUNNING"
+                : action.equals("decide") ? "COMMIT_REQUESTED" : "COMMITTED";
+        var row = execution(state, action.equals("bind") ? "NONE" : "COMMIT", "xid-store-1");
+        applyReadPayloadVariant(row, variant);
+        when(executions.selectForUpdate(row.payNo)).thenReturn(row);
+        var before = snapshotExecution(row);
+        var returned = executeLockedStoreAction(row, action);
+        if (!action.equals("bind")) org.junit.jupiter.api.Assertions.assertSame(row, returned);
+        org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+        verify(executions).selectForUpdate(row.payNo);
+        org.mockito.Mockito.verifyNoMoreInteractions(executions);
+        org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+      }
+  }
+
+  /** 合法未决行仍恰好执行原绑定、决议或观察SQL及既有readback，不增加新查询。 */
+  @Test
+  void validLockedTransitionsKeepOriginalSqlAndReadback() {
+    var binding = execution("CLAIMED", "NONE", null);
+    when(executions.selectForUpdate(binding.payNo)).thenReturn(binding);
+    when(executions.bindXid(any(), any(), any())).thenReturn(1);
+    var beforeBinding = snapshotExecution(binding);
+    store.bindXid(binding.payNo, "xid-store-1");
+    verify(executions).selectForUpdate(binding.payNo);
+    verify(executions)
+        .bindXid(
+            org.mockito.ArgumentMatchers.eq(binding.payNo),
+            org.mockito.ArgumentMatchers.eq("xid-store-1"),
+            any());
+    org.mockito.Mockito.verifyNoMoreInteractions(executions);
+    org.junit.jupiter.api.Assertions.assertEquals(beforeBinding, snapshotExecution(binding));
+
+    org.mockito.Mockito.reset(executions);
+    var deciding = execution("RUNNING", "NONE", "xid-store-1");
+    var decided = execution("COMMIT_REQUESTED", "COMMIT", "xid-store-1");
+    when(executions.selectForUpdate(deciding.payNo)).thenReturn(deciding);
+    when(executions.setDecision(any(), any(), any(), any(), any())).thenReturn(1);
+    when(executions.selectByPayNo(deciding.payNo)).thenReturn(decided);
+    var beforeDecision = snapshotExecution(deciding);
+    org.junit.jupiter.api.Assertions.assertSame(
+        decided, store.decide(deciding.payNo, deciding.xid, "COMMIT"));
+    verify(executions).selectForUpdate(deciding.payNo);
+    verify(executions)
+        .setDecision(
+            org.mockito.ArgumentMatchers.eq(deciding.payNo),
+            org.mockito.ArgumentMatchers.eq(deciding.xid),
+            org.mockito.ArgumentMatchers.eq("COMMIT"),
+            org.mockito.ArgumentMatchers.eq("COMMIT_REQUESTED"),
+            any());
+    verify(executions).selectByPayNo(deciding.payNo);
+    org.mockito.Mockito.verifyNoMoreInteractions(executions);
+    org.junit.jupiter.api.Assertions.assertEquals(beforeDecision, snapshotExecution(deciding));
+
+    org.mockito.Mockito.reset(executions);
+    var observing = execution("RUNNING", "NONE", "xid-store-1");
+    var observed = execution("COMMITTED", "NONE", "xid-store-1");
+    when(executions.selectForUpdate(observing.payNo)).thenReturn(observing);
+    when(executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+    when(executions.selectByPayNo(observing.payNo)).thenReturn(observed);
+    var beforeObservation = snapshotExecution(observing);
+    org.junit.jupiter.api.Assertions.assertSame(
+        observed, store.observe(observing.payNo, "COMMITTED", "owned-domain-observation"));
+    verify(executions).selectForUpdate(observing.payNo);
+    verify(executions)
+        .updateObservation(
+            org.mockito.ArgumentMatchers.eq(observing.payNo),
+                org.mockito.ArgumentMatchers.eq("COMMITTED"),
+            org.mockito.ArgumentMatchers.eq("owned-domain-observation"), any());
+    verify(executions).selectByPayNo(observing.payNo);
+    org.mockito.Mockito.verifyNoMoreInteractions(executions);
+    org.junit.jupiter.api.Assertions.assertEquals(beforeObservation, snapshotExecution(observing));
+    org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+  }
+
+  /** 对原三种公开入口调用；bind无返回值，测试只用快照和Mapper调用核验。 */
+  private PayTccExecutionPO executeLockedStoreAction(PayTccExecutionPO row, String action) {
+    if (action.equals("bind")) {
+      store.bindXid(row.payNo, "xid-store-1");
+      return row;
+    }
+    if (action.equals("decide")) return store.decide(row.payNo, row.xid, "COMMIT");
+    return store.observe(row.payNo, "COMMITTED", "invalid-domain-observation");
+  }
+
+  /** 复用原payload变体并添加原XID/state/decision坏域，不改变生产约束。 */
+  private void applyLockedDomainVariant(PayTccExecutionPO execution, String mutation) {
+    switch (mutation) {
+      case "xid-empty" -> execution.xid = "";
+      case "xid-space" -> execution.xid = "   ";
+      case "xid-controls" -> execution.xid = "\t\n";
+      case "xid-length" -> execution.xid = "x".repeat(129);
+      case "state-null" -> execution.state = null;
+      case "state-empty" -> execution.state = "";
+      case "state-blank" -> execution.state = " ";
+      case "state-space" -> execution.state = "RUNNING ";
+      case "state-lower" -> execution.state = "running";
+      case "state-unknown" -> execution.state = "BROKEN";
+      case "decision-null" -> execution.decision = null;
+      case "decision-empty" -> execution.decision = "";
+      case "decision-blank" -> execution.decision = " ";
+      case "decision-space" -> execution.decision = "COMMIT ";
+      case "decision-lower" -> execution.decision = "commit";
+      case "decision-unknown" -> execution.decision = "ABORT";
+      default -> applyReadPayloadVariant(execution, mutation);
+    }
+  }
+
   /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */
   private String snapshotExecution(PayTccExecutionPO execution) {
     return org.junit.jupiter.api.Assertions.assertDoesNotThrow(

@@ -4896,9 +4896,9 @@ class PayLegacyRefundLedgerMySqlIT {
     return facts;
   }
 
-  /** Java未识别而原SQL已保护的CI/PAD终态，实际写零行必须明确冲突而非静默readback。 */
+  /** CI/PAD坏终态现在由锁内有效域更早拒绝，原SQL零行保护由受控变化场景独立保留。 */
   @Test
-  void executionObservationZeroRowsDoNotReturnStaleRecord() {
+  void invalidExecutionObservationStatesRejectBeforeSqlWrite() {
     ownedExecutionObservationStore();
     var assertions = new ArrayList<org.junit.jupiter.api.function.Executable>();
     for (String state :
@@ -4936,7 +4936,8 @@ class PayLegacyRefundLedgerMySqlIT {
                             () -> store.observe("pay-1", "UNKNOWN", "owned-new-observation")),
                     state);
             assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
-            assertEquals(0, affectedRows.get());
+            assertEquals(-99, affectedRows.get());
+            verify(guarded, never()).updateObservation(any(), any(), any(), any());
             assertEquals(before, fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1"));
             assertEquals(payBefore, rawIntentTimeFacts());
           });
@@ -5529,6 +5530,211 @@ class PayLegacyRefundLedgerMySqlIT {
         execution.operationKey,
         execution.ledgerKey);
     return execution.payNo;
+  }
+
+  /** 锁定行的零金额不能被观察写成COMMITTED。 */
+  @Test
+  void invalidLockedAmountCannotBeObservedAsCommitted() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("RUNNING", "NONE", "t213-xid");
+    fixture.update("UPDATE pay_tcc_execution SET amount=0 WHERE id=1");
+    assertLockedExecutionDomainConflict(store, "pay-1", "observe");
+  }
+
+  /** 持久空白XID不能因与incoming相等而写入COMMIT决议。 */
+  @Test
+  void blankLockedXidCannotPersistCommitDecision() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("RUNNING", "NONE", "");
+    assertLockedExecutionDomainConflict(store, "pay-1", "decide");
+  }
+
+  /** 各既有坏域在三种锁内操作及early-return路径均拒绝，不改变三表事实。 */
+  @Test
+  void invalidLockedDomainsRejectBeforeAllThreeActions() {
+    var store = ownedExecutionObservationStore();
+    for (String mutation :
+        List.of(
+            "pay-empty",
+            "pay-punctuation",
+            "user-zero",
+            "user-negative",
+            "order-empty",
+            "order-space",
+            "order-utf16-length",
+            "amount-zero",
+            "amount-negative",
+            "operation-empty",
+            "operation-other",
+            "operation-case",
+            "operation-space",
+            "ledger-empty",
+            "ledger-other",
+            "ledger-case",
+            "ledger-space",
+            "xid-empty",
+            "xid-space",
+            "xid-controls",
+            "state-empty",
+            "state-lower",
+            "state-space",
+            "state-unknown",
+            "decision-empty",
+            "decision-lower",
+            "decision-space",
+            "decision-unknown"))
+      for (String state : List.of("RUNNING", "COMMITTED"))
+        for (String action : List.of("bind", "decide", "observe")) {
+          seedOwnedExecution(state, "NONE", "t213-xid");
+          String payNo = applyOwnedLockedDomainVariant(mutation);
+          assertLockedExecutionDomainConflict(store, payNo, action);
+        }
+  }
+
+  /** 合法边界在真实事务中仍可绑定、决议和观察，重复操作保持原幂等语义。 */
+  @Test
+  void validLockedDomainsKeepRealWritesAndIdempotency() {
+    var store = ownedExecutionObservationStore();
+    for (String variant : List.of("minimum", "maximum", "raw-text", "unicode-order"))
+      for (String action : List.of("bind", "decide", "observe")) {
+        seedOwnedExecution(
+            action.equals("bind") ? "CLAIMED" : "RUNNING",
+            "NONE",
+            action.equals("bind") ? null : "t213-xid");
+        String payNo = applyOwnedReadPayloadVariant(variant);
+        var before = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+        var paymentBefore = rawIntentTimeFacts();
+        executionTransaction(
+            () -> {
+              if (action.equals("bind")) store.bindXid(payNo, "t213-xid");
+              else if (action.equals("decide")) store.decide(payNo, "t213-xid", "COMMIT");
+              else store.observe(payNo, "COMMITTED", "owned-domain-observation");
+              return executionObservationMapper.selectByPayNo(payNo);
+            });
+        var after = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+        assertEquals(
+            action.equals("bind")
+                ? "RUNNING"
+                : action.equals("decide") ? "COMMIT_REQUESTED" : "COMMITTED",
+            after.get("state"));
+        assertEquals(action.equals("decide") ? "COMMIT" : "NONE", after.get("decision"));
+        assertEquals("t213-xid", after.get("xid"));
+        assertEquals(
+            action.equals("observe") ? "owned-domain-observation" : "owned-old-error",
+            after.get("last_error"));
+        List<String> changedFields =
+            switch (action) {
+              case "bind" -> List.of("xid", "state", "updated_at");
+              case "decide" -> List.of("decision", "state", "updated_at");
+              default -> List.of("state", "last_error", "updated_at");
+            };
+        for (String field : changedFields) {
+          before.remove(field);
+          after.remove(field);
+        }
+        assertEquals(before, after);
+        assertEquals(paymentBefore, rawIntentTimeFacts());
+        var beforeRepeat = executionReadFacts();
+        executionTransaction(
+            () -> {
+              if (action.equals("bind")) store.bindXid(payNo, "t213-xid");
+              else if (action.equals("decide")) store.decide(payNo, "t213-xid", "COMMIT");
+              else store.observe(payNo, "UNKNOWN", "late-domain-observation");
+              return executionObservationMapper.selectByPayNo(payNo);
+            });
+        assertEquals(beforeRepeat, executionReadFacts());
+      }
+  }
+
+  /** 扩展原owned载荷变体，坏XID/state/decision直接写owned，不更改生产约束。 */
+  private String applyOwnedLockedDomainVariant(String mutation) {
+    String column;
+    String value;
+    switch (mutation) {
+      case "xid-empty" -> {
+        column = "xid";
+        value = "";
+      }
+      case "xid-space" -> {
+        column = "xid";
+        value = "   ";
+      }
+      case "xid-controls" -> {
+        column = "xid";
+        value = "\t\n";
+      }
+      case "state-empty" -> {
+        column = "state";
+        value = "";
+      }
+      case "state-lower" -> {
+        column = "state";
+        value = "running";
+      }
+      case "state-space" -> {
+        column = "state";
+        value = "RUNNING ";
+      }
+      case "state-unknown" -> {
+        column = "state";
+        value = "BROKEN";
+      }
+      case "decision-empty" -> {
+        column = "decision";
+        value = "";
+      }
+      case "decision-lower" -> {
+        column = "decision";
+        value = "commit";
+      }
+      case "decision-space" -> {
+        column = "decision";
+        value = "COMMIT ";
+      }
+      case "decision-unknown" -> {
+        column = "decision";
+        value = "ABORT";
+      }
+      default -> {
+        return applyOwnedReadPayloadVariant(mutation);
+      }
+    }
+    fixture.update("UPDATE pay_tcc_execution SET " + column + "=? WHERE id=1", value);
+    return "pay-1";
+  }
+
+  /** 在真实同数据源事务中调用原公开写入口；失败前后比较完整三表，避免只核返回。 */
+  private void assertLockedExecutionDomainConflict(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo, String action) {
+    var before = executionReadFacts();
+    String originalXid =
+        (String) fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1").get("xid");
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.po.PayTccExecutionPO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      returned.set(
+                          executionTransaction(
+                              () -> {
+                                if (action.equals("bind")) {
+                                  store.bindXid(payNo, "t213-xid");
+                                  return executionObservationMapper.selectByPayNo(payNo);
+                                }
+                                if (action.equals("decide"))
+                                  return store.decide(payNo, originalXid, "COMMIT");
+                                return store.observe(
+                                    payNo, "COMMITTED", "invalid-domain-observation");
+                              })));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, executionReadFacts()));
   }
 
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
