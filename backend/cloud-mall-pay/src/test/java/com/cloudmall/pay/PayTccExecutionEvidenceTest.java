@@ -749,6 +749,175 @@ class PayTccExecutionEvidenceTest {
     fixture.user.orderNo = orderNo;
   }
 
+  /** 三方同样的错误键不是有效归属，缺端也不能将其降为UNKNOWN。 */
+  @Test
+  void matchingInvalidExecutionKeysAreConflictsEvenWithMissingSides() {
+    for (String mutation :
+        List.of(
+            "pay-null",
+            "pay-length",
+            "pay-empty",
+            "pay-space",
+            "pay-punctuation",
+            "pay-unicode",
+            "operation-null",
+            "operation-empty",
+            "operation-other",
+            "operation-case",
+            "operation-space",
+            "ledger-null",
+            "ledger-empty",
+            "ledger-other",
+            "ledger-case",
+            "ledger-space"))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED"))
+        for (boolean missingSides : List.of(false, true)) {
+          var fixture = new EvidenceFixture();
+          mutateMatchingExecutionKeys(fixture, mutation);
+          fixture.pay.state = payState;
+          fixture.user.state =
+              payState.equals("TRYING")
+                  ? "TRY_ACCEPTED"
+                  : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+          fixture.fence.status =
+              payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1;
+          if (missingSides) {
+            fixture.user = null;
+            when(fixture.receipts.selectByPayNo(any())).thenReturn(null);
+          }
+          var before = fixture.snapshot();
+          var failure =
+              assertThrows(
+                  BizException.class,
+                  () -> fixture.evidence.classify(fixture.execution, fixture.user),
+                  mutation);
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          verifyNoInteractions(fixture.receipts, fixture.fences);
+          assertEquals(before, fixture.snapshot());
+        }
+  }
+
+  /** 真实recover在固定键冲突后不观察写入，也不发送已持久决议；Bridge已先行。 */
+  @Test
+  void recoverStopsInvalidExecutionKeysBeforeObservationAndTc() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String mutation : List.of("operation-other", "ledger-other")) {
+        var fixture = new EvidenceFixture();
+        mutateMatchingExecutionKeys(fixture, mutation);
+        fixture.execution.decision = decision;
+        var store = mock(PayTccExecutionStore.class);
+        var bridge = mock(PayTccBridgeService.class);
+        var receiptService = mock(PayTccReceiptService.class);
+        var transactions = mock(PayTccTransactionClient.class);
+        when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
+        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
+        var coordinator =
+            new PayTccCoordinatorServiceImpl(
+                store, receiptService, bridge, fixture.evidence, transactions);
+        var before = fixture.snapshot();
+        var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        verify(store, never()).observe(any(), any(), any());
+        verifyNoInteractions(transactions, receiptService, fixture.receipts, fixture.fences);
+        assertEquals(before, fixture.snapshot());
+      }
+  }
+
+  /** 合法键原文和长度边界保持，缺端与prebegin仍沿既有UNKNOWN语义。 */
+  @Test
+  void canonicalExecutionKeysKeepTextAndMissingSideSemantics() {
+    for (String payNo : List.of("A", "Pay_1-a", "P_" + "a".repeat(62)))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED")) {
+        var fixture = new EvidenceFixture();
+        fixture.execution.payNo = payNo;
+        fixture.execution.operationKey = "tcc-debit:" + payNo;
+        fixture.execution.ledgerKey = payNo;
+        fixture.user.payNo = payNo;
+        fixture.user.operationKey = fixture.execution.operationKey;
+        fixture.user.ledgerKey = payNo;
+        fixture.pay.payNo = payNo;
+        fixture.pay.operationKey = fixture.execution.operationKey;
+        fixture.pay.ledgerKey = payNo;
+        fixture.pay.state = payState;
+        fixture.user.state =
+            payState.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+        fixture.fence.status =
+            payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1;
+        String expected =
+            payState.equals("CONFIRMED")
+                ? "COMMITTED"
+                : payState.equals("CANCELLED")
+                    ? "ROLLEDBACK"
+                    : payState.equals("TRYING") ? "TRYING" : "UNKNOWN";
+        var before = fixture.snapshot();
+        assertEquals(expected, fixture.evidence.classify(fixture.execution, fixture.user));
+        assertEquals(before, fixture.snapshot());
+      }
+    for (boolean missingUser : List.of(false, true)) {
+      var fixture = new EvidenceFixture();
+      if (missingUser) fixture.user = null;
+      else when(fixture.receipts.selectByPayNo(any())).thenReturn(null);
+      var before = fixture.snapshot();
+      assertEquals("UNKNOWN", fixture.evidence.classify(fixture.execution, fixture.user));
+      assertEquals(before, fixture.snapshot());
+    }
+    var prebegin = new EvidenceFixture();
+    prebegin.execution.xid = null;
+    prebegin.execution.state = "BEGIN_UNKNOWN";
+    prebegin.user = null;
+    when(prebegin.receipts.selectByPayNo(any())).thenReturn(null);
+    var beforePrebegin = prebegin.snapshot();
+    assertEquals("UNKNOWN", prebegin.evidence.classify(prebegin.execution, prebegin.user));
+    verifyNoInteractions(prebegin.fences);
+    assertEquals(beforePrebegin, prebegin.snapshot());
+  }
+
+  /** 各变体三端固定键完全相同；NULL/超长仅模拟PO，不修改数据库约束。 */
+  private void mutateMatchingExecutionKeys(EvidenceFixture fixture, String mutation) {
+    String payNo =
+        switch (mutation) {
+          case "pay-null" -> null;
+          case "pay-length" -> "p".repeat(65);
+          case "pay-empty" -> "";
+          case "pay-space" -> " ";
+          case "pay-punctuation" -> "pay.1";
+          case "pay-unicode" -> "páy-1";
+          default -> "pay-evidence-1";
+        };
+    String operationKey =
+        switch (mutation) {
+          case "operation-null" -> null;
+          case "operation-empty" -> "";
+          case "operation-other" -> "tcc-debit:another-pay";
+          case "operation-case" -> "TCC-DEBIT:pay-evidence-1";
+          case "operation-space" -> "tcc-debit:pay-evidence-1 ";
+          default -> "tcc-debit:" + payNo;
+        };
+    String ledgerKey =
+        switch (mutation) {
+          case "ledger-null" -> null;
+          case "ledger-empty" -> "";
+          case "ledger-other" -> "another-pay";
+          case "ledger-case" -> "PAY-EVIDENCE-1";
+          case "ledger-space" -> "pay-evidence-1 ";
+          default -> payNo;
+        };
+    fixture.execution.payNo = payNo;
+    fixture.execution.operationKey = operationKey;
+    fixture.execution.ledgerKey = ledgerKey;
+    fixture.user.payNo = payNo;
+    fixture.user.operationKey = operationKey;
+    fixture.user.ledgerKey = ledgerKey;
+    fixture.pay.payNo = payNo;
+    fixture.pay.operationKey = operationKey;
+    fixture.pay.ledgerKey = ledgerKey;
+  }
+
   /** 独立完整两端载荷及查询替身，状态和输入对象均不在测试间共享。 */
   private static final class EvidenceFixture {
     /** 当前原execution金额与不可变身份。 */

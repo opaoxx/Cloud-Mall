@@ -4669,6 +4669,139 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals(before, ownedFenceFacts()));
   }
 
+  /** 三方一致但属于另一个支付的操作键不能证明COMMITTED。 */
+  @Test
+  void anotherOperationKeyCannotProduceCommittedEvidence() {
+    assertExecutionFixedKeysRejected("operation-other", "CONFIRMED", false);
+  }
+
+  /** 三方一致但属于另一个支付的账本键不能证明ROLLEDBACK。 */
+  @Test
+  void anotherLedgerKeyCannotProduceRolledBackEvidence() {
+    assertExecutionFixedKeysRejected("ledger-other", "CANCELLED", false);
+  }
+
+  /** 固定键错误在四receipt态与缺端时均冲突，事实不能被分类过程改写。 */
+  @Test
+  void invalidExecutionFixedKeysRejectStatesAndMissingReceipt() {
+    for (String mutation :
+        List.of(
+            "pay-empty",
+            "pay-space",
+            "pay-punctuation",
+            "pay-unicode",
+            "operation-empty",
+            "operation-other",
+            "operation-case",
+            "operation-space",
+            "ledger-empty",
+            "ledger-other",
+            "ledger-case",
+            "ledger-space"))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED"))
+        assertExecutionFixedKeysRejected(mutation, payState, false);
+    for (String mutation : List.of("pay-empty", "operation-other", "ledger-other"))
+      assertExecutionFixedKeysRejected(mutation, "CONFIRMED", true);
+  }
+
+  /** 创建契约允许的原支付号及其派生键保留大小写和边界，不改分类或缺端语义。 */
+  @Test
+  void canonicalExecutionFixedKeysKeepExistingConclusions() {
+    for (String payNo : List.of("A", "Pay_1-a", "P_" + "a".repeat(62)))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED")) {
+        var evidence = ownedFenceIdentityEvidence();
+        seedOwnedFenceEvidence(
+            payState,
+            payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1,
+            "t174-xid",
+            11L);
+        for (String table : List.of("pay_tcc_execution", "pay_tcc_receipt"))
+          fixture.update(
+              "UPDATE " + table + " SET pay_no=?,operation_key=?,ledger_key=?",
+              payNo,
+              "tcc-debit:" + payNo,
+              payNo);
+        String userState =
+            payState.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+        String expected =
+            payState.equals("CONFIRMED")
+                ? "COMMITTED"
+                : payState.equals("CANCELLED")
+                    ? "ROLLEDBACK"
+                    : payState.equals("TRYING") ? "TRYING" : "UNKNOWN";
+        var before = ownedFenceFacts();
+        assertEquals(expected, classifyOwnedFence(evidence, userState, payNo));
+        assertEquals(before, ownedFenceFacts());
+      }
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence("CONFIRMED", 2, "t174-xid", 11L);
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    var before = ownedFenceFacts();
+    assertEquals("UNKNOWN", classifyOwnedFence(evidence, "CONFIRMED"));
+    assertEquals(before, ownedFenceFacts());
+  }
+
+  /** 只改owned执行/receipt固定键，User取同值；原Pay/Intent不冒充完整来源。 */
+  private void assertExecutionFixedKeysRejected(
+      String mutation, String payState, boolean missingReceipt) {
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence(
+        payState,
+        payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1,
+        "t174-xid",
+        11L);
+    String payNo =
+        switch (mutation) {
+          case "pay-empty" -> "";
+          case "pay-space" -> " ";
+          case "pay-punctuation" -> "pay.1";
+          case "pay-unicode" -> "páy-1";
+          default -> "pay-1";
+        };
+    String operationKey =
+        switch (mutation) {
+          case "operation-empty" -> "";
+          case "operation-other" -> "tcc-debit:another-pay";
+          case "operation-case" -> "TCC-DEBIT:pay-1";
+          case "operation-space" -> "tcc-debit:pay-1 ";
+          default -> "tcc-debit:" + payNo;
+        };
+    String ledgerKey =
+        switch (mutation) {
+          case "ledger-empty" -> "";
+          case "ledger-other" -> "another-pay";
+          case "ledger-case" -> "PAY-1";
+          case "ledger-space" -> "pay-1 ";
+          default -> payNo;
+        };
+    for (String table : List.of("pay_tcc_execution", "pay_tcc_receipt"))
+      fixture.update(
+          "UPDATE " + table + " SET pay_no=?,operation_key=?,ledger_key=?",
+          payNo,
+          operationKey,
+          ledgerKey);
+    if (missingReceipt) fixture.update("DELETE FROM pay_tcc_receipt");
+    String userState =
+        payState.equals("TRYING")
+            ? "TRY_ACCEPTED"
+            : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+    var before = ownedFenceFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(classifyOwnedFence(evidence, userState, payNo)));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, ownedFenceFacts()));
+  }
+
   /** 原execution/receipt/Fence表只在owned克隆，通过实际Mapper同RR快照读取。 */
   private com.cloudmall.pay.service.impl.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
     ownedExecutionObservationStore();
@@ -4699,6 +4832,14 @@ class PayLegacyRefundLedgerMySqlIT {
   /** 同一个只读RR快照核对实际execution/receipt/Fence，User镜像仅受控传值。 */
   private String classifyOwnedFence(
       com.cloudmall.pay.service.impl.PayTccExecutionEvidence evidence, String userState) {
+    return classifyOwnedFence(evidence, userState, "pay-1");
+  }
+
+  /** 在同RR快照中用变异后的原支付号读取执行，避免测试将查询缺失误作拒绝。 */
+  private String classifyOwnedFence(
+      com.cloudmall.pay.service.impl.PayTccExecutionEvidence evidence,
+      String userState,
+      String payNo) {
     var template =
         new org.springframework.transaction.support.TransactionTemplate(
             new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
@@ -4707,7 +4848,7 @@ class PayLegacyRefundLedgerMySqlIT {
         org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
     return template.execute(
         transactionStatus -> {
-          var execution = executionObservationMapper.selectByPayNo("pay-1");
+          var execution = executionObservationMapper.selectByPayNo(payNo);
           var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
           user.payNo = execution.payNo;
           user.xid = execution.xid;
