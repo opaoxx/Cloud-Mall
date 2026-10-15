@@ -16,23 +16,24 @@
 
 金额先比较上限，再检查 scale，避免极端指数或精度值先转换/溢出；不 trim、round、normalize、不新增金额词法，不 parse XID，不推断 state/decision 组合。任一失败沿既有 `PAY_TCC_EXECUTION_CONFLICT/409`，早于 Bridge、terminal cache、observe、TC。
 
-不改 claim/validateRequest/locked/SQL/事务/Coordinator/Evidence/Store/API，不修历史，不新增来源查询；NULL XID prebegin 和合法缺行/decision 行为保持。前置 Bridge 读取/镜像不撤回，execute 旧异常决议流程不扩展。
+仅修改 `Store.read` 的 point-read payload 门；其它 Store 方法（claim、validateRequest、locked、observe、decide、bind）及 SQL/事务/Coordinator/Evidence/API 不改，不修历史，不新增来源查询。NULL XID prebegin 和合法缺行/decision 行为保持；bad payload 在 Bridge 前阻断，execute 旧异常决议流程不扩展。
 
 ## 3. 验收矩阵
 
 ### 3.1 Unit/真实 Coordinator
 
-- 覆盖 userId null/0/负、order null/blank/65、amount null/0/负/超额/超精度/极端 BigDecimal、operation/ledger null/错误；终态/active/terminal cache 均在 read 409，无 Bridge/Evidence/observe/TC。
-- 真实 Coordinator/Store 配合 mock Bridge/Evidence/TC/receipt，COMMIT/ROLLBACK × 非法 amount/identity/key 组合验证不 observe、不发 TC；前置 Bridge 行为不撤回。
-- 合法 pay/user/order/amount/key 边界、合法缺端/prebegin、尾零/指数文本的原数值语义保持；read 对象事实不变。
+- Unit使用mock Mapper：native的17坏变体，加6个NULL、pay/order的65 ASCII字符、金额.001/超MAX/极端scale三个样本，共28 × 两state × 三decision × NULL/valid XID=336组，读409、一次查询、对象全字段不变、无其它Mapper动作。
+- 真实Coordinator/Store配mock Mapper/Bridge/Evidence/TC/receipt：8坏变体 × COMMIT_REQUESTED/COMMITTED × XID2=32组，decision固定COMMIT，在Bridge前拒绝。其它决议的正常恢复由201–211既有整套矩阵回归，不声称本批新Coordinator组合覆盖ROLLBACK。
+- 正6载荷模板（min/max/raw文本/Unicode订单/10.000/1E+1）× 四state × XID2=48组，返回同对象/全字段表示不变，不把raw组合作为合法状态机证明。NULL字段、ASCII超长及不可存金额仅PO mock，不变更DDL。
 
 ### 3.2 Owned native
 
 - 使用真实 ExecutionStore/Mapper 与 owned execution、Pay、Intent 三表；Coordinator 真实，Bridge/Evidence/TC/receipt 为 mock；不启动业务 App、TC/RM、新监听或官方 FenceHandler。
-- 旧 red：COMMITTED 非正金额曾直接返回 invalid VO；COMMIT_REQUESTED 错 operationKey 经 Bridge 503 曾继续 TC/诊断写入。修复后完整 payload bad matrix 均 409、不返回坏 execution，execution/Pay/Intent facts 不变。
-- native 覆盖能存的 order emoji33（UTF-16 66）及金额/键边界；超长 order、NULL 字段、极端 Unit-only 值不修改 DDL。合法边界与缺行/terminal/prebegin controls 保持。
+- 旧red：COMMITTED金额0返回VO而非409，2个断言失败；COMMIT_REQUESTED错误operationKey经Bridge503继续TCcommit/诊断写，5个断言失败。17坏变体（pay空/标点、user0/-1、order空/space/emoji33、amount0/负、operation与ledger各空/other/case/尾space）× 两state × XID2=68组，decision固定COMMIT，read/recover均409、无Bridge/Evidence/TC且三表不变。
+- 正4模板（min/max/raw文本/emoji32）× 四state RUNNING/COMMITTED/ROLLEDBACK/CONFLICT × XID2=32组，原字段/三表不变。只变更owned execution载荷，原Pay/Intent仍为种子值，不证明三表来源一致性。按变异payNo读取/恢复，避免把找不到行当作拒绝。emoji33是数据库可存的33字符/Java UTF-16 66；ASCII超长、NULL和不可存金额仅Unit，不修改DDL。
+- read原无事务注解，native未套Spring事务代理；同owned数据源实际Mapper，不证明完整事务隔离或TC/RM链路。原NULL prebegin/404/支付号别名/合法决议重试与201–211整套回归，原库全表指纹、owned精确DROP与有界池关闭保持。
 - 本批只证明 execution point read payload，不证明 Pay 原 source、User/Order、TC 或完整资金因果；原 201–211 仅整体回归。
 
 ## 4. 明确边界
 
-本批不改变金额字段生产/写入口、state/decision 组合、XID、SQL、事务、Coordinator execute、Bridge/Evidence、Store API 或历史数据；不撤回 Evidence 前 Bridge 读取/镜像，不增加来源查询或 Fence 证明。
+本批不改变金额字段生产/写入口、state/decision 组合、XID、SQL、事务、Coordinator execute、Bridge/Evidence、其它 Store 方法、API 或历史数据；bad payload 在 Bridge 前阻断，不扩展读后窗口，不增加来源查询或 Fence 证明。
