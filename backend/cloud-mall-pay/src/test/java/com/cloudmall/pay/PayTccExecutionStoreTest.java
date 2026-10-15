@@ -440,6 +440,129 @@ class PayTccExecutionStoreTest {
         bridge, receiptService, evidence, transactions, payments, dispatches, receipts, cancels);
   }
 
+  /** 单字段坏域在NULL/已绑定XID下均冲突，不将别名或未知值改成正常状态。 */
+  @Test
+  void invalidStateAndDecisionDomainsFailBeforeReadReturns() {
+    for (String state : java.util.Arrays.asList(null, "", " ", "RUNNING ", "running", "BROKEN"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1"))
+          assertInvalidReadDomain(state, decision, xid);
+    for (String decision : java.util.Arrays.asList(null, "", " ", "commit", "COMMIT ", "ABORT"))
+      for (String state :
+          List.of(
+              "CLAIMED",
+              "BEGIN_UNKNOWN",
+              "RUNNING",
+              "COMMIT_REQUESTED",
+              "ROLLBACK_REQUESTED",
+              "UNKNOWN",
+              "COMMITTED",
+              "ROLLEDBACK",
+              "CONFLICT"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1"))
+          assertInvalidReadDomain(state, decision, xid);
+  }
+
+  /** 真实Store与Coordinator在桥查询及缓存终态返回前拒绝坏状态/决议。 */
+  @Test
+  void coordinatorRejectsReadDomainsBeforeBridgeAndCachedTerminal() {
+    for (String mutation :
+        List.of("state-unknown", "state-alias", "decision-lower", "decision-null"))
+      for (String xid : java.util.Arrays.asList(null, "xid-store-1")) {
+        org.mockito.Mockito.reset(executions);
+        String state =
+            switch (mutation) {
+              case "state-unknown" -> "BROKEN";
+              case "state-alias" -> "COMMITTED ";
+              default -> "COMMITTED";
+            };
+        String decision =
+            switch (mutation) {
+              case "decision-lower" -> "commit";
+              case "decision-null" -> null;
+              default -> "COMMIT";
+            };
+        var row = execution(state, decision, xid);
+        when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+        var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+        var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+        var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+        var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+        when(bridge.recover(row.payNo))
+            .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
+        var coordinator =
+            new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+                store, receiptService, bridge, evidence, transactions);
+        var before = snapshotExecution(row);
+        var failure = assertThrows(BizException.class, () -> coordinator.recover(row.payNo));
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+        org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+        verify(executions).selectByPayNo(row.payNo);
+        org.mockito.Mockito.verifyNoMoreInteractions(executions);
+        org.mockito.Mockito.verifyNoInteractions(
+            bridge,
+            receiptService,
+            evidence,
+            transactions,
+            payments,
+            dispatches,
+            receipts,
+            cancels);
+      }
+  }
+
+  /** 原九状态三决议均可无损raw读取，不据此证明组合合法；DAO异常仍原样传播。 */
+  @Test
+  void canonicalReadStateAndDecisionDomainsPreserveRawRows() {
+    for (String state :
+        List.of(
+            "CLAIMED",
+            "BEGIN_UNKNOWN",
+            "RUNNING",
+            "COMMIT_REQUESTED",
+            "ROLLBACK_REQUESTED",
+            "UNKNOWN",
+            "COMMITTED",
+            "ROLLEDBACK",
+            "CONFLICT"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String xid : java.util.Arrays.asList(null, "xid-store-1")) {
+          org.mockito.Mockito.reset(executions);
+          var row = execution(state, decision, xid);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          var before = snapshotExecution(row);
+          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          verify(executions).selectByPayNo(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions);
+          org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+        }
+    org.mockito.Mockito.reset(executions);
+    var unavailable = new IllegalStateException("owned execution lookup fault");
+    when(executions.selectByPayNo("pay-store-1")).thenThrow(unavailable);
+    org.junit.jupiter.api.Assertions.assertSame(
+        unavailable, assertThrows(IllegalStateException.class, () -> store.read("pay-store-1")));
+    verify(executions).selectByPayNo("pay-store-1");
+    org.mockito.Mockito.verifyNoMoreInteractions(executions);
+  }
+
+  /** 只读门失败不能触及其它Mapper或改写被返回对象的任何字段。 */
+  private void assertInvalidReadDomain(String state, String decision, String xid) {
+    org.mockito.Mockito.reset(executions);
+    var row = execution(state, decision, xid);
+    when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+    var before = snapshotExecution(row);
+    var failure = assertThrows(BizException.class, () -> store.read(row.payNo));
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+    org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+    verify(executions).selectByPayNo(row.payNo);
+    org.mockito.Mockito.verifyNoMoreInteractions(executions);
+    org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+  }
+
   /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */
   private String snapshotExecution(PayTccExecutionPO execution) {
     return org.junit.jupiter.api.Assertions.assertDoesNotThrow(

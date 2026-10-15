@@ -5192,7 +5192,7 @@ class PayLegacyRefundLedgerMySqlIT {
   void blankBoundXidCannotReachTcAfterBridgeUnavailable() {
     var store = ownedExecutionObservationStore();
     seedOwnedExecution("COMMIT_REQUESTED", "COMMIT", "");
-    assertInvalidExecutionXidRecovery(store);
+    assertExecutionReadConflictStopsRecovery(store);
   }
 
   /** 空白已绑定XID不等于合法prebegin NULL，read不得直接返回。 */
@@ -5200,7 +5200,7 @@ class PayLegacyRefundLedgerMySqlIT {
   void whitespaceBoundXidCannotBeReadAsExecution() {
     var store = ownedExecutionObservationStore();
     seedOwnedExecution("RUNNING", "NONE", " \t\n");
-    var before = executionReadXidFacts();
+    var before = executionReadFacts();
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
             com.cloudmall.pay.domain.po.PayTccExecutionPO>();
@@ -5214,7 +5214,7 @@ class PayLegacyRefundLedgerMySqlIT {
           assertEquals(409, failure.getHttpStatus());
         },
         () -> assertNull(returned.get()),
-        () -> assertEquals(before, executionReadXidFacts()));
+        () -> assertEquals(before, executionReadFacts()));
   }
 
   /** 三种空白在所有持久决议与活动/终态均须源头拒绝，三表原事实不动。 */
@@ -5231,14 +5231,14 @@ class PayLegacyRefundLedgerMySqlIT {
                       : decision.equals("ROLLBACK") ? "ROLLEDBACK" : "CONFLICT"
                   : decision.equals("NONE") ? "RUNNING" : decision + "_REQUESTED";
           seedOwnedExecution(state, decision, xid);
-          var before = executionReadXidFacts();
+          var before = executionReadFacts();
           var failure =
               org.junit.jupiter.api.Assertions.assertThrows(
                   com.cloudmall.common.error.BizException.class, () -> store.read("pay-1"));
           assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
           assertEquals(409, failure.getHttpStatus());
-          assertInvalidExecutionXidRecovery(store);
-          assertEquals(before, executionReadXidFacts());
+          assertExecutionReadConflictStopsRecovery(store);
+          assertEquals(before, executionReadFacts());
         }
   }
 
@@ -5250,11 +5250,11 @@ class PayLegacyRefundLedgerMySqlIT {
         java.util.Arrays.asList(null, "x", " xid-with-space ", "x".repeat(128), "事务:one"))
       for (String state : List.of("CLAIMED", "RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
         seedOwnedExecution(state, "NONE", xid);
-        var before = executionReadXidFacts();
+        var before = executionReadFacts();
         var read = store.read("pay-1");
         assertEquals(xid, read.xid);
         assertEquals(state, read.state);
-        assertEquals(before, executionReadXidFacts());
+        assertEquals(before, executionReadFacts());
       }
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
@@ -5272,9 +5272,9 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(paymentBefore, rawIntentTimeFacts());
     for (String state : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
       seedOwnedExecution(state, "NONE", " xid-with-space ");
-      var before = executionReadXidFacts();
+      var before = executionReadFacts();
       assertEquals(state, coordinator.recover("pay-1").state);
-      assertEquals(before, executionReadXidFacts());
+      assertEquals(before, executionReadFacts());
     }
     org.mockito.Mockito.verifyNoInteractions(bridge, receiptService, evidence, transactions);
     fixture.update("DELETE FROM pay_tcc_execution");
@@ -5285,8 +5285,117 @@ class PayLegacyRefundLedgerMySqlIT {
     assertEquals(404, missing.getHttpStatus());
   }
 
+  /** 未知执行状态不能借Bridge503被重写为正常请求态并继续TC。 */
+  @Test
+  void unknownExecutionStateCannotBeRewrittenAndSentToTc() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("BROKEN", "COMMIT", "t211-xid");
+    assertExecutionReadConflictStopsRecovery(store);
+  }
+
+  /** 缓存终态也不能把非法决议当作合法execution返回。 */
+  @Test
+  void invalidDecisionCannotEscapeWithCachedTerminal() {
+    var store = ownedExecutionObservationStore();
+    seedOwnedExecution("COMMITTED", "commit", "t211-xid");
+    assertExecutionReadConflictStopsRecovery(store);
+  }
+
+  /** 非规范状态与决议在NULL/已绑定XID下均源头拒绝，原事实不被规范化。 */
+  @Test
+  void invalidReadStateAndDecisionRejectBeforeRecovery() {
+    var store = ownedExecutionObservationStore();
+    for (String state : List.of("", " ", "RUNNING ", "running", "BROKEN"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String xid : java.util.Arrays.asList(null, "t211-xid")) {
+          seedOwnedExecution(state, decision, xid);
+          var before = executionReadFacts();
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class, () -> store.read("pay-1"));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertExecutionReadConflictStopsRecovery(store);
+          assertEquals(before, executionReadFacts());
+        }
+    for (String decision : List.of("", " ", "commit", "COMMIT ", "ABORT"))
+      for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT"))
+        for (String xid : java.util.Arrays.asList(null, "t211-xid")) {
+          seedOwnedExecution(state, decision, xid);
+          var before = executionReadFacts();
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class, () -> store.read("pay-1"));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          assertExecutionReadConflictStopsRecovery(store);
+          assertEquals(before, executionReadFacts());
+        }
+  }
+
+  /** 仅验证原单字段域不改变raw读取；合法决议仍按原流程观察及同向重试。 */
+  @Test
+  void canonicalReadDomainsAndExistingDecisionRetriesRemain() throws Exception {
+    var store = ownedExecutionObservationStore();
+    for (String state :
+        List.of(
+            "CLAIMED",
+            "BEGIN_UNKNOWN",
+            "RUNNING",
+            "COMMIT_REQUESTED",
+            "ROLLBACK_REQUESTED",
+            "UNKNOWN",
+            "COMMITTED",
+            "ROLLEDBACK",
+            "CONFLICT"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String xid : java.util.Arrays.asList(null, "t211-xid")) {
+          seedOwnedExecution(state, decision, xid);
+          var before = executionReadFacts();
+          var read = store.read("pay-1");
+          assertEquals(state, read.state);
+          assertEquals(decision, read.decision);
+          assertEquals(xid, read.xid);
+          assertEquals(before, executionReadFacts());
+        }
+    for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
+      seedOwnedExecution(
+          decision.equals("NONE") ? "RUNNING" : decision + "_REQUESTED", decision, "t211-xid");
+      var paymentBefore = rawIntentTimeFacts();
+      var executionBefore = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+      var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+      var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+      when(bridge.recover("pay-1"))
+          .thenThrow(
+              new com.cloudmall.common.error.BizException(
+                  "REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
+      var coordinator =
+          new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+              store, receiptService, bridge, evidence, transactions);
+      var recovered = coordinator.recover("pay-1");
+      assertEquals(decision.equals("NONE") ? "UNKNOWN" : decision + "_REQUESTED", recovered.state);
+      assertEquals(decision, recovered.decision);
+      assertEquals("t211-xid", recovered.xid);
+      assertEquals("REMOTE_UNAVAILABLE", recovered.lastError);
+      verify(bridge, times(decision.equals("NONE") ? 1 : 2)).recover("pay-1");
+      if (decision.equals("COMMIT")) verify(transactions).commit("t211-xid");
+      else if (decision.equals("ROLLBACK")) verify(transactions).rollback("t211-xid");
+      org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+      org.mockito.Mockito.verifyNoInteractions(receiptService, evidence);
+      assertEquals(paymentBefore, rawIntentTimeFacts());
+      var executionAfter = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
+      for (String field : List.of("state", "last_error", "updated_at")) {
+        executionBefore.remove(field);
+        executionAfter.remove(field);
+      }
+      assertEquals(executionBefore, executionAfter);
+    }
+  }
+
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
-  private void assertInvalidExecutionXidRecovery(
+  private void assertExecutionReadConflictStopsRecovery(
       com.cloudmall.pay.service.impl.PayTccExecutionStore store) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
@@ -5299,7 +5408,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var coordinator =
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
-    var before = executionReadXidFacts();
+    var before = executionReadFacts();
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
             com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
@@ -5315,11 +5424,11 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertNull(returned.get()),
         () -> org.mockito.Mockito.verifyNoInteractions(bridge, receiptService, evidence),
         () -> org.mockito.Mockito.verifyNoInteractions(transactions),
-        () -> assertEquals(before, executionReadXidFacts()));
+        () -> assertEquals(before, executionReadFacts()));
   }
 
   /** 完整快照只含本批实际读取或潜在写入的Pay/Intent/Execution三表。 */
-  private List<List<Map<String, Object>>> executionReadXidFacts() {
+  private List<List<Map<String, Object>>> executionReadFacts() {
     var facts = new ArrayList<List<Map<String, Object>>>(rawIntentTimeFacts());
     facts.add(fixture.queryForList("SELECT * FROM pay_tcc_execution"));
     return facts;

@@ -2644,3 +2644,9 @@ CLAIMED本身不能证明分支未登记或资金结果。分类前的Bridge恢�
 execution读取会拒绝非NULL且空白或UTF-16长度超过128的XID，沿用原409。校验早于Bridge查询、Evidence分类、观察写入及TC重试，Bridge暂不可用时也不能借无效XID继续决议。
 
 NULL仍表示未持久绑定XID，保留原prebegin/BEGIN_UNKNOWN流程；合法非空白XID保留原文，不解析或修剪。该校验不证明XID全局来源，也不修改历史坏行。
+
+### CM-18 execution读取的状态与决议（16T211）
+
+execution读取只接受规格中的9种精确状态，以及NONE、COMMIT、ROLLBACK三种精确决议。空值、未知值、大小写或尾空格别名返回原409，早于Bridge查询、观察写入、TC重试或缓存终态返回。
+
+该校验只检查单字段有效值，不推断状态、决议和XID的组合是否合法；合法原值、NULL XID的prebegin流程和已有决议重试规则保持，不规范化或修复历史坏数据。

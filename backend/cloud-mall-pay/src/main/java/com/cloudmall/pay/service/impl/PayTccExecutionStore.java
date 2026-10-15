@@ -143,14 +143,31 @@ public class PayTccExecutionStore {
     return executions.selectByPayNo(payNo);
   }
 
-  /** 读取原支付号及有效已绑定XID；NULL保留prebegin语义，坏行不进入后续恢复。 */
+  /** 读取原支付号、XID及状态/决议有效域；NULL XID保留prebegin，坏行不进入恢复。 */
   public PayTccExecutionPO read(String payNo) {
+    // 1. 按原支付号读取，并核对查询身份与已绑定XID。
     PayTccExecutionPO execution = executions.selectByPayNo(payNo);
     if (execution == null)
       throw new BizException("PAY_TCC_EXECUTION_NOT_FOUND", "TCC execution 不存在", 404);
     if (execution.payNo == null || !Objects.equals(execution.payNo, payNo)) throw conflict();
     if (execution.xid != null && (execution.xid.isBlank() || execution.xid.length() > 128))
       throw conflict();
+    // 2. 只核原规格的单字段状态/决议，不推断组合或规范化历史值。
+    if (execution.state == null
+        || !Set.of(
+                "CLAIMED",
+                "BEGIN_UNKNOWN",
+                "RUNNING",
+                "COMMIT_REQUESTED",
+                "ROLLBACK_REQUESTED",
+                "UNKNOWN",
+                "COMMITTED",
+                "ROLLEDBACK",
+                "CONFLICT")
+            .contains(execution.state)
+        || execution.decision == null
+        || !Set.of("NONE", "COMMIT", "ROLLBACK").contains(execution.decision)) throw conflict();
+    // 3. 返回原执行事实，后续恢复继续沿原规则处理。
     return execution;
   }
 
