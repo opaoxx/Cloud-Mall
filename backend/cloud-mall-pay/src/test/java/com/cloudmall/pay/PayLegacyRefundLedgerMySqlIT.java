@@ -7644,6 +7644,75 @@ class PayLegacyRefundLedgerMySqlIT {
     org.mockito.Mockito.verifyNoInteractions(receiptRollbackMapper);
   }
 
+  /** 只有payNo大小写别名命中不能证明当前请求的另一owner。 */
+  @Test
+  void rejectedReceiptOwnerCannotBorrowPayNumberAlias() {
+    assertReceiptOwnerKeyAssociation(false, "payNo", "TRYING", 8L);
+  }
+
+  /** 只有XID大小写别名命中不能提前ACK被拒分支。 */
+  @Test
+  void rejectedReceiptOwnerCannotBorrowXidAlias() {
+    assertReceiptOwnerKeyAssociation(false, "xid", "TRYING", 8L);
+  }
+
+  /** 四键单独CI命中或全CI命中，在三个先进态都不能代替精确唯一键。 */
+  @Test
+  void rejectedReceiptOwnerRejectsPureAliasKeyMatrix() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+      for (String field : List.of("payNo", "xid", "operationKey", "ledgerKey", "all"))
+        assertReceiptOwnerKeyAssociation(false, field, state, 8L);
+  }
+
+  /** 每个单独exact键保持原OR归属语义，不能误改成四字段全等。 */
+  @Test
+  void rejectedReceiptOwnerKeepsEachExactUniqueKeyAssociation() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+      for (String field : List.of("payNo", "xid", "operationKey", "ledgerKey"))
+        for (Long branch : List.of(8L, Long.MAX_VALUE))
+          assertReceiptOwnerKeyAssociation(true, field, state, branch);
+  }
+
+  /** SQL实际命中一条owner；独立核exact关联数量，原查询门与五表不变同时断言。 */
+  private void assertReceiptOwnerKeyAssociation(
+      boolean exact, String field, String state, Long branch) {
+    var resource = ownedReceiptRollbackResource();
+    var context = seedOwnedRejectedReceiptOwner(state, branch, false);
+    String ownerPayNo = "foreign-pay";
+    String ownerXid = "foreign-xid";
+    String ownerOperation = "foreign-operation";
+    String ownerLedger = "foreign-ledger";
+    if (field.equals("payNo") || field.equals("all")) ownerPayNo = exact ? "pay-1" : "PAY-1";
+    if (field.equals("xid") || field.equals("all"))
+      ownerXid = exact ? context.getXid() : context.getXid().toUpperCase(java.util.Locale.ROOT);
+    if (field.equals("operationKey") || field.equals("all"))
+      ownerOperation = exact ? "tcc-debit:pay-1" : "TCC-DEBIT:PAY-1";
+    if (field.equals("ledgerKey") || field.equals("all")) ownerLedger = exact ? "pay-1" : "PAY-1";
+    fixture.update(
+        "UPDATE pay_tcc_receipt SET pay_no=?,xid=?,operation_key=?,ledger_key=?",
+        ownerPayNo,
+        ownerXid,
+        ownerOperation,
+        ownerLedger);
+    var matches =
+        receiptRollbackMapper.findOwners("pay-1", context.getXid(), "tcc-debit:pay-1", "pay-1");
+    assertEquals(1, matches.size());
+    var matched = matches.get(0);
+    int exactCount =
+        (java.util.Objects.equals(matched.payNo, "pay-1") ? 1 : 0)
+            + (java.util.Objects.equals(matched.xid, context.getXid()) ? 1 : 0)
+            + (java.util.Objects.equals(matched.operationKey, "tcc-debit:pay-1") ? 1 : 0)
+            + (java.util.Objects.equals(matched.ledgerKey, "pay-1") ? 1 : 0);
+    assertEquals(exact ? 1 : 0, exactCount);
+    org.mockito.Mockito.clearInvocations(receiptRollbackMapper, fenceIdentityMapper);
+    var before = ownedReceiptRollbackFacts();
+    boolean accepted = withOwnedReceiptFence(() -> resource.rollback(context));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> assertEquals(exact, accepted),
+        () -> assertEquals(before, ownedReceiptRollbackFacts()),
+        () -> assertReceiptOwnerQueryOrder(context));
+  }
+
   /** public rollback的返回、五表事实和真实owner查询计数同时断言。 */
   private void assertRejectedReceiptOwner(String state, Long branch, boolean otherXid) {
     var resource = ownedReceiptRollbackResource();

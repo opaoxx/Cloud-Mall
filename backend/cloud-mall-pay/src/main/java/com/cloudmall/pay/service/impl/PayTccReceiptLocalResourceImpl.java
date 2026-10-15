@@ -145,6 +145,7 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
             request.payNo, context.getXid(), "tcc-debit:" + request.payNo, request.payNo))
       if (PayTccReceiptStore.hasValidStateAndBranch(owner)
           && !"CLAIMED".equals(owner.state)
+          && hasExactOwnerKey(owner, request, context)
           && (!Objects.equals(owner.xid, context.getXid())
               || !Objects.equals(owner.branchId, context.getBranchId()))) return true;
     return false;
@@ -160,6 +161,15 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
     return Objects.equals(fence.xid, context.getXid())
         && Objects.equals(fence.branchId, context.getBranchId())
         && ACTION_NAME.equals(fence.actionName);
+  }
+
+  /** 保留四键OR归属语义，但CI别名必须至少有一个原唯一键精确命中。 */
+  private boolean hasExactOwnerKey(
+      PayTccReceiptPO owner, PayTccDispatchDTO request, BusinessActionContext context) {
+    return Objects.equals(owner.payNo, request.payNo)
+        || Objects.equals(owner.xid, context.getXid())
+        || Objects.equals(owner.operationKey, "tcc-debit:" + request.payNo)
+        || Objects.equals(owner.ledgerKey, request.payNo);
   }
 
   /** 固定只反射本项目公开 callback 方法。 */
