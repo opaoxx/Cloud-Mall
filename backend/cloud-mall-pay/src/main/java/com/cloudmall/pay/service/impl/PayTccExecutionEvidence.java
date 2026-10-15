@@ -55,13 +55,9 @@ public class PayTccExecutionEvidence {
             && Objects.equals(pay.ledgerKey, execution.ledgerKey)
             && pay.amount != null
             && pay.amount.compareTo(execution.amount) == 0);
+    // 2. 先核状态/分支；合法CLAIMED仍UNKNOWN，不推断分支登记或资金结果。
+    require(PayTccReceiptStore.hasValidStateAndBranch(pay));
     if ("CLAIMED".equals(pay.state)) return "UNKNOWN";
-    // 2. 已受理和终态必须有原 branch；Fence 清理不能清掉永久归属。
-    require(
-        pay.branchId != null
-            && pay.branchId > 0
-            && pay.state != null
-            && Set.of("TRYING", "CONFIRMED", "CANCELLED").contains(pay.state));
     PayTccFencePO fence = fences.findByBranch(pay.xid, pay.branchId);
     if (fence == null) require(!"TRYING".equals(pay.state));
     else

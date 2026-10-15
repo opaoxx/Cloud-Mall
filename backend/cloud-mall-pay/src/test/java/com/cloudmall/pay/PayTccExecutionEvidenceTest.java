@@ -411,6 +411,93 @@ class PayTccExecutionEvidenceTest {
     }
   }
 
+  /** CLAIMED坏分支不能因User未完成或状态缺失被降级为UNKNOWN。 */
+  @Test
+  void claimedReceiptRejectsInvalidBranchBeforeUnknown() {
+    for (Long branch : List.of(0L, -1L, Long.MIN_VALUE))
+      for (String userState :
+          java.util.Arrays.asList("CONFIRMED", "TRY_ACCEPTED", "CANCELLED", null)) {
+        var fixture = new EvidenceFixture();
+        fixture.pay.state = "CLAIMED";
+        fixture.pay.branchId = branch;
+        fixture.user.state = userState;
+        var before = fixture.snapshot();
+        var failure =
+            assertThrows(
+                BizException.class,
+                () -> fixture.evidence.classify(fixture.execution, fixture.user));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        verify(fixture.receipts).selectByPayNo(fixture.execution.payNo);
+        verifyNoInteractions(fixture.fences);
+        assertEquals(before, fixture.snapshot());
+      }
+  }
+
+  /** 原决议已持久化时，坏CLAIMED仍必须在观察写与TC重试之前停止。 */
+  @Test
+  void coordinatorStopsInvalidClaimedBranchBeforeObservationAndTc() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (Long branch : List.of(0L, -1L, Long.MIN_VALUE)) {
+        var fixture = new EvidenceFixture();
+        fixture.pay.state = "CLAIMED";
+        fixture.pay.branchId = branch;
+        fixture.execution.decision = decision;
+        var store = mock(PayTccExecutionStore.class);
+        var bridge = mock(PayTccBridgeService.class);
+        var receiptService = mock(PayTccReceiptService.class);
+        var transactions = mock(PayTccTransactionClient.class);
+        when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
+        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
+        var coordinator =
+            new PayTccCoordinatorServiceImpl(
+                store, receiptService, bridge, fixture.evidence, transactions);
+        var before = fixture.snapshot();
+        var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        verify(store, never()).observe(any(), any(), any());
+        verifyNoInteractions(transactions, receiptService, fixture.fences);
+        assertEquals(before, fixture.snapshot());
+      }
+  }
+
+  /** 合法CLAIMED仍未知且不读Fence，原User载荷冲突与receipt缺失先级保持。 */
+  @Test
+  void validClaimedUnknownAndOriginalLookupPriorityRemain() {
+    for (Long branch : java.util.Arrays.asList(null, 1L, Long.MAX_VALUE))
+      for (String userState :
+          java.util.Arrays.asList("CONFIRMED", "TRY_ACCEPTED", "CANCELLED", null)) {
+        var fixture = new EvidenceFixture();
+        fixture.pay.state = "CLAIMED";
+        fixture.pay.branchId = branch;
+        fixture.user.state = userState;
+        var before = fixture.snapshot();
+        assertEquals("UNKNOWN", fixture.evidence.classify(fixture.execution, fixture.user));
+        verifyNoInteractions(fixture.fences);
+        assertEquals(before, fixture.snapshot());
+      }
+    var missing = new EvidenceFixture();
+    when(missing.receipts.selectByPayNo(any())).thenReturn(null);
+    var beforeMissing = missing.snapshot();
+    assertEquals("UNKNOWN", missing.evidence.classify(missing.execution, missing.user));
+    verifyNoInteractions(missing.fences);
+    assertEquals(beforeMissing, missing.snapshot());
+    var invalidUser = new EvidenceFixture();
+    invalidUser.pay.state = "CLAIMED";
+    invalidUser.pay.branchId = 0L;
+    invalidUser.user.amount = "invalid-money";
+    var beforeInvalid = invalidUser.snapshot();
+    var failure =
+        assertThrows(
+            BizException.class,
+            () -> invalidUser.evidence.classify(invalidUser.execution, invalidUser.user));
+    assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    verifyNoInteractions(invalidUser.receipts, invalidUser.fences);
+    assertEquals(beforeInvalid, invalidUser.snapshot());
+  }
+
   /** 独立完整两端载荷及查询替身，状态和输入对象均不在测试间共享。 */
   private static final class EvidenceFixture {
     /** 当前原execution金额与不可变身份。 */

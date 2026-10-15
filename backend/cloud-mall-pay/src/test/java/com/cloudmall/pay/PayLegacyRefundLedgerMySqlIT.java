@@ -4409,6 +4409,68 @@ class PayLegacyRefundLedgerMySqlIT {
     }
   }
 
+  /** CLAIMED零分支不能绕过有效域，被误分为普通UNKNOWN。 */
+  @Test
+  void claimedReceiptZeroBranchCannotBecomeUnknownEvidence() {
+    assertClaimedReceiptBranchRejected(0L, "CONFIRMED");
+  }
+
+  /** CLAIMED负分支是矛盾事实，不能触发后续UNKNOWN恢复路径。 */
+  @Test
+  void claimedReceiptNegativeBranchCannotBecomeUnknownEvidence() {
+    assertClaimedReceiptBranchRejected(-1L, "CONFIRMED");
+  }
+
+  /** User已完成/进行中/取消/缺状态均不能掩盖Pay CLAIMED非正分支。 */
+  @Test
+  void claimedReceiptEvidenceRejectsInvalidBranchAcrossUserStates() {
+    for (Long branch : List.of(0L, -1L, Long.MIN_VALUE))
+      for (String userState :
+          java.util.Arrays.asList("CONFIRMED", "TRY_ACCEPTED", "CANCELLED", null))
+        assertClaimedReceiptBranchRejected(branch, userState);
+  }
+
+  /** 合法CLAIMED的NULL/正分支保持UNKNOWN，不把存在Fence推断成资金结论。 */
+  @Test
+  void claimedReceiptEvidenceKeepsValidUnknownAndMissingReceipt() {
+    for (Long branch : java.util.Arrays.asList(null, 1L, Long.MAX_VALUE))
+      for (String userState :
+          java.util.Arrays.asList("CONFIRMED", "TRY_ACCEPTED", "CANCELLED", null)) {
+        var evidence = ownedFenceIdentityEvidence();
+        seedOwnedFenceEvidence("CLAIMED", 1, "t174-xid", 11L);
+        fixture.update("UPDATE pay_tcc_receipt SET branch_id=?", branch);
+        var before = ownedFenceFacts();
+        assertEquals("UNKNOWN", classifyOwnedFence(evidence, userState));
+        assertEquals(before, ownedFenceFacts());
+      }
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence("CLAIMED", 1, "t174-xid", 11L);
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    var before = ownedFenceFacts();
+    assertEquals("UNKNOWN", classifyOwnedFence(evidence, "CONFIRMED"));
+    assertEquals(before, ownedFenceFacts());
+  }
+
+  /** 真Mapper及只读RR事务，不返回坏分支的UNKNOWN，不改变任何相关表。 */
+  private void assertClaimedReceiptBranchRejected(Long branch, String userState) {
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence("CLAIMED", 1, "t174-xid", 11L);
+    fixture.update("UPDATE pay_tcc_receipt SET branch_id=?", branch);
+    var before = ownedFenceFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(classifyOwnedFence(evidence, userState)));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, ownedFenceFacts()));
+  }
+
   /** 原execution/receipt/Fence表只在owned克隆，通过实际Mapper同RR快照读取。 */
   private com.cloudmall.pay.service.impl.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
     ownedExecutionObservationStore();

@@ -2614,3 +2614,9 @@ Fence缺失时的原终态核验、合法空回滚和owner规则保持。本批�
 独立读取receipt与准备流程使用同一状态/分支规则：仅允许CLAIMED、TRYING、CONFIRMED、CANCELLED，非空分支号必须为正数，后三种状态必须已有分支。坏证据返回409；CLAIMED允许空或正分支，缺失记录返回404。
 
 原支付号别名仍由Store先行拒绝。该读取只提供本地receipt视图，完整载荷、资金因果及读后事实稳定性仍需后续验证。
+
+### CM-18 CLAIMED receipt的恢复分类（16T206）
+
+恢复分类先校验receipt状态与分支，再处理CLAIMED。零或负分支号返回原409，恢复入口停止其后的execution观察写和TC重试；合法CLAIMED的空或正分支仍分类为UNKNOWN，且不读取Fence。
+
+CLAIMED本身不能证明分支未登记或资金结果。分类前的Bridge恢复沿原流程执行；合法UNKNOWN在已有决议下仍可重试TC。原载荷校验、缺失receipt的UNKNOWN和后续Fence、User及终态规则保持。
