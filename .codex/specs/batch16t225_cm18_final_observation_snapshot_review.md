@@ -6,28 +6,31 @@
 
 ## 2. 最小末次观察改动
 
-Store 提取 snapshot observation 内核：
+本批**完全不修改 `PayTccExecutionStore`**，不新增 Store API、SQL 或观察写入口。仅在 Coordinator 内提取同类私有内核：
 
-- 保留旧 `observe(payNo,state,error)`：先 `read(payNo)`，再委托 `observe(PayTccExecutionPO expected,...)` 内核，维持缺404/terminal/NULL prebegin/Bridge/Biz/Runtime诊断规则；
-- `observeSnapshot(expected,...)` 继续复用 Pay→execution/域/8anchor/source/merge 门；
-- 新 `verifyDecisionSnapshot(expected)` 后，execute 的 `sendDecision` 使用决议返回的原 owned PO；TC 返回后末次改为 `observeSnapshot(verifyDecisionSnapshot(owned),...)`；recover 同理以当前 snapshot 复核后末次观察。
+- 原私有 `observe(String payNo)` 改为 `return observe(executions.read(payNo))`；
+- 新私有 `observe(PayTccExecutionPO execution)` 保留原 terminal、NULL prebegin、Bridge/Evidence、BizException/Runtime 诊断逻辑，Bridge 参数使用 `execution.payNo`；
+- execute 使用 `owned = executions.decideOwned(owned, xid, decision)`，`sendDecision(owned)`；TC 返回后执行 `VO.from(observe(executions.verifyDecisionSnapshot(owned)))`；
+- recover 使用 `VO.from(observe(executions.verifyDecisionSnapshot(current)))`。
 
-末次门不从 payNo 新 read 获 owner，不持本地锁发 RPC；冲突沿 T220/T224 传播，execute finally 保持。合法 mutable 进度、同向终态、NONE/普通 begin failure 仍按原流程；不撤回已发 TC/Bridge。
+因此末次仍经过原 Coordinator 的 Bridge/Evidence 观察流程；`verifyDecisionSnapshot` 只在该流程前复核原 snapshot，不直接调用 Store `observeSnapshot` 替代 Bridge/Evidence。末次门不从 payNo 新 read 获取 owner，不持本地锁发 RPC；冲突沿 T220/T224 传播，execute finally 保持。合法 mutable 进度、同向终态、NONE/普通 begin failure 仍按原流程；不撤回已发 TC/Bridge。Store 旧 `observe(payNo,state,error)` 的 locked+merge 实现保持不动。
 
 ## 3. 验收矩阵
 
 ### 3.1 Owned native
 
 - 使用 actual Coordinator/Store/Mapper/owned execution/Pay/Intent 与本地事务代理；TC/Bridge/Evidence/receipt 为 mock，不启动 App、TC/RM、新监听。
-- execute/recover × 两方向 × 8 identity/source drift，peer 在 TC 成功返回后、末次观察前替换 execution/Pay；修复后 gate 409、无 VO/末次按 payNo read/Bridge/Evidence/observe 写，peer 三表事实不变，已发 TC 计数如实保留。
-- 覆盖反向/NONE、最新同向终态、普通 UNKNOWN/进度与 NULL/SQL 门；合法 anchor 允许末次只读。测试 manifest 只包含本批及 T217–T224 的实际 Coordinator/观察方法，不能把无关 Legacy/租约 SQL 矩阵计入本批 native 数量。
+- execute/recover × 两方向 × 8 identity/source drift=32，peer 在 TC 成功返回后、末次观察前替换 execution/Pay；修复后 gate 409、无 VO/末次按 payNo read/Bridge/Evidence/observe 写，peer 三表事实不变，已发 TC 计数如实保留。
+- 覆盖反向/NONE 8组、最新三终态12组、mutable进度4组（每组 `recoveryAttempts=9`、Pay.status=`SUCCESS`）；合法 anchor 允许末次只读。T224 terminal 控制的末次 payNo read 预期改为空列表。测试 manifest 精确包含本批4项、T217–T224各4项32项与2项 prebegin=38项，仅计实际 Coordinator/观察方法，不包含无关 Legacy/租约 SQL 矩阵。
 - 本地 peer 事务交错不证明真实 TC、远端并发、资金 source 或完整 fencing；不持锁调用 RPC，不撤回已发动作。
 
 ### 3.2 Unit
 
-- Store/Coordinator mock 适配 T220–T224，断言末次使用原 owned PO、无新的 payNo owner read，冲突时无末次 observation/readback，finally unbind。
+- Store/Coordinator mock 适配 T220–T224；Recovery 8组（入口/方向×拒绝末次/终态），Execute 3组普通 begin/bind/decide 阶段，断言末次使用原 owned PO、无新的 payNo owner read，冲突时无末次 observation/readback，finally unbind。完整定向专项为29类/38 native方法，不冒称全仓 native 总数。
 - 保留旧 observe、verifyDecisionSnapshot、sendDecision 的冲突/异常/terminal/NONE 矩阵；不扩状态机、API 或 SQL 组合。
 
 ## 4. 明确边界
 
 本批只保护 final observation 前的本地 snapshot 身份，不保护 gate→RPC、RPC→回写之外的全部窗口，不改变 TC client、决议算法、历史数据、Store 其它入口或外部 API，不宣称 TC/远端资金/全流程 fencing 闭环。
+
+首次预检中 fixture 诊断重复计数导致的一次失败必须与业务失败分开归档；修正后再执行完整定向专项，结果未出前不宣称通过。
