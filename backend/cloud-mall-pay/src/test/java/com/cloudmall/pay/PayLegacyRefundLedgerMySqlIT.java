@@ -4471,6 +4471,97 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertEquals(before, ownedFenceFacts()));
   }
 
+  /** 相等的零金额不能因两端已CONFIRMED被分类为COMMITTED。 */
+  @Test
+  void zeroExecutionMoneyCannotProduceCommittedEvidence() {
+    assertNonPositiveExecutionMoneyRejected(BigDecimal.ZERO, "CONFIRMED", false);
+  }
+
+  /** 相等的负金额不能因两端已CANCELLED被分类为ROLLEDBACK。 */
+  @Test
+  void negativeExecutionMoneyCannotProduceRolledBackEvidence() {
+    assertNonPositiveExecutionMoneyRejected(new BigDecimal("-0.01"), "CANCELLED", false);
+  }
+
+  /** 四种receipt状态及receipt缺失都不能掩盖execution非正金额。 */
+  @Test
+  void nonPositiveExecutionMoneyRejectsAllStateAndMissingControls() {
+    for (BigDecimal amount :
+        List.of(BigDecimal.ZERO, new BigDecimal("-0.01"), new BigDecimal("-10.00"))) {
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED"))
+        assertNonPositiveExecutionMoneyRejected(amount, payState, false);
+      assertNonPositiveExecutionMoneyRejected(amount, "CONFIRMED", true);
+    }
+  }
+
+  /** 正金额的原状态映射、数据库可存上下界与缺失UNKNOWN保持，不规范化输入。 */
+  @Test
+  void positiveExecutionMoneyKeepsExistingStateConclusions() {
+    for (BigDecimal amount :
+        List.of(
+            new BigDecimal("0.01"), new BigDecimal("10.00"), new BigDecimal("9999999999999999.99")))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED")) {
+        var evidence = ownedFenceIdentityEvidence();
+        seedOwnedFenceEvidence(
+            payState,
+            payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1,
+            "t174-xid",
+            11L);
+        fixture.update("UPDATE pay_tcc_execution SET amount=?", amount);
+        fixture.update("UPDATE pay_tcc_receipt SET amount=?", amount);
+        String userState =
+            payState.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+        String expected =
+            payState.equals("CONFIRMED")
+                ? "COMMITTED"
+                : payState.equals("CANCELLED")
+                    ? "ROLLEDBACK"
+                    : payState.equals("TRYING") ? "TRYING" : "UNKNOWN";
+        var before = ownedFenceFacts();
+        assertEquals(expected, classifyOwnedFence(evidence, userState));
+        assertEquals(before, ownedFenceFacts());
+      }
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence("CONFIRMED", 2, "t174-xid", 11L);
+    fixture.update("DELETE FROM pay_tcc_receipt");
+    var before = ownedFenceFacts();
+    assertEquals("UNKNOWN", classifyOwnedFence(evidence, "CONFIRMED"));
+    assertEquals(before, ownedFenceFacts());
+  }
+
+  /** 仅owned execution/receipt一致变异，User镜像取同一金额，原Pay/Intent不改。 */
+  private void assertNonPositiveExecutionMoneyRejected(
+      BigDecimal amount, String payState, boolean missingReceipt) {
+    var evidence = ownedFenceIdentityEvidence();
+    seedOwnedFenceEvidence(
+        payState,
+        payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1,
+        "t174-xid",
+        11L);
+    fixture.update("UPDATE pay_tcc_execution SET amount=?", amount);
+    fixture.update("UPDATE pay_tcc_receipt SET amount=?", amount);
+    if (missingReceipt) fixture.update("DELETE FROM pay_tcc_receipt");
+    String userState =
+        payState.equals("TRYING")
+            ? "TRY_ACCEPTED"
+            : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+    var before = ownedFenceFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<String>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(classifyOwnedFence(evidence, userState)));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, ownedFenceFacts()));
+  }
+
   /** 原execution/receipt/Fence表只在owned克隆，通过实际Mapper同RR快照读取。 */
   private com.cloudmall.pay.service.impl.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
     ownedExecutionObservationStore();

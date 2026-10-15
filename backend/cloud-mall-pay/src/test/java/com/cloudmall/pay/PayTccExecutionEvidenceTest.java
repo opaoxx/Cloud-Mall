@@ -498,6 +498,112 @@ class PayTccExecutionEvidenceTest {
     assertEquals(beforeInvalid, invalidUser.snapshot());
   }
 
+  /** 相等非正金额与缺端不能产生资金或UNKNOWN结论，必须在查询前拒绝。 */
+  @Test
+  void nonPositiveMoneyCannotProduceEvidenceEvenWithMissingSides() {
+    for (BigDecimal amount :
+        List.of(BigDecimal.ZERO, new BigDecimal("-0.01"), new BigDecimal("-10.00")))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED"))
+        for (boolean missingSides : List.of(false, true)) {
+          var fixture = new EvidenceFixture();
+          fixture.execution.amount = amount;
+          fixture.pay.amount = amount;
+          fixture.user.amount = amount.toPlainString();
+          fixture.pay.state = payState;
+          fixture.user.state =
+              payState.equals("TRYING")
+                  ? "TRY_ACCEPTED"
+                  : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+          fixture.fence.status =
+              payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1;
+          if (missingSides) {
+            fixture.user = null;
+            when(fixture.receipts.selectByPayNo(any())).thenReturn(null);
+          }
+          var before = fixture.snapshot();
+          var failure =
+              assertThrows(
+                  BizException.class,
+                  () -> fixture.evidence.classify(fixture.execution, fixture.user));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+          verifyNoInteractions(fixture.receipts, fixture.fences);
+          assertEquals(before, fixture.snapshot());
+        }
+  }
+
+  /** 恢复入口不能把非正金额写为终态或UNKNOWN，也不能继续既有TC决议。 */
+  @Test
+  void coordinatorStopsNonPositiveMoneyBeforeObservationAndTc() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (BigDecimal amount : List.of(BigDecimal.ZERO, new BigDecimal("-0.01"))) {
+        var fixture = new EvidenceFixture();
+        fixture.execution.amount = amount;
+        fixture.pay.amount = amount;
+        fixture.user.amount = amount.toPlainString();
+        fixture.execution.decision = decision;
+        var store = mock(PayTccExecutionStore.class);
+        var bridge = mock(PayTccBridgeService.class);
+        var receiptService = mock(PayTccReceiptService.class);
+        var transactions = mock(PayTccTransactionClient.class);
+        when(store.read("pay-evidence-1")).thenReturn(fixture.execution);
+        when(store.observe(any(), any(), any())).thenReturn(fixture.execution);
+        when(bridge.recover("pay-evidence-1")).thenReturn(fixture.user);
+        var coordinator =
+            new PayTccCoordinatorServiceImpl(
+                store, receiptService, bridge, fixture.evidence, transactions);
+        var before = fixture.snapshot();
+        var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-evidence-1"));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        verify(store, never()).observe(any(), any(), any());
+        verifyNoInteractions(transactions, receiptService, fixture.receipts, fixture.fences);
+        assertEquals(before, fixture.snapshot());
+      }
+  }
+
+  /** 正金额及数值等价保留原状态映射，缺失一端仍按原语义UNKNOWN。 */
+  @Test
+  void positiveMoneyKeepsEquivalentTextAndMissingSideSemantics() {
+    for (BigDecimal amount :
+        List.of(
+            new BigDecimal("0.01"),
+            new BigDecimal("10.000"),
+            new BigDecimal("9999999999999999.99")))
+      for (String payState : List.of("CONFIRMED", "CANCELLED", "TRYING", "CLAIMED")) {
+        var fixture = new EvidenceFixture();
+        fixture.execution.amount = amount;
+        fixture.pay.amount =
+            amount.compareTo(BigDecimal.TEN) == 0 ? new BigDecimal("10.00") : amount;
+        fixture.user.amount =
+            amount.compareTo(BigDecimal.TEN) == 0 ? "1E+1" : amount.toPlainString();
+        fixture.pay.state = payState;
+        fixture.user.state =
+            payState.equals("TRYING")
+                ? "TRY_ACCEPTED"
+                : payState.equals("CLAIMED") ? "CONFIRMED" : payState;
+        fixture.fence.status =
+            payState.equals("CONFIRMED") ? 2 : payState.equals("CANCELLED") ? 3 : 1;
+        String expected =
+            payState.equals("CONFIRMED")
+                ? "COMMITTED"
+                : payState.equals("CANCELLED")
+                    ? "ROLLEDBACK"
+                    : payState.equals("TRYING") ? "TRYING" : "UNKNOWN";
+        var before = fixture.snapshot();
+        assertEquals(expected, fixture.evidence.classify(fixture.execution, fixture.user));
+        assertEquals(before, fixture.snapshot());
+      }
+    for (boolean missingUser : List.of(false, true)) {
+      var fixture = new EvidenceFixture();
+      if (missingUser) fixture.user = null;
+      else when(fixture.receipts.selectByPayNo(any())).thenReturn(null);
+      var before = fixture.snapshot();
+      assertEquals("UNKNOWN", fixture.evidence.classify(fixture.execution, fixture.user));
+      assertEquals(before, fixture.snapshot());
+    }
+  }
+
   /** 独立完整两端载荷及查询替身，状态和输入对象均不在测试间共享。 */
   private static final class EvidenceFixture {
     /** 当前原execution金额与不可变身份。 */

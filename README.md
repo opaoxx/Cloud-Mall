@@ -2620,3 +2620,9 @@ Fence缺失时的原终态核验、合法空回滚和owner规则保持。本批�
 恢复分类先校验receipt状态与分支，再处理CLAIMED。零或负分支号返回原409，恢复入口停止其后的execution观察写和TC重试；合法CLAIMED的空或正分支仍分类为UNKNOWN，且不读取Fence。
 
 CLAIMED本身不能证明分支未登记或资金结果。分类前的Bridge恢复沿原流程执行；合法UNKNOWN在已有决议下仍可重试TC。原载荷校验、缺失receipt的UNKNOWN和后续Fence、User及终态规则保持。
+
+### CM-18 execution恢复证据的正金额（16T207）
+
+恢复分类入口要求execution金额为正；即使receipt与User镜像金额一致，零或负金额也返回原409，恢复入口停止其后的execution观察写和TC重试。合法正金额的数值等价规则和缺失一端的UNKNOWN保持。
+
+分类前的Bridge恢复仍沿原流程执行。该门只校验本地金额有效性，原Pay来源、真实User资金及TC链路仍需后续验证。
