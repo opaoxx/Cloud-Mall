@@ -6099,6 +6099,306 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** 恢复Bridge回包留下foreign RootContext，不能写观察/发TC并污染线程。 */
+  @Test
+  void recoveryBridgeContextCannotAuthorizeObservation() throws Exception {
+    assertRecoveryContext("recover", "COMMIT", "bridge", "foreign", true);
+  }
+
+  /** 发送前本地校验返回留下foreign context，恢复不能继续发TC。 */
+  @Test
+  void recoveryPreflightContextCannotAuthorizeTc() throws Exception {
+    assertRecoveryContext("recover", "ROLLBACK", "preflight", "foreign", true);
+  }
+
+  /** 无全局事务恢复与持原事务执行分别核caller context，异常与终态也清理本次污染。 */
+  @Test
+  void recoveryContextDriftStopsAndCleansOwnedThread() throws Exception {
+    for (String decision : List.of("COMMIT", "ROLLBACK")) {
+      for (String phase :
+          List.of(
+              "read",
+              "cached",
+              "bridge",
+              "evidence",
+              "bridge-error",
+              "evidence-error",
+              "observation",
+              "preflight",
+              "preflight-terminal",
+              "tc",
+              "tc-error",
+              "tc-diagnostic",
+              "final-verify"))
+        for (String replacement : List.of("foreign", "owned"))
+          assertRecoveryContext("recover", decision, phase, replacement, true);
+      for (String phase :
+          List.of(
+              "preflight", "preflight-terminal", "tc", "tc-error", "tc-diagnostic", "final-verify"))
+        for (String replacement :
+            phase.equals("final-verify")
+                ? List.of("foreign", "owned")
+                : List.of("foreign", "clear"))
+          assertRecoveryContext("execute", decision, phase, replacement, true);
+    }
+  }
+
+  /** 正常caller context、原业务冲突及入口ambient归属保持。 */
+  @Test
+  void recoveryContextKeepsEmptyFlowAndAmbientCaller() throws Exception {
+    for (String decision : List.of("COMMIT", "ROLLBACK")) {
+      for (String phase :
+          List.of(
+              "read",
+              "cached",
+              "bridge",
+              "evidence",
+              "bridge-error",
+              "evidence-error",
+              "observation",
+              "preflight",
+              "preflight-terminal",
+              "tc",
+              "tc-error",
+              "tc-diagnostic",
+              "final-verify")) assertRecoveryContext("recover", decision, phase, "same", false);
+      for (String phase :
+          List.of(
+              "preflight", "preflight-terminal", "tc", "tc-error", "tc-diagnostic", "final-verify"))
+        assertRecoveryContext("execute", decision, phase, "same", false);
+      for (String replacement : List.of("foreign", "owned"))
+        assertRecoveryContext("recover", decision, "bridge-conflict", replacement, true);
+    }
+    var store = proxiedExecutionObservationStore();
+    prepareOwnedClaimReplay("COMMIT_REQUESTED", "COMMIT", "t228-original-xid", "PENDING");
+    var before = executionReadFacts();
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receipts, bridge, evidence, transactions);
+    for (String ambient : List.of("caller-xid", "another-caller-xid")) {
+      io.seata.core.context.RootContext.bind(ambient);
+      try {
+        var failure =
+            org.junit.jupiter.api.Assertions.assertThrows(
+                com.cloudmall.common.error.BizException.class, () -> coordinator.recover("pay-1"));
+        assertEquals("PAY_TCC_CONTEXT_INVALID", failure.getCode());
+        assertEquals(ambient, io.seata.core.context.RootContext.getXID());
+        assertEquals(before, executionReadFacts());
+        org.mockito.Mockito.verifyNoInteractions(transactions, bridge, receipts, evidence);
+      } finally {
+        io.seata.core.context.RootContext.unbind();
+      }
+    }
+  }
+
+  /** actual Store本地事务与RootContext受控注入；TC/资金只按调用计数，不冒称真实结果。 */
+  private void assertRecoveryContext(
+      String entry, String decision, String phase, String replacement, boolean reject)
+      throws Exception {
+    String terminal = decision.equals("COMMIT") ? "COMMITTED" : "ROLLEDBACK";
+    var target = ownedExecutionObservationStore();
+    var request =
+        prepareOwnedClaimReplay(
+            entry.equals("execute")
+                ? "CLAIMED"
+                : phase.equals("cached") ? terminal : decision + "_REQUESTED",
+            entry.equals("execute") ? "NONE" : decision,
+            entry.equals("execute") ? null : "t228-original-xid",
+            "PENDING");
+    if (entry.equals("execute")) fixture.update("DELETE FROM pay_tcc_execution");
+    var contextFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var afterContext = new java.util.ArrayList<String>();
+    var sent = new java.util.concurrent.atomic.AtomicBoolean();
+    var verifications = new java.util.concurrent.atomic.AtomicInteger();
+    org.junit.jupiter.api.function.Executable changeContext =
+        () -> {
+          org.junit.jupiter.api.Assertions.assertFalse(
+              org.springframework.transaction.support.TransactionSynchronizationManager
+                  .isActualTransactionActive());
+          String context =
+              replacement.equals("foreign")
+                  ? "t228-foreign-xid"
+                  : replacement.equals("owned")
+                          || replacement.equals("same")
+                              && entry.equals("execute")
+                              && !phase.equals("final-verify")
+                      ? "t228-original-xid"
+                      : null;
+          if (context == null) io.seata.core.context.RootContext.unbind();
+          else io.seata.core.context.RootContext.bind(context);
+          contextFacts.set(executionReadFacts());
+        };
+    var transactional = proxyExecutionObservationStore(target);
+    var handoff = new org.springframework.aop.framework.ProxyFactory(transactional);
+    handoff.setProxyTargetClass(true);
+    handoff.addAdvice(
+        (org.aopalliance.intercept.MethodInterceptor)
+            invocation -> {
+              String method = invocation.getMethod().getName();
+              if (contextFacts.get() != null
+                  && List.of(
+                          "read",
+                          "verifyDecisionSnapshot",
+                          "observeSnapshot",
+                          "observeDecidedSnapshot",
+                          "decideOwned")
+                      .contains(method)) afterContext.add("store." + method);
+              int verification =
+                  method.equals("verifyDecisionSnapshot") ? verifications.incrementAndGet() : 0;
+              if (phase.equals("preflight-terminal") && verification == 1)
+                fixture.update("UPDATE pay_tcc_execution SET state=?", terminal);
+              var result = invocation.proceed();
+              boolean checkpoint =
+                  (phase.equals("read") || phase.equals("cached")) && method.equals("read")
+                      || phase.equals("observation")
+                          && method.equals("observeDecidedSnapshot")
+                          && !sent.get()
+                      || (phase.equals("preflight") || phase.equals("preflight-terminal"))
+                          && verification == 1
+                      || phase.equals("final-verify") && verification == 2
+                      || phase.equals("tc-diagnostic")
+                          && method.equals("observeDecidedSnapshot")
+                          && sent.get();
+              if (checkpoint && contextFacts.get() == null) changeContext.execute();
+              return result;
+            });
+    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
+    var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var originalConflict =
+        new com.cloudmall.common.error.BizException(
+            "USER_TCC_RECEIVE_CONFLICT", "original read conflict", 422);
+    when(transactions.begin())
+        .thenAnswer(
+            invocation -> {
+              io.seata.core.context.RootContext.bind("t228-original-xid");
+              return "t228-original-xid";
+            });
+    org.mockito.stubbing.Answer<Void> response =
+        invocation -> {
+          if (contextFacts.get() != null)
+            afterContext.add(
+                "tc."
+                    + invocation.getMethod().getName()
+                    + ":"
+                    + io.seata.core.context.RootContext.getXID());
+          sent.set(true);
+          if ((phase.equals("tc") || phase.equals("tc-error")) && contextFacts.get() == null)
+            changeContext.execute();
+          if (phase.equals("tc-error") || phase.equals("tc-diagnostic"))
+            throw new Exception("TC response lost");
+          return null;
+        };
+    if (decision.equals("COMMIT"))
+      org.mockito.Mockito.doAnswer(response).when(transactions).commit("t228-original-xid");
+    else org.mockito.Mockito.doAnswer(response).when(transactions).rollback("t228-original-xid");
+    var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+    receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    when(receipts.prepare(request)).thenReturn(receipt);
+    when(bridge.dispatch(request)).thenReturn(user);
+    when(bridge.recover(request.payNo))
+        .thenAnswer(
+            invocation -> {
+              if (contextFacts.get() != null) afterContext.add("bridge.recover");
+              if (phase.startsWith("bridge") && contextFacts.get() == null) changeContext.execute();
+              if (phase.equals("bridge-conflict")) throw originalConflict;
+              if (phase.equals("bridge-error"))
+                throw new IllegalStateException("Bridge unavailable");
+              return user;
+            });
+    when(evidence.classify(any(), any()))
+        .thenAnswer(
+            invocation -> {
+              if (contextFacts.get() != null) afterContext.add("evidence.classify");
+              if (phase.startsWith("evidence") && contextFacts.get() == null)
+                changeContext.execute();
+              if (phase.equals("evidence-error"))
+                throw new IllegalStateException("evidence unavailable");
+              return "TRYING";
+            });
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receipts, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    boolean expectedRpc =
+        reject
+            ? List.of("tc", "tc-error", "tc-diagnostic", "final-verify").contains(phase)
+            : !List.of("cached", "preflight-terminal").contains(phase);
+    try {
+      org.junit.jupiter.api.Assertions.assertAll(
+          "entry="
+              + entry
+              + ",decision="
+              + decision
+              + ",phase="
+              + phase
+              + ",context="
+              + replacement,
+          () -> {
+            if (reject) {
+              var failure =
+                  org.junit.jupiter.api.Assertions.assertThrows(
+                      com.cloudmall.common.error.BizException.class,
+                      () ->
+                          returned.set(
+                              entry.equals("recover")
+                                  ? coordinator.recover(request.payNo)
+                                  : coordinator.execute(request)));
+              assertEquals(
+                  phase.equals("bridge-conflict")
+                      ? originalConflict.getCode()
+                      : "PAY_TCC_EXECUTION_CONFLICT",
+                  failure.getCode());
+              assertEquals(phase.equals("bridge-conflict") ? 422 : 409, failure.getHttpStatus());
+              if (phase.equals("bridge-conflict"))
+                org.junit.jupiter.api.Assertions.assertSame(originalConflict, failure);
+            } else {
+              returned.set(
+                  entry.equals("recover")
+                      ? coordinator.recover(request.payNo)
+                      : coordinator.execute(request));
+              assertEquals(
+                  List.of("cached", "preflight-terminal").contains(phase)
+                      ? terminal
+                      : decision + "_REQUESTED",
+                  returned.get().state);
+            }
+          },
+          () -> {
+            if (reject) assertNull(returned.get());
+          },
+          () -> {
+            assertNotNull(contextFacts.get());
+            if (reject) assertEquals(contextFacts.get(), executionReadFacts());
+            else assertEquals(contextFacts.get().subList(0, 2), executionReadFacts().subList(0, 2));
+          },
+          () -> {
+            if (reject) assertEquals(List.of(), afterContext);
+          },
+          () -> {
+            if (entry.equals("execute")) verify(transactions).begin();
+            if (expectedRpc) {
+              if (decision.equals("COMMIT")) verify(transactions).commit("t228-original-xid");
+              else verify(transactions).rollback("t228-original-xid");
+            }
+            org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+          },
+          () -> assertNull(io.seata.core.context.RootContext.getXID()));
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
   /** 绑定已提交后换成foreign上下文，旧线程不得开始receipt或User Try。 */
   @Test
   void changedContextAfterBindingCannotStartReceipt() throws Exception {

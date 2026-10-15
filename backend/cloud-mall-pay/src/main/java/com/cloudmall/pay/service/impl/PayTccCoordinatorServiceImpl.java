@@ -82,7 +82,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
       owned = executions.decideOwned(owned, xid, decision);
       requireOwnedContext(xid);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
-      sendDecision(owned);
+      sendDecision(owned, xid);
     } catch (Exception beginOrPersistenceFailure) {
       rethrowConflict(beginOrPersistenceFailure);
       recordObservation(owned, "UNKNOWN", beginOrPersistenceFailure.getClass().getSimpleName());
@@ -97,14 +97,19 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
   @Override
   public PayTccExecutionVO recover(String payNo) {
     requireNoContext();
-    // 1. 先核对持久事实；两个终态齐全时无需 TC 历史状态。
-    PayTccExecutionPO current = observe(payNo);
-    if (PayTccExecutionStore.terminal(current.state)
-        || current.xid == null
-        || "NONE".equals(current.decision)) return PayTccExecutionVO.from(current);
-    // 2. 同向 RPC 可重复，绝不重新 begin 或执行任何 Try。
-    sendDecision(current);
-    return PayTccExecutionVO.from(observe(executions.verifyDecisionSnapshot(current)));
+    try {
+      // 1. 先核对持久事实；两个终态齐全时无需 TC 历史状态。
+      PayTccExecutionPO current = observe(payNo);
+      if (PayTccExecutionStore.terminal(current.state)
+          || current.xid == null
+          || "NONE".equals(current.decision)) return PayTccExecutionVO.from(current);
+      // 2. 恢复始终无全局上下文；同向RPC不获得新begin或Try权限。
+      sendDecision(current, null);
+      return PayTccExecutionVO.from(observe(executions.verifyDecisionSnapshot(current)));
+    } finally {
+      // 3. 入口已拒绝caller context，只清理本次恢复内依赖遗留的绑定。
+      RootContext.unbind();
+    }
   }
 
   /** 明确的业务冲突原样传播；其它异常保留原未知/回滚流程，不按HTTP状态猜测冲突。 */
@@ -117,15 +122,18 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
   }
 
   /** 发送前复核原决议快照；RPC失败诊断仍关联原快照，不推断资金终态。 */
-  private void sendDecision(PayTccExecutionPO execution) {
+  private void sendDecision(PayTccExecutionPO execution, String expectedXid) {
     PayTccExecutionPO current = executions.verifyDecisionSnapshot(execution);
+    requireExpectedContext(expectedXid);
     if (PayTccExecutionStore.terminal(current.state)) return;
     try {
       if ("COMMIT".equals(execution.decision)) transactions.commit(execution.xid);
       else if ("ROLLBACK".equals(execution.decision)) transactions.rollback(execution.xid);
     } catch (Exception decisionResponseLost) {
+      requireExpectedContext(expectedXid);
       recordObservation(execution, "UNKNOWN", decisionResponseLost.getClass().getSimpleName());
     }
+    requireExpectedContext(expectedXid);
   }
 
   /** 读关联结果锁内核对原执行快照，网络未知不覆盖已替换的 execution。 */
@@ -135,18 +143,38 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
 
   /** 原观察内核只消费调用方已核对的快照；不按支付号重新取得其它owner。 */
   private PayTccExecutionPO observe(PayTccExecutionPO execution) {
-    if (PayTccExecutionStore.terminal(execution.state)) return execution;
-    if (execution.xid == null) return recordObservation(execution, "UNKNOWN", "begin XID 尚无持久证据");
     try {
-      PayTccDispatchVO user = bridge.recover(execution.payNo);
-      String state = evidence.classify(execution, user);
-      return recordObservation(execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
-    } catch (BizException failure) {
-      rethrowConflict(failure);
-      return recordObservation(execution, "UNKNOWN", failure.getCode());
-    } catch (RuntimeException unavailable) {
-      return recordObservation(execution, "UNKNOWN", unavailable.getClass().getSimpleName());
+      requireExpectedContext(null);
+      if (PayTccExecutionStore.terminal(execution.state)) return execution;
+      if (execution.xid == null)
+        return recordUnboundObservation(execution, "UNKNOWN", "begin XID 尚无持久证据");
+      try {
+        PayTccDispatchVO user = bridge.recover(execution.payNo);
+        requireExpectedContext(null);
+        String state = evidence.classify(execution, user);
+        requireExpectedContext(null);
+        return recordUnboundObservation(
+            execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
+      } catch (BizException failure) {
+        rethrowConflict(failure);
+        return recordUnboundObservation(execution, "UNKNOWN", failure.getCode());
+      } catch (RuntimeException unavailable) {
+        return recordUnboundObservation(
+            execution, "UNKNOWN", unavailable.getClass().getSimpleName());
+      }
+    } finally {
+      // 只读观察由无context入口调用，清理回包或metadata返回时遗留的绑定。
+      RootContext.unbind();
     }
+  }
+
+  /** 无全局上下文的观察在写前后均核对，不把依赖遗留XID带出本次观察。 */
+  private PayTccExecutionPO recordUnboundObservation(
+      PayTccExecutionPO execution, String state, String error) {
+    requireExpectedContext(null);
+    PayTccExecutionPO observed = recordObservation(execution, state, error);
+    requireExpectedContext(null);
+    return observed;
   }
 
   /** NONE保留原进度合并，已决议快照在锁内核方向后才写观察。 */
@@ -155,6 +183,12 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     if ("NONE".equals(execution.decision))
       return executions.observeSnapshot(execution, state, error);
     return executions.observeDecidedSnapshot(execution, state, error);
+  }
+
+  /** 精确核caller期望上下文；NULL表示恢复/只读观察必须没有全局事务。 */
+  private void requireExpectedContext(String expectedXid) {
+    if (!Objects.equals(expectedXid, RootContext.getXID()))
+      throw new BizException("PAY_TCC_EXECUTION_CONFLICT", "Coordinator 调用XID上下文已变化", 409);
   }
 
   /** 初次线程只在原begin上下文仍匹配时继续，冲突不降级为普通失败诊断。 */

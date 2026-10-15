@@ -258,6 +258,184 @@ class PayTccRecoveryFailureTest {
         }
   }
 
+  /** 无全局事务的恢复不接受依赖留下的foreign或记录原XID，退出必须清理。 */
+  @Test
+  void recoveryRejectsLeakedContextAndCleansItsThread() throws Exception {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String phase :
+          List.of(
+              "read",
+              "cached",
+              "bridge",
+              "evidence",
+              "bridge-error",
+              "evidence-error",
+              "observation",
+              "preflight",
+              "preflight-terminal",
+              "tc",
+              "tc-error",
+              "tc-diagnostic",
+              "final-verify"))
+        for (String context : List.of("foreign-recovery-xid", "recovery-failure-xid")) {
+          var fixture =
+              new DecisionFixture("recover", decision, false, new Exception("overridden"));
+          var introduced = new java.util.concurrent.atomic.AtomicBoolean();
+          var sent = new java.util.concurrent.atomic.AtomicBoolean();
+          var gates = new java.util.concurrent.atomic.AtomicInteger();
+          var after = new java.util.ArrayList<String>();
+          Runnable changeContext =
+              () -> {
+                RootContext.bind(context);
+                introduced.set(true);
+              };
+          var terminal = execution("COMMITTED", decision);
+          when(fixture.store.read(fixture.request.payNo))
+              .thenAnswer(
+                  invocation -> {
+                    if (introduced.get()) after.add("read");
+                    if ((phase.equals("read") || phase.equals("cached")) && !introduced.get())
+                      changeContext.run();
+                    return phase.equals("cached") ? terminal : fixture.original;
+                  });
+          var user = new PayTccDispatchVO();
+          when(fixture.bridge.recover(fixture.request.payNo))
+              .thenAnswer(
+                  invocation -> {
+                    if (introduced.get()) after.add("bridge");
+                    if (phase.startsWith("bridge") && !introduced.get()) changeContext.run();
+                    if (phase.equals("bridge-error"))
+                      throw new IllegalStateException("Bridge unavailable");
+                    return user;
+                  });
+          when(fixture.evidence.classify(any(), any()))
+              .thenAnswer(
+                  invocation -> {
+                    if (introduced.get()) after.add("evidence");
+                    if (phase.startsWith("evidence") && !introduced.get()) changeContext.run();
+                    if (phase.equals("evidence-error"))
+                      throw new IllegalStateException("evidence unavailable");
+                    return "TRYING";
+                  });
+          org.mockito.stubbing.Answer<PayTccExecutionPO> observation =
+              invocation -> {
+                if (introduced.get()) after.add("observation");
+                if (!introduced.get()
+                    && (phase.equals("observation") && !sent.get()
+                        || phase.equals("tc-diagnostic") && sent.get())) changeContext.run();
+                return fixture.chosen;
+              };
+          when(fixture.store.observeSnapshot(any(), any(), any())).thenAnswer(observation);
+          when(fixture.store.observeDecidedSnapshot(any(), any(), any())).thenAnswer(observation);
+          when(fixture.store.verifyDecisionSnapshot(fixture.chosen))
+              .thenAnswer(
+                  invocation -> {
+                    if (introduced.get()) after.add("gate");
+                    int call = gates.incrementAndGet();
+                    if (!introduced.get()
+                        && ((phase.equals("preflight") || phase.equals("preflight-terminal"))
+                                && call == 1
+                            || phase.equals("final-verify") && call == 2)) changeContext.run();
+                    return phase.equals("preflight-terminal") ? terminal : fixture.chosen;
+                  });
+          org.mockito.stubbing.Answer<Void> response =
+              invocation -> {
+                if (introduced.get()) after.add("tc");
+                sent.set(true);
+                if ((phase.equals("tc") || phase.equals("tc-error")) && !introduced.get())
+                  changeContext.run();
+                if (phase.equals("tc-error") || phase.equals("tc-diagnostic"))
+                  throw new Exception("TC response lost");
+                return null;
+              };
+          if (decision.equals("COMMIT"))
+            org.mockito.Mockito.doAnswer(response)
+                .when(fixture.transactions)
+                .commit(fixture.original.xid);
+          else
+            org.mockito.Mockito.doAnswer(response)
+                .when(fixture.transactions)
+                .rollback(fixture.original.xid);
+          try {
+            var failure = assertThrows(BizException.class, fixture::call);
+            assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+            assertEquals(409, failure.getHttpStatus());
+            org.junit.jupiter.api.Assertions.assertTrue(introduced.get());
+            assertEquals(List.of(), after);
+            if (List.of("tc", "tc-error", "tc-diagnostic", "final-verify").contains(phase)) {
+              if (decision.equals("COMMIT"))
+                verify(fixture.transactions).commit(fixture.original.xid);
+              else verify(fixture.transactions).rollback(fixture.original.xid);
+            }
+            verifyNoMoreInteractions(fixture.transactions);
+            verifyNoInteractions(fixture.receipts);
+            assertNull(RootContext.getXID());
+          } finally {
+            RootContext.unbind();
+          }
+        }
+  }
+
+  /** 原caller上下文/本地事务拒绝后保持，内部业务冲突仍原样传播并清污染。 */
+  @Test
+  void recoveryPreservesAmbientCallerAndExplicitConflictPriority() throws Exception {
+    var fixture = new DecisionFixture("recover", "COMMIT", false, new Exception("must not send"));
+    for (String ambient : List.of("caller-xid", "another-caller-xid")) {
+      RootContext.bind(ambient);
+      try {
+        var failure = assertThrows(BizException.class, fixture::call);
+        assertEquals("PAY_TCC_CONTEXT_INVALID", failure.getCode());
+        assertEquals(ambient, RootContext.getXID());
+        verifyNoInteractions(
+            fixture.store,
+            fixture.receipts,
+            fixture.bridge,
+            fixture.evidence,
+            fixture.transactions);
+      } finally {
+        RootContext.unbind();
+      }
+    }
+    boolean previous =
+        org.springframework.transaction.support.TransactionSynchronizationManager
+            .isActualTransactionActive();
+    org.springframework.transaction.support.TransactionSynchronizationManager
+        .setActualTransactionActive(true);
+    try {
+      assertEquals(
+          "PAY_TCC_CONTEXT_INVALID", assertThrows(BizException.class, fixture::call).getCode());
+      org.junit.jupiter.api.Assertions.assertTrue(
+          org.springframework.transaction.support.TransactionSynchronizationManager
+              .isActualTransactionActive());
+      verifyNoInteractions(
+          fixture.store, fixture.receipts, fixture.bridge, fixture.evidence, fixture.transactions);
+    } finally {
+      org.springframework.transaction.support.TransactionSynchronizationManager
+          .setActualTransactionActive(previous);
+    }
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String context : List.of("foreign-recovery-xid", "recovery-failure-xid")) {
+        var conflictFixture =
+            new DecisionFixture("recover", decision, false, new Exception("must not send"));
+        var original = new BizException("USER_TCC_RECEIVE_CONFLICT", "original read conflict", 422);
+        when(conflictFixture.bridge.recover(conflictFixture.request.payNo))
+            .thenAnswer(
+                invocation -> {
+                  RootContext.bind(context);
+                  throw original;
+                });
+        try {
+          assertSame(original, assertThrows(BizException.class, conflictFixture::call));
+          assertNull(RootContext.getXID());
+          verify(conflictFixture.store, never()).observeSnapshot(any(), any(), any());
+          verify(conflictFixture.store, never()).observeDecidedSnapshot(any(), any(), any());
+          verifyNoInteractions(conflictFixture.transactions);
+        } finally {
+          RootContext.unbind();
+        }
+      }
+  }
+
   /** 完整原执行载荷，用独立对象区分read结果与观察返回的已决议chosen。 */
   private static PayTccExecutionPO execution(String state, String decision) {
     var execution = new PayTccExecutionPO();
