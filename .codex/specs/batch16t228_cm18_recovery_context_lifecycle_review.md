@@ -26,7 +26,7 @@ T227 的 owned context 检查保持；不持锁调用 RPC，不改变 Store/SQL/
 
 - 使用 actual Coordinator/Store/Mapper/owned execution/Pay/Intent 与 Spring 本地 proxy；Bridge/Evidence/TC/receipt 为受控依赖，不启动 App、TC/RM、新监听。
 - 两 red：Bridge 返回 foreign、recover send preflight 前 context drift；旧流程无409/返回 VO/污染 metadata/TC 在 foreign context 调用。修复后拒绝后续并清理本入口 context，已发生 begin/TC/metadata 计数如实保持。
-- 覆盖 recover 13阶段 × 两方向 × foreign/owned=52；execute 共用 send/末次观察6阶段 × 两方向 × foreign/clear=24。另有正常 context recover26、execute12=38控制，Bridge 明确 conflict4，入口真实 ambient2。recover 的 clear 组合不作为负例；NULL expected 仍是合法路径。
+- 覆盖 recover 13阶段 × 两方向 × foreign/owned=52；execute 前5个发送阶段 × foreign/clear=20，final verify 阶段 × foreign/owned=4，共24。final verify 位于原入口 finally 之后，same-context expected 为 NULL，不把 clear 当 drift 负例。另有正常 context recover26、execute12=38控制，Bridge 明确 conflict4，入口真实 ambient2。recover 的 clear 组合不作为负例；NULL expected 仍是合法路径。
 - context 变化由同线程 test advice/受控 callback 注入；native manifest 为 T227 46 + 本批4=50，逐名核 XML。本批只证明调用边界生命周期，不证明真实 Seata 故障、callee 内部、资金因果或完整 fencing。
 
 ### 3.2 Unit
@@ -36,6 +36,6 @@ T227 的 owned context 检查保持；不持锁调用 RPC，不改变 Store/SQL/
 
 ## 4. 明确边界
 
-本批不修改 Store、SQL、状态机、recover 数据、TC client、外部 API 或其它 ThreadLocal 代理；不撤回已发动作，不保护真实远端/TC 全窗口，不宣称完整资金/source/fencing。专项未完成前不得宣称闭环。
+本批不修改 Store、SQL、状态机、recover 数据、TC client、外部 API 或其它 ThreadLocal 代理；不撤回已发动作，不保护真实远端/TC 全窗口，不宣称完整资金/source/fencing。首轮2个失败均为 fixture 阶段所有权/expected-context 错配（final verify 在 finally 后、clear 合法、same 绑定原 XID应冲突），原日志/XML/counts 与初次 owned 清理证据保留；SDK 初次23方法/1失败的 blank-bind 证据同样单独归档。最终须核 red、focused-initial、focused 三个 owned 库的精确清理、指纹和池关闭。专项未完成前不得宣称闭环。
 
 execute 末次 `verifyDecisionSnapshot` 若在进入 observe 前直接抛出的外层 context 清理不由本批扩展；callee 内部、真实 TC、资金和 fencing 仍不在范围。
