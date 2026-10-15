@@ -24,7 +24,7 @@ null 任一身份字段均不匹配；不 trim、不大小写折叠、不改变 
 
 - 使用真实 Fence/Receipt Mapper、Store、BusinessCallback、LocalResource、DataSourceTransactionManager 与 owned schema；官方 TCCFenceHandler static datasource/transactionTemplate 保存并 finally 恢复。
 - 复用 16T201 的 scoped static 绑定和 cleanup；不启动项目业务服务、TC/RM、项目后台服务或新监听器。官方 JVM 初始化 daemon 如实记录，不冒称无任何线程，`LOG_QUEUE` 为空、static 前后相同。
-- red：首读 CI alias Fence（xid/branch/action匹配 context 的 action 但身份不同）不再让 rollback ACK；commit 已 CONFIRMED receipt 与 alias Fence 也不再成功 ACK，Pay/Intent/Dispatch/Receipt/Fence facts 不变。
+- red：首读真实 CI 大小写 alias Fence（xid/branch/action匹配 context 的 action 但身份不同）不再让 rollback ACK；commit 已 CONFIRMED receipt 与 alias Fence 也不再成功 ACK，Pay/Intent/Dispatch/Receipt/Fence facts 不变。尾空格在当前表 collation 下不作为 CI alias：实际 `findByBranch` 不命中时走既有 missing Fence 路径，不能强行按 alias mismatch 断言。
 - 健康精确 Fence4、missing Fence、原 CLAIMED/null empty-cancel、终态同方向和其它 direction 控制保持；owner T201 的 advanced 正 branch 规则不放宽。
 - 第二读用 Mapper `delegatesTo` wrapper 的受控返回对象覆盖 xid/branch/action 单字段变化及 NULL；声明这是异常 Mapper 返回边界，不是物理 DB 并发/TOCTOU fencing。五表 facts 与事务回滚断言保持。
 
