@@ -24,14 +24,14 @@ Fence status、count/findOwners 次数与顺序、其它 owner 语义、callback
 ### 3.1 Owned native
 
 - 在 owned schema 克隆 tcc_fence_log 与既有 Pay/Intent/Dispatch/Receipt 表，使用真实 Receipt/Fence Mapper、Store、BusinessCallback、LocalResource 和真实 DataSourceTransactionManager；绑定官方 TCCFenceHandler 的 static datasource/transactionTemplate 时，必须保存并 finally 恢复原 static 值，不启动 App/TC/RM/后台服务或监听器。
-- 旧 red：SUSPENDED Fence、当前 branch=7 无 receipt，owner branch=0/-1（同 xid）或 other xid 曾返回 true/ACK；修复后返回 false，Pay/Intent/Dispatch/Receipt/Fence 五表 facts 不变。
+- 旧 red：SUSPENDED Fence、当前 branch=7 无 receipt，owner branch=0/-1（同 xid）或 other xid 曾返回 true/ACK；修复后返回 false，Pay/Intent/Dispatch/Receipt/Fence 五表 facts 不变。既有 `Set.of` 已排除 CLAIMED/未知状态；null state 原本是 NPE 后由外层 false，均作为保留拒绝控制，不写成旧 ACK 现象。
 - 合法 owner 为 TRYING/CONFIRMED/CANCELLED 且 branch 正数（含 Long.MAX_VALUE）时仍可按原逻辑 ACK；owner CLAIMED null/positive branch、advanced null branch、UNKNOWN/空/别名状态、非法 branch 均不 ACK。
-- native 只验证本地资源与 Mapper/Fence 绑定，scope 为程序化同步调用；不冒称真实 TC/RM、远端 User 或完整资金因果。NOT NULL state 的 null 只由共享 Unit helper 兜底，不在 native 伪造生产 DDL。
+- native 只验证公开 rollback precondition/query 与 Mapper/Fence 绑定，scope 为程序化同步调用；不冒称真实 TC/RM、远端 User 或完整资金因果。NOT NULL state 的 null 只由 T200 共享 Unit 覆盖，不在 native 伪造生产 DDL。官方 Seata 1.5.2 类的 JVM 初始化线程不计为项目服务、TC/RM、新监听或本项目后台任务；需记录 `LOG_QUEUE` 为空、静态 datasource/transactionTemplate 前后相同，并在 finally 恢复 static 绑定。
 
 ### 3.2 Unit
 
-- 覆盖 owner 四状态、null/positive/0/负 branch、同/异 xid/branch、Fence4、count=0 与其它前置门；坏 owner 不提前 ACK，合法 advanced 正 branch 保持。
-- 断言原查询顺序、`countByBranch` 与 `findOwners` 调用和 callback/事务边界；不把 CLAIMED 未注册状态解释为另一分支已归属。
+- 通过公开 rollback precondition/query 矩阵覆盖 owner 四状态、positive/0/负 branch、同/异 xid/branch、Fence4、count=0 与其它前置门；坏 owner 不提前 ACK，合法 advanced 正 branch 保持。真实 Mapper 使用 Mockito 接口 mock `delegatesTo` 计数 wrapper，不反射 private helper、不用静态 Mock 镜像实现。
+- 断言 Fence4→count0→findOwners 的顺序与短路、callback/事务边界；CLAIMED/未知状态和 null state 的既有拒绝控制保持。官方 Fence static 绑定仅作为本地事务夹具，不能解释为没有任何 JVM 内部线程。
 
 ## 4. 明确边界
 
