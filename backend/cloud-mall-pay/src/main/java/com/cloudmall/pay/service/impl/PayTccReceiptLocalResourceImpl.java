@@ -145,6 +145,7 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
             request.payNo, context.getXid(), "tcc-debit:" + request.payNo, request.payNo))
       if (PayTccReceiptStore.hasValidStateAndBranch(owner)
           && !"CLAIMED".equals(owner.state)
+          && hasValidOwnerPayload(owner)
           && hasExactOwnerKey(owner, request, context)
           && (!Objects.equals(owner.xid, context.getXid())
               || !Objects.equals(owner.branchId, context.getBranchId()))) return true;
@@ -161,6 +162,18 @@ public class PayTccReceiptLocalResourceImpl implements PayTccReceiptLocalResourc
     return Objects.equals(fence.xid, context.getXid())
         && Objects.equals(fence.branchId, context.getBranchId())
         && ACTION_NAME.equals(fence.actionName);
+  }
+
+  /** 仅核原资源上下文要求的基本载荷域，不据此证明完整来源或资金结果。 */
+  private boolean hasValidOwnerPayload(PayTccReceiptPO owner) {
+    return owner.xid != null
+        && !owner.xid.isBlank()
+        && owner.userId != null
+        && owner.userId > 0
+        && owner.orderNo != null
+        && !owner.orderNo.isBlank()
+        && owner.amount != null
+        && owner.amount.signum() > 0;
   }
 
   /** 保留四键OR归属语义，但CI别名必须至少有一个原唯一键精确命中。 */

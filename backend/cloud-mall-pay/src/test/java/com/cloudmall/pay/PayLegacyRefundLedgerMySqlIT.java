@@ -7713,6 +7713,120 @@ class PayLegacyRefundLedgerMySqlIT {
         () -> assertReceiptOwnerQueryOrder(context));
   }
 
+  /** 无有效原XID的owner不能仅凭状态和唯一键使被拒分支提前ACK。 */
+  @Test
+  void rejectedReceiptOwnerCannotAckWithBlankXid() {
+    assertRejectedReceiptOwnerPayload("xid-empty", "TRYING");
+  }
+
+  /** 零金额owner不符合原资源入站条件，不能证明有效的另一资源。 */
+  @Test
+  void rejectedReceiptOwnerCannotAckWithZeroAmount() {
+    assertRejectedReceiptOwnerPayload("amount-zero", "TRYING");
+  }
+
+  /** DB可表达的四域坏值与NOTNULL字段的异常Mapper返回分别拒绝。 */
+  @Test
+  void rejectedReceiptOwnerRejectsInvalidPayloadDomains() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+      for (String mutation :
+          List.of(
+              "xid-empty",
+              "xid-space",
+              "xid-controls",
+              "user-zero",
+              "user-negative",
+              "order-empty",
+              "order-space",
+              "order-controls",
+              "amount-zero",
+              "amount-negative")) assertRejectedReceiptOwnerPayload(mutation, state);
+    for (String field : List.of("xid", "userId", "orderNo", "amount")) {
+      var resource = ownedReceiptRollbackResource();
+      var context = seedOwnedRejectedReceiptOwner("TRYING", 8L, false);
+      var before = ownedReceiptRollbackFacts();
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                @SuppressWarnings("unchecked")
+                var owners =
+                    (List<com.cloudmall.pay.domain.po.PayTccReceiptPO>)
+                        org.mockito.Mockito.mockingDetails(receiptRollbackMapper)
+                            .getMockCreationSettings()
+                            .getDefaultAnswer()
+                            .answer(invocation);
+                assertEquals(1, owners.size());
+                var owner = owners.get(0);
+                switch (field) {
+                  case "xid" -> owner.xid = null;
+                  case "userId" -> owner.userId = null;
+                  case "orderNo" -> owner.orderNo = null;
+                  case "amount" -> owner.amount = null;
+                  default -> throw new IllegalArgumentException("unknown returned owner field");
+                }
+                return owners;
+              })
+          .when(receiptRollbackMapper)
+          .findOwners("pay-1", context.getXid(), "tcc-debit:pay-1", "pay-1");
+      org.junit.jupiter.api.Assertions.assertFalse(
+          withOwnedReceiptFence(() -> resource.rollback(context)));
+      assertEquals(before, ownedReceiptRollbackFacts());
+      assertReceiptOwnerQueryOrder(context);
+    }
+  }
+
+  /** 仅校验合法域，不要求owner与incoming用户/订单/金额/XID全等。 */
+  @Test
+  void rejectedReceiptOwnerKeepsValidIndependentPayloadDomains() {
+    for (String state : List.of("TRYING", "CONFIRMED", "CANCELLED"))
+      for (String variant : List.of("original", "different", "positive-bounds")) {
+        var resource = ownedReceiptRollbackResource();
+        var context = seedOwnedRejectedReceiptOwner(state, 8L, false);
+        if (variant.equals("different"))
+          fixture.update(
+              "UPDATE pay_tcc_receipt SET xid=?,user_id=?,order_no=?,amount=?",
+              "other-owner-xid",
+              8L,
+              "other-owner-order",
+              new BigDecimal("11.00"));
+        if (variant.equals("positive-bounds"))
+          fixture.update(
+              "UPDATE pay_tcc_receipt SET xid=?,user_id=?,order_no=?,amount=?",
+              "bound-owner-xid",
+              Long.MAX_VALUE,
+              "bound-owner-order",
+              new BigDecimal("9999999999999999.99"));
+        var before = ownedReceiptRollbackFacts();
+        assertTrue(withOwnedReceiptFence(() -> resource.rollback(context)));
+        assertEquals(before, ownedReceiptRollbackFacts());
+        assertReceiptOwnerQueryOrder(context);
+      }
+  }
+
+  /** 仅owned注入可存坏值，公开rollback不ACK、不修复owner、不改五表。 */
+  private void assertRejectedReceiptOwnerPayload(String mutation, String state) {
+    var resource = ownedReceiptRollbackResource();
+    var context = seedOwnedRejectedReceiptOwner(state, 8L, false);
+    switch (mutation) {
+      case "xid-empty" -> fixture.update("UPDATE pay_tcc_receipt SET xid=?", "");
+      case "xid-space" -> fixture.update("UPDATE pay_tcc_receipt SET xid=?", "   ");
+      case "xid-controls" -> fixture.update("UPDATE pay_tcc_receipt SET xid=?", "\t\n");
+      case "user-zero" -> fixture.update("UPDATE pay_tcc_receipt SET user_id=0");
+      case "user-negative" -> fixture.update("UPDATE pay_tcc_receipt SET user_id=-1");
+      case "order-empty" -> fixture.update("UPDATE pay_tcc_receipt SET order_no=?", "");
+      case "order-space" -> fixture.update("UPDATE pay_tcc_receipt SET order_no=?", "   ");
+      case "order-controls" -> fixture.update("UPDATE pay_tcc_receipt SET order_no=?", "\t\n");
+      case "amount-zero" -> fixture.update("UPDATE pay_tcc_receipt SET amount=0");
+      case "amount-negative" -> fixture.update("UPDATE pay_tcc_receipt SET amount=-0.01");
+      default -> throw new IllegalArgumentException("unknown owner payload mutation");
+    }
+    var before = ownedReceiptRollbackFacts();
+    boolean accepted = withOwnedReceiptFence(() -> resource.rollback(context));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> org.junit.jupiter.api.Assertions.assertFalse(accepted),
+        () -> assertEquals(before, ownedReceiptRollbackFacts()),
+        () -> assertReceiptOwnerQueryOrder(context));
+  }
+
   /** public rollback的返回、五表事实和真实owner查询计数同时断言。 */
   private void assertRejectedReceiptOwner(String state, Long branch, boolean otherXid) {
     var resource = ownedReceiptRollbackResource();
