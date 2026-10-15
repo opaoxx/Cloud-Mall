@@ -6099,6 +6099,206 @@ class PayLegacyRefundLedgerMySqlIT {
     assertLockedExecutionDomainConflict(store, "pay-1", "observe");
   }
 
+  /** Try已明确冲突不能写UNKNOWN并自动选择ROLLBACK。 */
+  @Test
+  void receiptConflictCannotChooseRollbackOrOverwriteExecution() throws Exception {
+    assertOwnedExecuteConflictStopsAtFailure("receipt", "PAY_TCC_RECEIPT_CONFLICT");
+  }
+
+  /** 真实bindXid检测到另一原XID后，不能把冲突吞掉并改写peer执行记录。 */
+  @Test
+  void bindConflictCannotRewritePeerExecution() throws Exception {
+    assertOwnedExecuteConflictStopsAtFailure("bind", "PAY_TCC_EXECUTION_CONFLICT");
+  }
+
+  /** 五个可注入阶段的多种明确冲突都不能降级成普通失败或继续决议。 */
+  @Test
+  void explicitExecuteConflictsStopAtTheirOriginalStage() throws Exception {
+    for (String phase : List.of("begin", "receipt", "bridge", "evidence", "decide"))
+      for (String code :
+          List.of("PAY_TCC_EXECUTION_CONFLICT", "USER_TCC_RECEIVE_CONFLICT", "owned-CONFLICT-code"))
+        assertOwnedExecuteConflictStopsAtFailure(phase, code);
+  }
+
+  /** 普通失败仍按原XID回滚，正常Try仍提交；重入只恢复、不再begin或Try。 */
+  @Test
+  void healthyExecuteAndOrdinaryFailureKeepOriginalDecisions() throws Exception {
+    for (boolean ordinaryFailure : List.of(false, true)) {
+      var store = proxiedExecutionObservationStore();
+      var request = prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+      fixture.update("DELETE FROM pay_tcc_execution");
+      var paymentBefore = rawIntentTimeFacts();
+      var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+      var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+      var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+      receipt.state = "TRYING";
+      var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+      user.state = "TRYING";
+      when(receipts.prepare(request)).thenReturn(receipt);
+      if (ordinaryFailure)
+        when(receipts.prepare(request))
+            .thenThrow(
+                new com.cloudmall.common.error.BizException(
+                    "USER_BALANCE_NOT_ENOUGH", "owned ordinary failure", 409));
+      when(bridge.dispatch(request)).thenReturn(user);
+      when(bridge.recover(request.payNo)).thenReturn(user);
+      when(evidence.classify(any(), any())).thenReturn("TRYING");
+      when(transactions.begin())
+          .thenAnswer(
+              invocation -> {
+                io.seata.core.context.RootContext.bind("t220-healthy-xid");
+                return "t220-healthy-xid";
+              });
+      var coordinator =
+          new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+              store, receipts, bridge, evidence, transactions);
+      try {
+        String decision = ordinaryFailure ? "ROLLBACK" : "COMMIT";
+        var first = coordinator.execute(request);
+        assertEquals(decision, first.decision);
+        assertEquals(decision + "_REQUESTED", first.state);
+        assertEquals("t220-healthy-xid", first.xid);
+        assertNull(io.seata.core.context.RootContext.getXID());
+        var repeated = coordinator.execute(request);
+        assertEquals(first.state, repeated.state);
+        assertEquals(first.xid, repeated.xid);
+        assertEquals(
+            1, fixture.queryForObject("SELECT COUNT(*) FROM pay_tcc_execution", Integer.class));
+        assertEquals(paymentBefore, rawIntentTimeFacts());
+        verify(transactions).begin();
+        if (ordinaryFailure) verify(transactions, times(2)).rollback("t220-healthy-xid");
+        else verify(transactions, times(2)).commit("t220-healthy-xid");
+        org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+        verify(receipts).prepare(request);
+        verify(bridge, times(ordinaryFailure ? 0 : 1)).dispatch(request);
+        assertNull(io.seata.core.context.RootContext.getXID());
+      } finally {
+        io.seata.core.context.RootContext.unbind();
+      }
+    }
+  }
+
+  /** actual本地认领/绑定与受控阶段故障；比较故障发现时而非claim之前的三表现场。 */
+  private void assertOwnedExecuteConflictStopsAtFailure(String phase, String code)
+      throws Exception {
+    ownedExecutionObservationStore();
+    var request = prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+    fixture.update("DELETE FROM pay_tcc_execution");
+    var failure = new com.cloudmall.common.error.BizException(code, "owned execute conflict", 409);
+    var failureFacts =
+        new java.util.concurrent.atomic.AtomicReference<List<List<Map<String, Object>>>>();
+    var raised = new java.util.concurrent.atomic.AtomicBoolean();
+    var downstream = new java.util.ArrayList<String>();
+    var actualMapper = executionObservationMapper;
+    var decorated =
+        (com.cloudmall.pay.mapper.PayTccExecutionMapper)
+            java.lang.reflect.Proxy.newProxyInstance(
+                com.cloudmall.pay.mapper.PayTccExecutionMapper.class.getClassLoader(),
+                new Class<?>[] {com.cloudmall.pay.mapper.PayTccExecutionMapper.class},
+                (proxy, method, arguments) -> {
+                  if (phase.equals("decide")
+                      && method.getName().equals("setDecision")
+                      && raised.compareAndSet(false, true)) {
+                    failureFacts.set(executionReadFacts());
+                    throw failure;
+                  }
+                  if (failureFacts.get() != null
+                      && List.of("setDecision", "updateObservation", "selectByPayNo")
+                          .contains(method.getName())) downstream.add(method.getName());
+                  try {
+                    return method.invoke(actualMapper, arguments);
+                  } catch (java.lang.reflect.InvocationTargetException caught) {
+                    throw caught.getCause();
+                  }
+                });
+    var store = proxyExecutionObservationStore(executionObservationStore(decorated));
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
+    receipt.state = "TRYING";
+    var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
+    user.state = "TRYING";
+    when(transactions.begin())
+        .thenAnswer(
+            invocation -> {
+              io.seata.core.context.RootContext.bind("t220-xid");
+              if (phase.equals("begin")) {
+                raised.set(true);
+                failureFacts.set(executionReadFacts());
+                throw failure;
+              }
+              if (phase.equals("bind")) {
+                fixture.update("UPDATE pay_tcc_execution SET xid='t220-peer-xid',state='RUNNING'");
+                failureFacts.set(executionReadFacts());
+              }
+              return "t220-xid";
+            });
+    when(receiptService.prepare(request))
+        .thenAnswer(
+            invocation -> {
+              if (phase.equals("receipt") && raised.compareAndSet(false, true)) {
+                failureFacts.set(executionReadFacts());
+                throw failure;
+              }
+              return receipt;
+            });
+    when(bridge.dispatch(request))
+        .thenAnswer(
+            invocation -> {
+              if (phase.equals("bridge") && raised.compareAndSet(false, true)) {
+                failureFacts.set(executionReadFacts());
+                throw failure;
+              }
+              return user;
+            });
+    when(bridge.recover(request.payNo)).thenReturn(user);
+    when(evidence.classify(any(), any()))
+        .thenAnswer(
+            invocation -> {
+              if (phase.equals("evidence") && raised.compareAndSet(false, true)) {
+                failureFacts.set(executionReadFacts());
+                throw failure;
+              }
+              return "TRYING";
+            });
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    try {
+      org.junit.jupiter.api.Assertions.assertAll(
+          () -> {
+            var observed =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                    com.cloudmall.common.error.BizException.class,
+                    () -> returned.set(coordinator.execute(request)));
+            assertEquals(code, observed.getCode());
+            assertEquals(409, observed.getHttpStatus());
+            if (!phase.equals("bind"))
+              org.junit.jupiter.api.Assertions.assertSame(failure, observed);
+          },
+          () -> assertNull(returned.get()),
+          () -> {
+            assertNotNull(failureFacts.get());
+            assertEquals(failureFacts.get(), executionReadFacts());
+          },
+          () -> assertEquals(List.of(), downstream),
+          () -> {
+            verify(transactions).begin();
+            org.mockito.Mockito.verifyNoMoreInteractions(transactions);
+          },
+          () -> assertNull(io.seata.core.context.RootContext.getXID()));
+    } finally {
+      io.seata.core.context.RootContext.unbind();
+    }
+  }
+
   /** execution身份未变但原Pay已转Legacy时，旧COMMITTED不得继续写回。 */
   @Test
   void changedPaymentModeCannotAuthorizeSnapshotTerminal() {

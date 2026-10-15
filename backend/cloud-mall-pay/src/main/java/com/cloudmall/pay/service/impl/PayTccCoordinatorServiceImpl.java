@@ -59,7 +59,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
       if (xid == null || !Objects.equals(xid, RootContext.getXID()))
         throw new IllegalStateException("TC begin 未绑定原 XID");
       executions.bindXid(request.payNo, xid);
-      // 2. 两个分支仅初次执行；不能明确同时 TRYING 时请求回滚而非声称已回滚。
+      // 2. 两分支仅初次执行；明确冲突停止，普通失败请求回滚而非声称已回滚。
       String decision = "ROLLBACK";
       try {
         if ("TRYING".equals(receipts.prepare(request).state)) {
@@ -68,12 +68,14 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
             decision = "COMMIT";
         }
       } catch (RuntimeException tryFailure) {
+        rethrowConflict(tryFailure);
         executions.observe(request.payNo, "UNKNOWN", tryFailure.getClass().getSimpleName());
       }
       PayTccExecutionPO chosen = executions.decide(request.payNo, xid, decision);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
       sendDecision(chosen);
     } catch (Exception beginOrPersistenceFailure) {
+      rethrowConflict(beginOrPersistenceFailure);
       executions.observe(
           request.payNo, "UNKNOWN", beginOrPersistenceFailure.getClass().getSimpleName());
     } finally {
@@ -95,6 +97,15 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     // 2. 同向 RPC 可重复，绝不重新 begin 或执行任何 Try。
     sendDecision(current);
     return PayTccExecutionVO.from(observe(payNo));
+  }
+
+  /** 明确的业务冲突原样传播；其它异常保留原未知/回滚流程，不按HTTP状态猜测冲突。 */
+  private void rethrowConflict(Exception failure) {
+    if (failure instanceof BizException) {
+      BizException businessFailure = (BizException) failure;
+      if (businessFailure.getCode() != null && businessFailure.getCode().contains("CONFLICT"))
+        throw businessFailure;
+    }
   }
 
   /** RPC 结果只影响重试诊断，不能直接写资金终态。 */
