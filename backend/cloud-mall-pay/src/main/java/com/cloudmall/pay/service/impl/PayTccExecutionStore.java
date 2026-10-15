@@ -139,6 +139,7 @@ public class PayTccExecutionStore {
     // 1. 先核锁定行，再拒绝缺失的观察入参。
     PayTccExecutionPO current = locked(payNo);
     if (state == null) throw conflict();
+    if (current.xid == null && terminal(state)) throw conflict();
     // 2. 保留原终态和非终态合并规则，不给非NULL观察增加白名单。
     if (terminal(current.state)) {
       if (terminal(state) && !current.state.equals(state)) throw conflict();
@@ -181,13 +182,13 @@ public class PayTccExecutionStore {
     return row;
   }
 
-  /** 对非NULL持久行按原payNo→XID→状态/决议→载荷顺序拒绝坏值，不推断组合或改写。 */
+  /** 按原字段域及未绑定XID生命周期拒绝坏值，不规范化或推断已绑定资金结果。 */
   private void validatePersistedExecution(PayTccExecutionPO execution, String payNo) {
     // 1. 查询身份和已绑定XID必须有效；NULL XID仍保留prebegin语义。
     if (execution.payNo == null || !Objects.equals(execution.payNo, payNo)) throw conflict();
     if (execution.xid != null && (execution.xid.isBlank() || execution.xid.length() > 128))
       throw conflict();
-    // 2. 只核原规格的单字段状态/决议，不推断组合或规范化历史值。
+    // 2. 核原状态/决议域；未确认XID只允许认领或begin未知，且尚无决议。
     if (execution.state == null
         || !Set.of(
                 "CLAIMED",
@@ -202,6 +203,9 @@ public class PayTccExecutionStore {
             .contains(execution.state)
         || execution.decision == null
         || !Set.of("NONE", "COMMIT", "ROLLBACK").contains(execution.decision)) throw conflict();
+    if (execution.xid == null
+        && (!"NONE".equals(execution.decision)
+            || !Set.of("CLAIMED", "BEGIN_UNKNOWN").contains(execution.state))) throw conflict();
     // 3. 核原创建载荷和固定键，只拒绝坏值，不改写历史字段。
     if (!hasValidExecutionPayload(execution)) throw conflict();
   }

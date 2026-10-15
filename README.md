@@ -2674,3 +2674,9 @@ decide和observe仍先锁读并校验持久行，再将非法决议/XID及NULL�
 claim读到已有execution时，先复用读取与锁内入口的完整有效域校验，再核对原请求载荷；坏XID、状态或决议返回原409，不再直接返回false。原Pay或已有执行金额缺失也按409拒绝。
 
 合法重放仍返回false，不重新认领，不要求原Pay仍为PENDING，也不新增取消、派发或receipt查询。首次认领的门槛和唯一插入语义保持；该检查不证明完整状态组合、资金因果或真实TC链路。
+
+### CM-18 execution未绑定XID的状态关联（16T216）
+
+未绑定XID的execution只允许CLAIMED或BEGIN_UNKNOWN，且决议为NONE；读取、认领重放和锁内入口遇到其它组合返回原409。合法未绑定记录也不能接受COMMITTED、ROLLEDBACK或CONFLICT终态观察，避免缺少事务标识的缓存结论直接返回或写入。
+
+合法未绑定记录仍可读取、重放、观察为BEGIN_UNKNOWN或绑定XID。已绑定记录保留原组合和观察规则，包括与原决议意图相反的实际终态；本批不证明完整资金因果、TC结果或完整状态机，也不修复历史数据。

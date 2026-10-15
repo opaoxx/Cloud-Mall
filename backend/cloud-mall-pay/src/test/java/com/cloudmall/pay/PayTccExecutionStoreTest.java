@@ -279,7 +279,7 @@ class PayTccExecutionStoreTest {
     for (String state : List.of("RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
       var row = execution(state, "COMMIT", "xid-store-1");
       when(executions.selectByPayNo(row.payNo)).thenReturn(row);
-      org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+      assertReadUnderUnboundContract(row);
     }
     when(executions.selectByPayNo("absent-pay")).thenReturn(null);
     var missing = assertThrows(BizException.class, () -> store.read("absent-pay"));
@@ -406,7 +406,7 @@ class PayTccExecutionStoreTest {
         var row = execution(state, "NONE", xid);
         when(executions.selectByPayNo(row.payNo)).thenReturn(row);
         var before = snapshotExecution(row);
-        org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+        assertReadUnderUnboundContract(row);
         org.junit.jupiter.api.Assertions.assertEquals(xid, row.xid);
         org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
         verify(executions).selectByPayNo(row.payNo);
@@ -533,7 +533,7 @@ class PayTccExecutionStoreTest {
           var row = execution(state, decision, xid);
           when(executions.selectByPayNo(row.payNo)).thenReturn(row);
           var before = snapshotExecution(row);
-          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          assertReadUnderUnboundContract(row);
           org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
           verify(executions).selectByPayNo(row.payNo);
           org.mockito.Mockito.verifyNoMoreInteractions(executions);
@@ -681,7 +681,7 @@ class PayTccExecutionStoreTest {
           applyReadPayloadVariant(row, variant);
           when(executions.selectByPayNo(row.payNo)).thenReturn(row);
           var before = snapshotExecution(row);
-          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          assertReadUnderUnboundContract(row);
           org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
           verify(executions).selectByPayNo(row.payNo);
           org.mockito.Mockito.verifyNoMoreInteractions(executions);
@@ -1203,13 +1203,174 @@ class PayTccExecutionStoreTest {
               when(payments.selectForUpdate(request.payNo)).thenReturn(List.of(payment));
               when(executions.selectForUpdate(request.payNo)).thenReturn(existing);
               var before = snapshotExecution(existing);
-              org.junit.jupiter.api.Assertions.assertFalse(store.claim(request));
+              if (invalidUnboundFixture(existing)) {
+                assertExecutionConflict(() -> store.claim(request));
+              } else {
+                org.junit.jupiter.api.Assertions.assertFalse(store.claim(request));
+              }
               org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(existing));
               verify(payments).selectForUpdate(request.payNo);
               verify(executions).selectForUpdate(request.payNo);
               org.mockito.Mockito.verifyNoMoreInteractions(payments, executions);
               org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
             }
+  }
+
+  /** 未绑定XID的25种非法关联在所有入口均先拒绝，不触发更新或fresh gate。 */
+  @Test
+  void invalidUnboundPairsRejectEveryStoreEntry() {
+    for (String state : executionStates())
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK"))
+        for (String action : List.of("read", "bind", "decide", "observe", "claim")) {
+          var row = execution(state, decision, null);
+          if (!invalidUnboundFixture(row)) continue;
+          org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          when(executions.selectForUpdate(row.payNo)).thenReturn(row);
+          when(payments.selectForUpdate(row.payNo)).thenReturn(List.of(payment("TCC")));
+          var before = snapshotExecution(row);
+          assertExecutionConflict(() -> invokeUnboundAction(action, row));
+          org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+          if ("read".equals(action)) verify(executions).selectByPayNo(row.payNo);
+          else verify(executions).selectForUpdate(row.payNo);
+          if ("claim".equals(action)) verify(payments).selectForUpdate(row.payNo);
+          org.mockito.Mockito.verifyNoMoreInteractions(executions, payments);
+          org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+        }
+  }
+
+  /** 合法prebegin也不能通过三种终态观察写出无XID结论。 */
+  @Test
+  void unboundObservationsCannotProduceTerminalConclusions() {
+    for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN"))
+      for (String terminal : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+        org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+        var row = execution(state, "NONE", null);
+        when(executions.selectForUpdate(row.payNo)).thenReturn(row);
+        var before = snapshotExecution(row);
+        assertExecutionConflict(() -> store.observe(row.payNo, terminal, "unbound"));
+        org.junit.jupiter.api.Assertions.assertEquals(before, snapshotExecution(row));
+        verify(executions).selectForUpdate(row.payNo);
+        org.mockito.Mockito.verifyNoMoreInteractions(executions);
+        org.mockito.Mockito.verifyNoInteractions(payments, dispatches, receipts, cancels);
+      }
+  }
+
+  /** 合法未绑定生命周期及全部已绑定raw组合保留，真实相反观察不被意图覆盖。 */
+  @Test
+  void validUnboundLifecycleAndBoundProgressRemain() {
+    for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN"))
+      for (String action : List.of("read", "claim", "UNKNOWN", "TRYING", "bind")) {
+        org.mockito.Mockito.reset(executions, payments, dispatches, receipts, cancels);
+        var row = execution(state, "NONE", null);
+        var observed = execution("BEGIN_UNKNOWN", "NONE", null);
+        when(executions.selectForUpdate(row.payNo)).thenReturn(row);
+        if ("read".equals(action)) {
+          when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+          org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+          verify(executions).selectByPayNo(row.payNo);
+        } else if ("claim".equals(action)) {
+          when(payments.selectForUpdate(row.payNo)).thenReturn(List.of(payment("TCC")));
+          org.junit.jupiter.api.Assertions.assertFalse(store.claim(request()));
+          verify(payments).selectForUpdate(row.payNo);
+          verify(executions).selectForUpdate(row.payNo);
+        } else if ("bind".equals(action)) {
+          when(executions.bindXid(any(), any(), any())).thenReturn(1);
+          store.bindXid(row.payNo, "xid-store-1");
+          verify(executions).selectForUpdate(row.payNo);
+          verify(executions)
+              .bindXid(
+                  org.mockito.ArgumentMatchers.eq(row.payNo),
+                  org.mockito.ArgumentMatchers.eq("xid-store-1"),
+                  any());
+        } else {
+          when(executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+          when(executions.selectByPayNo(row.payNo)).thenReturn(observed);
+          org.junit.jupiter.api.Assertions.assertSame(
+              observed, store.observe(row.payNo, action, "pending"));
+          verify(executions).selectForUpdate(row.payNo);
+          verify(executions)
+              .updateObservation(
+                  org.mockito.ArgumentMatchers.eq(row.payNo),
+                  org.mockito.ArgumentMatchers.eq("BEGIN_UNKNOWN"),
+                  org.mockito.ArgumentMatchers.eq("pending"),
+                  any());
+          verify(executions).selectByPayNo(row.payNo);
+        }
+        org.mockito.Mockito.verifyNoMoreInteractions(executions, payments);
+        org.mockito.Mockito.verifyNoInteractions(dispatches, receipts, cancels);
+      }
+    for (String state : executionStates())
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
+        org.mockito.Mockito.reset(executions);
+        var row = execution(state, decision, "xid-store-1");
+        when(executions.selectByPayNo(row.payNo)).thenReturn(row);
+        org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+        verify(executions).selectByPayNo(row.payNo);
+        org.mockito.Mockito.verifyNoMoreInteractions(executions);
+      }
+    org.mockito.Mockito.reset(executions);
+    var current = execution("COMMIT_REQUESTED", "COMMIT", "xid-store-1");
+    var rolledBack = execution("ROLLEDBACK", "COMMIT", "xid-store-1");
+    when(executions.selectForUpdate(current.payNo)).thenReturn(current);
+    when(executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+    when(executions.selectByPayNo(current.payNo)).thenReturn(rolledBack);
+    org.junit.jupiter.api.Assertions.assertSame(
+        rolledBack, store.observe(current.payNo, "ROLLEDBACK", "TC timeout"));
+    verify(executions).selectForUpdate(current.payNo);
+    verify(executions)
+        .updateObservation(
+            org.mockito.ArgumentMatchers.eq(current.payNo),
+            org.mockito.ArgumentMatchers.eq("ROLLEDBACK"),
+            org.mockito.ArgumentMatchers.eq("TC timeout"),
+            any());
+    verify(executions).selectByPayNo(current.payNo);
+    org.mockito.Mockito.verifyNoMoreInteractions(executions);
+  }
+
+  /** 保留原27个状态与决议组合，NULL侧只允许两个prebegin组合。 */
+  private List<String> executionStates() {
+    return List.of(
+        "CLAIMED",
+        "BEGIN_UNKNOWN",
+        "RUNNING",
+        "COMMIT_REQUESTED",
+        "ROLLBACK_REQUESTED",
+        "UNKNOWN",
+        "COMMITTED",
+        "ROLLEDBACK",
+        "CONFLICT");
+  }
+
+  /** 仅判断本批NULL XID关联，不收紧已绑定组合。 */
+  private boolean invalidUnboundFixture(PayTccExecutionPO row) {
+    return row.xid == null
+        && !List.of("CLAIMED:NONE", "BEGIN_UNKNOWN:NONE").contains(row.state + ":" + row.decision);
+  }
+
+  /** 旧矩阵保留所有样本，将非法NULL关联改为409且不规范化原行。 */
+  private void assertReadUnderUnboundContract(PayTccExecutionPO row) {
+    if (invalidUnboundFixture(row)) assertExecutionConflict(() -> store.read(row.payNo));
+    else org.junit.jupiter.api.Assertions.assertSame(row, store.read(row.payNo));
+  }
+
+  /** 统一核对原冲突码与HTTP状态。 */
+  private void assertExecutionConflict(org.junit.jupiter.api.function.Executable action) {
+    var failure = assertThrows(BizException.class, action);
+    org.junit.jupiter.api.Assertions.assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    org.junit.jupiter.api.Assertions.assertEquals(409, failure.getHttpStatus());
+  }
+
+  /** 使用合法本次参数，让坏持久组合先于命令分支被拒绝。 */
+  private void invokeUnboundAction(String action, PayTccExecutionPO row) {
+    switch (action) {
+      case "read" -> store.read(row.payNo);
+      case "bind" -> store.bindXid(row.payNo, "xid-store-1");
+      case "decide" -> store.decide(row.payNo, "xid-store-1", "COMMIT");
+      case "observe" -> store.observe(row.payNo, "UNKNOWN", "pending");
+      case "claim" -> store.claim(request());
+      default -> throw new IllegalArgumentException(action);
+    }
   }
 
   /** 保留所有公开字段文本快照，验证读路径不改写任何载荷或诊断。 */

@@ -5252,9 +5252,13 @@ class PayLegacyRefundLedgerMySqlIT {
       for (String state : List.of("CLAIMED", "RUNNING", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
         seedOwnedExecution(state, "NONE", xid);
         var before = executionReadFacts();
-        var read = store.read("pay-1");
-        assertEquals(xid, read.xid);
-        assertEquals(state, read.state);
+        if (invalidUnboundFixture(xid, state, "NONE")) {
+          assertNativeUnboundReadConflict(store, "pay-1");
+        } else {
+          var read = store.read("pay-1");
+          assertEquals(xid, read.xid);
+          assertEquals(state, read.state);
+        }
         assertEquals(before, executionReadFacts());
       }
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
@@ -5353,10 +5357,14 @@ class PayLegacyRefundLedgerMySqlIT {
         for (String xid : java.util.Arrays.asList(null, "t211-xid")) {
           seedOwnedExecution(state, decision, xid);
           var before = executionReadFacts();
-          var read = store.read("pay-1");
-          assertEquals(state, read.state);
-          assertEquals(decision, read.decision);
-          assertEquals(xid, read.xid);
+          if (invalidUnboundFixture(xid, state, decision)) {
+            assertNativeUnboundReadConflict(store, "pay-1");
+          } else {
+            var read = store.read("pay-1");
+            assertEquals(state, read.state);
+            assertEquals(decision, read.decision);
+            assertEquals(xid, read.xid);
+          }
           assertEquals(before, executionReadFacts());
         }
     for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
@@ -5462,15 +5470,19 @@ class PayLegacyRefundLedgerMySqlIT {
           String payNo = applyOwnedReadPayloadVariant(variant);
           var before = executionReadFacts();
           var expected = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
-          var read = store.read(payNo);
-          assertEquals(payNo, read.payNo);
-          assertEquals(expected.get("user_id"), read.userId);
-          assertEquals(expected.get("order_no"), read.orderNo);
-          assertEquals(expected.get("amount"), read.amount);
-          assertEquals("tcc-debit:" + payNo, read.operationKey);
-          assertEquals(payNo, read.ledgerKey);
-          assertEquals(state, read.state);
-          assertEquals(xid, read.xid);
+          if (invalidUnboundFixture(xid, state, "NONE")) {
+            assertNativeUnboundReadConflict(store, payNo);
+          } else {
+            var read = store.read(payNo);
+            assertEquals(payNo, read.payNo);
+            assertEquals(expected.get("user_id"), read.userId);
+            assertEquals(expected.get("order_no"), read.orderNo);
+            assertEquals(expected.get("amount"), read.amount);
+            assertEquals("tcc-debit:" + payNo, read.operationKey);
+            assertEquals(payNo, read.ledgerKey);
+            assertEquals(state, read.state);
+            assertEquals(xid, read.xid);
+          }
           assertEquals(before, executionReadFacts());
         }
   }
@@ -5943,7 +5955,11 @@ class PayLegacyRefundLedgerMySqlIT {
           for (String paymentStatus : List.of("PENDING", "SUCCESS", "REFUNDED")) {
             var request = prepareOwnedClaimReplay(state, decision, xid, paymentStatus);
             var before = executionReadFacts();
-            org.junit.jupiter.api.Assertions.assertFalse(claimOwnedTransaction(store, request));
+            if (invalidUnboundFixture(xid, state, decision)) {
+              assertOwnedClaimReplayConflict(store, request);
+            } else {
+              org.junit.jupiter.api.Assertions.assertFalse(claimOwnedTransaction(store, request));
+            }
             assertEquals(before, executionReadFacts());
           }
     for (String variant : List.of("minimum", "maximum", "raw-text", "unicode-order")) {
@@ -6032,6 +6048,182 @@ class PayLegacyRefundLedgerMySqlIT {
         },
         () -> assertNull(returned.get()),
         () -> assertEquals(before, executionReadFacts()));
+  }
+
+  /** 缺少持久XID的缓存终态不能被恢复入口作为资金结论返回。 */
+  @Test
+  void unboundCachedTerminalCannotEscapeRecovery() {
+    var store = ownedExecutionObservationStore();
+    prepareOwnedClaimReplay("COMMITTED", "COMMIT", null, "PENDING");
+    var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
+    var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
+    var coordinator =
+        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            store, receiptService, bridge, evidence, transactions);
+    var before = executionReadFacts();
+    var returned =
+        new java.util.concurrent.atomic.AtomicReference<
+            com.cloudmall.pay.domain.vo.PayTccExecutionVO>();
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () -> returned.set(coordinator.recover("pay-1")));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, executionReadFacts()),
+        () ->
+            org.mockito.Mockito.verifyNoInteractions(
+                bridge, receiptService, evidence, transactions));
+  }
+
+  /** 合法prebegin上下文不能直接被观察写为COMMITTED。 */
+  @Test
+  void unboundObservationCannotPersistCommittedState() {
+    var store = ownedExecutionObservationStore();
+    prepareOwnedClaimReplay("CLAIMED", "NONE", null, "PENDING");
+    assertLockedExecutionDomainConflict(store, "pay-1", "observe");
+  }
+
+  /** 保留全部NULL组合样本，非法组合在所有入口拒绝；合法prebegin拒绝三个终态。 */
+  @Test
+  void invalidUnboundPairsRejectAcrossEveryStoreEntry() {
+    var store = ownedExecutionObservationStore();
+    for (String state :
+        List.of(
+            "CLAIMED",
+            "BEGIN_UNKNOWN",
+            "RUNNING",
+            "COMMIT_REQUESTED",
+            "ROLLBACK_REQUESTED",
+            "UNKNOWN",
+            "COMMITTED",
+            "ROLLEDBACK",
+            "CONFLICT"))
+      for (String decision : List.of("NONE", "COMMIT", "ROLLBACK")) {
+        if (decision.equals("NONE") && List.of("CLAIMED", "BEGIN_UNKNOWN").contains(state))
+          continue;
+        for (String action : List.of("read", "bind", "decide", "observe", "claim")) {
+          var request = prepareOwnedClaimReplay(state, decision, null, "PENDING");
+          assertOwnedUnboundPairConflict(store, request, action);
+        }
+      }
+    for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN"))
+      for (String terminal : List.of("COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+        var request = prepareOwnedClaimReplay(state, "NONE", null, "PENDING");
+        assertOwnedUnboundPairConflict(store, request, "observe-" + terminal);
+      }
+  }
+
+  /** 两种未绑定状态保读取/重放/未知观察/绑定，已绑定的相反TC观测不受意图约束。 */
+  @Test
+  void validUnboundLifecycleAndBoundOppositeObservationRemain() {
+    var store = ownedExecutionObservationStore();
+    for (String state : List.of("CLAIMED", "BEGIN_UNKNOWN"))
+      for (String action : List.of("read", "claim", "observe-UNKNOWN", "observe-TRYING", "bind")) {
+        var request = prepareOwnedClaimReplay(state, "NONE", null, "PENDING");
+        var before = executionReadFacts();
+        var paymentBefore = rawIntentTimeFacts();
+        if (action.equals("read")) {
+          var read = store.read("pay-1");
+          assertNull(read.xid);
+          assertEquals(state, read.state);
+          assertEquals(before, executionReadFacts());
+        } else if (action.equals("claim")) {
+          org.junit.jupiter.api.Assertions.assertFalse(claimOwnedTransaction(store, request));
+          assertEquals(before, executionReadFacts());
+        } else if (action.equals("bind")) {
+          var bound =
+              executionTransaction(
+                  () -> {
+                    store.bindXid("pay-1", "t216-xid");
+                    return executionObservationMapper.selectByPayNo("pay-1");
+                  });
+          assertEquals("t216-xid", bound.xid);
+          assertEquals("RUNNING", bound.state);
+          assertEquals("NONE", bound.decision);
+        } else {
+          var observed =
+              executionTransaction(
+                  () ->
+                      store.observe(
+                          "pay-1", action.substring("observe-".length()), "unbound-observation"));
+          assertNull(observed.xid);
+          assertEquals("BEGIN_UNKNOWN", observed.state);
+          assertEquals("NONE", observed.decision);
+        }
+        assertEquals(paymentBefore, rawIntentTimeFacts());
+      }
+    prepareOwnedClaimReplay("COMMIT_REQUESTED", "COMMIT", "t216-xid", "PENDING");
+    var paymentBefore = rawIntentTimeFacts();
+    var opposite =
+        executionTransaction(() -> store.observe("pay-1", "ROLLEDBACK", "original-tc-observation"));
+    assertEquals("ROLLEDBACK", opposite.state);
+    assertEquals("COMMIT", opposite.decision);
+    assertEquals("t216-xid", opposite.xid);
+    assertEquals(paymentBefore, rawIntentTimeFacts());
+  }
+
+  /** 同源实际事务中检查当前NULL关联；只核本地三表，不构造TC/receipt事实。 */
+  private void assertOwnedUnboundPairConflict(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store,
+      com.cloudmall.pay.domain.dto.PayTccDispatchDTO request,
+      String action) {
+    var before = executionReadFacts();
+    var returned = new java.util.concurrent.atomic.AtomicReference<Object>();
+    var template =
+        new org.springframework.transaction.support.TransactionTemplate(
+            new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
+    org.junit.jupiter.api.Assertions.assertAll(
+        () -> {
+          var failure =
+              org.junit.jupiter.api.Assertions.assertThrows(
+                  com.cloudmall.common.error.BizException.class,
+                  () ->
+                      returned.set(
+                          template.execute(
+                              transactionStatus -> {
+                                if (action.equals("read")) return store.read(request.payNo);
+                                if (action.equals("claim")) return store.claim(request);
+                                if (action.equals("bind")) {
+                                  store.bindXid(request.payNo, "t216-xid");
+                                  return "bound";
+                                }
+                                if (action.equals("decide"))
+                                  return store.decide(request.payNo, "t216-xid", "COMMIT");
+                                String observed =
+                                    action.equals("observe")
+                                        ? "UNKNOWN"
+                                        : action.substring("observe-".length());
+                                return store.observe(
+                                    request.payNo, observed, "unbound-domain-observation");
+                              })));
+          assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+          assertEquals(409, failure.getHttpStatus());
+        },
+        () -> assertNull(returned.get()),
+        () -> assertEquals(before, executionReadFacts()));
+  }
+
+  /** 原raw样本不跳过：以两种明确允许的未绑定配对重新分类，其它NULL组合须409。 */
+  private boolean invalidUnboundFixture(String xid, String state, String decision) {
+    return xid == null
+        && !List.of("CLAIMED:NONE", "BEGIN_UNKNOWN:NONE").contains(state + ":" + decision);
+  }
+
+  /** 对原读取样本继续执行实际查询，拒绝必须为原业务409。 */
+  private void assertNativeUnboundReadConflict(
+      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo) {
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.cloudmall.common.error.BizException.class, () -> store.read(payNo));
+    assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    assertEquals(409, failure.getHttpStatus());
   }
 
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
