@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -94,6 +95,25 @@ class PayTccExecuteConflictTest {
       else verify(fixture.transactions).commit("unit-execute-xid");
       verifyNoMoreInteractions(fixture.transactions);
       verify(fixture.store, never()).observe(any(), any(), any());
+      assertNull(RootContext.getXID());
+    }
+  }
+
+  /** 普通begin/bind/decide失败也持原claim/bound快照末次核对，不重读payNo。 */
+  @Test
+  void ordinaryFailuresKeepOwnedSnapshotForFinalObservation() throws Exception {
+    for (String phase : List.of("begin", "bind", "decide")) {
+      Exception failure =
+          phase.equals("begin")
+              ? new Exception("begin response lost")
+              : new IllegalStateException("ordinary failure");
+      var fixture = new Fixture(phase, failure);
+      var result = fixture.coordinator.execute(fixture.request);
+      assertEquals(phase.equals("decide") ? "UNKNOWN" : "BEGIN_UNKNOWN", result.state);
+      verify(fixture.store).verifyDecisionSnapshot(same(fixture.execution));
+      verify(fixture.store, times(phase.equals("decide") ? 1 : 0)).read(fixture.request.payNo);
+      verify(fixture.transactions).begin();
+      verifyNoMoreInteractions(fixture.transactions);
       assertNull(RootContext.getXID());
     }
   }

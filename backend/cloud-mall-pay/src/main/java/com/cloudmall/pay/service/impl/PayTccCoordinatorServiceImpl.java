@@ -72,9 +72,9 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
         rethrowConflict(tryFailure);
         executions.observeSnapshot(owned, "UNKNOWN", tryFailure.getClass().getSimpleName());
       }
-      PayTccExecutionPO chosen = executions.decideOwned(owned, xid, decision);
+      owned = executions.decideOwned(owned, xid, decision);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
-      sendDecision(chosen);
+      sendDecision(owned);
     } catch (Exception beginOrPersistenceFailure) {
       rethrowConflict(beginOrPersistenceFailure);
       executions.observeSnapshot(
@@ -83,7 +83,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
       // 4. 入口已拒绝继承上下文，因此只清理本次 begin 建立的绑定。
       RootContext.unbind();
     }
-    return PayTccExecutionVO.from(observe(request.payNo));
+    return PayTccExecutionVO.from(observe(executions.verifyDecisionSnapshot(owned)));
   }
 
   /** 只读核对两端；已有决议可用原 XID 重试，NONE 永不自动决议。 */
@@ -97,7 +97,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
         || "NONE".equals(current.decision)) return PayTccExecutionVO.from(current);
     // 2. 同向 RPC 可重复，绝不重新 begin 或执行任何 Try。
     sendDecision(current);
-    return PayTccExecutionVO.from(observe(payNo));
+    return PayTccExecutionVO.from(observe(executions.verifyDecisionSnapshot(current)));
   }
 
   /** 明确的业务冲突原样传播；其它异常保留原未知/回滚流程，不按HTTP状态猜测冲突。 */
@@ -124,12 +124,16 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
 
   /** 读关联结果锁内核对原执行快照，网络未知不覆盖已替换的 execution。 */
   private PayTccExecutionPO observe(String payNo) {
-    PayTccExecutionPO execution = executions.read(payNo);
+    return observe(executions.read(payNo));
+  }
+
+  /** 原观察内核只消费调用方已核对的快照；不按支付号重新取得其它owner。 */
+  private PayTccExecutionPO observe(PayTccExecutionPO execution) {
     if (PayTccExecutionStore.terminal(execution.state)) return execution;
     if (execution.xid == null)
       return executions.observeSnapshot(execution, "UNKNOWN", "begin XID 尚无持久证据");
     try {
-      PayTccDispatchVO user = bridge.recover(payNo);
+      PayTccDispatchVO user = bridge.recover(execution.payNo);
       String state = evidence.classify(execution, user);
       return executions.observeSnapshot(
           execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);

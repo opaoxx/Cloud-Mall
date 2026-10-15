@@ -49,8 +49,9 @@ class PayTccRecoveryFailureTest {
               .observeSnapshot(same(fixture.chosen), eq("UNKNOWN"), eq("Exception"));
           verify(fixture.store, never()).observe(any(), any(), any());
           int readsBeforeFailure = entry.equals("recover") || decision.equals("COMMIT") ? 1 : 0;
-          verify(fixture.store, times(readsBeforeFailure + (rejectDiagnostic ? 0 : 1)))
-              .read(fixture.request.payNo);
+          verify(fixture.store, times(readsBeforeFailure)).read(fixture.request.payNo);
+          verify(fixture.store, times(rejectDiagnostic ? 1 : 2))
+              .verifyDecisionSnapshot(same(fixture.chosen));
           assertEquals(1, fixture.diagnosticCalls);
           fixture.verifyTcCalls();
           assertNull(RootContext.getXID());
@@ -86,10 +87,13 @@ class PayTccRecoveryFailureTest {
           assertSame(
               failure, assertThrows(BizException.class, () -> coordinator.recover(current.payNo)));
         else assertEquals(updated.state, coordinator.recover(current.payNo).state);
-        verify(store, times(conflict ? 1 : observations)).read(current.payNo);
+        verify(store).read(current.payNo);
         verify(bridge, times(conflict ? 1 : observations)).recover(current.payNo);
-        verify(store, times(observations)).observeSnapshot(same(current), eq("UNKNOWN"), eq(code));
-        if (!conflict && !decision.equals("NONE")) verify(store).verifyDecisionSnapshot(updated);
+        if (!conflict) verify(store).observeSnapshot(same(current), eq("UNKNOWN"), eq(code));
+        if (!conflict && !decision.equals("NONE")) {
+          verify(store).observeSnapshot(same(updated), eq("UNKNOWN"), eq(code));
+          verify(store, times(2)).verifyDecisionSnapshot(updated);
+        }
         verifyNoMoreInteractions(store, bridge);
         verifyNoInteractions(receipts, evidence);
         if (!conflict && decision.equals("COMMIT")) verify(transactions).commit(current.xid);
@@ -187,7 +191,7 @@ class PayTccRecoveryFailureTest {
                   });
           if (reject) assertSame(fixture.conflict, assertThrows(BizException.class, fixture::call));
           else assertEquals("COMMITTED", fixture.call().state);
-          verify(fixture.store).verifyDecisionSnapshot(same(fixture.chosen));
+          verify(fixture.store, times(reject ? 1 : 2)).verifyDecisionSnapshot(same(fixture.chosen));
           assertEquals(0, fixture.diagnosticCalls);
           if (entry.equals("execute")) verify(fixture.transactions).begin();
           verifyNoMoreInteractions(fixture.transactions);
@@ -203,6 +207,50 @@ class PayTccRecoveryFailureTest {
             org.springframework.dao.DataAccessResourceFailureException.class, fixture::call));
     assertEquals(0, fixture.diagnosticCalls);
     verifyNoInteractions(fixture.transactions);
+  }
+
+  /** TC已成功返回时末次核对仍持chosen；冲突不读新owner，最新终态免Bridge。 */
+  @Test
+  void finalObservationKeepsChosenSnapshotAfterSuccessfulRpc() throws Exception {
+    for (String entry : List.of("execute", "recover"))
+      for (String decision : List.of("COMMIT", "ROLLBACK"))
+        for (boolean reject : List.of(false, true)) {
+          var fixture = new DecisionFixture(entry, decision, false, new Exception("overridden"));
+          var sent = new java.util.concurrent.atomic.AtomicBoolean();
+          org.mockito.stubbing.Answer<Void> successful =
+              invocation -> {
+                sent.set(true);
+                return null;
+              };
+          if (decision.equals("COMMIT"))
+            org.mockito.Mockito.doAnswer(successful)
+                .when(fixture.transactions)
+                .commit(fixture.original.xid);
+          else
+            org.mockito.Mockito.doAnswer(successful)
+                .when(fixture.transactions)
+                .rollback(fixture.original.xid);
+          var latest = execution("COMMITTED", decision);
+          when(fixture.store.verifyDecisionSnapshot(fixture.chosen))
+              .thenAnswer(
+                  invocation -> {
+                    if (!sent.get()) return fixture.chosen;
+                    if (reject) throw fixture.conflict;
+                    return latest;
+                  });
+          if (reject) assertSame(fixture.conflict, assertThrows(BizException.class, fixture::call));
+          else assertEquals("COMMITTED", fixture.call().state);
+          verify(fixture.store, times(2)).verifyDecisionSnapshot(same(fixture.chosen));
+          int initialReads = entry.equals("recover") || decision.equals("COMMIT") ? 1 : 0;
+          verify(fixture.store, times(initialReads)).read(fixture.request.payNo);
+          verify(fixture.bridge, times(entry.equals("recover") ? 1 : 0))
+              .recover(fixture.request.payNo);
+          verify(fixture.store, times(entry.equals("recover") ? 1 : 0))
+              .observeSnapshot(any(), any(), any());
+          assertEquals(0, fixture.diagnosticCalls);
+          fixture.verifyTcCalls();
+          assertNull(RootContext.getXID());
+        }
   }
 
   /** 完整原执行载荷，用独立对象区分read结果与观察返回的已决议chosen。 */
@@ -288,7 +336,10 @@ class PayTccRecoveryFailureTest {
       when(store.observeSnapshot(any(), any(), any()))
           .thenAnswer(
               invocation -> {
-                if (rpcFailed && invocation.getArgument(0) == chosen) {
+                if (rpcFailed
+                    && invocation.getArgument(0) == chosen
+                    && "UNKNOWN".equals(invocation.getArgument(1))
+                    && transport.getClass().getSimpleName().equals(invocation.getArgument(2))) {
                   diagnosticCalls++;
                   if (rejectDiagnostic) throw conflict;
                 }
