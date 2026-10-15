@@ -17,13 +17,13 @@
 ### 3.1 Owned native
 
 - 使用 actual Coordinator/Store/Mapper 与 Spring 本地代理；TC/Bridge/Evidence/receipt 为 mock，不启动 App、TC/RM、新监听。
-- execute/recover × COMMIT/ROLLBACK × 8 anchor/source drift：peer 在 decideOwned 或 observeSnapshot 事务提交后、Coordinator 返回前修改 execution/Pay；修复后 gate 409、无 VO/后续 decision-observation-readback，peer 三表 facts 保持，TC 仅此前 begin 或0。
-- 覆盖反向 decision、清空 decision、same identity 最新进度、terminal、NONE no-op、NULL/SQL门；相同方向合法最新 terminal 不 RPC，非 terminal 仅当前方向调用。
+- execute/recover × COMMIT/ROLLBACK × 8 anchor/source drift=32：peer 在 decideOwned 或 observeSnapshot 事务提交后、Coordinator 返回前修改 execution/Pay；修复后 gate 409、无 VO/后续 decision-observation-readback，peer 三表 facts 保持，TC 仅此前 begin 或0。
+- 覆盖反向 decision/NONE 等8组拒绝、最新三终态12组不发 RPC且允许末次只读、3方向（含 NONE/UNKNOWN/recovery/PaySUCCESS）纯读 gate 控制；相同身份合法非 terminal 仅当前方向调用。gate 是纯读取，不把 SQL0 写回作为本批证据。
 - 使用外层 test interceptor 注入独立 peer 事务，不在本地锁内发 RPC；本地交错不证明真实 TC/远端并发或完整 fencing。
 
 ### 3.2 Unit
 
-- Coordinator/Store/TC mock 覆盖 gate identity/source/decision/terminal/NULL/SQL0 与异常传播，保 T220/T221 矩阵；冲突前不调用 TC/observe/readback，finally unbind。
+- Coordinator/Store/TC mock 覆盖 gate identity/source/decision/terminal/NULL current/DAO read exception 与异常传播，保 T220/T221 矩阵；冲突前不调用 TC/observe/readback，finally unbind。双向×12 drift/NULL=24，3决议×5进度+2 prebegin=17，另8（2入口×2方向×冲突/最新终态）gate控制加1个 DAO read failure 控制。
 - 保留 RPC exception 的原 snapshot 诊断、NONE no-op、反向/同向/terminal 方向语义；不把 mock 当真实 TC。
 
 ## 4. 明确边界
