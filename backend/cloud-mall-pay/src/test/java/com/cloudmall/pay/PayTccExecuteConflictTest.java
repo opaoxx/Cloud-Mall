@@ -300,14 +300,14 @@ class PayTccExecuteConflictTest {
                 execution.state = execution.decision + "_REQUESTED";
                 return execution;
               });
-      when(store.observeSnapshot(any(), any(), any()))
-          .thenAnswer(
-              invocation -> {
-                if ("UNKNOWN".equals(invocation.getArgument(1))
-                    && invocation.getArgument(2) != null)
-                  execution.state = execution.xid == null ? "BEGIN_UNKNOWN" : "UNKNOWN";
-                return execution;
-              });
+      org.mockito.stubbing.Answer<PayTccExecutionPO> observation =
+          invocation -> {
+            if ("UNKNOWN".equals(invocation.getArgument(1)) && invocation.getArgument(2) != null)
+              execution.state = execution.xid == null ? "BEGIN_UNKNOWN" : "UNKNOWN";
+            return execution;
+          };
+      when(store.observeSnapshot(any(), any(), any())).thenAnswer(observation);
+      when(store.observeDecidedSnapshot(any(), any(), any())).thenAnswer(observation);
     }
 
     /** 故障后不再注入第二错误，便于检测不应发生的后续动作。 */

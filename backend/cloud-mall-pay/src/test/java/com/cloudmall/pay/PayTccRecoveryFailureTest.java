@@ -46,7 +46,7 @@ class PayTccRecoveryFailureTest {
             assertSame(fixture.conflict, assertThrows(BizException.class, fixture::call));
           else assertEquals(decision + "_REQUESTED", fixture.call().state);
           verify(fixture.store)
-              .observeSnapshot(same(fixture.chosen), eq("UNKNOWN"), eq("Exception"));
+              .observeDecidedSnapshot(same(fixture.chosen), eq("UNKNOWN"), eq("Exception"));
           verify(fixture.store, never()).observe(any(), any(), any());
           int readsBeforeFailure = entry.equals("recover") || decision.equals("COMMIT") ? 1 : 0;
           verify(fixture.store, times(readsBeforeFailure)).read(fixture.request.payNo);
@@ -77,6 +77,7 @@ class PayTccRecoveryFailureTest {
         var failure = new BizException(code, "controlled Bridge failure", 409);
         when(store.read(current.payNo)).thenReturn(current);
         when(store.observeSnapshot(any(), any(), any())).thenReturn(updated);
+        when(store.observeDecidedSnapshot(any(), any(), any())).thenReturn(updated);
         when(store.verifyDecisionSnapshot(updated)).thenReturn(updated);
         when(bridge.recover(current.payNo)).thenThrow(failure);
         var coordinator =
@@ -89,9 +90,11 @@ class PayTccRecoveryFailureTest {
         else assertEquals(updated.state, coordinator.recover(current.payNo).state);
         verify(store).read(current.payNo);
         verify(bridge, times(conflict ? 1 : observations)).recover(current.payNo);
-        if (!conflict) verify(store).observeSnapshot(same(current), eq("UNKNOWN"), eq(code));
+        if (!conflict && decision.equals("NONE"))
+          verify(store).observeSnapshot(same(current), eq("UNKNOWN"), eq(code));
         if (!conflict && !decision.equals("NONE")) {
-          verify(store).observeSnapshot(same(updated), eq("UNKNOWN"), eq(code));
+          verify(store).observeDecidedSnapshot(same(current), eq("UNKNOWN"), eq(code));
+          verify(store).observeDecidedSnapshot(same(updated), eq("UNKNOWN"), eq(code));
           verify(store, times(2)).verifyDecisionSnapshot(updated);
         }
         verifyNoMoreInteractions(store, bridge);
@@ -114,7 +117,7 @@ class PayTccRecoveryFailureTest {
       var fixture = new DecisionFixture("recover", "COMMIT", false, transport);
       assertEquals("COMMIT_REQUESTED", fixture.call().state);
       verify(fixture.store)
-          .observeSnapshot(
+          .observeDecidedSnapshot(
               same(fixture.chosen), eq("UNKNOWN"), eq(transport.getClass().getSimpleName()));
       verify(fixture.store, never()).observe(any(), any(), any());
       fixture.verifyTcCalls();
@@ -129,6 +132,7 @@ class PayTccRecoveryFailureTest {
       var user = new PayTccDispatchVO();
       when(store.read(current.payNo)).thenReturn(current);
       when(store.observeSnapshot(any(), any(), any())).thenReturn(current);
+      when(store.observeDecidedSnapshot(any(), any(), any())).thenReturn(current);
       when(store.verifyDecisionSnapshot(current)).thenReturn(current);
       var conflict = new BizException("PAY_TCC_EXECUTION_CONFLICT", "evidence conflict", 409);
       if (evidenceConflict) {
@@ -143,11 +147,12 @@ class PayTccRecoveryFailureTest {
         assertSame(
             conflict, assertThrows(BizException.class, () -> coordinator.recover(current.payNo)));
         verify(store, never()).observeSnapshot(any(), any(), any());
+        verify(store, never()).observeDecidedSnapshot(any(), any(), any());
         verifyNoInteractions(transactions);
       } else {
         assertEquals("COMMIT_REQUESTED", coordinator.recover(current.payNo).state);
         verify(store, times(2))
-            .observeSnapshot(same(current), eq("UNKNOWN"), eq("IllegalStateException"));
+            .observeDecidedSnapshot(same(current), eq("UNKNOWN"), eq("IllegalStateException"));
         verify(transactions).commit(current.xid);
         verifyNoMoreInteractions(transactions);
       }
@@ -333,18 +338,19 @@ class PayTccRecoveryFailureTest {
       when(store.read(original.payNo)).thenReturn(original);
       when(store.decideOwned(any(), any(), any())).thenReturn(chosen);
       when(store.verifyDecisionSnapshot(chosen)).thenReturn(chosen);
-      when(store.observeSnapshot(any(), any(), any()))
-          .thenAnswer(
-              invocation -> {
-                if (rpcFailed
-                    && invocation.getArgument(0) == chosen
-                    && "UNKNOWN".equals(invocation.getArgument(1))
-                    && transport.getClass().getSimpleName().equals(invocation.getArgument(2))) {
-                  diagnosticCalls++;
-                  if (rejectDiagnostic) throw conflict;
-                }
-                return chosen;
-              });
+      org.mockito.stubbing.Answer<PayTccExecutionPO> observation =
+          invocation -> {
+            if (rpcFailed
+                && invocation.getArgument(0) == chosen
+                && "UNKNOWN".equals(invocation.getArgument(1))
+                && transport.getClass().getSimpleName().equals(invocation.getArgument(2))) {
+              diagnosticCalls++;
+              if (rejectDiagnostic) throw conflict;
+            }
+            return chosen;
+          };
+      when(store.observeSnapshot(any(), any(), any())).thenAnswer(observation);
+      when(store.observeDecidedSnapshot(any(), any(), any())).thenAnswer(observation);
       var receipt = new PayTccReceiptVO();
       receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
       var user = new PayTccDispatchVO();

@@ -70,15 +70,14 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
         }
       } catch (RuntimeException tryFailure) {
         rethrowConflict(tryFailure);
-        executions.observeSnapshot(owned, "UNKNOWN", tryFailure.getClass().getSimpleName());
+        recordObservation(owned, "UNKNOWN", tryFailure.getClass().getSimpleName());
       }
       owned = executions.decideOwned(owned, xid, decision);
       // 3. 决议独立提交后才发 RPC，之后永远不能改变方向。
       sendDecision(owned);
     } catch (Exception beginOrPersistenceFailure) {
       rethrowConflict(beginOrPersistenceFailure);
-      executions.observeSnapshot(
-          owned, "UNKNOWN", beginOrPersistenceFailure.getClass().getSimpleName());
+      recordObservation(owned, "UNKNOWN", beginOrPersistenceFailure.getClass().getSimpleName());
     } finally {
       // 4. 入口已拒绝继承上下文，因此只清理本次 begin 建立的绑定。
       RootContext.unbind();
@@ -117,8 +116,7 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
       if ("COMMIT".equals(execution.decision)) transactions.commit(execution.xid);
       else if ("ROLLBACK".equals(execution.decision)) transactions.rollback(execution.xid);
     } catch (Exception decisionResponseLost) {
-      executions.observeSnapshot(
-          execution, "UNKNOWN", decisionResponseLost.getClass().getSimpleName());
+      recordObservation(execution, "UNKNOWN", decisionResponseLost.getClass().getSimpleName());
     }
   }
 
@@ -130,20 +128,25 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
   /** 原观察内核只消费调用方已核对的快照；不按支付号重新取得其它owner。 */
   private PayTccExecutionPO observe(PayTccExecutionPO execution) {
     if (PayTccExecutionStore.terminal(execution.state)) return execution;
-    if (execution.xid == null)
-      return executions.observeSnapshot(execution, "UNKNOWN", "begin XID 尚无持久证据");
+    if (execution.xid == null) return recordObservation(execution, "UNKNOWN", "begin XID 尚无持久证据");
     try {
       PayTccDispatchVO user = bridge.recover(execution.payNo);
       String state = evidence.classify(execution, user);
-      return executions.observeSnapshot(
-          execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
+      return recordObservation(execution, state, "UNKNOWN".equals(state) ? "两端永久终态尚未齐全" : null);
     } catch (BizException failure) {
       rethrowConflict(failure);
-      return executions.observeSnapshot(execution, "UNKNOWN", failure.getCode());
+      return recordObservation(execution, "UNKNOWN", failure.getCode());
     } catch (RuntimeException unavailable) {
-      return executions.observeSnapshot(
-          execution, "UNKNOWN", unavailable.getClass().getSimpleName());
+      return recordObservation(execution, "UNKNOWN", unavailable.getClass().getSimpleName());
     }
+  }
+
+  /** NONE保留原进度合并，已决议快照在锁内核方向后才写观察。 */
+  private PayTccExecutionPO recordObservation(
+      PayTccExecutionPO execution, String state, String error) {
+    if ("NONE".equals(execution.decision))
+      return executions.observeSnapshot(execution, state, error);
+    return executions.observeDecidedSnapshot(execution, state, error);
   }
 
   /** 禁止把新的全局事务误加入别人的 XID 或尚未提交的本地事务。 */

@@ -391,6 +391,120 @@ class PayTccExecutionOwnerTest {
     }
   }
 
+  /** 新观察入口在terminal/参数/SQL之前拒绝原方向和来源变化。 */
+  @Test
+  void decidedObservationRejectsDirectionBeforeTerminalAndWrites() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String mutation :
+          List.of(
+              "opposite",
+              "none",
+              "expected-none",
+              "null-owner",
+              "missing-current",
+              "wrong-id",
+              "wrong-source",
+              "bad-current",
+              "bad-expected",
+              "null-incoming",
+              "zero-update")) {
+        var fixture = new Fixture();
+        var expected = execution("RUNNING", "owned-xid");
+        expected.decision = decision;
+        var current = execution("COMMITTED", "owned-xid");
+        current.decision = decision;
+        switch (mutation) {
+          case "opposite" -> current.decision = decision.equals("COMMIT") ? "ROLLBACK" : "COMMIT";
+          case "none" -> current.decision = "NONE";
+          case "expected-none" -> expected.decision = "NONE";
+          case "wrong-id" -> current.id = 2L;
+          case "wrong-source" -> fixture.source.amount = new BigDecimal("10.01");
+          case "bad-current" -> current.operationKey = "bad-key";
+          case "bad-expected" -> expected.amount = null;
+          case "zero-update" -> current.state = "RUNNING";
+          default -> {}
+        }
+        when(fixture.executions.selectForUpdate(expected.payNo))
+            .thenReturn(mutation.equals("missing-current") ? null : current);
+        var input = mutation.equals("null-owner") ? null : expected;
+        String state = mutation.equals("null-incoming") ? null : "UNKNOWN";
+        var before = snapshot(expected);
+        var failure =
+            assertThrows(
+                BizException.class,
+                () -> fixture.store.observeDecidedSnapshot(input, state, "late"));
+        assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+        assertEquals(409, failure.getHttpStatus());
+        assertEquals(before, snapshot(expected));
+        if (input == null) verifyNoInteractions(fixture.payments, fixture.executions);
+        else {
+          var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+          order.verify(fixture.payments).selectForUpdate(expected.payNo);
+          order.verify(fixture.executions).selectForUpdate(expected.payNo);
+          if (mutation.equals("zero-update"))
+            order
+                .verify(fixture.executions)
+                .updateObservation(
+                    eq(expected.payNo), eq(decision + "_REQUESTED"), eq("late"), any());
+        }
+        fixture.verifyNoOtherInteractions();
+      }
+  }
+
+  /** 同向merge与终态幂等保持，旧NONE观察仍可跟随合法决议进度。 */
+  @Test
+  void decidedObservationKeepsSameDirectionAndLegacyNoneProgress() {
+    for (String decision : List.of("COMMIT", "ROLLBACK"))
+      for (String state :
+          List.of("RUNNING", decision + "_REQUESTED", "COMMITTED", "ROLLEDBACK", "CONFLICT")) {
+        var fixture = new Fixture();
+        var expected = execution("RUNNING", "owned-xid");
+        expected.decision = decision;
+        var current = execution(state, "owned-xid");
+        current.decision = decision;
+        current.amount = new BigDecimal("10.000");
+        fixture.source.status = "SUCCESS";
+        var updated = execution(decision + "_REQUESTED", "owned-xid");
+        updated.decision = decision;
+        when(fixture.executions.selectForUpdate(expected.payNo)).thenReturn(current);
+        when(fixture.executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+        when(fixture.executions.selectByPayNo(expected.payNo)).thenReturn(updated);
+        var before = snapshot(expected);
+        boolean terminal = List.of("COMMITTED", "ROLLEDBACK", "CONFLICT").contains(state);
+        assertSame(
+            terminal ? current : updated,
+            fixture.store.observeDecidedSnapshot(expected, "UNKNOWN", "same-direction"));
+        assertEquals(before, snapshot(expected));
+        var order = org.mockito.Mockito.inOrder(fixture.payments, fixture.executions);
+        order.verify(fixture.payments).selectForUpdate(expected.payNo);
+        order.verify(fixture.executions).selectForUpdate(expected.payNo);
+        if (!terminal) {
+          order
+              .verify(fixture.executions)
+              .updateObservation(
+                  eq(expected.payNo), eq(decision + "_REQUESTED"), eq("same-direction"), any());
+          order.verify(fixture.executions).selectByPayNo(expected.payNo);
+        }
+        fixture.verifyNoOtherInteractions();
+      }
+    var fixture = new Fixture();
+    var expected = execution("RUNNING", "owned-xid");
+    var current = execution("COMMIT_REQUESTED", "owned-xid");
+    current.decision = "COMMIT";
+    when(fixture.executions.selectForUpdate(expected.payNo)).thenReturn(current);
+    when(fixture.executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
+    when(fixture.executions.selectByPayNo(expected.payNo)).thenReturn(current);
+    assertSame(current, fixture.store.observeSnapshot(expected, "UNKNOWN", "legacy-progress"));
+    assertEquals("NONE", expected.decision);
+    verify(fixture.payments).selectForUpdate(expected.payNo);
+    verify(fixture.executions).selectForUpdate(expected.payNo);
+    verify(fixture.executions)
+        .updateObservation(
+            eq(expected.payNo), eq("COMMIT_REQUESTED"), eq("legacy-progress"), any());
+    verify(fixture.executions).selectByPayNo(expected.payNo);
+    fixture.verifyNoOtherInteractions();
+  }
+
   /** 有效请求与固定键共享原创建域。 */
   private static PayTccDispatchDTO request() {
     var request = new PayTccDispatchDTO();

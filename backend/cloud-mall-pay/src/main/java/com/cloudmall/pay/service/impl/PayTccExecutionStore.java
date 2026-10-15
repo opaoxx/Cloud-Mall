@@ -206,6 +206,19 @@ public class PayTccExecutionStore {
     return mergeObservation(current, state, error);
   }
 
+  /** 已决议观察先核原方向，再合并进度；旧未决议观察入口保持兼容。 */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public PayTccExecutionPO observeDecidedSnapshot(
+      PayTccExecutionPO expected, String state, String error) {
+    // 1. 沿原Pay→execution锁核身份、来源及两端持久域。
+    PayTccExecutionPO current = lockedSnapshot(expected);
+    // 2. 已决议方向不得变成反向或NONE，拒绝先于终态和观察参数处理。
+    if ("NONE".equals(expected.decision) || !Objects.equals(current.decision, expected.decision))
+      throw conflict();
+    // 3. 同方向沿原合并规则写入，保终态幂等、诊断截断与影响行检查。
+    return mergeObservation(current, state, error);
+  }
+
   /** TC发送前只读复核原身份、来源与方向，返回当前进度；事务外才允许发RPC。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public PayTccExecutionPO verifyDecisionSnapshot(PayTccExecutionPO expected) {
