@@ -1,0 +1,67 @@
+# QueryInfo 测试候选：独立 false→true 有界真实比较
+
+2026-10-31。本项承接已完成的绑定离线验收，用户既有真实实验与后续默认执行授权持续有效；在本规格所有具体准入门满足时直接执行，不再询问一般授权。它不是预先的 actual GO，任何现场或精确评审门缺失均 STOP/BLOCKED。Root 负责新操作者工具、构建、真实资源、公开 caller 和显式 OPEN/DECIDE；PM 仅本规格与精确包评审；QA 只读，不执行现场动作；不子委派，不回滚他人变更。
+
+## 1. 三个固定作用域及不可变 runtime
+
+协调作用域为 `target/cm21-queryinfo-comparison-20261031`。两个实际臂必须为其兄弟目录：`target/cm21-queryinfo-control-actual-20261031` 和 `target/cm21-queryinfo-candidate-actual-20261031`，分别承载 CONTROL_FALSE 和 CANDIDATE_TRUE。37 runtime 的 `ROOT=HERE.parents[1]` 因此仍指 F:/Cloud-Mall；不得把臂嵌入协调目录再修改 runtime 修路径。
+
+正式 SPEC 仍为 `.codex/specs/cm21_queryinfo_binding_20261031.md`，SHA `f5b8992cebc05fd9e34642a1d9bd051b6f42b05b2d1fb40b02ba45faed54547f`。来源是 `target/cm21-queryinfo-binding-20261031` 最终903图 SHA `eadd915e9247791e05f4148dd0682b6a8159db901b0f8acdd1d8264900dec4dd` 及其最终 current pins。本治理规格和操作者脚手架独立 pin，不加入正式935名单、不篡改正式 SPEC。
+
+每臂复制来源已审37 runtime 原字节及准确191预期目录；全部 source935/tool37/profile41-source12-tool/wiring34/执行必需30、metadata15、inputs9、op6、OPEN7、cleanup关键3保持。Cache strict bool 只由新 profile seal runtime 固定，各臂 false 或 true，经 sealSHA批准，PB仍策略无关。原 runtime、Java、SQL、POM、配置、JMX及旧scope 不改；旧 actual60a 已消费不重激活，旧NO_GO/ABORTED-closeFailed不重判。
+
+Root 可在协调/两臂新目录新建或复制最小改版 operator：identity、live-inputs、package、sealer、launch、pairclock、pair安全判定与归档工具，适配本次路径、37/935/191及cachebool。所有 operator 保源/currentSHA、闭读捕获后执行同bytes，未知或漂移拒绝；不混入37 runtime，不改原原子发布/批准/原执行算法。不裸import未知本地文件后才自验。
+
+## 2. 负载前一次性准备
+
+开始先核旧完整图、current Root源码和两RootDoc并保前像；RootDoc可以在正式候选前追加本次开始记录一次，随后冻结同一当前字节，覆盖两个臂。false公开caller launch之后直到两臂结束或STOP、终态独立audit完成前不得再追加；不能复用中间变更后的旧source pin。
+
+全部 operator、精确发布/NO_GO分支/预算/0actor反例先完成并审定，再建立两份新标准 Maven build-workspace，各自新执行精确14suite191unique0FES及common/product/stock package、3CP/StockBootJar。实际 JDK17.0.20/Maven3.9.16/Root313输入/18指定test Java与Mapper三SQL、全class major61/build/依赖/source副本前后和闭流自然0由37内原producer/verifier核。不得复制上轮class/XML/PB冒新构建；两个PB可有路径相关字段，各自完整真实来源，代码/JDK/依赖/工具版本相同。已知未执行Stock测试两编码仅沿已审完整path/source/两SHA/单CP证明，当前各自封存后严格按实际SHA，第三变体硬拒，不重编求绿或泛排test。
+
+这些准备在pairclock前完成，不重复无意义设计轮。Bootstrap20只从原schema.sql/StockConsistencyAuditStateMapper取得文本和SHA，准备期不执行SQL、不创建业务schema、不启业务main；手动migration/rollback仍只绑定、不执行。正式NEW2初始化由实际fresh Single10原流程执行，默认开发库不碰。
+
+两臂预分配独立未用32hex owner、Compose project、四卷名称、claim/once和进程；同一固定端口53901 MySQL、53902 Rabbit、53903 Rabbit management、53904 ES、53905 Redis顺序使用。false所属容器全部移除且端口真实重新合格后才允许true；不得重用false卷/catalog/claim或当时LIVE。镜像四完整ID、root/root、builtin bridge/Rabbit gosu健康检查、MySQL原1+1/ROW/doublewrite/RR与其余profile保持。所有临时资源只由各臂已准入的公开caller所管worker创建，准备及评审不创建容器、卷或网络。
+
+JMeter固定 `E:/apache-jmeter-5.6.3`（bin为用户指定路径），实读版本5.6.3、JMX与完整工具输入。两臂同batch1/consumer1/seed300、10rps暖10秒正式60秒、原排空与comparison，phase两false、原application timing及已审callback/serviceTx观察策略一致。唯一被试差异是受控product客户端四属性及必须随机身份/实际资源代际；不加探针、改SQL、清池、补第三臂或扩25/50档。
+
+## 3. 每臂独立精确包与现场门
+
+每臂在当时重新获得完整Docker inventory/旧资源语义、EngineID、running ps/stats、host/engine/disk强容量、四imageIDs、7端口bind释放、新project四卷未用、Compose原配置、root/Rabbit实证和原op6。所有原始读回、CLI退出/时钟/闭流/容量值先归档再判门；不得跨臂拼LIVE或把准备时点值冒当前持续成立。真实public caller/sup/worker仍会原样再次验证。任一原门不满足即BLOCKED，保真，不停用户程序/降阈值/换端口owner或重跑寻绿。
+
+每臂按原工具生成false candidate/inactive intended及完整profile/wiring/PB/runtime/source/tool/external/op6/operator/governance pins；false→intended只有原四授权bool和canonical approval digest可变。PM与独立只读QA必须对同一完整 intended SHA各自明确PASS，Root才CREATE_NEW发布其原bytes为execution-admission并闭读核同SHA，再一次公开caller CLI传该最终SHA。治理spec/历史审批/PB通过均不代本臂精确批准。true必须等false安全分支成立并取得自己的当时完整包双审，不能预先拿准备模板替最终true准入。
+
+两PB和静态工具可提前备齐；true当时LIVE/最终包/双审耗时计入原pairclock。若剩余时间不够完整原协议和清理，STOP不发true caller；不能先发再祈望时间足够。
+
+## 4. 唯一总时钟与原Root决定
+
+pairclock为CREATE_NEW一次真实monotonic_ns/UTC锚，紧邻false公开caller Popen之前；总3000秒从该launch到true最终终态与独立cleanup观察，若STOP则到该终态观察。锚不覆盖之前的离线build/静态审查，但包含false启动/Root评审/清理、true准备末段/现场/精确双审/启动/Root评审/清理。每臂原独立parent work1080/outer1200/cleanup120、review390-stage300-closing90、deadline clip/Job/句柄/流/return等算法完全保持，不共享、续期或重置。启动true前必须能容纳完整原outer1200及所需终态观察到pair绝对截止。
+
+各臂只一次原公开caller，不直调_work、Runner或私有业务入口，不重用旧claim。不自动判定性能。PENDING出现后Root在原deadline内显式bound OPEN，核原九hash、真实XML/JTL窗口、完整U-P采样/truehalf、stock偏移、HTTP/accounting/functional及全部原覆盖，显式DECIDE GO/NO_GO/UNKNOWN。保持原阈值/窗口/Closing门；最终drain、HTTP零错或观察者局部健康不独立构成GO。晚评审/覆盖未知必须原样STOP，不补签。
+
+## 5. false→true唯一决策表
+
+原比较卡 `target/cm21-queryinfo-test-candidate-20261030/comparison-card.json` 完整继承，额外必须新queryinfo四侧车合格。false性能结果为GO时，须全部原happy/native/正常close、四侧车、下列安全合取均过，才有资格准备true最终包。不是自动launch。
+
+唯一允许的失败分支为 Root及时接受的NO_GO且basis列表精确只有 `SUSTAINED_GROWTH_UNAPPLIED`；还必须逐项证明：
+
+- 原bound OPEN/DECIDE接受、九hash/XML/U-P/stock及所有必需覆盖有效，reviewReturnGate/closingTimely为true。
+- evidence/sourceAfter/runtime/postFour/preRemovalArchive/callerWithinOriginalOuter均true；四queryinfo侧车由新独立UUID/CID/catalog/PB driver锚校验合格。
+- 两Job均active0，句柄及stdout/stderr关闭，无terminate/timeout；所属业务池与全部进程结束，没有另一运行错误或未知关闭资格。
+- 原cleanup通过、旧资源全量稳定语义保持、own四CID全部absent、四fresh卷保留；独立终态/端口观察完成。
+- true为独立新owner/project/进程/四卷/claim，当前capacity/ports/images/LIVE及完整精确包双审全部通过，pair剩余足够完整原true协议。
+
+该NO_GO下false仍保持overall/work/native=false、main ABORTED、closeFailed=true等原已知safe-abort负面字段，不洗成正常业务close。37内timing_native仍硬要求原legacy成功及Root verdict GO，因此该失败臂native可以原样失败；不得改native批准NO_GO。caller独立queryInfoCache.qualified可作四侧车事实，candidateQualified=overall AND qic仍false；不能用candidateQualified=false机械删除上述唯一例外，也不能以qic绿替原安全合取。
+
+UNKNOWN、其它或多basis、任一证据/覆盖/资源/关闭未知、额外运行错、超时或终止，一律STOP只报告control或比较不完整，不发第二臂。true任何GO/NO_GO/UNKNOWN归档后结束，不自动第三rollback、不换owner重跑；false STOP同理。Root pair判定只读原报告/独立证据并列出全部合取，不改变原负面字段。
+
+## 6. 四侧车、关闭与归档
+
+新四侧车严格要求startup/measurement-ended/finish-10/completion同owner/runtime/mode/run、policy/effectiveprops、独立mysql-load-profile.serverUuid/CID、原ready.productCatalog及PB唯一Connector8.0.33路径SHA。早期open/inFlight状态量不要求单调下降，终态完全释放且累计计数守恒。seq/digest/16前缀有界语义不作每连接重放或cache-hit证据。缺/坏侧车不得为凑齐比较放行。
+
+core先冻结，独立aux/setdefault/return复读保持；serviceTx和callback本地逻辑段不冒物理commit/ACK或SQL成本，partial/THREW保原。失败保真实primary/cause/close/native/Root结论，运行中不得修37/Java/SQL；新Bug先保原证据，按bugfix规则记录，另scope审修。
+
+无论结果，按原关闭资格与独立cleanup：归档原始证据和SHA后ordinary stop/rm本臂own4，保4卷及builtin bridge，不force/prune/down-v/kill无关资源。cleanup只依原关键3合法授权；不因缺侧车阻塞安全清理。容器移除不等业务正常close、数据清零或负载成功。true基线包含false保留卷；旧资源完整比较相应含已保留false卷。
+
+两臂结束或STOP后冻结当时真实current source/tool/runtime/op6/RootDoc和完整结果，由PM/QA精确只读审实际达成或未达、Root接受、四侧车/独立aux/关闭/清理；随后才追加RootDoc并另存tail验证。最高结果按真实臂状态命名；BLOCKED/NOT_RUN明确0业务负载和claim未消费，准备通过不能称实际跑过。若只一臂执行，只报告该臂事实及STOP原因。
+
+仅一个固定顺序、两独立fresh环境的样本对最多给描述比较，明确顺序/机器负载效应；不预签缓存命中、性能收益、统计因果或生产启用，不拿旧NO_GO当新control，不改变历史性能失败结论。未达任何门不得为“完成比较”放宽。

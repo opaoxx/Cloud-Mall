@@ -1,0 +1,77 @@
+# CM21：native actual传输、独立binder和受控文件publisher实现补充
+
+2026-10-26，pm_arch。`GO_IMPLEMENT_RUNTIME_MODULES_AND_LOCAL_FAULT_REGRESSIONS / NO_DOCKER_OR_LIVE_ADMISSION`。本轮交可调用实现和故障回归，不再停于泛方案；仍不运行Docker/Engine/Erlang或现场资源。root集成native_session/binder/tests/entry；worker一仅native_transport.py、test_native_transport.py、固定已pin独立helper pipe_peer.py及transport-derivation.json，worker二仅publisher.py、test_publisher.py、固定已pin独立helper publisher_worker.py及publisher-derivation.json；pub负例可用私有闭enum fixture入口复用相同代码路径，公开publish_once仍固定5参数，不加任意callback/path。QA只读。pm_arch仅本文，不子委派、不回退他人修改，不改业务或旧sealed文件。
+
+## 1. 输入和原设计约束
+
+新target `target/cm21-rabbit-native-runtime-20261026/`，input38165files/20目录/absence/822Java源 SHA `4dcf50bab806b521f9b33a88f82df514b21053aaaf3d9035b7658b037809ec37`，继承plan final315map SHA `f56cc4e6495adb4bc5a9e601f2932a92931e21fe8e61235d11e79b7206c29822`和manifest `1bb89d50693c86f3aa9b8e014882d60c27588d797eb04fd033e1760195169be4`全部引用字节。设计规格eec30f9946d803462a00324ca9d43488b04014c8d948603268105f140911a1e0和closed plan e7c390ec8ea116a2e2a9b470a5005d344de171e94bac8e6cc481c73483f8dfa0不改；实现进度另记录，不回写其NOT_IMPLEMENTED事实。
+
+保旧4cf0现场/223卷历史档、所有FAIL/claims、原7core/C3/typed producer/codec文件，不当前盘点、重试或创建owner。新actual模块不是将模型改scope；旧memory controller不可接actual。actual仍需下一fresh生命周期/无端口发布工件/准确owner/资源保护/完整入口封存和PMQA准入。常设实验授权有效，未来必要动作不再用户确认，但本轮没有live许可或real执行入口。
+
+预算保持outer600、active240含create/start/boot/report、report75=work60（5meta8+Start15=55+source/codec5）+从实际work_end起final close/publication≤15、closing90。metadata8/Start15各内含本地cleanup≤2，不重复加12；原session40不能冒75。report请求严格串行最多6次、总attempt1，无retry/fallback，任何unknown不发下一步补救请求。
+
+## 2. 最小模块API及scope
+
+### NativeTransport
+
+允许接口 `NativeTransport(binding, work_deadline, total_deadline, fixture=None)`及 `request(method,path,body,absolute_deadline)`。binding准确闭合10键：cid、node、nonce、generation、owner、profileSha256、image、commandSha256、expressionSha256、createBodySha256。full64/32hex、合法同代际时间、有限ASCII节点/固定image与程序、内部重算Cmd/body/expression SHA严格核，bool不当数/缺键不补null，不接任意Cmd/argv/进程工厂/clock/可执行对象。
+
+fixture只能是本模块允许的exact LocalPipeFixture类型、固定scenario和固定Python/helper源SHA；不接普通callable/process_factory或仅scope同名的假backend。该分支scope固定 `LOCAL_NATIVE_REPORT_PIPE_FIXTURE`。helper只按HTTP消息header+CL完整body回复，校验固定六步/命令/摘要，不等stdinEOF、不执行Cmd或Erlang，无socket。
+
+fixture=None为实际实现分支，scope预留 `ACTUAL_FIXED_REPORT_OBSERVATION_LIMITED`；固定pinned DockerCLI/context/API、真实monotonic，无caller clock/factory。只有未来固定actual-final-admission.json及准确代码/source/plan/owner/CID/代际准入gate齐全才可取得真实stdio；**本轮该gate pin未配置/无许可文件，必须fail-closed、零Docker**。不能用self-computed hash、临时trusted=true或fixture marker替代未实现的生命周期/实际准入；实现实际IO代码不等本轮可运行真实分支。未来gate绑定须避免代码hash与包含该代码的admission/manifest自引用。
+
+只接受固定六形态/顺序：ContainerGET前→Create201固定Userrabbitmq/Privilegedfalse/Ttyfalse/Attach+已审rabbitmqctl eval Cmd→同收到ExecID Start→同ID两终态GET→ContainerGET后。Create ID从真实回复严格提取，不caller预填。Create/Start body是新native allowlist，不调用或放宽旧collector bash builder。任何请求错误/unknown后poison，拒第七次/重试/换node或nonce。
+
+每call≤min(原work_deadline, caller原deadline,metadata8或Start15)，原local reserve包含在此界内；六请求共同原work60不复位，total75供末pub。并发有界writer/stdout/stderr、header32KiB/metadata2MiB/stream2228224bytes/stdout2MiB/stderr64KiB/4096mux帧等既有界保留。stdin仍原EOF/CLI退出或abort后的cleanup关闭，不改成CL提前关闭。source receipt必须闭合safe字段：provider scope/kind、request index/method/path/body/wireSHA和bytes、实际观察response bytes/SHA/completeEOF、同clock host窗/有效deadline、strict局部cleanup/exit和固定error enums，无raw/stdErr文本/Args/Env。
+
+receipt来源须绑定该exact provider实例、准入/绑定与当前sequence，不因一个caller dict写actualScope就通过；actual与fixture身份/receipt类型或等价不可混淆的实例绑定明确分开。counter和source/currentCall不变量每步及末核，非法可变counter不转录，保先前counter/末钟缺口回归。CLI退出/本地join不是容器exec完成。
+
+### native_session / binder
+
+root产 `run_once(binding, channel, report_anchor, phase_deadline, outer_deadline, ...)`等具体有限接口，无通用backend或实际CLI入口；确切签名静态plan/测试冻结。只接受新exact provider/合法scope，fixture结果必须标fixture、actual资格恒false，不可改标或制造actual envelope。实际分支亦须future gate；当前默认禁用，不分配nonce/owner/claim。
+
+可原字节复用producer5a4fd0c8edc9e9fdde4786a08e8414b2437f1aeecc923f4d8fbf8a549bf3bcd2、pureHTTP edd68ad6141bce70257c3d31cb5120c95b5a6e3a5c6cc5ced14b580a66aaa7a1及mux来源6951a7490747f15dbb1aa3ad984248778502a646e2ab878d5ad2783484a7cdd3。term codec来源bbec6e5b1dab97663d807ed0f107ec70eb9346fcebad3f1c312d8c66c87c8f12只复用纯grammar（pin私有_TermReader或原span独立提取均需证明）；**不调用旧synthetic envelope完整binding入口来处理actual**，不改旧SCOPE或常量。
+
+新binder以自身固定program/nonce/node/template4990993e…/renderedExpr/Cmd/CreateBodySHA、实际source受控链而不是外部trusted标签核：准确CID/owner/image/profile/StartedAt前后、native Create→同ID Start accepted、完整HTTP/mux/EOF、两同ID/CID Runningfalse+ExitCode strictint0、stdout完整arity7 term/stderr空、actualNode逐字等expected、所有actor/时间/source和publisher门。new CmdSHA不冒旧native/模型常量，source/audit1718…/contract14cf…可信实现+标准RPC假设、不attest保持。
+
+报告READY/NOT_READY是条件布尔观察；UNKNOWN合法帧可保协议事实但不能Ready或自动再probe。future actual status最多有限实际报告观察；fixture只能fixture观察，sourceBranchWitnessProven/realRemoteCompletionProven（无实际时）/readyQualified/retryAllowed/liveAdmissionGranted/runtimeQualified保持相应否定边界。本轮未实际producer执行，不能把pipe人工报告签为真实谓词值。
+
+## 3. Publisher API、精确payload及外部ack
+
+接口 `publish_once(payload, report_anchor, work_end, phase_deadline, outer_deadline)`；无caller path/callback/任意worker命令。内部fresh已验证绝对TemporaryDirectory（marker+nonce/不可逃逸/无symlink或junction）、固定Python+本publisher内部worker源pin，CREATE_NEW固定payload/receipt文件，禁止覆盖/目录泛删。当前只允许明确本地文件测试scope取得worker，非Docker/网络/Erlang；将来实际报告复用同受控字节出版机制，不因payload.scope就授actual来源。
+
+payload exact18键：schemaVersion、scope、containerId、execId、nonce、expectedNodeSha256、templatePolicySha256、actualExpressionSha256、fullCommandSha256、createBodySha256、reportStdoutSha256、reportStderrSha256、sourceLedgerSha256、predicateOutcome、reportDecoded、sourceBound、requestCount、terminalCount。schemaVersion strict1，scope仅LOCAL_NATIVE_REPORT_PIPE_FIXTURE或ACTUAL_FIXED_REPORT_OBSERVATION_LIMITED；各ID/hash strict64hex、nonce32hex；predicateOutcome仅READY/NOT_READY/UNKNOWN，reportDecoded/sourceBound strictbool，requestCount native int0–6、terminalCount native int0–2。payload仅closed hash/enum summary，无rawframe/HTTP/CLI/Config/Env/Args/异常文本。
+
+publisher只证明这些bytes写入/关闭/读回，不因caller sourceBound/actualScope标签证明实际报告、分支或资格。root session在binder后生成此summary，actual权限独立；测试恶意actualScope标签也只能字节出版证明，不制造actual report运行证据。
+
+报告75/actual work_end+15/phase/outer-closing90共同裁publication窗口；deadline从caller原anchor推，不pub时再起15而借旧work，不足或超时UNKNOWN。writer child仅接有界safe payload（上限2MiB）及必要nonce/marker，不暴露通用stdin脚本；stdout仅≤64KiB封闭ACK，stderr只bounded count/hash/安全enum。所有worker/spawn/readers/pipes需在原界join/close/reap，未归还/late/missingACK保UNKNOWN，不daemon冒完成、不无界等或重试。
+
+worker完成payload write/close→readback bytes/SHA；若写terminal receipt，它只引用payloadSHA/阶段事实，不自证自己的期限。全部文件close/readback之后才发完整nonce/path-identity/payloadHash/receiptHash/bytecount/源workerSHA绑定ACK并退出。**caller在收到完整ACK、验证schema/nonce/hash/worker身份、worker已退出且全部pipes闭合之后读原caller monotonic**，这是独立内存ack，不由worker自报时间代caller结束；成功必须callerEnd在原pub/phase/outer界。worker自己的clock最多局部说明，不跨clock硬排。
+
+caller ack本身若再写磁盘，那个末写不被自身内容证明；当前返回内存ack可供外层未来orchestrator独立记录，不保证无限自引用最后文件或fsync硬实时/durability。任一文件worker不明、join/ACK/readback不全或迟到，不准report完整成功/删除或继续probe，仍不证明远端eval被取消。挂起worker只按准确owned本地子进程清理/保安全Temp说明，不杀未知PID，不在未reap时递归删除临时根。
+
+## 4. Session最后门与受控输出
+
+work60包括5*8+15串行上界和source/codec5，8/15已有每call cleanup，不double-count12；report total75、从真实work_end起publisher/末记录≤15，outer/phase/closing保持原设计。校验、builder/source、所有6步和binder均在原work内，文件出版在剩余原界，不用模型8+2/10或旧session40代替。
+
+session在publisher实际返回/关闭后以原real monotonic再核总耗时、source/计数/精确身份/终态和ACK；不能先签绿再等未知publisher撤销。source一旦未知fail-fast，不加terminal重试或第二report。partial stdout/header/坏JSON/mux/report、Start timeout/局部kill、RPC infinity导致未知都保已知ExecID/Start及局部事实，不签remote完成；实际资源stop/归档仍下一生命周期gate，本轮不能对4cf采取动作。
+
+只有固定closed native-data最终结果发布；严分fixtureExecEvidence/fixtureReportValidated、actual report观察、publisher字节证明与ready/分支强见证。任何新增报告资格在pending/exception/deadline/counter/source/ACK失败时false，已知局部关闭/解码事实可分层保；不把未知当false/空正文或把CLIexit作remote终态。端点来源和文件出版不是全时段或恶意binary保证。
+
+## 5. 本轮允许测试与必须通过的回归
+
+pure测试硬禁Popen/run/socket/helper；local故障套件只完整白名单固定Python+已封本地helper/publisher worker脚本及严格argv，禁Docker/dialer/网络/Erlang/任意factory/shell。允许真实匿名pipes、nonce标记新Temp目录文件write/close/readback故障测试；因此分别记录local helpers/真实Temp出版次数，不写笼统“无进程/无文件操作”。所有旧资源/owner/claim和Java源不动。
+
+Native测试至少固定builder完整Cmd/body/hash/注入拒、Scope/factory假actual拒、actual gate缺失0Docker、真6步非空Create/Start body读CL不等EOF、200/101/mux/stdout/stderr、两终态/代际/nonce/node/template错、header/JSON/cap/unknownstderr、partial write/hang/abort/early/late/pending/pipeclose/CLIexit完成分离、work60/total75/每call8-15剪界和poison/no retry/第七步拒。原stdout先完允许，stdin只EOF/CLIexit或abort cleanup关闭。
+
+Publisher测试至少真实Temp成功写关/读回SHA/完整ACK+callerEnd/worker与pipes闭合，路径/marker/nonce/unknownkey/boolcount/payloadscope不提权、CREATE_NEW冲突、截断/伪ACK/hash错/worker exit非零/early/hang/late/pending/读取或关闭失败、截止在写/读回/ACK/末caller观察前后等边界；UNKNOWN不伪绿、不删除foreign Temp、不已返回后回填。
+
+Session/binder测试真pipe六步到固定term语法+独立actual/fixture envelope、7core原字节、program/schema/来源哈希、预算新75不旧40、模型不能改标actual、publisher只bytes不SourceGate、所有pending新增字段降级与最后caller核。旧C3内存data-only门不冒磁盘时限；不为过测延长timeout/改header/放宽parser。失败/修前源/旧回执保，最新唯一方法/helper/process/file计数分开不累旧30/70。
+
+root封38165继承及新spec/模块/测试/固定helper/出版worker/源proof/计划/回执/default，独立核20目录/absence/822、所有旧sealed/当前4cf端点档不变；逐核心调用链记录源码行与来源/资格局限。默认entry无actual命令、root可显式运行仅local-fault suite；--live/--execute-real等实际路径不本轮提供。
+
+## 6. 实现GO与最终可签结论
+
+本GO批准上述最小三个责任域API/本地权限，worker可立即实施，不再等额外泛研究。最终需PM/QA准确source/manifest/plan/本地故障证据/default/publisher闭环后，仅签 `NATIVE_RUNTIME_MODULES_LOCALLY_VERIFIED_PENDING_LIFECYCLE_ADMISSION`。实现可调用不等实机通过，actual adapter gate仍无本轮准入，current4cf/新owner/资源动作、Erlang执行和真实报告次数均0。
+
+八未来gate只完成本轮确已实现/测过的部分，fresh lifecycle/完整实际入口及准确owner、无publish工件、old全资源保护、失联owned stop/归档/先档普通rm、真实准入未完成就明确pending，不伪造actualAllowed。下一任务这些全过后才可按常设授权一次真实验证，不重复询问用户也不跳过缺失实现/回归。原全部FAIL/有限绿、flag=false、性能OPEN_NO_GO与223卷历史档保持。

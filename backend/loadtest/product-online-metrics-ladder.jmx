@@ -1,0 +1,160 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="CM21 owned online metric ladder" enabled="true">
+      <stringProp name="TestPlan.comments">Run each level with explicit owned productPort/threads/seconds/rps/seedIds/resultsFile. Warmup seconds=10, stop and drain before baseline, then seconds=60. Root runs levels 10,25,50 and independently audits all raw XML responses.</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="Explicit properties" enabled="true" />
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="CM21 bounded level" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Bounded duration loop" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">-1</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(threads,0)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">5</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${__P(seconds,0)}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      </ThreadGroup>
+      <hashTree>
+        <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="Actual 300 owned product IDs" enabled="true">
+          <stringProp name="filename">${__P(seedIds,)}</stringProp>
+          <stringProp name="fileEncoding">UTF-8</stringProp>
+          <stringProp name="variableNames">productId</stringProp>
+          <boolProp name="ignoreFirstLine">false</boolProp>
+          <stringProp name="delimiter">,</stringProp>
+          <boolProp name="quotedData">false</boolProp>
+          <boolProp name="recycle">true</boolProp>
+          <boolProp name="stopThread">false</boolProp>
+          <stringProp name="shareMode">shareMode.all</stringProp>
+        </CSVDataSet>
+        <hashTree />
+        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Shared whole-group RPS times 60" enabled="true">
+          <stringProp name="throughput">${__groovy(Double.parseDouble(props.get('rps'))*60)}</stringProp>
+          <intProp name="calcMode">4</intProp>
+        </ConstantThroughputTimer>
+        <hashTree />
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="CM21_VIEW" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="Public GET parameters" enabled="true">
+            <collectionProp name="Arguments.arguments" />
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">127.0.0.1</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(productPort,0)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/api/products/0</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <stringProp name="HTTPSampler.connect_timeout">3000</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">5000</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Fixed 40/40/20 public mix" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters" />
+            <stringProp name="filename" />
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="script">def port=props.getProperty('productPort','0').toInteger()
+def threads=props.getProperty('threads','0').toInteger()
+def seconds=props.getProperty('seconds','0').toInteger()
+def rps=props.getProperty('rps','0').toInteger()
+if(port&lt;1024 || port&gt;65535 || !(threads in [10,25,50]) || !(seconds in [10,60]) || rps!=threads) throw new IllegalArgumentException('CM21_EXPLICIT_LEVEL_REQUIRED')
+if(!props.getProperty('resultsFile') || !new File(props.getProperty('seedIds','')).isFile()) throw new IllegalArgumentException('CM21_EXPLICIT_FILES_REQUIRED')
+def id=vars.get('productId')
+if(!(id ==~ '[0-9]+')) throw new IllegalArgumentException('CM21_SEED_ID_REQUIRED')
+def position=(vars.get('cm21.iteration') ?: '0').toInteger()
+vars.put('cm21.iteration',Integer.toString(position+1))
+def slot=position%5
+sampler.getArguments().removeAllArguments()
+if(slot&lt;2){
+ sampler.setName('CM21_VIEW');sampler.setPath('/api/products/'+id)
+}else if(slot&lt;4){
+ sampler.setName('CM21_SEARCH');sampler.setPath('/api/products')
+ sampler.addArgument('keyword','Metric');sampler.addArgument('status','1');sampler.addArgument('sort','latest')
+ sampler.addArgument('page',Long.toString(((id.toLong()-41)%15)+1));sampler.addArgument('pageSize','20')
+}else{
+ sampler.setName('CM21_HOT');sampler.setPath('/api/products/'+id+'/hot-stat')
+}
+</stringProp>
+          </JSR223PreProcessor>
+          <hashTree />
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Raw result identity and derived event expectation" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters" />
+            <stringProp name="filename" />
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="script">try{
+ if(prev.getResponseCode()!='200') throw new IllegalStateException('CM21_HTTP_NOT_200')
+ def response=new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString())
+ if(response.code?.toString()!='0') throw new IllegalStateException('CM21_PUBLIC_ERROR')
+ def requestId=response.requestId?.toString()
+ if(!requestId || java.util.UUID.fromString(requestId).toString()!=requestId) throw new IllegalStateException('CM21_REQUEST_ID_INVALID')
+ def label=prev.getSampleLabel();def ids=[];def expected=0;def kind='NONE'
+ if(label=='CM21_VIEW'){
+  ids=[response.data.id.toString()];expected=1;kind='PRODUCT_VIEW_CONFIRMED'
+  if(ids[0]!=vars.get('productId')) throw new IllegalStateException('CM21_DETAIL_ID_MISMATCH')
+ }else if(label=='CM21_SEARCH'){
+  if(!(response.data.items instanceof List) || response.data.items.size()&gt;20) throw new IllegalStateException('CM21_FINAL_PAGE_INVALID')
+  ids=response.data.items.collect{it.id.toString()};expected=ids.unique(false).size();kind='PRODUCT_SEARCH_EXPOSED'
+ }else if(label=='CM21_HOT'){
+  ids=[response.data.productId.toString()]
+  if(ids[0]!=vars.get('productId')) throw new IllegalStateException('CM21_HOT_ID_MISMATCH')
+ }else throw new IllegalStateException('CM21_LABEL_INVALID')
+ def observation=[requestId:requestId,returnedIds:ids,returnedDistinct:ids.unique(false).size(),expectedEventCount:expected,eventType:kind]
+ vars.put('requestId',requestId);vars.put('returnedIds',ids.join(';'));vars.put('returnedDistinct',observation.returnedDistinct.toString());vars.put('expectedEventCount',expected.toString())
+ prev.setSamplerData(prev.getSamplerData()+'\nCM21_OBSERVATION '+groovy.json.JsonOutput.toJson(observation))
+}catch(Throwable problem){
+ prev.setSuccessful(false)
+ def failure=new org.apache.jmeter.assertions.AssertionResult('CM21 public envelope')
+ failure.setFailure(true);failure.setFailureMessage(problem.getClass().getSimpleName());prev.addAssertionResult(failure)
+}
+</stringProp>
+          </JSR223PostProcessor>
+          <hashTree />
+        </hashTree>
+        <ResultCollector guiclass="SimpleDataWriter" testclass="ResultCollector" testname="Raw XML responses for independent audit" enabled="true">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time>
+              <latency>true</latency>
+              <connectTime>true</connectTime>
+              <timestamp>true</timestamp>
+              <success>true</success>
+              <label>true</label>
+              <code>true</code>
+              <message>true</message>
+              <threadName>true</threadName>
+              <dataType>true</dataType>
+              <encoding>true</encoding>
+              <assertions>true</assertions>
+              <subresults>true</subresults>
+              <responseData>true</responseData>
+              <samplerData>true</samplerData>
+              <xml>true</xml>
+              <fieldNames>true</fieldNames>
+              <url>true</url>
+              <bytes>true</bytes>
+              <sentBytes>true</sentBytes>
+              <threadCounts>true</threadCounts>
+              <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+              <responseHeaders>false</responseHeaders>
+              <requestHeaders>false</requestHeaders>
+              <responseDataOnError>false</responseDataOnError>
+              <assertionsResultsToSave>0</assertionsResultsToSave>
+            </value>
+          </objProp>
+          <stringProp name="filename">${__P(resultsFile,)}</stringProp>
+        </ResultCollector>
+        <hashTree />
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
