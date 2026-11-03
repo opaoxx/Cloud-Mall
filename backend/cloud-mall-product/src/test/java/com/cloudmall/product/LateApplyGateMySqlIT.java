@@ -67,7 +67,11 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** Seven bounded genuine-MySQL trajectories; no broker, ES, Redis or HTTP listener is started. */
+/**
+ * Seven bounded genuine-MySQL trajectories; no broker, ES, Redis or HTTP listener is started. SQL
+ * targets per-run owned schemas, which are unavailable to IDE static table resolution.
+ */
+@SuppressWarnings("SqlResolve")
 @TestMethodOrder(OrderAnnotation.class)
 @Execution(ExecutionMode.SAME_THREAD)
 class LateApplyGateMySqlIT {
@@ -1176,6 +1180,8 @@ class LateApplyGateMySqlIT {
                 "owner",
                 owner));
       } catch (Exception | Error initializationFailure) {
+        // Use a common type for identity checks across different multi-catch alternatives.
+        Throwable primaryFailure = initializationFailure;
         SAFETY_STOP.set(true);
         try {
           workers.shutdown();
@@ -1183,17 +1189,15 @@ class LateApplyGateMySqlIT {
             throw new IllegalStateException("LATE_GATE_INITIALIZATION_WORKERS_UNKNOWN");
         } catch (InterruptedException interrupted) {
           Thread.currentThread().interrupt();
-          initializationFailure.addSuppressed(interrupted);
+          primaryFailure.addSuppressed(interrupted);
         } catch (RuntimeException | Error cleanupFailure) {
-          if (cleanupFailure != initializationFailure)
-            initializationFailure.addSuppressed(cleanupFailure);
+          if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
         }
         if (acquiredContext != null) {
           try {
             acquiredContext.close();
           } catch (RuntimeException | Error cleanupFailure) {
-            if (cleanupFailure != initializationFailure)
-              initializationFailure.addSuppressed(cleanupFailure);
+            if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
           }
         }
         if (acquiredDatabase != null) {
@@ -1202,15 +1206,13 @@ class LateApplyGateMySqlIT {
             try {
               registered.close();
             } catch (RuntimeException | Error cleanupFailure) {
-              if (cleanupFailure != initializationFailure)
-                initializationFailure.addSuppressed(cleanupFailure);
+              if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
             }
           }
           try {
             acquiredDatabase.close();
           } catch (Exception | Error cleanupFailure) {
-            if (cleanupFailure != initializationFailure)
-              initializationFailure.addSuppressed(cleanupFailure);
+            if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
           }
         }
         throw initializationFailure;
