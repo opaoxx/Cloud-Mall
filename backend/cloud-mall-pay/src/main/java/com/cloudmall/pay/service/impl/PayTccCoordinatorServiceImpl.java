@@ -6,12 +6,15 @@ import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
 import com.cloudmall.pay.domain.vo.PayTccReceiptVO;
+import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.PayTccBridgeService;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccReceiptService;
 import com.cloudmall.pay.service.PayTccTransactionClient;
 import io.seata.core.context.RootContext;
 import java.util.Objects;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -20,6 +23,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @Service
 @ConditionalOnProperty(name = "cloudmall.pay.tcc-coordinator.enabled", havingValue = "true")
 public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
+  /** 正式容器强制注入真实观察组件，旧直接构造保持无资源兼容。 */
+  @Autowired private PayProtocolMetrics metrics = PayProtocolMetrics.noop();
+
   /** 独立提交的执行权/XID/决议。 */
   private final PayTccExecutionStore executions;
 
@@ -52,7 +58,35 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
   /** 只有首次插入胜者能 begin/两个 Try，所有重入进入只读恢复。 */
   @Override
   public PayTccExecutionVO execute(PayTccDispatchDTO request) {
+    // 1. 原方法保留全部业务校验、调用与清理顺序。
+    try {
+      PayTccExecutionVO result = executeObserved(request);
+      // 2. 原方法返回后仅按原结果记录一次有限观察。
+      metrics.observation(
+          Mode.TCC,
+          Scope.TCC_EXECUTE,
+          PayProtocolMetrics.executionOutcome(result == null ? null : result.state));
+      return result;
+    } catch (RuntimeException failure) {
+      // 3. 原异常只作有限分类并保持同一对象传播。
+      metrics.observation(Mode.TCC, Scope.TCC_EXECUTE, PayProtocolMetrics.failureOutcome(failure));
+      throw failure;
+    }
+  }
+
+  /** 保留原方法全部校验、调用顺序和finally，外层仅观察最终返回或原异常。 */
+  private PayTccExecutionVO executeObserved(PayTccDispatchDTO request) {
     requireNoContext();
+    try {
+      return executeWithoutCallerContext(request);
+    } finally {
+      // 认领和末次快照校验也属于本入口，异常不得把依赖遗留的XID带回调用线程。
+      RootContext.unbind();
+    }
+  }
+
+  /** 入口已拒绝caller上下文；原begin绑定仍在无上下文观察之前清理。 */
+  private PayTccExecutionVO executeWithoutCallerContext(PayTccDispatchDTO request) {
     // 1. 持久化执行权先于 begin，重放不能继承初次线程的执行权。
     PayTccExecutionPO owned = executions.claimOwned(request);
     if (owned == null) return recover(request.payNo);
@@ -96,6 +130,24 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
   /** 只读核对两端；已有决议可用原 XID 重试，NONE 永不自动决议。 */
   @Override
   public PayTccExecutionVO recover(String payNo) {
+    // 1. 原方法保留全部业务校验、调用与清理顺序。
+    try {
+      PayTccExecutionVO result = recoverObserved(payNo);
+      // 2. 原方法返回后仅按原结果记录一次有限观察。
+      metrics.observation(
+          Mode.TCC,
+          Scope.TCC_RECOVERY,
+          PayProtocolMetrics.executionOutcome(result == null ? null : result.state));
+      return result;
+    } catch (RuntimeException failure) {
+      // 3. 原异常只作有限分类并保持同一对象传播。
+      metrics.observation(Mode.TCC, Scope.TCC_RECOVERY, PayProtocolMetrics.failureOutcome(failure));
+      throw failure;
+    }
+  }
+
+  /** 保留原方法全部校验、调用顺序和finally，外层仅观察最终返回或原异常。 */
+  private PayTccExecutionVO recoverObserved(String payNo) {
     requireNoContext();
     try {
       // 1. 先核对持久事实；两个终态齐全时无需 TC 历史状态。
@@ -127,8 +179,35 @@ public class PayTccCoordinatorServiceImpl implements PayTccCoordinatorService {
     requireExpectedContext(expectedXid);
     if (PayTccExecutionStore.terminal(current.state)) return;
     try {
-      if ("COMMIT".equals(execution.decision)) transactions.commit(execution.xid);
-      else if ("ROLLBACK".equals(execution.decision)) transactions.rollback(execution.xid);
+      if ("COMMIT".equals(execution.decision)) {
+        try {
+          transactions.commit(execution.xid);
+        } catch (Exception failure) {
+          metrics.rpc(
+              expectedXid == null ? Origin.RECOVERY : Origin.INITIAL,
+              Decision.COMMIT,
+              RpcResult.EXCEPTION);
+          throw failure;
+        }
+        metrics.rpc(
+            expectedXid == null ? Origin.RECOVERY : Origin.INITIAL,
+            Decision.COMMIT,
+            RpcResult.RETURNED);
+      } else if ("ROLLBACK".equals(execution.decision)) {
+        try {
+          transactions.rollback(execution.xid);
+        } catch (Exception failure) {
+          metrics.rpc(
+              expectedXid == null ? Origin.RECOVERY : Origin.INITIAL,
+              Decision.ROLLBACK,
+              RpcResult.EXCEPTION);
+          throw failure;
+        }
+        metrics.rpc(
+            expectedXid == null ? Origin.RECOVERY : Origin.INITIAL,
+            Decision.ROLLBACK,
+            RpcResult.RETURNED);
+      }
     } catch (Exception decisionResponseLost) {
       requireExpectedContext(expectedXid);
       recordObservation(execution, "UNKNOWN", decisionResponseLost.getClass().getSimpleName());

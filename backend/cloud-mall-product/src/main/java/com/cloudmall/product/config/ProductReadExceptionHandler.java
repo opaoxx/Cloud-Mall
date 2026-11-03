@@ -37,6 +37,15 @@ public class ProductReadExceptionHandler {
   @ExceptionHandler({DataAccessException.class, TransactionException.class, SQLException.class})
   public ResponseEntity<ApiResponse<Object>> databaseUnavailable(
       Exception failure, HttpServletRequest request) {
+    // Preserve the exact registration GET failure before a nested SQL cause selects this advice.
+    if ("GET".equals(request.getMethod())
+        && failure instanceof com.cloudmall.common.error.BizException metricFailure
+        && "PRODUCT_METRICS_UNAVAILABLE".equals(metricFailure.getCode())
+        && metricFailure.getHttpStatus() == 503) {
+      return ResponseEntity.status(503).cacheControl(CacheControl.noStore())
+          .body(ApiResponse.error("PRODUCT_METRICS_UNAVAILABLE", "Product metrics could not be registered"));
+    }
+
     // 1. 分类完整 cause 链；事务包装、通信中断和未知实现错误保持各自含义。
     Reason reason = ProductReadFailureClassifier.classify(failure);
     boolean readRequest = "GET".equals(request.getMethod());

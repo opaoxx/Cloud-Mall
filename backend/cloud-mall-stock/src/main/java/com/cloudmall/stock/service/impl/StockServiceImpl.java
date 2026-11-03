@@ -46,6 +46,14 @@ import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api/stock")
 public class StockServiceImpl implements StockService {
+  /** Enabled-only atomic sale participant; legacy direct construction has no new table dependency. */
+  @Autowired(required = false) private com.cloudmall.stock.service.StockSalesOutboxService salesMetrics;
+  /** Enablement may not silently fall back to an unwired legacy confirmation. */
+  @org.springframework.beans.factory.annotation.Value("${cloudmall.stock.sales-metrics.enabled:false}") private boolean salesMetricsEnabled;
+
+  /** Require the actual transaction proxy whenever first-confirm metrics are enabled. */
+  @javax.annotation.PostConstruct
+  public void validateSalesMetrics(){if(salesMetricsEnabled&&(salesMetrics==null||!org.springframework.aop.support.AopUtils.isAopProxy(salesMetrics)))throw new IllegalStateException("SALES_TRANSACTION_PROXY_REQUIRED");}
   /** 记录普通库存投影和旧预扣标记清理失败。 */
   private static final Logger log = LoggerFactory.getLogger(StockServiceImpl.class);
 
@@ -213,6 +221,8 @@ public class StockServiceImpl implements StockService {
     // 2. 普通库存按持久请求状态及流水确认，拒绝相反终态。
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequestForUpdate(orderNo);
     if (requestRow != null) {
+      if (salesMetrics != null && !Objects.equals(orderNo, requestRow.get("order_no")))
+        throw new BizException("STOCK_SALES_EVENT_CONFLICT", "Original reservation identity conflicts", 409);
       String status = String.valueOf(requestRow.get("status"));
       if ("CONFIRMED".equals(status))
         return ApiResponse.ok(Map.of("confirmed", true, "idempotent", true));
@@ -305,6 +315,13 @@ public class StockServiceImpl implements StockService {
     int targetAvailable = ((Number) stockRow.get("available_quantity")).intValue();
     if ("ROLLBACK".equals(flowType)) targetAvailable += quantity;
     stockSqlMapper.insertCacheRepair(skuId, targetAvailable, version + 1, changedAt);
+    if (salesMetrics != null && "CONFIRM".equals(flowType)) {
+      Object productId = stockRow.get("product_id");
+      if (!(productId instanceof Number) || ((Number) productId).longValue() <= 0)
+        throw com.cloudmall.stock.service.StockSalesOutboxService.unavailable(null);
+      salesMetrics.normal(orderNo, skuId, quantity, ((Number) productId).longValue(),
+          (long) version + 1, org.slf4j.MDC.get("traceId"));
+    }
   }
 
   /** 查询订单库存预扣的持久化状态，供远程写结果未知时恢复。 */

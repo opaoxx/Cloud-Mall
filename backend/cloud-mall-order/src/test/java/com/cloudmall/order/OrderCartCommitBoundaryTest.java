@@ -4,6 +4,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -27,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -50,6 +55,34 @@ class OrderCartCommitBoundaryTest {
     verifyNoInteractions(fixture.cart);
     verify(fixture.stock, never()).rollback(anyString());
     verify(fixture.stock, never()).reservation(anyString());
+  }
+
+  /** code0/null是合法空项；先空后有效时只在提交后清理原有效证明且不误WARN。 */
+  @Test
+  void successfulEmptySnapshotIsQuietAndNeverAuthorizesCleanup() {
+    try (CapturedOrderLogs captured = new CapturedOrderLogs()) {
+      Fixture fixture = new Fixture();
+      TransactionSynchronizationManager.setActualTransactionActive(true);
+      TransactionSynchronizationManager.initSynchronization();
+      doReturn(ApiResponse.ok(null)).when(fixture.cart).cleanupSnapshot(7L, 8L);
+
+      assertEquals("0", fixture.service.create("empty-cart-item", request()).code);
+
+      var requests = inOrder(fixture.cart);
+      requests.verify(fixture.cart).cleanupSnapshot(7L, 8L);
+      requests.verify(fixture.cart).cleanupSnapshot(8L, 8L);
+      verify(fixture.cart, never()).cleanupItem(anyLong(), anyLong(), any());
+      List<TransactionSynchronization> callbacks =
+          TransactionSynchronizationManager.getSynchronizations();
+      assertEquals(1, callbacks.size());
+      callbacks.get(0).afterCommit();
+      verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+      verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+      verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+      verifyNoMoreInteractions(fixture.cart);
+      verify(fixture.stock, never()).rollback(anyString());
+      assertEquals(0, captured.snapshotWarnings());
+    }
   }
 
   @Test
@@ -127,8 +160,10 @@ class OrderCartCommitBoundaryTest {
         List.of(
             "null-response",
             "nonzero",
+            "null-code",
             "null-data",
             "wrong-dto",
+            "wrong-quantity",
             "blank",
             "string-sku",
             "wrong-json",
@@ -137,47 +172,54 @@ class OrderCartCommitBoundaryTest {
             "array",
             "trailing",
             "runtime")) {
-      Fixture fixture = new Fixture();
-      TransactionSynchronizationManager.setActualTransactionActive(true);
-      TransactionSynchronizationManager.initSynchronization();
-      doAnswer(
-              invocation -> {
-                return switch (fault) {
-                  case "null-response" -> null;
-                  case "nonzero" -> ApiResponse.error("503", "unavailable");
-                  case "null-data" -> ApiResponse.ok(null);
-                  case "wrong-dto" ->
-                      ApiResponse.ok(new CartCleanupSnapshotDTO(99L, "{\"skuId\":7}"));
-                  case "blank" -> ApiResponse.ok(new CartCleanupSnapshotDTO(7L, " "));
-                  case "string-sku" ->
-                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":\"7\"}"));
-                  case "wrong-json" ->
-                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":8}"));
-                  case "decimal" ->
-                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7.0}"));
-                  case "overflow" ->
-                      ApiResponse.ok(
-                          new CartCleanupSnapshotDTO(7L, "{\"skuId\":18446744073709551623}"));
-                  case "array" -> ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "[]"));
-                  case "trailing" ->
-                      ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7} {}"));
-                  case "runtime" -> throw new IllegalStateException("snapshot unavailable");
-                  default -> throw new AssertionError(fault);
-                };
-              })
-          .when(fixture.cart)
-          .cleanupSnapshot(7L, 8L);
-      assertEquals("0", fixture.service.create("bad-snapshot-" + fault, request()).code);
-      for (TransactionSynchronization callback :
-          TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
-      verify(fixture.cart).cleanupSnapshot(7L, 8L);
-      verify(fixture.cart).cleanupSnapshot(8L, 8L);
-      verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
-      verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
-      verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
-      verifyNoMoreInteractions(fixture.cart);
-      verify(fixture.stock, never()).rollback(anyString());
-      clearContext();
+      try (CapturedOrderLogs captured = new CapturedOrderLogs()) {
+        Fixture fixture = new Fixture();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.initSynchronization();
+        doAnswer(
+                invocation -> {
+                  return switch (fault) {
+                    case "null-response" -> null;
+                    case "nonzero" -> ApiResponse.error("503", "unavailable");
+                    case "null-code" -> new ApiResponse<CartCleanupSnapshotDTO>();
+                    case "null-data" -> ApiResponse.ok(null);
+                    case "wrong-dto" ->
+                        ApiResponse.ok(new CartCleanupSnapshotDTO(99L, "{\"skuId\":7}"));
+                    case "wrong-quantity" ->
+                        ApiResponse.ok(
+                            new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":5}"));
+                    case "blank" -> ApiResponse.ok(new CartCleanupSnapshotDTO(7L, " "));
+                    case "string-sku" ->
+                        ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":\"7\"}"));
+                    case "wrong-json" ->
+                        ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":8}"));
+                    case "decimal" ->
+                        ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7.0}"));
+                    case "overflow" ->
+                        ApiResponse.ok(
+                            new CartCleanupSnapshotDTO(7L, "{\"skuId\":18446744073709551623}"));
+                    case "array" -> ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "[]"));
+                    case "trailing" ->
+                        ApiResponse.ok(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7} {}"));
+                    case "runtime" -> throw new IllegalStateException("snapshot unavailable");
+                    default -> throw new AssertionError(fault);
+                  };
+                })
+            .when(fixture.cart)
+            .cleanupSnapshot(7L, 8L);
+        assertEquals("0", fixture.service.create("bad-snapshot-" + fault, request()).code);
+        for (TransactionSynchronization callback :
+            TransactionSynchronizationManager.getSynchronizations()) callback.afterCommit();
+        verify(fixture.cart).cleanupSnapshot(7L, 8L);
+        verify(fixture.cart).cleanupSnapshot(8L, 8L);
+        verify(fixture.cart, never()).cleanupItem(eq(7L), anyLong(), any());
+        verify(fixture.cart).cleanupItem(8L, 8L, snapshot(8L));
+        verify(fixture.cart, never()).deleteItem(anyLong(), anyLong());
+        verifyNoMoreInteractions(fixture.cart);
+        verify(fixture.stock, never()).rollback(anyString());
+        assertEquals("null-data".equals(fault) ? 0 : 1, captured.snapshotWarnings(), fault);
+        clearContext();
+      }
     }
   }
 
@@ -420,6 +462,45 @@ class OrderCartCommitBoundaryTest {
             + ",\"quantity\":"
             + (skuId.equals(7L) ? 2 : 1)
             + ",\"checked\":true}");
+  }
+
+  /** 只捕获本例原Order logger，不构造生产日志helper或影响其它测试配置。 */
+  private static final class CapturedOrderLogs implements AutoCloseable {
+    /** 被测Service实际日志通道。 */
+    private final Logger logger = (Logger) LoggerFactory.getLogger(OrderServiceImpl.class);
+
+    /** 测试前原logger级别。 */
+    private final Level originalLevel = logger.getLevel();
+
+    /** 测试前父logger传播开关。 */
+    private final boolean originalAdditivity = logger.isAdditive();
+
+    /** 只在本测试内持有的日志事件。 */
+    private final ListAppender<ILoggingEvent> events = new ListAppender<>();
+
+    private CapturedOrderLogs() {
+      events.setContext(logger.getLoggerContext());
+      events.start();
+      logger.addAppender(events);
+      logger.setLevel(Level.WARN);
+      logger.setAdditive(false);
+    }
+
+    private long snapshotWarnings() {
+      return events.list.stream()
+          .filter(event -> event.getLevel() == Level.WARN)
+          .filter(event -> event.getFormattedMessage().startsWith("订单购物车前置快照捕获失败"))
+          .count();
+    }
+
+    /** 精确解除本例appender并恢复原level/additivity，即使RED断言抛错也执行。 */
+    @Override
+    public void close() {
+      logger.detachAppender(events);
+      events.stop();
+      logger.setLevel(originalLevel);
+      logger.setAdditive(originalAdditivity);
+    }
   }
 
   /** 实际创建编排，持久层和远端明确替身，不把人工同步上下文称作真实提交。 */

@@ -184,8 +184,7 @@ public class OrderServiceImpl implements OrderService {
       } catch (FeignException productFailure) {
         if (productFailure.status() == 404)
           throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
-        throw new BizException(
-            "GATEWAY_SERVICE_UNAVAILABLE", "商品服务暂不可用，请稍后重试", 503);
+        throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "商品服务暂不可用，请稍后重试", 503);
       }
       if (resp == null || !"0".equals(resp.code) || resp.data == null)
         throw new BizException(ErrorCodes.NOT_FOUND, "商品或 SKU 不存在", 404);
@@ -374,6 +373,8 @@ public class OrderServiceImpl implements OrderService {
       }
       try {
         ApiResponse<CartCleanupSnapshotDTO> response = cart.cleanupSnapshot(skuId, userId);
+        // 成功空项没有可清理证明，安静跳过且不授权提交后删除。
+        if (response != null && "0".equals(response.code) && response.data == null) continue;
         if (response == null
             || !"0".equals(response.code)
             || !validCartCleanupSnapshot(skuId, purchasedQuantity, response.data))
@@ -570,8 +571,7 @@ public class OrderServiceImpl implements OrderService {
             ? timestamp.toLocalDateTime()
             : createdAt instanceof LocalDateTime localDateTime ? localDateTime : null;
     if (createdLocal == null || !YearMonth.from(createdLocal).equals(month)) {
-      throw unavailableOrderMonth(
-          month, new IllegalStateException("订单行的 created_at 不属于所在月表"));
+      throw unavailableOrderMonth(month, new IllegalStateException("订单行的 created_at 不属于所在月表"));
     }
   }
 
@@ -601,8 +601,7 @@ public class OrderServiceImpl implements OrderService {
             ? "ROLLBACK"
             : ("PAID".equals(order.status) || "COMPLETED".equals(order.status)) ? "CONFIRM" : null;
     String actionStatus = orderStockActionMapper.statusForOrder(orderNo, expectedActionType);
-    if (actionStatus == null)
-      actionStatus = legacyStockActionStatus(order);
+    if (actionStatus == null) actionStatus = legacyStockActionStatus(order);
     return ApiResponse.ok(
         Map.of(
             "orderNo", order.orderNo,
@@ -628,8 +627,7 @@ public class OrderServiceImpl implements OrderService {
       ApiResponse<com.cloudmall.order.domain.vo.StockReservationStatusVO> response =
           OrderStockCircuitBreaker.call(
               OrderStockCircuitBreaker.STATUS, () -> stock.reservation(order.orderNo));
-      if (response == null || !"0".equals(response.code) || response.data == null)
-        return "UNKNOWN";
+      if (response == null || !"0".equals(response.code) || response.data == null) return "UNKNOWN";
       // 缺失或错单响应保持未知，不能借别单终态作为结清或退款依据。
       if (!Objects.equals(order.orderNo, response.data.orderNo)) return "UNKNOWN";
       if (expected.equals(response.data.status)) return "SUCCEEDED";
@@ -721,8 +719,9 @@ public class OrderServiceImpl implements OrderService {
       stockRequest.put("idempotencyKey", key);
       stockRequest.put("addressSnapshot", toJson(address));
       try {
-        ApiResponse<?> row = OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.SECKILL,
-            () -> stock.seckill(stockRequest));
+        ApiResponse<?> row =
+            OrderStockCircuitBreaker.call(
+                OrderStockCircuitBreaker.SECKILL, () -> stock.seckill(stockRequest));
         if (row == null)
           throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
         return row;
@@ -738,9 +737,14 @@ public class OrderServiceImpl implements OrderService {
         String downstreamCode = remoteCode(exception);
         if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(downstreamCode))
           throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
-        if (exception.status() == 409 && Set.of("SECKILL_NOT_STARTED", "SECKILL_ENDED",
-                "SECKILL_SOLD_OUT", "SECKILL_CLAIM_CONFLICT", "COMMON_CONFLICT")
-            .contains(downstreamCode))
+        if (exception.status() == 409
+            && Set.of(
+                    "SECKILL_NOT_STARTED",
+                    "SECKILL_ENDED",
+                    "SECKILL_SOLD_OUT",
+                    "SECKILL_CLAIM_CONFLICT",
+                    "COMMON_CONFLICT")
+                .contains(downstreamCode))
           throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
         throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
       } catch (StockCircuitOpenException circuitOpen) {
@@ -973,9 +977,10 @@ public class OrderServiceImpl implements OrderService {
 
   private static String sha256(String value) {
     try {
-      return java.util.HexFormat.of().formatHex(
-          java.security.MessageDigest.getInstance("SHA-256")
-              .digest(value.getBytes(StandardCharsets.UTF_8)));
+      return java.util.HexFormat.of()
+          .formatHex(
+              java.security.MessageDigest.getInstance("SHA-256")
+                  .digest(value.getBytes(StandardCharsets.UTF_8)));
     } catch (java.security.NoSuchAlgorithmException exception) {
       throw new IllegalStateException("JDK 缺少 SHA-256", exception);
     }

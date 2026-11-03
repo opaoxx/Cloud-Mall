@@ -18,9 +18,9 @@ public final class PayDebitModes {
     return mode == null ? LEGACY : mode;
   }
 
-  /** 在领取恢复租约或资金/订单副作用之前检查协议，不改变任何持久状态。 */
+  /** 仅接受持久来源的精确 LEGACY；null 或其他模式在副作用前拒绝，不改变持久状态。 */
   public static void requireSupported(String mode) {
-    if (!LEGACY.equals(persisted(mode))) throw unavailable();
+    if (!LEGACY.equals(mode)) throw unavailable();
   }
 
   /** 原支付单缺失或两份路由事实不一致时保持结果未知。 */

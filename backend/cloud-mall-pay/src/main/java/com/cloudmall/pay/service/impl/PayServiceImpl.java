@@ -15,6 +15,8 @@ import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.PayService;
 import com.cloudmall.pay.util.PayDebitModes;
 import java.nio.charset.StandardCharsets;
@@ -32,6 +34,9 @@ import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api/payments")
 public class PayServiceImpl implements PayService {
+  /** 正式容器强制注入真实观察组件，旧直接构造保持无资源兼容。 */
+  @Autowired private PayProtocolMetrics metrics = PayProtocolMetrics.noop();
+
   /** 保存 orders 的业务状态或配置。 */
   @Autowired private OrderClient orders;
 
@@ -159,6 +164,7 @@ public class PayServiceImpl implements PayService {
     // 3. 返回 success 的处理结果。
     PayVO payment = owned(payNo);
     String mode = paymentMode(payNo);
+    metrics.route(PayProtocolMetrics.mode(mode), Entry.MOCK_SUCCESS);
     if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
     if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
       throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
@@ -172,6 +178,7 @@ public class PayServiceImpl implements PayService {
     // 1. 读取当前用户支付并核验不可变协议。
     PayVO payment = owned(payNo);
     String mode = paymentMode(payNo);
+    metrics.route(PayProtocolMetrics.mode(mode), Entry.MOCK_FAIL);
     if (PayDebitModes.TCC.equals(mode)) {
       tccEntry().failure(payment);
       return ApiResponse.ok(payment);
@@ -205,6 +212,7 @@ public class PayServiceImpl implements PayService {
     String mode = paymentMode(callback.payNo);
     if (payment.amount.compareTo(callback.amount) != 0)
       throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
+    metrics.route(PayProtocolMetrics.mode(mode), Entry.CALLBACK);
     callbackReceipts.claim(payment, callback, callbackId);
     if (callback.success) {
       if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))

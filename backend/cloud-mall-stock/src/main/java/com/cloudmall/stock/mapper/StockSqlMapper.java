@@ -140,7 +140,7 @@ public class StockSqlMapper {
   public Map<String, Object> findStockForUpdate(Long skuId) {
     List<Map<String, Object>> rows =
         queryForList(
-            "SELECT sku_id,available_quantity,reserved_quantity,sold_quantity,version"
+            "SELECT sku_id,product_id,available_quantity,reserved_quantity,sold_quantity,version"
                 + " FROM stock_sku WHERE sku_id=? FOR UPDATE",
             skuId);
     return rows.isEmpty() ? null : rows.get(0);

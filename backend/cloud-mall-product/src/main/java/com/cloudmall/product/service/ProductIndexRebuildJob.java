@@ -3,6 +3,7 @@ package com.cloudmall.product.service;
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.domain.po.ProductIndexRebuildJobPO;
 import com.cloudmall.product.mapper.ProductIndexRebuildMapper;
+import com.cloudmall.product.util.ProductMetricEvents;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -18,6 +19,10 @@ import org.springframework.stereotype.Component;
 /** 以持久游标和有界 ES Bulk 渐进修复缺失的商品索引。 */
 @Component
 public class ProductIndexRebuildJob {
+  /** V2 readiness belongs to the original rebuild lifecycle and physical UUID generation. */
+  @org.springframework.beans.factory.annotation.Value("${cloudmall.product.metrics.enabled:false}") private boolean metricsEnabled;
+  /** Enabled-only same-resource cut service; no new table lookup in legacy construction. */
+  @org.springframework.beans.factory.annotation.Autowired(required=false) private ProductMetricService metrics;
   /** 重建错误、代次变化和进度日志。 */
   private static final Logger log = LoggerFactory.getLogger(ProductIndexRebuildJob.class);
   /** 数据库 DATETIME(3) 使用的业务时区。 */
@@ -80,6 +85,7 @@ public class ProductIndexRebuildJob {
     // 1. 读取任务状态与速率窗口；暂停、完成和退避中的任务不访问 ES。
     LocalDateTime currentTime = now();
     ProductIndexRebuildJobPO visible = rebuildMapper.findJob(JOB_ID);
+    if(metricsEnabled&&visible!=null&&"COMPLETED".equals(visible.status)){auditCompletedIndex();return;}
     if (visible == null || "PAUSED".equals(visible.status) || "COMPLETED".equals(visible.status))
       return;
     if (!isRateWindowDue(visible, currentTime)) return;
@@ -101,13 +107,15 @@ public class ProductIndexRebuildJob {
         throw new IllegalStateException("重建批次必须在 1 至 500 之间");
       long oldCursor = claimed.cursorProductId == null ? 0L : claimed.cursorProductId;
       // 3. 处理中若索引被删除，重新开始一个代次，避免跳过先前批次。
-      if (oldCursor > 0 && !indexWriter.indexExists()) {
+      if (oldCursor > 0 && (!indexWriter.indexExists() || metricsEnabled&&!java.util.Objects.equals(metrics.cut().indexUuid(),v2Writer().indexUuid()))) {
+        if(metricsEnabled)metrics.readiness(indexWriter.indexExists()?v2Writer().indexUuid():null,false);
         if (rebuildMapper.restartClaimedAfterIndexLoss(JOB_ID, owner, now()) != 1)
           throw new IllegalStateException("目标索引丢失后重建游标无法重置");
         log.warn("商品 ES 索引丢失，重置游标并开始新代次，index={}", targetIndex);
         return;
       }
       indexWriter.ensureIndex();
+      if(metricsEnabled)metrics.readiness(v2Writer().indexUuid(),false);
       List<ProductIndexDocument> documents = documentLoader.loadBatch(oldCursor, batchSize);
       if (!documents.isEmpty()) indexWriter.upsertBatch(documents);
       // 4. 完整成功后才更新进度；重复 Bulk 由 external version 保证幂等。
@@ -117,6 +125,7 @@ public class ProductIndexRebuildJob {
       if (rebuildMapper.finishBatch(
               JOB_ID, owner, oldCursor, newCursor, documents.size(), nextStatus, now())
           != 1) throw new IllegalStateException("商品索引重建游标更新失败");
+      if(metricsEnabled&&"COMPLETED".equals(nextStatus))auditCompletedIndex();
       if ("COMPLETED".equals(nextStatus))
         log.info("商品 ES 索引存量重建完成，index={}，cursor={}", targetIndex, newCursor);
     } catch (Exception rebuildFailure) {
@@ -136,9 +145,18 @@ public class ProductIndexRebuildJob {
     if (job == null || !"COMPLETED".equals(job.status)) return;
     try {
       boolean indexPresent = indexWriter.indexExists();
+      String uuid=metricsEnabled&&indexPresent?v2Writer().indexUuid():null;
+      ProductMetricService.Cut cut=metricsEnabled?metrics.cut():null;
+      boolean generationChanged=metricsEnabled&&!java.util.Objects.equals(cut.indexUuid(),uuid);
       long sourceCount = documentLoader.countSources();
       long indexCount = indexPresent ? indexWriter.countDocuments() : 0L;
-      if (!indexPresent || indexCount < sourceCount) {
+      boolean requested=indexPresent&&!generationChanged&&indexCount==sourceCount;
+      // A pending committed cut may defer recovery until the next settled audit.
+      boolean unchangedPending=metricsEnabled&&ProductMetricEvents.SERIES.equals(cut.series())
+          &&uuid!=null&&!uuid.isEmpty()&&uuid.equals(cut.indexUuid())
+          &&requested&&!cut.ready()&&cut.pending();
+      if(metricsEnabled&&!unchangedPending)metrics.readiness(uuid,requested);
+      if (!indexPresent || indexCount < sourceCount || generationChanged) {
         if (rebuildMapper.restartCompleted(JOB_ID, now()) == 1)
           log.warn("商品 ES 索引缺失或数量不足，重新限速重建，mysql={}，es={}",
               sourceCount, indexCount);
@@ -147,6 +165,7 @@ public class ProductIndexRebuildJob {
             sourceCount, indexCount);
       }
     } catch (Exception auditFailure) {
+      if(metricsEnabled)try{metrics.readiness(metrics.cut().indexUuid(),false);}catch(RuntimeException closingFailure){auditFailure.addSuppressed(closingFailure);}
       log.warn("商品 ES 索引数量核对失败，下一轮继续", auditFailure);
     }
   }
@@ -172,4 +191,6 @@ public class ProductIndexRebuildJob {
   private static LocalDateTime now() {
     return LocalDateTime.now(BUSINESS_ZONE);
   }
+  private com.cloudmall.product.service.impl.ElasticsearchProductIndexWriter v2Writer(){if(!(indexWriter instanceof com.cloudmall.product.service.impl.ElasticsearchProductIndexWriter writer))throw new IllegalStateException("METRIC_PRODUCTION_WRITER_REQUIRED");return writer;}
+
 }

@@ -43,6 +43,12 @@ import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class ProductServiceImpl implements ProductService {
+  /** True mode requires a real proxied metric participant; legacy construction stays disabled. */
+  @Value("${cloudmall.product.metrics.enabled:false}") private boolean metricsEnabled;
+  /** Exact LEGACY/ONLINE selector; no implicit history migration. */
+  @Value("${cloudmall.product.metrics.sort-mode:LEGACY}") private String metricSortMode="LEGACY";
+  /** Required by enabled graph admission, optional for legacy direct-constructor tests. */
+  @Autowired(required=false) private com.cloudmall.product.service.ProductMetricService metrics;
   /** 记录异常慢读请求的筛选类型、返回行数与耗时。 */
   private static final Logger log = LoggerFactory.getLogger(ProductServiceImpl.class);
 
@@ -165,6 +171,7 @@ public class ProductServiceImpl implements ProductService {
     // 2. 执行 products 的核心业务校验与状态处理。
     // 3. 返回 products 的处理结果。
     long startedAt = System.nanoTime();
+    String metricRequestId=UUID.randomUUID().toString();
     page = Math.max(1, page);
     pageSize = Math.min(Math.max(1, pageSize), 100);
     long offset = Math.multiplyExact((long) page - 1L, pageSize);
@@ -177,24 +184,30 @@ public class ProductServiceImpl implements ProductService {
             normalizedPageSize, (int) offset, sort)
         : withReadTransaction(() -> sqlProducts(keyword, categoryId, status,
             normalizedPage, normalizedPageSize, (int) offset, sort));
+    if(metricsEnabled&&keyword!=null&&!keyword.isBlank()) {
+      try{metrics.registerSearchPage(metricRequestId,result.items.stream().map(item->item.id).toList(),MDC.get("traceId"));}
+      catch(org.springframework.dao.DataAccessException|org.springframework.transaction.TransactionException failure){throw metricUnavailable(failure);}
+    }
+    if("ONLINE".equals(metricSortMode)&&!(result instanceof com.cloudmall.product.domain.vo.ProductMetricPageVO))
+      result=new com.cloudmall.product.domain.vo.ProductMetricPageVO<>(result,null);
     long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
         System.nanoTime() - startedAt);
     if (elapsedMillis > 200L)
       log.warn("商品列表慢读，elapsedMs={}，page={}，pageSize={}，sort={}，keyword={}，categoryFiltered={}，statusFiltered={}，total={}，rows={}，traceId={}",
           elapsedMillis, page, pageSize, sort, keyword != null && !keyword.isBlank(),
           categoryId != null, status != null, result.total, result.items.size(), MDC.get("traceId"));
-    return ApiResponse.ok(result);
+    ApiResponse<?> response=ApiResponse.ok(result);if(metricsEnabled)response.requestId=metricRequestId;return response;
   }
 
   /** 保持空关键词和关闭搜索开关时的原 MySQL 分页语义。 */
   private PageResult<ProductDTO> sqlProducts(String keyword, Long categoryId, Integer status,
       int page, int pageSize, int offset, String sort) {
     long total = productSqlMapper.countProducts(keyword, categoryId, status);
-    if (offset >= total) return new PageResult<>(List.of(), page, pageSize, total);
-    List<ProductDTO> items = productSqlMapper
-        .findProducts(keyword, categoryId, status, offset, pageSize, sort).stream()
+    if (offset >= total) {PageResult<ProductDTO> empty=new PageResult<>(List.of(),page,pageSize,total);return onlineRank(sort)?new com.cloudmall.product.domain.vo.ProductMetricPageVO<>(empty,metrics.sqlRevision()):empty;}
+    List<ProductDTO> items = (onlineRank(sort)?productSqlMapper.findProductsOnline(keyword,categoryId,status,offset,pageSize,sort):productSqlMapper.findProducts(keyword, categoryId, status, offset, pageSize, sort)).stream()
         .map(this::productView).toList();
-    return new PageResult<>(items, page, pageSize, total);
+    PageResult<ProductDTO> result=new PageResult<>(items,page,pageSize,total);
+    return onlineRank(sort)?new com.cloudmall.product.domain.vo.ProductMetricPageVO<>(result,metrics.sqlRevision()):result;
   }
 
   /** ES 先获取同一查询快照，再在独立短事务内验证并组装 MySQL 商品事实。 */
@@ -202,21 +215,41 @@ public class ProductServiceImpl implements ProductService {
       int page, int pageSize, int offset, String sort) {
     if (productKeywordSearch == null)
       throw new BizException("PRODUCT_SEARCH_UNAVAILABLE", "商品检索暂时不可用", 503);
+    long metricDeadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    boolean online=onlineRank(sort);
     for (int attempt = 0; attempt < 2; attempt++) {
+      com.cloudmall.product.service.ProductMetricService.Cut cut=null;
+      if(online){if(System.nanoTime()>=metricDeadline)break;try{cut=metrics.cut();}catch(org.springframework.dao.DataAccessException|org.springframework.transaction.TransactionException unavailable){continue;}if(!cut.admissible())continue;try{if(!cut.indexUuid().equals(productKeywordSearch.indexUuid(metricDeadline)))continue;}catch(Exception unavailable){continue;}}
       ProductSearchPage matches;
       try {
-        matches = productKeywordSearch.search(keyword, categoryId,
+        matches = online ? productKeywordSearch.search(keyword,categoryId,status,offset,pageSize,sort,metricDeadline) : productKeywordSearch.search(keyword, categoryId,
             status, offset, pageSize, sort);
       } catch (Exception searchFailure) {
+        if(online)continue;
         log.warn("商品 ES 检索失败，index={}，traceId={}，reason={}",
             searchIndexName, MDC.get("traceId"), searchFailure.toString());
         throw new BizException("PRODUCT_SEARCH_UNAVAILABLE", "商品检索暂时不可用", 503);
       }
-      if (matches.hits().isEmpty())
+      if (!online && matches.hits().isEmpty())
         return new PageResult<>(List.of(), page, pageSize, matches.total());
-      PageResult<ProductDTO> verified = withReadTransaction(
-          () -> verifiedSearchPage(matches, categoryId, status, page, pageSize));
-      if (verified != null) return verified;
+      if(!online){
+        PageResult<ProductDTO> verified=withReadTransaction(()->verifiedSearchPage(matches,categoryId,status,page,pageSize));
+        if(verified!=null)return verified;
+        continue;
+      }
+      String actualUuid;try{actualUuid=productKeywordSearch.indexUuid(metricDeadline);}catch(Exception unavailable){continue;}
+      if(System.nanoTime()>=metricDeadline||!cut.indexUuid().equals(actualUuid))continue;
+      final com.cloudmall.product.service.ProductMetricService.Cut acceptedCut=cut;
+      PageResult<ProductDTO> admitted;
+      try {
+        admitted=withOnlineReadTransaction(()->{
+          PageResult<ProductDTO> verified=verifiedSearchPage(matches,categoryId,status,page,pageSize);
+          if(verified==null||!metrics.admit(acceptedCut,matches.hits()))return null;
+          return new com.cloudmall.product.domain.vo.ProductMetricPageVO<>(verified,acceptedCut.revision());
+        });
+      }catch(org.springframework.dao.DataAccessException|org.springframework.transaction.TransactionException unavailable){continue;}
+      if(admitted!=null)return admitted;
+
     }
     log.warn("商品 ES 页内事实连续两次变化，traceId={}，page={}，pageSize={}",
         MDC.get("traceId"), page, pageSize);
@@ -262,13 +295,24 @@ public class ProductServiceImpl implements ProductService {
     return transaction.execute(status -> work.get());
   }
 
+  /** One bounded ONLINE after-snapshot combines original content assembly and metric admission. */
+  private <T> T withOnlineReadTransaction(java.util.function.Supplier<T> work){
+    if(transactionManager==null)throw new IllegalStateException("METRIC_TRANSACTION_MANAGER_REQUIRED");
+    TransactionTemplate transaction=new TransactionTemplate(transactionManager);transaction.setReadOnly(true);
+    transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    transaction.setTimeout(3);return transaction.execute(status->work.get());
+  }
+
   @GetMapping("/products/{id}")
   /** 执行 product 相关操作。 */
   public ApiResponse<?> product(@PathVariable Long id) {
     // 1. 接收并整理 product 的业务请求。
     // 2. 执行 product 的核心业务校验与状态处理。
     // 3. 返回 product 的处理结果。
-    return ApiResponse.ok(requireProduct(id));
+    String requestId=UUID.randomUUID().toString();
+    ProductDTO result=requireProduct(id);
+    if(metricsEnabled)try{metrics.registerViews(requestId,id,MDC.get("traceId"));}catch(org.springframework.dao.DataAccessException|org.springframework.transaction.TransactionException failure){throw metricUnavailable(failure);}
+    ApiResponse<?> response=ApiResponse.ok(result);if(metricsEnabled)response.requestId=requestId;return response;
   }
 
   @GetMapping("/products/skus/{skuId}")
@@ -307,7 +351,8 @@ public class ProductServiceImpl implements ProductService {
     // 3. 返回 hot 的处理结果。
     requireProduct(id);
     List<HotStatVO> x = productSqlMapper.findHotStat(id).stream().map(this::hotView).toList();
-    return ApiResponse.ok(x.isEmpty() ? new HotStatVO(id, 0, 0, "0.000000") : x.get(0));
+    HotStatVO history=x.isEmpty()?new HotStatVO(id,0,0,"0.000000"):x.get(0);
+    return ApiResponse.ok(metricsEnabled?new HotStatVO(history.productId,history.viewCount,history.searchCount,history.hotScore,history.sourceType,history.sourceRef,metrics.online(id)):history);
   }
 
   @Transactional
@@ -848,4 +893,10 @@ public class ProductServiceImpl implements ProductService {
       int stockLimit,
       int perUserLimit,
       String status) {}
+  /** Enabled-mode graph admission also applies to the inherited production Controller bean. */
+  @javax.annotation.PostConstruct
+  public void validateMetricConfiguration(){if(!Set.of("LEGACY","ONLINE").contains(metricSortMode)||("ONLINE".equals(metricSortMode)&&!metricsEnabled))throw new IllegalStateException("METRIC_SORT_MODE_INVALID");if(metricsEnabled&&"ONLINE".equals(metricSortMode)&&searchEnabled&&productKeywordSearch==null)throw new IllegalStateException("METRIC_ONLINE_SEARCH_COMPONENT_REQUIRED");if(metricsEnabled&&(metrics==null||transactionManager==null||!org.springframework.aop.support.AopUtils.isAopProxy(metrics)))throw new IllegalStateException("METRIC_TRANSACTION_PROXY_REQUIRED");}
+  private boolean onlineRank(String sort){return metricsEnabled&&"ONLINE".equals(metricSortMode)&&("sales".equals(sort)||"hot".equals(sort));}
+  private static BizException metricUnavailable(Throwable cause){BizException failure=new BizException("PRODUCT_METRICS_UNAVAILABLE","Product metrics could not be registered",503);failure.initCause(cause);return failure;}
+
 }

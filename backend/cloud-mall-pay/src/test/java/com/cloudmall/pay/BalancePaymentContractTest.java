@@ -85,6 +85,7 @@ class BalancePaymentContractTest {
     payment.userId = 7L;
     payment.amount = new BigDecimal("10.00");
     payment.status = status;
+    payment.debitMode = "LEGACY";
     return payment;
   }
 }

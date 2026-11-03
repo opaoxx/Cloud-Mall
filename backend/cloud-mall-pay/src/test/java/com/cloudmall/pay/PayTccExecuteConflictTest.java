@@ -194,6 +194,80 @@ class PayTccExecuteConflictTest {
     assertNull(RootContext.getXID());
   }
 
+  /** 首次认领异常仍属于本入口，清理依赖遗留绑定并保留原异常。 */
+  @Test
+  void claimFailuresAlwaysReleaseEntryContext() throws Exception {
+    for (Throwable original :
+        List.of(
+            new BizException("PAY_TCC_EXECUTION_CONFLICT", "claim conflict", 409),
+            new IllegalStateException("claim unavailable"),
+            new AssertionError("claim aborted"))) {
+      var fixture = new Fixture("none", null);
+      when(fixture.store.claimOwned(fixture.request))
+          .thenAnswer(
+              invocation -> {
+                RootContext.bind("leaked-claim-xid");
+                throw original;
+              });
+      try {
+        assertSame(
+            original,
+            assertThrows(Throwable.class, () -> fixture.coordinator.execute(fixture.request)));
+        assertNull(RootContext.getXID());
+        verify(fixture.store).claimOwned(fixture.request);
+        verifyNoMoreInteractions(fixture.store);
+        verifyNoInteractions(
+            fixture.transactions, fixture.receipts, fixture.bridge, fixture.evidence);
+      } finally {
+        RootContext.unbind();
+      }
+    }
+  }
+
+  /** 末次校验抛错早于观察内核，也必须清理；已完成的原决议不撤回。 */
+  @Test
+  void finalSnapshotFailuresAlwaysReleaseEntryContext() throws Exception {
+    for (String phase : List.of("commit", "rollback", "begin-failure"))
+      for (Throwable original :
+          List.of(
+              new BizException("PAY_TCC_EXECUTION_CONFLICT", "snapshot conflict", 422),
+              new IllegalStateException("snapshot unavailable"),
+              new AssertionError("snapshot aborted"))) {
+        var fixture =
+            new Fixture(
+                phase.equals("begin-failure") ? "begin" : "none",
+                phase.equals("begin-failure") ? new Exception("begin response lost") : null);
+        fixture.declinedReceipt = phase.equals("rollback");
+        var verifications = new java.util.concurrent.atomic.AtomicInteger();
+        when(fixture.store.verifyDecisionSnapshot(fixture.execution))
+            .thenAnswer(
+                invocation -> {
+                  if (verifications.incrementAndGet() == (phase.equals("begin-failure") ? 1 : 2)) {
+                    assertNull(RootContext.getXID());
+                    RootContext.bind("leaked-final-snapshot-xid");
+                    throw original;
+                  }
+                  return fixture.execution;
+                });
+        try {
+          assertSame(
+              original,
+              assertThrows(Throwable.class, () -> fixture.coordinator.execute(fixture.request)));
+          assertNull(RootContext.getXID());
+          verify(fixture.transactions).begin();
+          if (phase.equals("commit")) verify(fixture.transactions).commit("unit-execute-xid");
+          if (phase.equals("rollback")) verify(fixture.transactions).rollback("unit-execute-xid");
+          verifyNoMoreInteractions(fixture.transactions);
+          verify(fixture.bridge, never()).recover(any());
+          assertEquals(
+              phase.equals("begin-failure") ? "BEGIN_UNKNOWN" : phase.toUpperCase() + "_REQUESTED",
+              fixture.execution.state);
+        } finally {
+          RootContext.unbind();
+        }
+      }
+  }
+
   /** 调用回包和普通异常中丢失原XID，不能继续下一步或诊断写回。 */
   @Test
   void contextDriftStopsAtOwnedCallBoundaries() throws Exception {

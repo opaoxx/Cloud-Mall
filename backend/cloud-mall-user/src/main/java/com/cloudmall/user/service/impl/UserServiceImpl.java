@@ -72,6 +72,12 @@ public class UserServiceImpl implements UserService {
   /** 关联退款读取采用100加一哨兵，超限必须补证后再处理。 */
   private static final int MAX_REFUND_CANDIDATES = 100;
 
+  /** 当前数字JSON契约的安全整数上限，只用于启动兼容检查。 */
+  private static final long MAX_SAFE_IDENTIFIER = 9007199254740991L;
+
+  /** 本批有限并发新增的最低安全余量，不代表永久计数器耗尽保障。 */
+  private static final long IDENTIFIER_HEADROOM = 64L;
+
   /** 用户事实数据 Mapper。 */
   @Autowired private UserMapper userMapper;
 
@@ -96,15 +102,16 @@ public class UserServiceImpl implements UserService {
   /** 初始化本地管理员账号。 */
   @PostConstruct
   public void ensureLocalAdmin() {
-    // 1. 查询本地管理员是否已存在。
-    // 2. 缺失时创建默认管理员账号和初始余额。
-    // 3. 仅将旧的默认密码迁移到新的默认密码，保持初始化操作幂等。
+    // 1. 仅只读核部署前置，未迁移时明确拒启动，禁止隐式修改业务表。
+    requireCompatibleIdentifiers();
+    // 2. 查询本地管理员是否已存在。
+    // 3. 缺失时创建默认管理员账号和初始余额。
+    // 4. 仅将旧的默认密码迁移到新的默认密码，保持初始化操作幂等。
     long administratorCount =
         userMapper.selectCount(new QueryWrapper<UserPO>().eq("username", "admin"));
     if (administratorCount == 0) {
       LocalDateTime currentTime = LocalDateTime.now();
       UserPO administrator = new UserPO();
-      administrator.id = System.currentTimeMillis();
       administrator.username = "admin";
       administrator.passwordHash = ENCODER.encode("admin123");
       administrator.role = "ADMIN";
@@ -124,6 +131,27 @@ public class UserServiceImpl implements UserService {
     }
   }
 
+  /** 检查数据库生成身份的结构和本批有限安全余量，不执行DDL或写后伪回滚。 */
+  private void requireCompatibleIdentifiers() {
+    if (userMapper.countCompatibleIdentifierColumns() != 2
+        || userMapper.countIdentifierPrimaryColumns() != 2
+        || !safeIdentifierRange(userMapper.maximumUserIdentifier(), userMapper.nextUserIdentifier())
+        || !safeIdentifierRange(
+            userMapper.maximumAddressIdentifier(), userMapper.nextAddressIdentifier())) {
+      throw new BizException("USER_IDENTIFIER_SCHEMA_INCOMPATIBLE", "用户及地址主键尚未完成兼容迁移或安全余量不足", 503);
+    }
+  }
+
+  /** 空表MAX为零，计数器必须为正；未知或接近JS精度边界时不开放本批新增。 */
+  private boolean safeIdentifierRange(Long maximum, Long next) {
+    return maximum != null
+        && next != null
+        && maximum >= 0
+        && next > 0
+        && maximum <= MAX_SAFE_IDENTIFIER - IDENTIFIER_HEADROOM
+        && next <= MAX_SAFE_IDENTIFIER - IDENTIFIER_HEADROOM;
+  }
+
   /** 注册用户并返回用户标识。 */
   @PostMapping("/auth/register")
   public ApiResponse<?> register(@Valid @RequestBody CredentialsDTO credentials) {
@@ -137,7 +165,6 @@ public class UserServiceImpl implements UserService {
     }
     LocalDateTime currentTime = LocalDateTime.now();
     UserPO user = new UserPO();
-    user.id = System.currentTimeMillis();
     user.username = credentials.username;
     user.passwordHash = ENCODER.encode(credentials.password);
     user.role = "USER";
@@ -1080,7 +1107,7 @@ public class UserServiceImpl implements UserService {
   /** 新增当前用户收货地址。 */
   @PostMapping("/users/me/addresses")
   public ApiResponse<?> addAddress(@Valid @RequestBody AddressRequestDTO request) {
-    // 1. 获取当前用户并准备地址主键。
+    // 1. 获取当前用户，新地址主键由数据库生成。
     // 2. 必要时清除原默认地址。
     // 3. 保存新地址并返回地址视图。
     Long userId = AuthContext.requireUserId();
@@ -1149,7 +1176,7 @@ public class UserServiceImpl implements UserService {
   /** 将请求对象转换为地址持久化对象。 */
   private UserAddressPO toAddress(Long addressId, Long userId, AddressRequestDTO request) {
     UserAddressPO address = new UserAddressPO();
-    address.id = addressId == null ? System.currentTimeMillis() : addressId;
+    address.id = addressId;
     address.userId = userId;
     address.receiverName = request.receiver;
     address.receiverPhone = request.phone;

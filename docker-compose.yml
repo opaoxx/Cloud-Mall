@@ -189,7 +189,7 @@ services:
       STORAGE_TYPE: mem
       TZ: Asia/Shanghai
     ports:
-      - "9411:9411"
+      - "19411:9411"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:9411/health || exit 1"]
       interval: 15s

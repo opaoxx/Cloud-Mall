@@ -17,6 +17,7 @@ import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayConsistencyService;
 import com.cloudmall.pay.service.impl.PayDebitIntentService;
+import com.cloudmall.pay.util.PayDebitModes;
 import feign.Request;
 import feign.RetryableException;
 import java.math.BigDecimal;
@@ -757,17 +758,18 @@ class PayConsistencyServiceTest {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
-  /** 合法尾零、最小/最大金额及旧Java null-mode保持兼容，不按BigDecimal scale比较相等。 */
+  /** 明确 LEGACY 来源按数值核合法金额和尾零；旧 Java null 的纯转换兼容独立验证。 */
   @Test
   void healthyRecoveryTupleKeepsMoneyAndLegacyObjectCompatibility() {
+    assertEquals(PayDebitModes.LEGACY, PayDebitModes.persisted(null));
     for (String amount : java.util.List.of("10.000", "0.01", "9999999999999999.99")) {
       setUp();
       PayDebitIntentPO original = intent();
       original.amount = new BigDecimal(amount);
-      original.debitMode = null;
+      original.debitMode = PayDebitModes.LEGACY;
       var payment = payRecordMapper.selectByPayNo("pay-1").get(0);
       payment.amount = original.amount.setScale(2);
-      payment.debitMode = null;
+      payment.debitMode = PayDebitModes.LEGACY;
       org.mockito.Mockito.clearInvocations(payRecordMapper);
       when(intentMapper.findByPayNo("pay-1")).thenReturn(original);
       when(intentMapper.claim(eq("pay-1"), anyString(), any(), any())).thenReturn(0);
@@ -3710,6 +3712,7 @@ class PayConsistencyServiceTest {
     intent.userId = 7L;
     intent.amount = new BigDecimal("10.00");
     intent.status = "INIT";
+    intent.debitMode = PayDebitModes.LEGACY;
     intent.attempts = 1;
     return intent;
   }

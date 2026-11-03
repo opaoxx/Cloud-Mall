@@ -11,6 +11,10 @@ import org.springframework.stereotype.Service;
 /** 在商品事务中写入索引事件，并异步交给 dispatcher 投递。 */
 @Service
 public class ProductIndexOutboxService {
+  /** Optional while disabled; enabled mode requires the real same-resource proxy. */
+  @org.springframework.beans.factory.annotation.Autowired(required=false) private ProductMetricService metrics;
+  /** The legacy constructor never touches the online control table. */
+  @org.springframework.beans.factory.annotation.Value("${cloudmall.product.metrics.enabled:false}") private boolean metricsEnabled;
   private final ProductIndexOutboxMapper mapper;
   private final ObjectMapper objectMapper;
 
@@ -38,6 +42,7 @@ public class ProductIndexOutboxService {
     } catch (JsonProcessingException exception) {
       throw new IllegalStateException("商品索引事件序列化失败", exception);
     }
+    if(metricsEnabled){if(metrics==null)throw new IllegalStateException("METRIC_TRANSACTION_PROXY_REQUIRED");metrics.contentChanged();}
     return eventId;
   }
 }

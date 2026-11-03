@@ -1,6 +1,7 @@
 package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderOutboxPO;
+import com.cloudmall.order.util.OrderJdbcLocalDateTime;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
@@ -72,9 +73,11 @@ public class OrderOutboxMapper {
    */
   public List<OrderOutboxPO> findPendingOutbox(int limit) {
     return jdbcTemplate.query(
-        "SELECT"
-            + " id,event_id,event_type,order_no,payload,status,attempts,next_retry_at,last_error,published_at,created_at,updated_at"
-            + " FROM order_outbox WHERE CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND"
+        "SELECT id,event_id,event_type,order_no,payload,status,attempts,CAST(next_retry_at AS CHAR)"
+            + " AS cm_local_next_retry_at,last_error,CAST(published_at AS CHAR) AS"
+            + " cm_local_published_at,CAST(created_at AS CHAR) AS"
+            + " cm_local_created_at,CAST(updated_at AS CHAR) AS cm_local_updated_at FROM"
+            + " order_outbox WHERE CAST(status AS BINARY)=CAST('PENDING' AS BINARY) AND"
             + " next_retry_at<=? AND next_retry_at>='1000-01-01 00:00:00.000' AND"
             + " created_at>='1000-01-01 00:00:00.000' AND updated_at>='1000-01-01 00:00:00.000' AND"
             + " (published_at IS NULL OR published_at>='1000-01-01 00:00:00.000') AND"
@@ -98,12 +101,14 @@ public class OrderOutboxMapper {
           outbox.payload = resultSet.getString("payload");
           outbox.status = resultSet.getString("status");
           outbox.attempts = resultSet.getInt("attempts");
-          // DATETIME直接读取列组件，避免Timestamp混合历及JVM默认时区中转。
-          outbox.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
+          // MySQL先投影字符，避免4.1.1内存物化提前转Timestamp。
+          outbox.nextRetryAt =
+              OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_next_retry_at");
           outbox.lastError = resultSet.getString("last_error");
-          outbox.publishedAt = resultSet.getObject("published_at", LocalDateTime.class);
-          outbox.createdAt = resultSet.getObject("created_at", LocalDateTime.class);
-          outbox.updatedAt = resultSet.getObject("updated_at", LocalDateTime.class);
+          outbox.publishedAt =
+              OrderJdbcLocalDateTime.readNullable(resultSet, "cm_local_published_at");
+          outbox.createdAt = OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_created_at");
+          outbox.updatedAt = OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_updated_at");
           return outbox;
         },
         LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
@@ -127,7 +132,8 @@ public class OrderOutboxMapper {
           fact.status = resultSet.getString("status");
           fact.eventType = resultSet.getString("event_type");
           fact.orderNo = resultSet.getString("order_no");
-          fact.attempts = resultSet.getObject("attempts", Integer.class);
+          int attempts = resultSet.getInt("attempts");
+          fact.attempts = resultSet.wasNull() ? null : attempts;
           return fact;
         },
         eventId);

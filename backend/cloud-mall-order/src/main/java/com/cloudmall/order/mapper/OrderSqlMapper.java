@@ -1,11 +1,14 @@
 package com.cloudmall.order.mapper;
 
+import com.cloudmall.order.config.OrderRoutingConfiguration;
 import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.domain.po.OrderItemPO;
 import com.cloudmall.order.domain.po.OrderPO;
+import com.cloudmall.order.util.OrderJdbcLocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -13,6 +16,7 @@ import org.springframework.stereotype.Repository;
 
 /** 订单动态分片和兼容性 SQL 的统一持久化入口。 */
 @Repository
+@Conditional(OrderRoutingConfiguration.DynamicMonthly.class)
 public class OrderSqlMapper {
   /** Spring JDBC 执行器。 */
   private final JdbcTemplate jdbcTemplate;
@@ -122,7 +126,8 @@ public class OrderSqlMapper {
    */
   public List<OrderIdempotencyPO> findIdempotentOrders(Long userId, String idempotencyKey) {
     return query(
-        "select id,user_id,idempotency_key,order_no,created_at from order_idempotency"
+        "select id,user_id,idempotency_key,order_no,CAST(created_at AS CHAR) AS"
+            + " cm_local_created_at from order_idempotency"
             + " where user_id=? and idempotency_key=?",
         (resultSet, rowNumber) -> {
           OrderIdempotencyPO existingOrder = new OrderIdempotencyPO();
@@ -131,7 +136,7 @@ public class OrderSqlMapper {
           existingOrder.idempotencyKey = resultSet.getString("idempotency_key");
           existingOrder.orderNo = resultSet.getString("order_no");
           existingOrder.createdAt =
-              resultSet.getObject("created_at", java.time.LocalDateTime.class);
+              OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_created_at");
           return existingOrder;
         },
         userId,
@@ -292,7 +297,7 @@ public class OrderSqlMapper {
         orderNo);
   }
 
-  /** 按当前状态条件迁移订单状态。 */
+  /** 按当前状态条件迁移订单状态；IF保留原ELSE语义并让4.1.1遍历全部绑定参数。 */
   public int updateStatus(
       String tableName,
       String orderNo,
@@ -302,8 +307,8 @@ public class OrderSqlMapper {
     return update(
         "update "
             + tableName
-            + " set status=?,updated_at=?,paid_at=case when ?='PAID' then ? else paid_at"
-            + " end,cancelled_at=case when ?='CANCELLED' then ? else cancelled_at end where"
+            + " set status=?,updated_at=?,paid_at=IF(?='PAID',?,paid_at),"
+            + "cancelled_at=IF(?='CANCELLED',?,cancelled_at) where"
             + " order_no=? and status=?",
         targetStatus,
         updatedAt,

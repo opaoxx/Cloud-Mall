@@ -8,6 +8,10 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PayProtocolMetrics.*;
+import com.cloudmall.pay.util.PayDebitModes;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -17,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,6 +29,9 @@ import org.springframework.transaction.annotation.Transactional;
 /** 公开支付回调的独立预绑定与完成记录服务，不写支付业务状态。 */
 @Service
 public class PayCallbackReceiptService {
+  /** 正式容器强制注入真实观察组件，旧直接构造保持无资源兼容。 */
+  @Autowired private PayProtocolMetrics metrics = PayProtocolMetrics.noop();
+
   /** 回调日志数据访问入口。 */
   private final PayCallbackLogMapper callbackLogs;
 
@@ -50,16 +58,36 @@ public class PayCallbackReceiptService {
    */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public void claim(PayVO payment, PayCallbackDTO request, String callbackId) {
-    // 1. 先核验请求和调用方已读取的支付不可变字段。
-    validateRequest(payment, request, callbackId);
-    // 2. 在独立本地事务中锁定真实支付行，避免视图与数据库载荷分叉。
-    PayRecordPO lockedPayment = lockPayment(request.payNo);
-    validatePayment(lockedPayment, payment, request);
-    // 3. 预绑定完整事实后重新锁定日志，兼容并发插入和历史空 payload。
-    PayCallbackLogPO candidate = receivedLog(payment, request, callbackId);
-    callbackLogs.insertReceived(candidate);
-    PayCallbackLogPO bound = callbackLogs.lockedSelect(callbackId);
-    validateBound(bound, payment, request, callbackId);
+    Mode observedMode = Mode.UNKNOWN;
+    try {
+      // 1. 先核验请求和调用方已读取的支付不可变字段。
+      validateRequest(payment, request, callbackId);
+      // 2. 在独立本地事务中锁定真实支付行，避免视图与数据库载荷分叉。
+      PayRecordPO lockedPayment = lockPayment(request.payNo);
+      observedMode = PayProtocolMetrics.mode(lockedPayment.debitMode);
+      validatePayment(lockedPayment, payment, request);
+      // 3. 预绑定完整事实后重新锁定日志，兼容并发插入和历史空 payload。
+      PayCallbackLogPO candidate = receivedLog(payment, request, callbackId);
+      int inserted = callbackLogs.insertReceived(candidate);
+      PayCallbackLogPO bound = callbackLogs.lockedSelect(callbackId);
+      validateBound(bound, payment, request, callbackId);
+
+      metrics.claim(
+          observedMode,
+          request.success ? Direction.SUCCESS : Direction.FAILURE,
+          inserted == 1
+              ? ClaimResult.NEW
+              : inserted == 0 ? ClaimResult.REPLAY : ClaimResult.UNKNOWN);
+    } catch (RuntimeException failure) {
+      if (request != null)
+        metrics.claim(
+            observedMode,
+            request.success ? Direction.SUCCESS : Direction.FAILURE,
+            PayProtocolMetrics.failureOutcome(failure) == Outcome.CONFLICT
+                ? ClaimResult.CONFLICT
+                : ClaimResult.UNKNOWN);
+      throw failure;
+    }
   }
 
   /**
@@ -77,6 +105,57 @@ public class PayCallbackReceiptService {
     validatePayment(lockedPayment, payment, request);
     // 2. 绑定记录必须同支付、同方向且 payload 可验证，才允许写终态。
     PayCallbackLogPO bound = callbackLogs.lockedSelect(callbackId);
+    completeLocked(lockedPayment, bound, payment, request, callbackId);
+  }
+
+  /**
+   * 在独立事务中恢复已有 Legacy 支付终态对应的完整回调日志，不重复业务副作用。
+   *
+   * @param callbackId 已持久预绑定的回调标识
+   */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public void recoverReceived(String callbackId) {
+    // 1. 只读定位原支付，候选本身不能授权完成回调。
+    if (callbackId == null || callbackId.isBlank() || callbackId.length() > 128)
+      throw conflict("回调标识不完整");
+    List<PayCallbackLogPO> observed = callbackLogs.selectByCallbackId(callbackId);
+    if (observed.size() != 1) throw conflict("回调记录不存在或不唯一");
+    PayCallbackLogPO snapshot = observed.get(0);
+    if (snapshot == null
+        || snapshot.id == null
+        || !Objects.equals(snapshot.callbackId, callbackId)
+        || snapshot.payNo == null
+        || snapshot.payNo.isBlank()) throw conflict("回调原始身份不完整");
+    // 2. 沿原 payment → callback 锁序重读，拒绝候选之后的删除重建或载荷分叉。
+    PayRecordPO lockedPayment = lockPayment(snapshot.payNo);
+    PayCallbackLogPO bound = callbackLogs.lockedSelect(callbackId);
+    if (bound == null
+        || !Objects.equals(bound.id, snapshot.id)
+        || !Objects.equals(bound.callbackId, callbackId)
+        || !Objects.equals(bound.payNo, snapshot.payNo)) throw conflict("回调原始身份发生变化");
+    if (!PayDebitModes.LEGACY.equals(lockedPayment.debitMode)) return;
+    // 3. 只消费原完整冻结载荷；缺少原请求时不从支付行补造用户、金额或方向。
+    PayCallbackDTO request = recoveryRequest(bound.payload);
+    PayVO payment = new PayVO();
+    payment.payNo = lockedPayment.payNo;
+    payment.userId = lockedPayment.userId;
+    payment.amount = lockedPayment.amount;
+    payment.status = lockedPayment.status;
+    validateRequest(payment, request, callbackId);
+    validatePayment(lockedPayment, payment, request);
+    validateBound(bound, payment, request, callbackId);
+    if (!finalStatus(request.success).equals(lockedPayment.status)) return;
+    // 4. 仅复用已经锁定事实的日志 CAS，不调用 claim、支付编排或任何远程接口。
+    completeLocked(lockedPayment, bound, payment, request, callbackId);
+  }
+
+  /** 已有支付和日志行锁下的完成原语；CAS 未命中必须报告冲突而非猜测成功。 */
+  private void completeLocked(
+      PayRecordPO lockedPayment,
+      PayCallbackLogPO bound,
+      PayVO payment,
+      PayCallbackDTO request,
+      String callbackId) {
     validateBound(bound, payment, request, callbackId);
     String expected = receivedStatus(request.success);
     if (!finalStatus(request.success).equals(lockedPayment.status)) throw conflict("支付尚未确认相应终态");
@@ -89,6 +168,37 @@ public class PayCallbackReceiptService {
     if (callbackLogs.markProcessed(
             callbackId, expected, finalStatus(request.success), LocalDateTime.now())
         != 1) throw conflict("回调处理状态发生冲突");
+  }
+
+  /** 严格解析恢复所需四字段，拒绝重复键、尾随值和数值截断，不放宽公开历史兼容。 */
+  private PayCallbackDTO recoveryRequest(String payload) {
+    try {
+      if (payload == null || payload.isBlank()) throw conflict("回调缺少完整冻结载荷");
+      try (JsonParser parser = objectMapper.getFactory().createParser(payload)) {
+        parser.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+        JsonNode node = objectMapper.readTree(parser);
+        if (node == null
+            || !node.isObject()
+            || node.size() != 4
+            || parser.nextToken() != null
+            || !node.path("payNo").isTextual()
+            || !node.path("userId").isIntegralNumber()
+            || !node.path("userId").canConvertToLong()
+            || node.path("userId").longValue() <= 0
+            || !node.path("amount").isTextual()
+            || !node.path("success").isBoolean()) throw conflict("回调缺少完整冻结载荷");
+        PayCallbackDTO request = new PayCallbackDTO();
+        request.payNo = node.get("payNo").textValue();
+        request.userId = node.get("userId").longValue();
+        request.amount = new BigDecimal(node.get("amount").textValue());
+        request.success = node.get("success").booleanValue();
+        return request;
+      }
+    } catch (BizException failure) {
+      throw failure;
+    } catch (Exception parseFailure) {
+      throw conflict("回调冻结载荷无法验证");
+    }
   }
 
   /** 锁定唯一支付记录。 */

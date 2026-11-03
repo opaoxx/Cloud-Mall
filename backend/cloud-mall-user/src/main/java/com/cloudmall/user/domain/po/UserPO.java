@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 @TableName("mall_user")
 public class UserPO {
   /** 用户主键。 */
-  @TableId(type = IdType.INPUT)
+  @TableId(type = IdType.AUTO)
   public Long id;
 
   /** 登录用户名。 */

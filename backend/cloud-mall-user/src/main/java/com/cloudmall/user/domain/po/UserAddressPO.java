@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 @TableName("user_address")
 public class UserAddressPO {
   /** 地址主键。 */
-  @TableId(type = IdType.INPUT)
+  @TableId(type = IdType.AUTO)
   public Long id;
 
   /** 所属用户主键。 */

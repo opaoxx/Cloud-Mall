@@ -7,6 +7,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.PostConstruct;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.env.Environment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.DependsOn;
@@ -38,6 +41,19 @@ public class OrderTableInitializer {
   /** 负责模板选择和物理月表 DDL 的持久化入口。 */
   private final OrderSqlMapper orderSqlMapper;
 
+  /** Spring-only mode; null retains the original direct-construction contract. */
+  private Environment routingEnvironment;
+  /** Optional only for dynamic routing; explicit mode requires a completed bootstrap. */
+  private ObjectProvider<OrderShardingBootstrap> bootstrapProvider;
+
+  /** Connects Spring lifecycle selection while retaining the original constructor. */
+  @Autowired
+  public OrderTableInitializer(OrderSqlMapper mapper, Environment environment, ObjectProvider<OrderShardingBootstrap> provider) {
+    this(mapper);
+    this.routingEnvironment = environment;
+    this.bootstrapProvider = provider;
+  }
+
   /** 创建 OrderTableInitializer 实例。 */
   public OrderTableInitializer(OrderSqlMapper orderSqlMapper) {
     this.orderSqlMapper = orderSqlMapper;
@@ -46,6 +62,7 @@ public class OrderTableInitializer {
   /** 服务启动时准备当前窗口内的订单、明细和状态日志月表。 */
   @PostConstruct
   public void prepareRollingTables() {
+    if (explicitBootstrap() != null) return;
     prepareForMonth(YearMonth.now(BUSINESS_ZONE));
   }
 
@@ -58,7 +75,9 @@ public class OrderTableInitializer {
     YearMonth currentMonth = YearMonth.now(BUSINESS_ZONE);
     // 2. 若 DDL 失败则记录并保留异常，本轮不假称目标月表已经就绪。
     try {
-      prepareForMonth(currentMonth);
+      OrderShardingBootstrap bootstrap = explicitBootstrap();
+      if (bootstrap == null) prepareForMonth(currentMonth);
+      else bootstrap.prepareForMonth(currentMonth);
     } catch (RuntimeException preparationFailure) {
       log.error("订单未来月表准备失败，currentMonth={}", currentMonth, preparationFailure);
       throw preparationFailure;
@@ -77,5 +96,14 @@ public class OrderTableInitializer {
         "订单月度分表已准备，覆盖 {} 至 {}",
         rollingMonths(currentMonth).get(0),
         rollingMonths(currentMonth).get(3));
+  }
+
+  /** New mode cannot silently fall back to business-connection DDL. */
+  private OrderShardingBootstrap explicitBootstrap() {
+    if (routingEnvironment == null || !OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(routingEnvironment))) return null;
+    OrderShardingBootstrap bootstrap = bootstrapProvider == null ? null : bootstrapProvider.getIfAvailable();
+    if (bootstrap == null) throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
+    bootstrap.requireReady();
+    return bootstrap;
   }
 }

@@ -2,6 +2,8 @@
 
 CloudMall 是一个面向学习与复盘的云购微商城项目，用于演示基于 Spring Cloud 的微服务电商业务闭环。
 
+**维护状态（2026-11-04）：有限三项收尾已完成，停止迭代维护。** 最终范围、实际检查结果、已知限制与归档位置见[停工交接](PROJECT_CLOSEOUT_2026-11-04.md)。CM21 性能与真实压测启动链仍有未完成项；历史维护记录中的“下一项”不再自动执行。
+
 项目覆盖：
 
 - 用户注册、登录和个人资料
@@ -34,6 +36,8 @@ CloudMall 是一个面向学习与复盘的云购微商城项目，用于演示�
 | Frontend | 5173 |
 
 Docker Compose 默认提供 MySQL、Redis、RabbitMQ、Nacos、Seata、Elasticsearch、Kibana、Prometheus、Grafana、Sentinel 和 Nginx。
+
+临时回归与压测中间件使用[独立实验 Compose 项目](deploy/experiments/README.md)分组，结束后归档证据并移除不再使用的容器，避免在 Docker Desktop 堆积散装实验实例。
 
 ## 快速开始
 
@@ -71,6 +75,84 @@ EOF、超时或错误响应返回失败；Redis `NOAUTH` 表示协议可达，�
 备份并核对业务表校验和、Redis 持久化文件及命名卷后，分别仅重启对应容器恢复了
 原端口；未改端口、镜像、数据卷或 WSL 配置。此恢复不能保证故障不会再次出现。
 恢复时应先记录证据和备份，再按单服务操作，勿以 `down -v` 或清空数据卷排障。
+
+2026-10-24 再次实测：Zipkin 的 9411 被 IPv4/IPv6 系统排除段 9381–9480 阻挡，
+单独 `docker start` 重现 forbidden；本机两族 TCP 动态范围为 1024–15000，
+注册表 `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters` 存在
+DWORD `MaxUserPort=15000`，两族 UDP 则为默认范围。这个低位 TCP 配置与反复出现的
+开发端口冲突一致，但尚未确定配置写入者或所有历史排除段的来源。现代 Windows
+默认动态范围为 [49152–65535](https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/tcp-ip-port-exhaustion-troubleshooting)。
+长期修复应先恢复异常系统配置，再重启验证原端口；持续换映射只能绕开当时的冲突。
+
+2026-10-24 按用户当前选择，先将 Zipkin 宿主入口改为
+`http://localhost:19411`（健康端点 `/health`），容器内仍为 `9411`，镜像仍为
+`openzipkin/zipkin:2.23.19`。本次仅重建 Zipkin 单服务验证可用，不执行系统 TCP
+修复或更改已启用的注册表审计。后续宿主客户端应使用 `19411`；Docker 网络内仍用
+`http://zipkin:9411`。
+
+本机目前按用户后续授权**先追踪写入者，暂不应用 TCP 修复**。2026-10-24 03:02（+08:00）
+已启用 Registry 成功审计，并给实际 `ControlSet001\Services\Tcpip\Parameters`
+本键添加 Everyone / SetValue / Success 审计规则，不继承到子键；`MaxUserPort` 仍为
+DWORD 15000。该规则会审计本键的其他值写入，读取时才筛选 MaxUserPort；全局成功
+开关也可能激活其他已有 SACL 的注册表键。失败位、DACL、所有者、端口和服务保持。
+
+正常使用电脑即可，不需重启或主动复现。之后在**管理员 PowerShell** 每次执行一条：
+
+```powershell
+& 'F:\Cloud-Mall\deploy\trace-tcp-registry-writes.ps1' -Action Status
+```
+
+```powershell
+& 'F:\Cloud-Mall\deploy\trace-tcp-registry-writes.ps1' -Action Read
+```
+
+Read 保存并输出事件时间、进程路径、PID、旧新值及原 XML，按实际 ControlSet/值名筛选；
+无命中不代表软件无责，同值写入可能不生成变更事件。它不能还原过去没有记录的写入。
+原状态及本次应用证据在 `target/tcp-registry-audit/state.json` 所指的独立 run 目录。
+如需移除此项监测，在管理员 PowerShell 执行：
+
+```powershell
+& 'F:\Cloud-Mall\deploy\trace-tcp-registry-writes.ps1' -Action Disable
+```
+
+Disable 仅去掉本次自增规则、恢复原 Registry 成功位；若策略、SACL、权限或当前
+ControlSet 已漂移则拒绝自动处理，不覆盖其他修改。部分应用失败也需保留现场，
+不能宣称自动回退已实机验证。审计启用已读回，不代表已捕获写入者或 Docker 故障闭环。
+
+下列 TCP 恢复工具适用于另行决定修复时，**本次监测没有执行它**。工具默认只读；
+保存工作、正常退出 Docker Desktop 后，
+在**管理员 PowerShell** 显式应用：
+
+```powershell
+F:\Cloud-Mall\deploy\repair-windows-tcp-range.ps1
+# 以下命令才修改系统设置，须管理员权限：
+F:\Cloud-Mall\deploy\repair-windows-tcp-range.ps1 -Apply
+```
+
+工具先备份原注册表值/类型和两族 TCP/UDP 范围及 TCP 排除段到独立
+`target/docker-tcp-repair-*`，只删除确认的 DWORD `MaxUserPort=15000`，
+并持久设置两族 TCP 动态范围为 49152 起、16384 个端口。未知注册表值会停止。
+工具不自动重启电脑；应用后保存工作并**人工重启 Windows**，从开始菜单正常启动
+Docker Desktop，再运行以下验证。原端口检查未通过时保留输出，停止后续启动：
+
+```powershell
+Set-Location F:\Cloud-Mall
+.\deploy\repair-windows-tcp-range.ps1
+.\deploy\check-local-ports.ps1 -IncludeBusinessPorts -ProbeProtocols
+if ($LASTEXITCODE -ne 0) { throw '端口检查未通过，请保留现场。' }
+docker compose start
+docker compose ps -a
+Invoke-WebRequest http://127.0.0.1:19411/health -UseBasicParsing
+```
+
+还须核对 12 个常驻容器健康、`MaxUserPort` 未重新出现、两族 TCP 为默认范围且 UDP
+与备份一致。已有排除段可能保留到重启后，应用脚本成功不代表端口立即释放。
+本次已恢复 Kibana/Grafana（healthy、HTTP 200），系统恢复尚待管理员执行及重启回归，
+不能宣称已经永久解决。若配置再次被写回，应根据前后审计定位写入者。
+需要人工回退时，从该次 `before.json` 按原存在状态、类型和值只恢复 `MaxUserPort`，
+并按两族原 TCP 输出恢复范围，再安排人工重启；本次观测为 DWORD 15000、TCP
+1024 起/13977 个。未获取独立 persistent 范围输出，不声称备份能还原未知的原覆盖状态。
+部分应用失败时工具保留 `failure.json` 与已完成步骤，不自动回退或继续写入。
 
 Docker Desktop 自身未启动、`dockerDesktopLinuxEngine` 管道不存在，且 backend
 日志报 `sailor-ingest.sock` / `The file cannot be accessed by the system` （错误 1920）时，
@@ -995,6 +1077,8 @@ Order CANCELLED且库存回滚成功后使用原唯一退款键结清；Order PA
 
 ## 订单路由模式审计（CM-20 第17轮A）
 
+> 历史阶段说明：本节记录第17轮A的限制；后续[17EJ 显式装配](#cm20-sharding-runtime-17ej)已新增受约束的 `sharding-monthly` 入口，默认仍为 `dynamic-monthly`，旧 `sharding` profile 仍不可启用。
+
 订单默认使用 `cloudmall.order.routing.mode=dynamic-monthly`：由现有OrderSqlMapper按物理月表读写。当前Sharding-JDBC没有接管主链路；激活 `sharding` profile（含默认profile）或配置未支持的routing mode会以 `ORDER_ROUTING_UNSUPPORTED` 在数据源/建表初始化前失败。保留默认模式即可沿用当前行为。
 
 启动时还会核对选定DataSource、JdbcTemplate与本地事务管理器是否引用同一对象，并拒绝实际Sharding数据源链。合法的同源Seata代理允许使用；数据源绑定不一致会在订单DDL前失败。
@@ -1009,6 +1093,8 @@ mvn -pl backend/cloud-mall-order -am test '-Dtest=OrderRoutingAuditIT' '-Dsurefi
 ```
 
 ### 月分片算法隔离验证（CM-20 第17轮B）
+
+> 历史阶段说明：本节接入限制是第17轮B时点的记录；当前显式分片入口与限制见[17EJ 显式装配](#cm20-sharding-runtime-17ej)，不表示默认路由已经切换。
 
 月分片算法已补齐精确与有界范围路由。第17轮B修正了原 YAML 算法类名，第17轮C进一步移除静态分片声明，改由隔离规则工厂使用算法对象。只接受上海本地语义的 `LocalDateTime` 或 JDBC 已物化的 `Timestamp`，时间精度必须符合 `DATETIME(3)`；目标表必须属于当前逻辑表。范围按毫秒处理开闭边界，缺少任一所需月份或输入无界时明确失败。
 
@@ -2752,3 +2838,60 @@ NONE快照继续沿原观察入口合并合法并发进度；同方向的终态�
 恢复和只读观察要求无全局XID，在查询回包和观察写回前后核对；恢复退出与只读观察退出清理本次依赖遗留的绑定。入口已有caller上下文仍拒绝且保留。共用TC发送在校验返回、异常诊断和返回时核caller期望：首次线程为原XID，恢复为NULL。
 
 上下文异常不继续后续写回或TC，已提交metadata或已发请求保持事实；回归使用受控注入，不代表真实Seata故障或完整远端资金fencing已经验证。
+
+
+## CM-18 本地观察、协议回退与证据处置手册（16T249）
+
+本节用于本地技术实战。隔离发布、回退验收不等于生产部署；完成状态以最新已签署的 `maintenance_progress.md` CURRENT 区及 R16 评审为准。新支付默认 `cloudmall.pay.debit-mode=LEGACY`，显式配置 TCC 须通过原模式准入及六门。旧支付始终按持久化 `debit_mode` 路由，切配置不迁移旧行；真实 SQL NULL、非法模式须原门拒绝，Java `persisted(null)` 兼容行为不能授权业务。
+
+Pay 原本地端口为 8086，可只读抓取 `Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8086/actuator/prometheus`。现有指标如下，不需修改共享 Prometheus/Grafana 配置：
+
+| Prometheus family | 有限标签 | 含义 |
+| --- | --- | --- |
+| `cloudmall_pay_protocol_route_total` | `mode/entry` | 原入口已校验的协议路由观察 |
+| `cloudmall_pay_protocol_observation_total` | `mode/scope/outcome` | 原协议方法的资金、交付或未知结果 |
+| `cloudmall_pay_tcc_decision_rpc_total` | `origin/decision/result` | 原提交/回滚 RPC 的实际调用结果 |
+| `cloudmall_pay_callback_claim_total` | `mode/direction/result` | 原 callback claim 的新建、重放或冲突 |
+
+Counter 是进程内调用/观察次数，重启归零、重放可重复，不能作为唯一支付数、金额或账本。专用 `TCC_EXECUTE/TCC_RECOVERY/TCC_RESOURCE_EVIDENCE/TCC_DELIVERY` 的 `mode=TCC` 表示方法协议路径，不证明本次持久模式准入通过；route 只记录原严格校验成功的 LEGACY/TCC，非法模式不增加 route；callback 取原 lockedPayment，Legacy 恢复仅在原准入成功后标 LEGACY，两者未取得模式事实则 UNKNOWN。RPC `RETURNED` 不是资金提交证明；`RECOVERY` 是原恢复 RPC，不能当 TC 服务端 branch 重试。callback `REPLAY` 仅指 insert0 且原绑定校验通过，complete 终态重放不额外计 claim。
+
+`BEGIN_UNKNOWN/UNKNOWN/EVIDENCE_MISSING/TRYING/REFUND_PENDING/CONFLICT` 单列并排除已知终态分母。固定同一 mode 和单一 `TCC_EXECUTE` 或 `TCC_RECOVERY`，以 `MONEY_COMMITTED/(MONEY_COMMITTED+MONEY_CANCELLED)` 表达“已知结算观察 COMMIT 占比”。交付另固定单一 `LEGACY_RECOVERY` 或 `TCC_DELIVERY`，看 `DELIVERED/(DELIVERED+REFUNDED+FAILED)`。分母0显示 N/A；不补1、不跨 scope 累加、不称唯一支付成功率。COMMIT 后退款仍是原资金 COMMIT 与退款交付，不能改称 TCC_CANCELLED。
+
+阻塞处理以原 `CM18_OFFLINE_CLASSIFICATION_REPORT_V1`、`ISOLATED_ARCHIVED_EVIDENCE_ONLY` 只读报告为入口，信任范围 `LOCAL_OPERATOR_PINNED_INDEX`，`automaticActionsAllowed=false`。沿原 pay/order、tuple、mode、XID/branch/操作键、账本、Order 动作、Stock 向量，以及 TC/MQ 的 SHA/ref/JSON pointer 和采集窗口核证；按实际 `PAY/USER/ORDER/STOCK/TC/MQ_EVIDENCE/LOCAL_OPERATOR` owner 补证。缺证不等于源库坏账或要求用户重新决议。无可信 Pay subject 的 `INPUT_FIELD_MISSING/REJECTED` 是安全拒绝，不能补造字段后称已接受 UNKNOWN。禁止猜决议、手写身份、新 begin/Try、改资金/冻结、另造退款或跨阶段借未来 MQ。SDK Finished 无方向、Commit branch ACK 未直接观测、队列聚合值不证明逐 event 消费，均保留原限制。
+
+停止新 TCC 选择时，将新建模式回到默认或显式 LEGACY，同时保留以下恢复依赖：
+
+```properties
+cloudmall.pay.debit-mode=LEGACY
+cloudmall.pay.tcc-entry.enabled=true
+cloudmall.pay.tcc-receipt.enabled=true
+cloudmall.pay.tcc-bridge.enabled=true
+cloudmall.pay.tcc-coordinator.enabled=true
+cloudmall.pay.tcc-recovery.enabled=true
+cloudmall.pay.tcc-delivery.enabled=true
+seata.enabled=true
+seata.enable-auto-data-source-proxy=false
+```
+
+`tcc-entry` 必须保留以路由旧 TCC；原 User RM 依赖也须保留。仅停止已授权自有 PID、确认退出后启新 JVM，使用原 DB、稳定 Seata appId、资源名及发现组。新 Legacy 与旧 TCC 分别核验，旧行 mode/XID/branch/键不改，不发第二次 begin/Try 或相反决议。已验收 M4-R1 从原 COMMIT_REQUESTED 自动恢复；M4-R2 从已发生唯一退款的 REFUND_PENDING 恢复，不能产生第二条退款或余额增量。
+
+成功阶段包、manifest、XML/log、源码/Jar 指纹至少保留30天；失败、缺证、未决材料 `NO_AUTOMATIC_EXPIRY`，不建自动删除任务。保留原失败、中断 UNKNOWN 和后续恢复审计。原始材料仅存本地受控目录，对外只给安全投影/相对引用，不公开凭据、地址、raw XID/branch/操作键、MQ body 或完整异常；合法 payNo 与 ledgerKey 可同值，按字段语义脱敏。
+
+证据保留与 owned 资源清理分别判断。按场景原评审，先确认原业务终态及资金/库存方向、收齐 worker/Future/HTTP、自有 PID stop/wait 和本 group 注销，再重核原 tuple、资金/库存、实际 catalog、当前 facts、源基线，仅清本 fixture 精确库名/vhost/Redis ID+label；删前重核，身份/退出/结果未知则 preserve。无通配或共享资源删除。未来 MQ 缺证造成 M1 INCOMPLETE 不等于资金未决，资源资格仍依原场景，artifact 继续无限期保留；collector-only 种子须用其独立清理资格，不能冒充支付。外部并发变化保留 before/after、单列说明，不回滚他项目或声称全机未变。
+
+评审入口：[完成六门](.codex/specs/cm18_completion_plan_review.md)、[M1 阶段证据](.codex/specs/cm18_m1_phase_evidence_bundle_review.md)、[M4-R1/R2 隔离回退](.codex/specs/cm18_m4_isolated_protocol_rollback_acceptance_review.md)、[离线分类](.codex/specs/batch16t235_cm18_offline_classification_review.md)、[模式准入](.codex/specs/batch16t245_cm18_m2_admission_persisted_mode_migration_review.md)、[已签指标及边界](.codex/specs/batch16t248_cm18_protocol_metrics_review.md)。具体受保护证据与 XML 从各批维护记录/manifest 查阅；本节不运行自动资金动作或替代 R16 只读总报告。
+
+
+<a id="cm20-sharding-runtime-17ej"></a>
+
+## CM-20 显式 Sharding-JDBC 装配与节点发布（17EJ）
+
+默认路由仍为 `dynamic-monthly`。在独立、已评审的本地配置中显式设置 `cloudmall.order.routing.mode=sharding-monthly`，才启用生产 Sharding-JDBC 4.1.1 Mapper。旧 `sharding` profile（含默认 profile）、空值或未知模式、Bean 覆盖、自定义额外 DataSource/JdbcTemplate/事务管理器会被拒绝。启用该模式时，若 Seata 开启，必须显式设置 `seata.enable-auto-data-source-proxy=false`；本次隔离验收使用 `seata.enabled=false`，未新增真实订单 AT 验收。
+
+启动顺序为私有物理连接执行原建表流程、观测实际 BASE TABLE 并校验历史月份、构造不可变节点快照、发布同源 DataSource/JdbcTemplate/事务管理器、绑定审计，再开放业务与恢复调度。已有服务和恢复任务继续使用原 Mapper 契约。合法但未发布的月份按数据访问失败处理，保留原查询 503 和恢复重试语义。
+
+物理月表准备完成后，当前进程不会热替换路由。诊断中的 `preparedMonths` 表示已准备节点，`publishedMonths` 表示本进程固定快照；两者不同则 `requiresRestart=true`。`snapshotSha256` 用于比较快照。`expectedMonths` 取机器上海月份，仅作诊断，不能替代已发布节点事实。诊断不输出连接地址或凭据。
+
+发布新节点前，先停止新请求、监听与调度，等待已知在途调用结束，关闭原 Spring context 和连接池，然后以原数据库配置重启，核对发布月份与新快照。回退时同样先停止并排空显式模式，再以默认或显式 `dynamic-monthly` 重启，保留同一库内全部历史月表及数据。原动态初始化只准备机器月份窗口；不得删除未来月表、改写未决 Intent、Outbox、Action 的身份、状态或租约来完成回退。退出、连接或在途结果未知时保留现场。
+
+本轮已完成源码及自建隔离验证：三项实库方法合取通过，其中启动拒绝与跨年发布/回退来自第二轮，业务链来自修复后的单项补验；两次整体失败及其隔离库均保留。最终 Order/common 常规测试与打包为 56 套、323 项，失败/错误/跳过均为 0。业务链覆盖真实 Spring Controller、Service、事务及数据库，远端服务与 RabbitMQ 使用本地替身；不代表共享环境接管、真实消息链或分布式事务已验收。实际默认配置、原数据库和共享容器未切换。完整证据入口见 `maintenance_progress.md` CURRENT 和同一 17EJ `bugfix_log.md` 条目。

@@ -10,6 +10,40 @@ import org.apache.ibatis.annotations.Update;
 /** 用户表数据访问接口。 */
 @Mapper
 public interface UserMapper extends BaseMapper<UserPO> {
+  /** 只读核验用户及地址id为signed BIGINT非空主键且已启用数据库自增。 */
+  @Select(
+      "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()"
+          + " AND table_name IN ('mall_user','user_address') AND column_name='id'"
+          + " AND data_type='bigint' AND column_type NOT LIKE '%unsigned%'"
+          + " AND is_nullable='NO' AND column_key='PRI' AND extra='auto_increment'")
+  int countCompatibleIdentifierColumns();
+
+  /** 两张表合计必须恰为两个主键列，拒绝把复合主键误作单列身份。 */
+  @Select(
+      "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE()"
+          + " AND table_name IN ('mall_user','user_address') AND index_name='PRIMARY'")
+  int countIdentifierPrimaryColumns();
+
+  /** 读取当前最大用户标识，空表返回零，不修改计数器。 */
+  @Select("SELECT COALESCE(MAX(id),0) FROM mall_user")
+  Long maximumUserIdentifier();
+
+  /** 读取当前最大地址标识，空表返回零，不修改计数器。 */
+  @Select("SELECT COALESCE(MAX(id),0) FROM user_address")
+  Long maximumAddressIdentifier();
+
+  /** 只读观察用户表自增计数器，不预分配或降低下一值。 */
+  @Select(
+      "SELECT auto_increment FROM information_schema.tables WHERE table_schema=DATABASE()"
+          + " AND table_name='mall_user' AND table_type='BASE TABLE'")
+  Long nextUserIdentifier();
+
+  /** 只读观察地址表自增计数器，不预分配或降低下一值。 */
+  @Select(
+      "SELECT auto_increment FROM information_schema.tables WHERE table_schema=DATABASE()"
+          + " AND table_name='user_address' AND table_type='BASE TABLE'")
+  Long nextAddressIdentifier();
+
   /** 内部只读取证仅投影账户资金字段，不读取密码、电话或角色。 */
   @Select("SELECT id,status,balance,frozen_balance FROM mall_user WHERE id=#{userId}")
   UserPO selectBalanceEvidenceById(@Param("userId") Long userId);
@@ -71,7 +105,8 @@ public interface UserMapper extends BaseMapper<UserPO> {
   UserPO selectActiveForUpdate(@Param("userId") Long userId);
 
   /** 按用户主键增加余额。 */
-  @Update("update mall_user set balance=balance+#{amount},updated_at=#{updatedAt} where id=#{userId}")
+  @Update(
+      "update mall_user set balance=balance+#{amount},updated_at=#{updatedAt} where id=#{userId}")
   int creditBalance(
       @Param("userId") Long userId,
       @Param("amount") java.math.BigDecimal amount,

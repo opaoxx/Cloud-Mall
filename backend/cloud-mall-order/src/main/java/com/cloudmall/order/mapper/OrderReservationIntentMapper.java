@@ -1,6 +1,7 @@
 package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
+import com.cloudmall.order.util.OrderJdbcLocalDateTime;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.springframework.dao.DuplicateKeyException;
@@ -91,7 +92,11 @@ public class OrderReservationIntentMapper {
   /** 按用户与幂等键读取已有意图。 */
   public List<OrderReservationIntentPO> findByUserAndKey(long userId, String idempotencyKey) {
     return jdbcTemplate.query(
-        "SELECT * FROM order_reservation_intent WHERE user_id=? AND idempotency_key=?",
+        "SELECT"
+            + " id,order_no,user_id,idempotency_key,items_snapshot,status,last_error,CAST(next_retry_at"
+            + " AS CHAR) AS cm_local_next_retry_at,CAST(created_at AS CHAR) AS"
+            + " cm_local_created_at,CAST(updated_at AS CHAR) AS cm_local_updated_at FROM"
+            + " order_reservation_intent WHERE user_id=? AND idempotency_key=?",
         ROW_MAPPER,
         userId,
         idempotencyKey);
@@ -101,14 +106,17 @@ public class OrderReservationIntentMapper {
   public List<OrderReservationIntentPO> findRecoverable(
       LocalDateTime staleBefore, LocalDateTime now, int limit) {
     return jdbcTemplate.query(
-        "SELECT * FROM order_reservation_intent WHERE status IN"
-            + " ('INIT','RESERVE_UNKNOWN','RESERVED') AND created_at<? AND (next_retry_at IS NULL"
-            + " OR next_retry_at<=?) AND created_at>='1000-01-01 00:00:00.000' AND"
-            + " updated_at>='1000-01-01 00:00:00.000' AND (next_retry_at IS NULL OR"
-            + " next_retry_at>='1000-01-01 00:00:00.000') AND MONTH(created_at)>0 AND"
-            + " DAYOFMONTH(created_at)>0 AND MONTH(updated_at)>0 AND DAYOFMONTH(updated_at)>0 AND"
-            + " (next_retry_at IS NULL OR (MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0))"
-            + " ORDER BY created_at,id LIMIT ?",
+        "SELECT"
+            + " id,order_no,user_id,idempotency_key,items_snapshot,status,last_error,CAST(next_retry_at"
+            + " AS CHAR) AS cm_local_next_retry_at,CAST(created_at AS CHAR) AS"
+            + " cm_local_created_at,CAST(updated_at AS CHAR) AS cm_local_updated_at FROM"
+            + " order_reservation_intent WHERE status IN ('INIT','RESERVE_UNKNOWN','RESERVED') AND"
+            + " created_at<? AND (next_retry_at IS NULL OR next_retry_at<=?) AND"
+            + " created_at>='1000-01-01 00:00:00.000' AND updated_at>='1000-01-01 00:00:00.000' AND"
+            + " (next_retry_at IS NULL OR next_retry_at>='1000-01-01 00:00:00.000') AND"
+            + " MONTH(created_at)>0 AND DAYOFMONTH(created_at)>0 AND MONTH(updated_at)>0 AND"
+            + " DAYOFMONTH(updated_at)>0 AND (next_retry_at IS NULL OR (MONTH(next_retry_at)>0 AND"
+            + " DAYOFMONTH(next_retry_at)>0)) ORDER BY created_at,id LIMIT ?",
         ROW_MAPPER,
         staleBefore,
         now,
@@ -206,7 +214,7 @@ public class OrderReservationIntentMapper {
         orderNo);
   }
 
-  /** 将 JDBC 行转换为预扣意图 PO，DATETIME直接读取组件并保留可空重试时间。 */
+  /** 将 JDBC 行转换为预扣意图 PO，读取MySQL字符投影的本地组件并保留可空重试时间。 */
   private static final RowMapper<OrderReservationIntentPO> ROW_MAPPER =
       (resultSet, rowNumber) -> {
         OrderReservationIntentPO intent = new OrderReservationIntentPO();
@@ -217,9 +225,10 @@ public class OrderReservationIntentMapper {
         intent.itemsSnapshot = resultSet.getString("items_snapshot");
         intent.status = resultSet.getString("status");
         intent.lastError = resultSet.getString("last_error");
-        intent.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
-        intent.createdAt = resultSet.getObject("created_at", LocalDateTime.class);
-        intent.updatedAt = resultSet.getObject("updated_at", LocalDateTime.class);
+        intent.nextRetryAt =
+            OrderJdbcLocalDateTime.readNullable(resultSet, "cm_local_next_retry_at");
+        intent.createdAt = OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_created_at");
+        intent.updatedAt = OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_updated_at");
         return intent;
       };
 }

@@ -2,6 +2,7 @@ package com.cloudmall.order.mapper;
 
 import com.cloudmall.order.domain.po.OrderStockActionPO;
 import com.cloudmall.order.util.OrderCreationTime;
+import com.cloudmall.order.util.OrderJdbcLocalDateTime;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -130,14 +131,13 @@ public class OrderStockActionMapper {
   public List<OrderStockActionPO> findDue(LocalDateTime now, int limit) {
     LocalDateTime normalizedNow = normalizeActionTime(now);
     return jdbcTemplate.query(
-        "SELECT id,order_no,action_type,operation_key,status,attempts,next_retry_at FROM"
-            + " order_stock_action WHERE status IN ('PENDING','UNKNOWN') AND BINARY status IN"
-            + " (BINARY 'PENDING', BINARY 'UNKNOWN') AND attempts>=0 AND next_retry_at<=? AND"
-            + " next_retry_at>='1000-01-01 00:00:00.000' AND MONTH(next_retry_at)>0"
-            + " AND DAYOFMONTH(next_retry_at)>0"
-            + " AND DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at))"
-            + " AND (lease_until IS NULL OR lease_until<?)"
-            + " ORDER BY next_retry_at,id LIMIT ?",
+        "SELECT id,order_no,action_type,operation_key,status,attempts,CAST(next_retry_at AS CHAR)"
+            + " AS cm_local_next_retry_at FROM order_stock_action WHERE status IN"
+            + " ('PENDING','UNKNOWN') AND status IN (BINARY 'PENDING', BINARY 'UNKNOWN') AND"
+            + " attempts>=0 AND next_retry_at<=? AND next_retry_at>='1000-01-01 00:00:00.000' AND"
+            + " MONTH(next_retry_at)>0 AND DAYOFMONTH(next_retry_at)>0 AND"
+            + " DAYOFMONTH(next_retry_at)<=DAYOFMONTH(LAST_DAY(next_retry_at)) AND (lease_until IS"
+            + " NULL OR lease_until<?) ORDER BY next_retry_at,id LIMIT ?",
         (resultSet, rowNumber) -> {
           OrderStockActionPO action = new OrderStockActionPO();
           action.id = resultSet.getLong("id");
@@ -146,7 +146,8 @@ public class OrderStockActionMapper {
           action.operationKey = resultSet.getString("operation_key");
           action.status = resultSet.getString("status");
           action.attempts = resultSet.getInt("attempts");
-          action.nextRetryAt = resultSet.getObject("next_retry_at", LocalDateTime.class);
+          action.nextRetryAt =
+              OrderJdbcLocalDateTime.readRequired(resultSet, "cm_local_next_retry_at");
           return action;
         },
         normalizedNow,
@@ -171,7 +172,7 @@ public class OrderStockActionMapper {
         "UPDATE order_stock_action SET lease_owner=?,lease_until=?,"
             + "attempts=CASE WHEN attempts<2147483647 THEN attempts+1 ELSE attempts END,"
             + "updated_at=? WHERE id=? AND status IN ('PENDING','UNKNOWN')"
-            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
+            + " AND status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0 AND next_retry_at<=? AND (lease_until IS NULL OR lease_until<?)",
         owner,
         leaseUntil,
@@ -200,7 +201,7 @@ public class OrderStockActionMapper {
         "UPDATE order_stock_action SET status=?,last_error=?,lease_owner=NULL,lease_until=NULL,"
             + "updated_at=? WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
             + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
-            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
+            + " AND status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0",
         status,
         shorten(error),
@@ -230,7 +231,7 @@ public class OrderStockActionMapper {
             + "lease_owner=NULL,lease_until=NULL,updated_at=?"
             + " WHERE id=? AND lease_owner IS NOT NULL AND BINARY lease_owner=BINARY ?"
             + " AND lease_until IS NOT NULL AND lease_until>? AND status IN ('PENDING','UNKNOWN')"
-            + " AND BINARY status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
+            + " AND status IN (BINARY 'PENDING', BINARY 'UNKNOWN')"
             + " AND attempts>=0",
         shorten(error),
         normalizedRetryAt,

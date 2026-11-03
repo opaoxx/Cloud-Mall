@@ -10,7 +10,11 @@ import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PayProtocolMetrics.Mode;
+import com.cloudmall.pay.service.PayProtocolMetrics.Scope;
 import com.cloudmall.pay.util.PayDebitModes;
+import com.cloudmall.pay.util.PayRecoveryLog;
 import feign.FeignException;
 import io.seata.core.context.RootContext;
 import java.math.BigDecimal;
@@ -22,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -32,6 +37,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** 用持久支付意图、用户账本和订单事实收敛模拟余额支付。 */
 @Service
 public class PayConsistencyService {
+  /** 正式容器强制注入真实观察组件，旧直接构造保持无资源兼容。 */
+  @Autowired private PayProtocolMetrics metrics = PayProtocolMetrics.noop();
+
   /** 支付结果未知和恢复重试日志。 */
   private static final Logger log = LoggerFactory.getLogger(PayConsistencyService.class);
 
@@ -106,12 +114,23 @@ public class PayConsistencyService {
   public void recoverDue() {
     // 1. 扫描前拒绝继承的事务，保持每条恢复的独立提交边界。
     requireStandaloneLegacyRecovery();
+    long observationStarted = System.nanoTime();
     Long startCursor = scanAfterId.get();
     LocalDateTime scanTime = now();
     // 2. 查询异常不改变游标；首段为空才回环，最多两次查询和50条处理。
-    List<PayDebitIntentPO> due = payDebitIntentMapper.findDueAfter(scanTime, startCursor, 50);
-    if (due.isEmpty() && startCursor != null) {
-      due = payDebitIntentMapper.findDueAfter(scanTime, null, 50);
+    List<PayDebitIntentPO> due;
+    boolean wrapped = false;
+    int queryCount = 1;
+    try {
+      due = payDebitIntentMapper.findDueAfter(scanTime, startCursor, 50);
+      if (due.isEmpty() && startCursor != null) {
+        wrapped = true;
+        queryCount = 2;
+        due = payDebitIntentMapper.findDueAfter(scanTime, null, 50);
+      }
+    } catch (RuntimeException queryFailure) {
+      PayRecoveryLog.scanQueryFailed(log, startCursor, wrapped, queryCount, observationStarted);
+      throw queryFailure;
     }
     Long endCursor = due.isEmpty() ? null : due.get(due.size() - 1).id;
     if (!due.isEmpty() && endCursor == null) endCursor = startCursor;
@@ -121,36 +140,61 @@ public class PayConsistencyService {
         try {
           process(intent.payNo);
         } catch (RuntimeException recoveryFailure) {
-          log.warn("支付恢复任务本轮失败，下一轮继续处理，payNo={}", intent.payNo, recoveryFailure);
+          PayRecoveryLog.candidateFailed(log, intent, recoveryFailure);
         }
       }
     } finally {
       // 4. 只有原游标仍有效才更新，迟到旧轮不能覆盖已变化的扫描进度。
-      scanAfterId.compareAndSet(startCursor, endCursor);
+      boolean casApplied = scanAfterId.compareAndSet(startCursor, endCursor);
+      PayRecoveryLog.scanFinished(
+          log, startCursor, endCursor, casApplied, wrapped, queryCount, due, observationStarted);
     }
   }
 
   /** 无调用者事务时读取并恢复支付意图；已有事务则在读取或领取前拒绝。 */
   public String process(String payNo) {
-    // 1. 读取和领取前拒绝外部事务，不终止或解绑调用者上下文。
-    requireStandaloneLegacyRecovery();
-    // 2. 原意图与支付单模式先核对，再领取租约；拒绝路径不修改任何恢复字段。
-    PayDebitIntentPO pending = payDebitIntentMapper.findByPayNo(payNo);
-    if (pending != null) requireLegacyRoute(payNo, pending);
-    LocalDateTime currentTime = now();
-    // 3. 每次领取使用独立身份，同实例迟到旧执行不得匹配重领后的owner。
-    String claimToken = UUID.randomUUID().toString();
-    if (payDebitIntentMapper.claim(payNo, claimToken, currentTime.plusSeconds(30), currentTime)
-        != 1) {
-      PayDebitIntentPO existing = payDebitIntentMapper.findByPayNo(payNo);
-      if (existing != null) requireLegacyRoute(payNo, existing);
-      return existing == null ? "INIT" : existing.status;
+    Mode observedMode = Mode.UNKNOWN;
+    try {
+      // 1. 读取和领取前拒绝外部事务，不终止或解绑调用者上下文。
+      requireStandaloneLegacyRecovery();
+      // 2. 原意图与支付单模式先核对，再领取租约；拒绝路径不修改任何恢复字段。
+      PayDebitIntentPO pending = payDebitIntentMapper.findByPayNo(payNo);
+      if (pending != null) {
+        requireLegacyRoute(payNo, pending);
+        observedMode = Mode.LEGACY;
+      }
+      LocalDateTime currentTime = now();
+      // 3. 每次领取使用独立身份，同实例迟到旧执行不得匹配重领后的owner。
+      String claimToken = UUID.randomUUID().toString();
+      int claimRows =
+          payDebitIntentMapper.claim(payNo, claimToken, currentTime.plusSeconds(30), currentTime);
+      if (claimRows != 1) {
+        PayDebitIntentPO existing = payDebitIntentMapper.findByPayNo(payNo);
+        if (existing != null) {
+          requireLegacyRoute(payNo, existing);
+          observedMode = Mode.LEGACY;
+        }
+        String result = existing == null ? "INIT" : existing.status;
+        metrics.observation(
+            observedMode, Scope.LEGACY_RECOVERY, PayProtocolMetrics.legacyOutcome(result));
+        PayRecoveryLog.claimNotAcquired(log, payNo, claimRows, pending, existing);
+        return result;
+      }
+      // 4. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
+      PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
+      if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
+      PayRecordPO payment = requireLegacyRoute(payNo, intent);
+      observedMode = Mode.LEGACY;
+      String result = processClaimed(intent, claimToken, payment);
+      metrics.observation(
+          observedMode, Scope.LEGACY_RECOVERY, PayProtocolMetrics.legacyOutcome(result));
+      return result;
+
+    } catch (RuntimeException failure) {
+      metrics.observation(
+          observedMode, Scope.LEGACY_RECOVERY, PayProtocolMetrics.failureOutcome(failure));
+      throw failure;
     }
-    // 4. 领取成功后仅以本次身份进入处理，后续条件写不能复用实例标识。
-    PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
-    if (intent == null) throw new IllegalStateException("支付意图认领后不存在: " + payNo);
-    PayRecordPO payment = requireLegacyRoute(payNo, intent);
-    return processClaimed(intent, claimToken, payment);
   }
 
   /** 恢复入口必须独立于caller事务；拒绝发生在catch/retry外，保留原调用者上下文。 */
@@ -302,7 +346,7 @@ public class PayConsistencyService {
         retryStatus = "REFUND_PENDING";
       recordOwnedLegacyRetry(
           intent, claimToken, retryStatus, remoteOrPersistenceFailure.toString());
-      log.warn("支付结果待恢复，payNo={}，status={}", intent.payNo, retryStatus, remoteOrPersistenceFailure);
+      PayRecoveryLog.retryDeferred(log, intent, retryStatus, remoteOrPersistenceFailure);
       return retryStatus;
     }
   }
@@ -348,20 +392,32 @@ public class PayConsistencyService {
 
   /** 只读订单须精确对应原身份和金额，且状态可判定，才参与资金恢复决策。 */
   private OrderClient.OrderView readOrderState(PayDebitIntentPO intent) {
-    ApiResponse<OrderClient.OrderView> response =
-        orderClient.paymentState(intent.orderNo, intent.userId);
-    if (response == null || !"0".equals(response.code) || response.data == null)
-      throw new IllegalStateException("订单支付状态查询结果未知");
-    OrderClient.OrderView order = response.data;
-    if (!Objects.equals(order.orderNo(), intent.orderNo)
-        || !Objects.equals(order.userId(), intent.userId)
-        || order.payAmount().compareTo(intent.amount) != 0)
-      throw new BizException(ErrorCodes.CONFLICT, "订单身份、归属或金额与支付意图不一致", 409);
-    if (!("PENDING_PAYMENT".equals(order.status())
-        || "PAID".equals(order.status())
-        || "COMPLETED".equals(order.status())
-        || "CANCELLED".equals(order.status()))) throw new IllegalStateException("订单支付状态暂不可判定");
-    return order;
+    long observationStarted = System.nanoTime();
+    OrderClient.OrderView order = null;
+    PayRecoveryLog.OrderStage stage = PayRecoveryLog.OrderStage.RPC;
+    try {
+      ApiResponse<OrderClient.OrderView> response =
+          orderClient.paymentState(intent.orderNo, intent.userId);
+      stage = PayRecoveryLog.OrderStage.RESPONSE;
+      if (response == null || !"0".equals(response.code) || response.data == null)
+        throw new IllegalStateException("订单支付状态查询结果未知");
+      order = response.data;
+      stage = PayRecoveryLog.OrderStage.IDENTITY;
+      if (!Objects.equals(order.orderNo(), intent.orderNo)
+          || !Objects.equals(order.userId(), intent.userId)
+          || order.payAmount().compareTo(intent.amount) != 0)
+        throw new BizException(ErrorCodes.CONFLICT, "订单身份、归属或金额与支付意图不一致", 409);
+      stage = PayRecoveryLog.OrderStage.STATUS;
+      if (!("PENDING_PAYMENT".equals(order.status())
+          || "PAID".equals(order.status())
+          || "COMPLETED".equals(order.status())
+          || "CANCELLED".equals(order.status()))) throw new IllegalStateException("订单支付状态暂不可判定");
+      PayRecoveryLog.orderObserved(log, intent, order, observationStarted);
+      return order;
+    } catch (RuntimeException orderFailure) {
+      PayRecoveryLog.orderFailed(log, intent, order, stage, observationStarted);
+      throw orderFailure;
+    }
   }
 
   /** 用户账本和订单都明确成功后才标记支付成功。 */

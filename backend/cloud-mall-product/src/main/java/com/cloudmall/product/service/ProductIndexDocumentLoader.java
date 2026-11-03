@@ -11,6 +11,9 @@ import org.springframework.stereotype.Component;
 /** Reads the current MySQL fact before projecting it to Elasticsearch. */
 @Component
 public class ProductIndexDocumentLoader {
+  /** Disabled legacy construction never asks the mapper for new online tables. */
+  @org.springframework.beans.factory.annotation.Value("${cloudmall.product.metrics.enabled:false}")
+  private boolean metricsEnabled;
   /** 商品索引事实数据 Mapper。 */
   private final ProductIndexMapper productIndexMapper;
 
@@ -23,19 +26,21 @@ public class ProductIndexDocumentLoader {
   }
 
   /** 执行 load 相关操作。 */
+  @org.springframework.transaction.annotation.Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ,timeout=5)
   public Optional<ProductIndexDocument> load(long productId) {
     // 1. 接收并整理 load 的业务请求。
     // 2. 执行 load 的核心业务校验与状态处理。
     // 3. 返回 load 的处理结果。
-    List<Map<String, Object>> sources = productIndexMapper.selectIndexSource(productId);
+    List<Map<String, Object>> sources = metricsEnabled ? productIndexMapper.selectOnlineSource(productId) : productIndexMapper.selectIndexSource(productId);
     return sources.stream().findFirst().map(ProductIndexDocumentLoader::toDocument);
   }
 
   /** 按稳定商品主键游标读取一个有界重建批次。 */
+  @org.springframework.transaction.annotation.Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ,timeout=5)
   public List<ProductIndexDocument> loadBatch(long cursorProductId, int batchSize) {
     if (cursorProductId < 0 || batchSize < 1 || batchSize > 500)
       throw new IllegalArgumentException("商品索引重建游标或批次无效");
-    return productIndexMapper.selectIndexSourcesAfter(cursorProductId, batchSize).stream()
+    return (metricsEnabled ? productIndexMapper.selectOnlineSourcesAfter(cursorProductId,batchSize) : productIndexMapper.selectIndexSourcesAfter(cursorProductId, batchSize)).stream()
         .map(ProductIndexDocumentLoader::toDocument)
         .toList();
   }
@@ -62,6 +67,19 @@ public class ProductIndexDocumentLoader {
         (java.math.BigDecimal) source.get("hot_score"),
         source.get("metric_source_type") == null
             ? "UNKNOWN" : String.valueOf(source.get("metric_source_type")),
-        (String) source.get("metric_source_ref"));
+        (String) source.get("metric_source_ref"), onlineStat(source));
   }
+  /** Read one bounded current content/stat snapshot, then release the transaction before ES. */
+  @org.springframework.transaction.annotation.Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ,timeout=5)
+  public List<ProductIndexDocument> loadOnline(List<Long> ids) {
+    if(ids.isEmpty())return List.of();
+    if(ids.size()>100)throw new IllegalArgumentException("METRIC_SNAPSHOT_PRODUCT_LIMIT");
+    return productIndexMapper.selectOnlineSources(ids).stream().map(ProductIndexDocumentLoader::toDocument).toList();
+  }
+  private static com.cloudmall.product.domain.po.ProductOnlineStatPO onlineStat(Map<String,Object> source){
+    if(!source.containsKey("metric_version"))return null;
+    com.cloudmall.product.domain.po.ProductOnlineStatPO stat=new com.cloudmall.product.domain.po.ProductOnlineStatPO();
+    stat.productId=((Number)source.get("id")).longValue();stat.viewCount=((Number)source.get("online_view_count")).longValue();stat.searchCount=((Number)source.get("online_search_count")).longValue();stat.soldCount=((Number)source.get("online_sold_count")).longValue();stat.hotScore=((Number)source.get("online_hot_score")).longValue();stat.metricVersion=((Number)source.get("metric_version")).longValue();return stat;
+  }
+
 }

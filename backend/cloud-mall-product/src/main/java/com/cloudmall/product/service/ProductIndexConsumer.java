@@ -26,6 +26,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 /** Rabbit-to-ES seam. Replaying an event is safe because ES document id is productId. */
 @Component
 public class ProductIndexConsumer {
+  /** Only V2 uses trusted event-version tombstones; legacy direct tests retain delete(id). */
+  @org.springframework.beans.factory.annotation.Value("${cloudmall.product.metrics.enabled:false}") private boolean metricsEnabled;
   /** 执行 getLogger 相关操作。 */
   private static final Logger log = LoggerFactory.getLogger(ProductIndexConsumer.class);
 
@@ -160,6 +162,7 @@ public class ProductIndexConsumer {
     String traceId = envelope.traceId;
     String eventType = envelope.eventType;
     if (eventType.startsWith("CATEGORY_")) return;
+    if(metricsEnabled)validateV2(event,envelope);
     MDC.put("traceId", traceId);
     try {
       if (consumptionService.isTerminal(eventId)) return;
@@ -167,12 +170,14 @@ public class ProductIndexConsumer {
       if (eventType.contains("DELETED")) {
         loader.load(productId).ifPresentOrElse(
             document -> {
+              if(metricsEnabled&&document.version()<envelope.productVersion)throw new IllegalStateException("CONTENT_VERSION_UNPROVEN");
               invokeUpsert(document, eventId, traceId);
               envelope.appliedVersion = document.version();
               record(envelope, "STALE", null);
             },
             () -> {
-              invokeDelete(productId, eventId, traceId);
+              invokeDelete(productId, envelope.productVersion, eventId, traceId);
+              if(metricsEnabled)envelope.appliedVersion=envelope.productVersion;
               record(envelope, "APPLIED", null);
             });
         return;
@@ -181,7 +186,8 @@ public class ProductIndexConsumer {
           .load(productId)
           .ifPresentOrElse(
               document -> {
-                invokeUpsert(document, eventId, traceId);
+                if(metricsEnabled&&document.version()<envelope.productVersion)throw new IllegalStateException("CONTENT_VERSION_UNPROVEN");
+              invokeUpsert(document, eventId, traceId);
                 envelope.appliedVersion = document.version();
                 record(
                     envelope,
@@ -191,7 +197,8 @@ public class ProductIndexConsumer {
                     null);
               },
               () -> {
-                invokeDelete(productId, eventId, traceId);
+                invokeDelete(productId, envelope.productVersion, eventId, traceId);
+              if(metricsEnabled)envelope.appliedVersion=envelope.productVersion;
                 record(envelope, "APPLIED", null);
               });
     } catch (Exception e) {
@@ -221,12 +228,12 @@ public class ProductIndexConsumer {
   }
 
   /** 执行 invokeDelete 相关操作。 */
-  private void invokeDelete(long productId, String eventId, String traceId) {
+  private void invokeDelete(long productId, long eventVersion, String eventId, String traceId) {
     // 1. 接收并整理 invokeDelete 的业务请求。
     // 2. 执行 invokeDelete 的核心业务校验与状态处理。
     // 3. 返回 invokeDelete 的处理结果。
     try {
-      writer.delete(productId);
+      if(metricsEnabled)writer.delete(productId,eventVersion);else writer.delete(productId);
     } catch (Exception e) {
       throw new ProductIndexException("delete", eventId, traceId, e);
     }
@@ -272,6 +279,14 @@ public class ProductIndexConsumer {
     long productVersion = event.has("productVersion")
         ? requiredNonnegativeVersion(event, "productVersion") : -1L;
     return new EventEnvelope(eventId, eventType, traceId, rootId, productVersion);
+  }
+
+  /** V2 trusts only a lossless V1 source version; legacy envelope compatibility remains unchanged. */
+  private static void validateV2(JsonNode event,EventEnvelope envelope){
+    JsonNode payloadVersion=event.get("payloadVersion"),version=event.get("productVersion");
+    if(payloadVersion==null||!payloadVersion.isIntegralNumber()||!payloadVersion.canConvertToInt()||payloadVersion.intValue()!=1
+        ||version==null||!version.isIntegralNumber()||!version.canConvertToLong()||version.longValue()<0
+        ||envelope.productVersion!=version.longValue())throw new IllegalArgumentException("CONTENT_VERSION_UNPROVEN");
   }
 
   private static long requiredNonnegativeVersion(JsonNode event, String field) {

@@ -9,12 +9,15 @@ import com.cloudmall.pay.domain.vo.UserTccStateVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.feign.UserTccClient;
+import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import io.seata.core.context.RootContext;
 import java.math.BigDecimal;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -24,6 +27,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @Service
 @ConditionalOnProperty(name = "cloudmall.pay.tcc-delivery.enabled", havingValue = "true")
 public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
+  /** 正式容器强制注入真实观察组件，旧直接构造保持无资源兼容。 */
+  @Autowired private PayProtocolMetrics metrics = PayProtocolMetrics.noop();
+
   /** 原交付记录与本地支付状态的事务边界。 */
   private final PayTccDeliveryStore store;
 
@@ -57,6 +63,24 @@ public class PayTccDeliveryServiceImpl implements PayTccDeliveryService {
   /** 按原 payNo 尝试一次交付，未知结果保留并退避，不生成新付款或退款键。 */
   @Override
   public PayTccDeliveryVO deliver(String payNo) {
+    // 1. 原方法保留全部业务校验、调用与清理顺序。
+    try {
+      PayTccDeliveryVO result = deliverObserved(payNo);
+      // 2. 原方法返回后仅按原结果记录一次有限观察。
+      metrics.observation(
+          Mode.TCC,
+          Scope.TCC_DELIVERY,
+          PayProtocolMetrics.deliveryOutcome(result == null ? null : result.state));
+      return result;
+    } catch (RuntimeException failure) {
+      // 3. 原异常只作有限分类并保持同一对象传播。
+      metrics.observation(Mode.TCC, Scope.TCC_DELIVERY, PayProtocolMetrics.failureOutcome(failure));
+      throw failure;
+    }
+  }
+
+  /** 保留原方法全部校验、调用顺序和finally，外层仅观察最终返回或原异常。 */
+  private PayTccDeliveryVO deliverObserved(String payNo) {
     if (RootContext.getXID() != null
         || TransactionSynchronizationManager.isActualTransactionActive())
       throw new IllegalStateException("交付不能继承全局或本地事务");

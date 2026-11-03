@@ -13,6 +13,8 @@ import org.springframework.aop.framework.Advised;
 import org.springframework.boot.actuate.info.Info;
 import org.springframework.boot.actuate.info.InfoContributor;
 import org.springframework.core.env.Environment;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
@@ -40,22 +42,44 @@ public class OrderRoutingAudit implements InfoContributor {
   /** Spring 环境，仅用于读取安全配置摘要。 */
   private final Environment environment;
 
+  /** Completed explicit bootstrap; absent only on the original dynamic construction path. */
+  private final OrderShardingBootstrap bootstrap;
+
+  /** Spring injection checks the explicit snapshot without changing old direct callers. */
+  @Autowired
+  public OrderRoutingAudit(DataSource dataSource, JdbcTemplate jdbcTemplate,
+      PlatformTransactionManager transactionManager, Environment environment,
+      ObjectProvider<OrderShardingBootstrap> provider) {
+    this(dataSource, jdbcTemplate, transactionManager, environment,
+        OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(environment))
+            ? requireBootstrap(provider) : null);
+  }
+
   /** 创建并立即审计 DataSource、JdbcTemplate 和事务管理器对象绑定。 */
   public OrderRoutingAudit(
       DataSource dataSource,
       JdbcTemplate jdbcTemplate,
       PlatformTransactionManager transactionManager,
       Environment environment) {
+    this(dataSource, jdbcTemplate, transactionManager, environment, (OrderShardingBootstrap) null);
+  }
+
+  private OrderRoutingAudit(DataSource dataSource, JdbcTemplate jdbcTemplate,
+      PlatformTransactionManager transactionManager, Environment environment, OrderShardingBootstrap bootstrap) {
+    if (OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(environment)) && bootstrap == null)
+      throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
+    this.bootstrap = bootstrap;
     this.dataSource = dataSource;
     this.jdbcTemplate = jdbcTemplate;
     this.transactionManager = transactionManager;
     this.environment = environment;
     validateBinding();
-    this.underlyingType = simpleName(underlyingDataSource(dataSource));
+    if (bootstrap != null) bootstrap.verifyBinding(dataSource);
+    this.underlyingType = bootstrap == null ? simpleName(underlyingDataSource(dataSource)) : "HikariDataSource";
     LOG.info(
         "订单路由审计 mode={}, dataSource={}, underlying={}, transactionManager={}, identity={},"
             + " profiles={}, expectedMonths={}",
-        OrderRoutingConfiguration.DYNAMIC_MONTHLY,
+        OrderRoutingConfiguration.mode(environment),
         simpleName(dataSource),
         underlyingType,
         simpleName(transactionManager),
@@ -68,12 +92,13 @@ public class OrderRoutingAudit implements InfoContributor {
   @Override
   public void contribute(Info.Builder builder) {
     Map<String, Object> details = new LinkedHashMap<>();
-    details.put("routingMode", OrderRoutingConfiguration.DYNAMIC_MONTHLY);
+    details.put("routingMode", OrderRoutingConfiguration.mode(environment));
     details.put("activeProfiles", sanitizedProfiles());
     details.put("dataSourceType", simpleName(dataSource));
     details.put("underlyingDataSourceType", underlyingType);
     details.put("transactionManagerType", simpleName(transactionManager));
     details.put("expectedMonths", expectedMonths());
+    if (bootstrap != null) details.putAll(bootstrap.info());
     builder.withDetail("orderRouting", details);
   }
 
@@ -132,6 +157,13 @@ public class OrderRoutingAudit implements InfoContributor {
   private List<String> expectedMonths() {
     return OrderTableInitializer.rollingMonths(
         java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai")));
+  }
+
+  private static OrderShardingBootstrap requireBootstrap(ObjectProvider<OrderShardingBootstrap> provider) {
+    OrderShardingBootstrap bootstrap = provider.getIfAvailable();
+    if (bootstrap == null) throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
+    bootstrap.requireReady();
+    return bootstrap;
   }
 
   private String simpleName(Object value) {

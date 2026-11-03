@@ -3,6 +3,7 @@ package com.cloudmall.pay;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.vo.PayTccReceiptVO;
 import com.cloudmall.pay.service.PayTccBridgeService;
+import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.PayTccReceiptService;
 import com.cloudmall.pay.service.PayTccTransactionClient;
 import com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl;
@@ -58,6 +59,21 @@ public final class PayCoordinatorFaultProcess {
     server.createContext("/state", control::state);
     server.createContext("/execute", control::execute);
     server.createContext("/recover", control::recover);
+    PayTccDeliveryService delivery =
+        application.getBeanProvider(PayTccDeliveryService.class).getIfAvailable();
+    if (delivery != null) {
+      server.createContext(
+          "/deliver",
+          exchange -> {
+            if (!control.authorize(exchange)) return;
+            try {
+              var request = objectMapper.readTree(exchange.getRequestBody());
+              control.respond(exchange, 200, delivery.deliver(request.path("payNo").asText()));
+            } catch (Exception failure) {
+              control.respond(exchange, 500, Map.of("error", failure.getClass().getSimpleName()));
+            }
+          });
+    }
     server.setExecutor(Executors.newCachedThreadPool(new DaemonThreadFactory()));
     server.start();
 

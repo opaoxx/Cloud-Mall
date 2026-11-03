@@ -16,6 +16,26 @@ public interface PayCallbackLogMapper extends BaseMapper<PayCallbackLogPO> {
   @Select("select * from pay_callback_log where callback_id=#{callbackId}")
   List<PayCallbackLogPO> selectByCallbackId(@Param("callbackId") String callbackId);
 
+  /**
+   * 按主键游标只读取得已有 Legacy 匹配终态的未完成回调，不以候选快照授权更新。
+   *
+   * @param afterId 上轮最后观察主键，空值表示从头扫描
+   * @param limit 本轮候选上限
+   * @return 按主键升序排列的候选日志
+   */
+  @Select(
+      "<script>SELECT callback.* FROM pay_callback_log callback"
+          + " JOIN pay_record payment ON BINARY payment.pay_no=BINARY callback.pay_no"
+          + " WHERE callback.processed_at IS NULL AND BINARY payment.debit_mode=BINARY 'LEGACY'"
+          + " AND ((BINARY callback.callback_status=BINARY 'RECEIVED_SUCCESS'"
+          + " AND BINARY payment.status=BINARY 'SUCCESS')"
+          + " OR (BINARY callback.callback_status=BINARY 'RECEIVED_FAILURE'"
+          + " AND BINARY payment.status=BINARY 'FAILED'))"
+          + " <if test='afterId != null'>AND callback.id &gt; #{afterId}</if>"
+          + " ORDER BY callback.id ASC LIMIT #{limit}</script>")
+  List<PayCallbackLogPO> findCompletableAfter(
+      @Param("afterId") Long afterId, @Param("limit") int limit);
+
   /** 按回调幂等标识锁定唯一处理记录。 */
   @Select("select * from pay_callback_log where callback_id=#{callbackId} for update")
   PayCallbackLogPO lockedSelect(@Param("callbackId") String callbackId);

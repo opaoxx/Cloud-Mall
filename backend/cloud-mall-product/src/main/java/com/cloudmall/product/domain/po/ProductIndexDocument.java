@@ -18,7 +18,15 @@ public record ProductIndexDocument(
     long searchCount,
     BigDecimal hotScore,
     String metricSourceType,
-    String metricSourceRef) {
+    String metricSourceRef,
+    ProductOnlineStatPO onlineStat) {
+  /** Preserve the original fourteen-field legacy constructor and its untouched history values. */
+  public ProductIndexDocument(long id,long categoryId,String name,String mainImage,String description,
+      BigDecimal price,int status,long version,LocalDateTime updatedAt,long viewCount,long searchCount,
+      BigDecimal hotScore,String metricSourceType,String metricSourceRef) {
+    this(id,categoryId,name,mainImage,description,price,status,version,updatedAt,viewCount,searchCount,
+        hotScore,metricSourceType,metricSourceRef,null);
+  }
   /** 兼容既有测试调用；运行时投影必须由 Mapper 提供完整排序字段。 */
   public ProductIndexDocument(long id, long categoryId, String name, String mainImage,
       String description, BigDecimal price, int status, long version) {

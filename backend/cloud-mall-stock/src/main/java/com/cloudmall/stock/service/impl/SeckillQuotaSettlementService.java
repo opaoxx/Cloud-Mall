@@ -21,6 +21,14 @@ import org.springframework.transaction.annotation.Transactional;
 /** 秒杀配额最终结算事实服务；不触碰普通库存流水。 */
 @Service
 public class SeckillQuotaSettlementService {
+  /** Enabled-only sale outbox uses the settlement transaction and actual post-CAS revision. */
+  @Autowired(required = false) private com.cloudmall.stock.service.StockSalesOutboxService salesMetrics;
+  /** Enablement may not silently fall back to an unwired legacy confirmation. */
+  @org.springframework.beans.factory.annotation.Value("${cloudmall.stock.sales-metrics.enabled:false}") private boolean salesMetricsEnabled;
+
+  /** Require the actual transaction proxy whenever first-confirm metrics are enabled. */
+  @javax.annotation.PostConstruct
+  public void validateSalesMetrics(){if(salesMetricsEnabled&&(salesMetrics==null||!org.springframework.aop.support.AopUtils.isAopProxy(salesMetrics)))throw new IllegalStateException("SALES_TRANSACTION_PROXY_REQUIRED");}
   /** 秒杀结算事实 Mapper。 */
   private final SeckillQuotaSettlementMapper settlementMapper;
 
@@ -135,7 +143,20 @@ public class SeckillQuotaSettlementService {
           "PROJECTION_BLOCKED".equals(status)
               ? settlementMapper.transitionBlockedToConfirmed(orderNo, operationKey, revision)
               : settlementMapper.transitionOpenToConfirmed(orderNo, operationKey, revision);
-      if (changed == 1) return ApiResponse.ok(Map.of("confirmed", true, "idempotent", false));
+      if (changed == 1) {
+        if (salesMetrics != null) {
+          SeckillQuotaSettlementPO persisted = settlementMapper.findSettlementForUpdate(orderNo);
+          Map<String, Object> sku = stockSqlMapper.findStockForUpdate(settlement.skuId);
+          if (persisted == null || !orderNo.equals(persisted.orderNo)
+              || !"CONFIRMED".equals(persisted.status) || persisted.revision == null
+              || sku == null || !(sku.get("product_id") instanceof Number)
+              || ((Number) sku.get("product_id")).longValue() <= 0)
+            throw com.cloudmall.stock.service.StockSalesOutboxService.unavailable(null);
+          salesMetrics.seckill(orderNo, settlement.skuId,
+              ((Number) sku.get("product_id")).longValue(), persisted.revision, org.slf4j.MDC.get("traceId"));
+        }
+        return ApiResponse.ok(Map.of("confirmed", true, "idempotent", false));
+      }
       throw unknownCas(orderNo);
     }
     if ("RELEASED".equals(status)) {

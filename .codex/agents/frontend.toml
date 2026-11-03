@@ -1,7 +1,7 @@
 # 前端开发角色配置
 name = "frontend"
 description = "负责 React/Vite 前端页面、组件、样式、接口联调、前端测试与缺陷修复"
-model = "gpt-5.6-luna"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """

@@ -2614,6 +2614,12 @@ class OrderCreationPrecisionMySqlIT {
       checks.add(() -> assertEquals("COMMITTED", intentStatus, failure));
       checks.add(() -> assertEquals(1, secondCalls, failure));
       checks.add(() -> assertEquals(0, stockRollbacks, failure));
+      verify(cart, times(1))
+          .cleanupItem(
+              eq(7L),
+              eq(7L),
+              eq(new CartCleanupSnapshotDTO(7L, "{\"skuId\":7,\"quantity\":1,\"checked\":true}")));
+      verify(cart, never()).deleteItem(anyLong(), anyLong());
     }
     assertAll(checks);
   }

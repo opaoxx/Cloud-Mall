@@ -371,4 +371,11 @@ public class ProductSqlMapper {
       arguments.add(status);
     }
   }
+  /** ONLINE ranks real confirmed sales and exact online scores, preserving the legacy SQL unchanged. */
+  public List<Map<String,Object>> findProductsOnline(String keyword,Long categoryId,Integer status,int offset,int pageSize,String sort){
+    StringBuilder condition=new StringBuilder(" where 1=1");List<Object> arguments=new java.util.ArrayList<>();appendProductConditions(condition,arguments,keyword,categoryId,status);arguments.add(offset);arguments.add(pageSize);
+    String order="sales".equals(sort)?"coalesce(m.sold_count,0) desc,p.updated_at desc,p.id desc":"coalesce(m.hot_score,0) desc,p.updated_at desc,p.id desc";
+    return timed(productListTimer,()->queryForList("select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status from product p left join product_online_stat m on m.product_id=p.id"+condition+" order by "+order+" limit ?,?",arguments.toArray()));
+  }
+
 }

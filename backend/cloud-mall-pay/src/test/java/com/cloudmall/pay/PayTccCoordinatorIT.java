@@ -6,6 +6,7 @@ import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.naming.NamingService;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
+import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
 import com.cloudmall.pay.service.PayTccBridgeService;
@@ -247,6 +248,7 @@ class PayTccCoordinatorIT {
 
   @AfterEach
   void settle() throws Exception {
+    if (preserve) return;
     try {
       RootContext.unbind();
       if (payChild != null && payChild.isAlive()) killPay();
@@ -303,7 +305,7 @@ class PayTccCoordinatorIT {
 
   @AfterAll
   static void cleanup() throws Exception {
-    for (String xid : startedXids) if (!terminalXid(xid)) preserve = true;
+    if (!preserve) for (String xid : startedXids) if (!terminalXid(xid)) preserve = true;
     if (application != null) application.close();
     for (int index = 0; index < 2; index++) {
       stopUser(index);
@@ -362,6 +364,40 @@ class PayTccCoordinatorIT {
   void concurrentExecuteAndRecoverCannotAcquireBeginRights() throws Exception {
     ExecutorService pool = Executors.newFixedThreadPool(3);
     CountDownLatch gate = new CountDownLatch(1);
+    var winner = new java.util.concurrent.atomic.AtomicReference<Thread>();
+    var ownerCompleted = new AtomicInteger();
+    var staleObservers = new ConcurrentHashMap<Thread, BizException>();
+    var observedStore =
+        org.mockito.Mockito.mock(
+            PayTccExecutionStore.class, org.mockito.AdditionalAnswers.delegatesTo(executions));
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              PayTccExecutionPO owned = executions.claimOwned(request);
+              if (owned != null) assertTrue(winner.compareAndSet(null, Thread.currentThread()));
+              return owned;
+            })
+        .when(observedStore)
+        .claimOwned(request);
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              PayTccExecutionPO expected = invocation.getArgument(0);
+              try {
+                return executions.observeSnapshot(
+                    expected, invocation.getArgument(1), invocation.getArgument(2));
+              } catch (BizException failure) {
+                assertStaleUnboundObservation(failure, expected);
+                assertNotSame(winner.get(), Thread.currentThread());
+                assertNull(staleObservers.put(Thread.currentThread(), failure));
+                throw failure;
+              }
+            })
+        .when(observedStore)
+        .observeSnapshot(
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any());
+    var racingCoordinator =
+        new PayTccCoordinatorServiceImpl(observedStore, receipts, bridge, evidence, probe);
     try {
       List<Future<?>> results = new ArrayList<>();
       for (int index = 0; index < 3; index++)
@@ -369,17 +405,33 @@ class PayTccCoordinatorIT {
             pool.submit(
                 () -> {
                   gate.await();
-                  return coordinator.execute(request);
+                  try {
+                    PayTccExecutionVO result = racingCoordinator.execute(request);
+                    assertNotNull(result);
+                    if (Thread.currentThread() == winner.get()) ownerCompleted.incrementAndGet();
+                    return result;
+                  } catch (BizException failure) {
+                    assertSame(staleObservers.remove(Thread.currentThread()), failure);
+                    assertNotSame(winner.get(), Thread.currentThread());
+                    return null;
+                  } finally {
+                    assertNull(RootContext.getXID());
+                  }
                 }));
       gate.countDown();
-      for (Future<?> future : results) assertNotNull(future.get(30, TimeUnit.SECONDS));
+      // 收齐所有worker，不能因旧observer冲突而提前shutdownNow中断合法owner。
+      List<org.junit.jupiter.api.function.Executable> completions = new ArrayList<>();
+      for (Future<?> future : results) completions.add(() -> future.get(30, TimeUnit.SECONDS));
+      assertAll(completions);
+      assertEquals(1, ownerCompleted.get());
+      assertTrue(staleObservers.isEmpty());
       await(() -> "COMMITTED".equals(coordinator.recover(request.payNo).state), 30);
       assertEquals(1, probe.begins.get());
       assertEquals(1, posts());
       assertTwoBranches();
       assertFunds("90.00", "0.00", 1);
     } finally {
-      pool.shutdownNow();
+      stopWorkers(pool);
     }
   }
 
@@ -564,8 +616,176 @@ class PayTccCoordinatorIT {
       assertFunds("90.00", "0.00", 1);
     } finally {
       probe.releaseBegin.countDown();
-      pool.shutdownNow();
+      stopWorkers(pool);
     }
+  }
+
+  /** 旧观察的NULL XID不能跟随owner取得绑定；拒绝不影响原提交。 */
+  @Test
+  @Order(14)
+  void staleUnboundObserverCannotFollowCompletedOwner() throws Exception {
+    assertObservationAcrossOriginalCommit(false);
+  }
+
+  /** 同一XID的NONE观察允许原owner提交后的合法决议进展。 */
+  @Test
+  @Order(15)
+  void boundUndecidedObserverAcceptsOriginalCommitProgress() throws Exception {
+    assertObservationAcrossOriginalCommit(true);
+  }
+
+  /** 两个真实并发窗口只暂停已返回的读取或Try；等待期间不持数据库事务。 */
+  private void assertObservationAcrossOriginalCommit(boolean boundAtRead) throws Exception {
+    CountDownLatch ownerWaiting = new CountDownLatch(1);
+    CountDownLatch releaseOwner = new CountDownLatch(1);
+    CountDownLatch observerRead = new CountDownLatch(1);
+    CountDownLatch releaseObserver = new CountDownLatch(1);
+    var observed = new java.util.concurrent.atomic.AtomicReference<PayTccExecutionPO>();
+    var delayedStore =
+        org.mockito.Mockito.mock(
+            PayTccExecutionStore.class, org.mockito.AdditionalAnswers.delegatesTo(executions));
+    org.mockito.Mockito.doAnswer(
+            invocation -> {
+              PayTccExecutionPO snapshot = executions.read(request.payNo);
+              assertFalse(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive());
+              assertEquals("NONE", snapshot.decision);
+              if (boundAtRead) assertNotNull(snapshot.xid);
+              else assertNull(snapshot.xid);
+              assertTrue(observed.compareAndSet(null, snapshot));
+              observerRead.countDown();
+              assertTrue(releaseObserver.await(30, TimeUnit.SECONDS));
+              return snapshot;
+            })
+        .when(delayedStore)
+        .read(request.payNo);
+    PayTccReceiptService ownerReceipts = receipts;
+    if (boundAtRead) {
+      ownerReceipts =
+          org.mockito.Mockito.mock(
+              PayTccReceiptService.class, org.mockito.AdditionalAnswers.delegatesTo(receipts));
+      org.mockito.Mockito.doAnswer(
+              invocation -> {
+                var receipt = receipts.prepare(request);
+                assertFalse(
+                    org.springframework.transaction.support.TransactionSynchronizationManager
+                        .isActualTransactionActive());
+                ownerWaiting.countDown();
+                assertTrue(releaseOwner.await(30, TimeUnit.SECONDS));
+                return receipt;
+              })
+          .when(ownerReceipts)
+          .prepare(request);
+    } else {
+      probe.beginWaiting = ownerWaiting;
+      probe.releaseBegin = releaseOwner;
+    }
+    var ownerCoordinator =
+        new PayTccCoordinatorServiceImpl(executions, ownerReceipts, bridge, evidence, probe);
+    var observerCoordinator =
+        new PayTccCoordinatorServiceImpl(delayedStore, receipts, bridge, evidence, probe);
+    ExecutorService workers = Executors.newFixedThreadPool(2);
+    try {
+      Future<PayTccExecutionVO> owner = workers.submit(() -> ownerCoordinator.execute(request));
+      assertTrue(ownerWaiting.await(15, TimeUnit.SECONDS));
+      Future<PayTccExecutionVO> observer =
+          workers.submit(
+              () -> {
+                try {
+                  return observerCoordinator.execute(request);
+                } finally {
+                  assertNull(RootContext.getXID());
+                }
+              });
+      assertTrue(observerRead.await(15, TimeUnit.SECONDS));
+      releaseOwner.countDown();
+      PayTccExecutionVO ownerResult = owner.get(30, TimeUnit.SECONDS);
+      assertEquals("COMMITTED", ownerResult.state);
+      List<Map<String, Object>> before = payDb.queryForList("SELECT * FROM pay_tcc_execution");
+      releaseObserver.countDown();
+      if (boundAtRead) {
+        PayTccExecutionVO result = observer.get(30, TimeUnit.SECONDS);
+        assertEquals("COMMITTED", result.state);
+        assertEquals("COMMIT", result.decision);
+      } else {
+        var failure =
+            assertThrows(ExecutionException.class, () -> observer.get(30, TimeUnit.SECONDS));
+        var conflict = assertInstanceOf(BizException.class, failure.getCause());
+        assertStaleUnboundObservation(conflict, observed.get());
+      }
+      assertEquals(before, payDb.queryForList("SELECT * FROM pay_tcc_execution"));
+      PayTccExecutionPO previous = observed.get();
+      PayTccExecutionPO current = executions.read(request.payNo);
+      assertSameObservationSource(previous, current);
+      assertEquals(ownerResult.xid, current.xid);
+      if (boundAtRead) assertEquals(previous.xid, current.xid);
+      else assertNull(previous.xid);
+      assertEquals(1, probe.begins.get());
+      assertEquals(1, posts());
+      assertExecution("COMMITTED", "COMMIT");
+      assertTwoBranches();
+      assertFunds("90.00", "0.00", 1);
+    } finally {
+      releaseOwner.countDown();
+      releaseObserver.countDown();
+      stopWorkers(workers);
+    }
+  }
+
+  /** 清算前有界等待worker退出；失败或中断保留现场，后续用例不得重置该库。 */
+  private void stopWorkers(ExecutorService workers) throws Exception {
+    workers.shutdownNow();
+    boolean terminated = false;
+    try {
+      terminated = workers.awaitTermination(15, TimeUnit.SECONDS);
+    } finally {
+      if (!terminated) {
+        preserve = true;
+        Files.writeString(
+            artifacts.resolve("workers-unresolved-" + System.nanoTime() + ".txt"),
+            "Coordinator worker termination unconfirmed; preserve the owned databases and"
+                + " evidence.");
+      }
+    }
+    assertTrue(terminated, "worker未退出，禁止清算或覆盖原隔离现场");
+  }
+
+  /** 仅承认原NULL快照在锁内发现绑定；其它冲突和owner失败必须使验收失败。 */
+  private void assertStaleUnboundObservation(BizException failure, PayTccExecutionPO expected) {
+    assertEquals("PAY_TCC_EXECUTION_CONFLICT", failure.getCode());
+    assertEquals(409, failure.getHttpStatus());
+    assertNull(expected.xid);
+    PayTccExecutionPO current = executions.read(expected.payNo);
+    assertNotNull(current.xid);
+    assertSameObservationSource(expected, current);
+    for (String method : List.of("lockedSnapshot", "observeSnapshot"))
+      assertTrue(
+          Arrays.stream(failure.getStackTrace())
+              .anyMatch(
+                  frame ->
+                      frame.getClassName().equals(PayTccExecutionStore.class.getName())
+                          && frame.getMethodName().equals(method)));
+  }
+
+  /** 真实数据库复核除XID外的原锚点及Pay来源，不把其它漂移归为并发重放。 */
+  private void assertSameObservationSource(PayTccExecutionPO expected, PayTccExecutionPO current) {
+    assertEquals(expected.id, current.id);
+    assertEquals(expected.payNo, current.payNo);
+    assertEquals(expected.userId, current.userId);
+    assertEquals(expected.orderNo, current.orderNo);
+    assertEquals(0, expected.amount.compareTo(current.amount));
+    assertEquals(expected.operationKey, current.operationKey);
+    assertEquals(expected.ledgerKey, current.ledgerKey);
+    Map<String, Object> payment =
+        payDb.queryForMap(
+            "SELECT pay_no,debit_mode,user_id,order_no,amount FROM pay_record WHERE pay_no=?",
+            expected.payNo);
+    assertEquals(expected.payNo, payment.get("pay_no"));
+    assertEquals("TCC", payment.get("debit_mode"));
+    assertEquals(expected.userId, payment.get("user_id"));
+    assertEquals(expected.orderNo, payment.get("order_no"));
+    assertEquals(0, expected.amount.compareTo((BigDecimal) payment.get("amount")));
   }
 
   private PayTccCoordinatorService coordinator(

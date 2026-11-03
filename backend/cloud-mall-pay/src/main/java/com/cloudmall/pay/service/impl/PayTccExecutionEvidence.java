@@ -7,10 +7,13 @@ import com.cloudmall.pay.domain.po.PayTccReceiptPO;
 import com.cloudmall.pay.domain.vo.PayTccDispatchVO;
 import com.cloudmall.pay.mapper.PayTccFenceMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
+import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.PayTccReceiptLocalResource;
 import java.math.BigDecimal;
 import java.util.Objects;
 import java.util.Set;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 /** Pay 同一快照与已校验 User 镜像共同确定扣款切片结果。 */
 @Service
 public class PayTccExecutionEvidence {
+  /** 正式容器强制注入真实观察组件，旧直接构造保持无资源兼容。 */
+  @Autowired private PayProtocolMetrics metrics = PayProtocolMetrics.noop();
+
   /** Pay 永久分支归属与本地状态。 */
   private final PayTccReceiptMapper receipts;
 
@@ -33,6 +39,23 @@ public class PayTccExecutionEvidence {
   /** 缺失一端只能未知；TC 响应和网络超时不参与本方法的资金结论。 */
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public String classify(PayTccExecutionPO execution, PayTccDispatchVO user) {
+    // 1. 原方法保留全部业务校验、调用与清理顺序。
+    try {
+      String result = classifyObserved(execution, user);
+      // 2. 原方法返回后仅按原结果记录一次有限观察。
+      metrics.observation(
+          Mode.TCC, Scope.TCC_RESOURCE_EVIDENCE, PayProtocolMetrics.evidenceOutcome(result));
+      return result;
+    } catch (RuntimeException failure) {
+      // 3. 原异常只作有限分类并保持同一对象传播。
+      metrics.observation(
+          Mode.TCC, Scope.TCC_RESOURCE_EVIDENCE, PayProtocolMetrics.failureOutcome(failure));
+      throw failure;
+    }
+  }
+
+  /** 保留原方法全部校验、调用顺序和finally，外层仅观察最终返回或原异常。 */
+  private String classifyObserved(PayTccExecutionPO execution, PayTccDispatchVO user) {
     // 1. 先核基本域及创建时固定键，再比较User镜像完整载荷。
     require(execution != null && execution.amount != null && execution.amount.signum() > 0);
     require(
