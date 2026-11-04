@@ -494,3 +494,33 @@ git revert --no-edit $gatewayRefactorCommit
 ```
 
 核心调用链已逐行复盘。Gateway FilteringWebHandler → AuthenticationFilter → GatewayAccessPolicy / Redis会话查找 → 下游过滤链。应用就绪与定时任务 → SeckillSentinelGatewayConfiguration → Nacos监听 → GatewayFlowRuleParser → GatewayRuleManager发布。限流回调沿原指标与429 JSON处理。后续重构进入 Product 模块细化。
+
+
+## 15. Product 重构实施清单
+
+2026-11-04 从 `faaecef256bc75cbdf03f598788aff7359626d57` 开始，当前会话由主 Agent 单独完成细化、实现与验证。分支继续为 codex/refactor-backend。原 Product 定向十四类57项和 Common四类25项基线通过，记录位于 `F:/Cloud-Mall/target/backend-refactor-20261104/product/baseline/maven.log`。
+
+ProductController 继承约900行的 ProductServiceImpl，空 ProductService 及同层大量索引/指标实现增加了定位成本。本轮按既有规格分三个切片，真实SQL、消息和启用模式继续作为兼容基线。
+
+| 职责 | 目标类型与位置 | 验收重点 |
+| --- | --- | --- |
+| HTTP十七个入口 | 原 ProductController，构造器注入四项业务契约 | 原路径、方法、参数默认值、仅create的Valid、GET异常Advice、JSON金额/null/大整数ID |
+| 分类查询与管理 | service.CategoryService / service.impl.CategoryServiceImpl | 三项写方法的事务代理、管理员校验顺序、分类默认值及原返回字段 |
+| 商品列表、详情、SKU与热度 | service.ProductQueryService / service.impl.ProductQueryServiceImpl | SQL/ES路由、短事务与五秒窗口、ONLINE快照、登记失败、requestId与原指标事件绑定 |
+| 商品创建、修改和上下架 | service.ProductManagementService / service.impl.ProductManagementServiceImpl | 管理员校验、事实/版本/索引outbox同事务、参数和SKU原更新方式 |
+| 秒杀活动查询与管理 | service.SeckillActivityService / service.impl.SeckillActivityServiceImpl | 原逐步数据库/Redis行为、Key/TTL/写入顺序、活动时间、配额与错误优先级 |
+| 商品行与附属数据装配 | service.impl.ProductCatalogReader、util.ProductValueCodec | 原Map查询投影、金额格式、SKU JSON、原SQL调用次序 |
+| 响应与内部上下文 | 独立CategoryVO/ProductVO/SkuVO/ProductParameterVO/SkuSummaryVO、ProductReadResultDTO、ProductOperatorDTO | VO与请求DTO分离，ID字符串注解与默认值逐字段复制，内部读结果携带可空指标requestId供Controller装配 |
+| 原静态辅助与活动快照 | util.ProductEventEnvelope、util.ProductIdentifiers、util.SeckillActivityStock，复用SeckillActivityPO和ProductDateTimes | 原追踪ID、事件字段、ID算法、活动原时间转换和剩余库存算法 |
+| 已有索引与指标实现 | service.impl.index、service.impl.metrics | 类名、Bean默认名、事务和消息注解、算法与指标契约，保留service中的检索/索引写入接口 |
+| 测试辅助命名 | JdbcTransactionAnchorObserver、TransactionPhaseAnchorBridge及对应测试 | 替换当前Java引用和测试选择器，历史冻结runner与归档按原版本保存 |
+
+管理员上下文在Controller读取为ProductOperatorDTO，Service在原方法位置校验身份。分类与商品管理的Transactional入口仍在业务方法开始时建立代理事务。商品查询生成原指标requestId，ProductReadResultDTO只在Controller转换为统一ApiResponse，启用指标时响应ID与登记ID保持同一值。查询的可选指标/搜索依赖与开关在第一切片保持原注入/启动校验语义，避免改变LEGACY与ONLINE装配条件。
+
+ProductCatalogReader通过现有ProductSqlMapper读取事实并装配VO，Mapper SQL及表映射按原契约执行。创建响应保留请求对象原金额字符串及被写回的ID，读取响应继续使用数据库金额格式。活动快照使用已有SeckillActivityPO，原Timestamp/LocalDateTime转换往返需覆盖。ProductReadExceptionHandler继续针对同一Controller包生效。
+
+首先记录本清单与基线，再完成核心HTTP/业务分离和正常入口回归。随后归组已有索引与指标实现、整理测试辅助类名，同步所有现行测试和集成测试的装配引用。新职责类使用实际依赖构造器，辅助实现采用具体类，按真实需要保留接口。
+
+必要回归包括原商品/索引/指标单测、Common源码规则断言迁移后的同等保障、真实MVC响应与身份边界、Spring事务代理中的提交/回滚和outbox协同、已有ES页内事实及ONLINE登记测试。对涉及数据库写入的迁移使用新独立Compose项目和新MySQL卷执行实际数据库回归。真实ES/MQ端到端与冻结性能runner的执行范围独立记录，测试结果逐项标注。
+
+重命名或移动完成后检查新旧类与Spring Bean注册，八模块生产/测试源码编译，Product打包，原格式工具与diff检查。每个完成切片提交，并在本节记录验收范围和可回退节点。
