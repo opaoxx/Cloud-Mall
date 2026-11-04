@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart、Gateway 和 Product 重构，最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart、Gateway、Product 重构及 User 账号首切片，最新验证与回退信息见文末实施记录。User 下一切片为资金职责与响应解耦。
 
 ## 1. 使用方式与范围
 
@@ -443,7 +443,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Cart | 三个切片验收通过 | 已具备逐模块重构样板 |
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
-| User | 待开始 | 下一模块，先细化认证、资料、地址与资金职责 |
+| User | 账号首切片完成 | 认证、资料、地址、初始化与HTTP委托完成；资金职责拆分及TCC/证据归组待继续 |
 | Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -615,3 +615,47 @@ git revert --no-edit $productGroupingCommit 02464c3769f36b0d31b0aa4ac398e419606b
 5. 归档证据、逐行复盘、格式化与git diff --check，提交并建立本切片通过标签。独立中间件使用deploy/experiments/compose.yml的新项目与新卷，完成后归档并移除容器/网络，卷保留。
 
 源码回退按结构提交倒序revert；保留独立地址缺陷修复。Git不回退数据库、Redis及忽略的本地证据。回退后精确清理过期生成class，再重新编译验证。下一步为BalanceLedgerService的扣款/退款/操作查询职责和响应解耦，随后TCC/证据归组。
+
+### 16.5 第一切片验收与调用链
+
+第一切片已完成。准备提交为 `3579a1a9`，独立地址归属修复为 `c835b778`；结构提交通过标签为 `refactor/user-account-complete-20261104`。Controller仍使用原Bean名userController，四个能力由构造器注入；原UserServiceImpl没有独立Service Bean，旧实现方法在Controller代理上运行，现在资金事务由BalanceLedgerServiceImpl代理承接。所有当前Java引用、反射注解断言及实库测试注册均已同步；历史材料保留。
+
+逐行复盘本切片账号核心代码并核对以下调用链：
+
+- UserController → AuthenticationServiceImpl → UserMapper/BCrypt → Redis auth:token → UserRegistrationVO/UserLoginVO → Controller统一响应。
+- UserController读取AuthContext身份 → UserProfileServiceImpl/UserAddressServiceImpl → 原Mapper → 原UserVO/UserAddressVO。地址修改通过Mapper.updateOwnedAddress一次限定id/user_id，失败不进入默认标志清理。
+- UserController的DependsOn → UserAccountInitializer → 原UserTableInitializer/BalanceTccTableInitializer → 身份结构/范围只读检查 → 管理员幂等初始化。原管理员密码升级和默认余额保持。
+- UserController → BalanceLedgerService事务代理 → 原钱包行锁、扣款归属、账本、TCC/receive事实读取与可选Redis缓存。三个写入口保持noRollbackFor=BizException，操作查询保持readOnly与REPEATABLE_READ；私有函数不经过新的事务跳转。
+
+资金实现的40个方法体与初始化器3个方法体经忽略注释/空白的词法逐项比对全部一致，报告为account/method-parity.json。资金Service暂留ApiResponse与字段注入，扣款/退款/操作查询内部职责仍需下一切片细化，本次不将User模块记为整体完成。
+
+验证结果如下，均为本轮实际执行：
+
+| 范围 | 结果 |
+| --- | --- |
+| 原User/Common基线 | User279 + Common25通过 |
+| 地址缺陷专项 | 修改前真实MySQL复现跨用户更新未拒绝；独立修复后15项通过，含7项MySQL生成ID/迁移/归属测试 |
+| 原资金实库基线 | BalanceTccStateMySqlIT 103项通过 |
+| 最终统一回归 | 24类420项，0失败、0错误、0跳过：Common25、User单测281、生成ID MySQL7、资金MySQL103、账号MySQL/Redis/MVC4 |
+| 打包与引用 | User package通过；八模块生产/测试源码test-compile通过；Jar排除两个已删除类型并含全部新实现 |
+| 格式与差异 | google-java-format 1.22.0执行；大规模既有资金测试只整理import；git diff --check通过 |
+
+新增MVC回归使用真实Spring Web、MyBatis、事务管理器、MySQL与Redis，覆盖全部13个路由、身份数字JSON、资料null/空字符串、默认地址排序、校验与鉴权优先级、账号禁用、Token内容/两小时TTL、Bearer匹配/trim与登出。资金HTTP回归证明成功/重放/退款查询、余额不足REJECTED账本提交，以及真实SQL触发器故障时余额/归属回滚且不写缓存。资金103项实库测试保留原并发、互斥、退款证据与快照断言。本轮没有执行真实Seata RM/TC进程回调、跨服务浏览器端到端及性能实验。
+
+测试适配中发现并修正了新夹具的错误码常量、方法引用、JdbcTemplate调用误替换与@Import全限定Bean名问题，相关失败日志保留；最终结果以account/final-regression.log为准。证据根为 `F:/Cloud-Mall/target/backend-refactor-20261104/user`，verification.json包含逐类统计，package.log与all-modules-test-compile.log位于account目录。
+
+实验使用全新Compose项目cloud-mall-refactor-user-20261104，MySQL19925、Redis19926，核对无重叠的独立子网10.254.242.0/24。全部UUID测试数据库已删除，实验cloudmall_user两张来源表仍为0行且原测试校验和通过，Redis DB15为0键。容器inspect与日志归档后已移除本项目两容器和网络；mysql_data、redis_data两个命名卷按规则保留，既有中间件未更动。User target下历史cm15b_rm_it证据保留，仅精确移除旧UserService.class和UserServiceImpl.class。
+
+### 16.6 回退与下一步
+
+回退本切片结构、保留独立地址修复：
+
+```powershell
+$userAccountCommit = git rev-parse 'refactor/user-account-complete-20261104^{commit}'
+git show --stat $userAccountCommit
+git revert --no-edit $userAccountCommit
+```
+
+回退后按本次新增类型清单核对并删除target/classes中的过期新类型及其嵌套class，再重新编译；禁止清空整个User target中的历史实验证据。只反向应用结构提交应回到c835b778的源码，地址WHERE归属限制仍在。临时Git索引中的反向补丁检查只证明源码回退路径，不等于运行态回滚；执行实际回退后仍需对应测试。
+
+下一任务先为BalanceLedgerService细化扣款、退款、操作查询与共享证明规则的依赖图，冻结事务外边界后拆分，并把ApiResponse封装移回Controller。TCC/Fence、证据读取与恢复类的业务归组在其后实施；保留原资金算法、错误优先级和跨协议互斥契约。

@@ -1,239 +1,81 @@
 package com.cloudmall.user.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.cloudmall.common.api.ApiResponse;
-import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
-import com.cloudmall.user.domain.dto.AddressRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
-import com.cloudmall.user.domain.dto.CredentialsDTO;
 import com.cloudmall.user.domain.dto.DebitRequestDTO;
-import com.cloudmall.user.domain.dto.ProfileDTO;
 import com.cloudmall.user.domain.po.BalanceDebitAttemptPO;
 import com.cloudmall.user.domain.po.BalanceLedgerPO;
 import com.cloudmall.user.domain.po.BalanceTccDebitPO;
-import com.cloudmall.user.domain.po.UserAddressPO;
 import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.domain.vo.BalanceDebitVO;
 import com.cloudmall.user.domain.vo.BalanceOperationVO;
 import com.cloudmall.user.domain.vo.BalanceRefundVO;
-import com.cloudmall.user.domain.vo.UserAddressVO;
-import com.cloudmall.user.domain.vo.UserVO;
 import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.BalanceTccDebitMapper;
-import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.mapper.UserTccReceiveMapper;
-import com.cloudmall.user.service.UserService;
+import com.cloudmall.user.service.BalanceLedgerService;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
-import javax.annotation.PostConstruct;
-import javax.validation.Valid;
 import org.apache.ibatis.exceptions.TooManyResultsException;
 import org.mybatis.spring.MyBatisSystemException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.*;
 
-/** 用户领域业务实现，负责用户、地址、登录态和余额业务。 */
-@RequestMapping("/api")
-public class UserServiceImpl implements UserService {
-  /** 同库TCC接收来源读取，首次Legacy不得跨协议占用已接收支付号。 */
+/** 余额扣款、退款与账本事实查询，保持共享归属和本地事务边界。 */
+@Service
+public class BalanceLedgerServiceImpl implements BalanceLedgerService {
+  /** 同库TCC接收来源，阻止跨协议占用已接收支付号。 */
   @Autowired private UserTccReceiveMapper userTccReceiveMapper;
 
-  /** 记录可选 Redis 加速缓存的写入失败。 */
-  private static final Logger log = LoggerFactory.getLogger(UserServiceImpl.class);
+  /** 可选Redis加速缓存失败日志。 */
+  private static final Logger log = LoggerFactory.getLogger(BalanceLedgerServiceImpl.class);
 
-  /** 密码摘要编码器。 */
-  private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder();
-
-  /** 资金请求金额与钱包/账本快照的DECIMAL(18,2)容量上界，不舍入或截断金额。 */
+  /** 钱包及账本DECIMAL(18,2)金额上限。 */
   private static final BigDecimal MAX_BALANCE_MONEY = new BigDecimal("9999999999999999.99");
 
-  /** 关联退款读取采用100加一哨兵，超限必须补证后再处理。 */
+  /** 关联退款读取的100条上限，额外一条为哨兵。 */
   private static final int MAX_REFUND_CANDIDATES = 100;
 
-  /** 当前数字JSON契约的安全整数上限，只用于启动兼容检查。 */
-  private static final long MAX_SAFE_IDENTIFIER = 9007199254740991L;
-
-  /** 本批有限并发新增的最低安全余量，不代表永久计数器耗尽保障。 */
-  private static final long IDENTIFIER_HEADROOM = 64L;
-
-  /** 用户事实数据 Mapper。 */
+  /** 钱包事实和条件资金写入。 */
   @Autowired private UserMapper userMapper;
 
-  /** 用户余额账本 Mapper。 */
+  /** 持久化资金账本。 */
   @Autowired private BalanceLedgerMapper balanceLedgerMapper;
 
-  /** LEGACY/TCC 共享扣款归属，所有扣款入口必须核对该事实。 */
+  /** Legacy/TCC共享扣款归属。 */
   @Autowired private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
 
-  /** 原TCC冻结/确认事实，用于首次扣款互斥与退款来源证明。 */
+  /** 原TCC冻结及确认事实。 */
   @Autowired private BalanceTccDebitMapper balanceTccDebitMapper;
 
-  /** 用户地址数据 Mapper。 */
-  @Autowired private UserAddressMapper userAddressMapper;
-
-  /** 登录态和余额幂等缓存。 */
+  /** 可选余额幂等加速缓存。 */
   @Autowired private StringRedisTemplate redis;
 
-  /** 创建由 Spring 注入依赖的用户服务。 */
-  public UserServiceImpl() {}
-
-  /** 初始化本地管理员账号。 */
-  @PostConstruct
-  public void ensureLocalAdmin() {
-    // 1. 仅只读核部署前置，未迁移时明确拒启动，禁止隐式修改业务表。
-    requireCompatibleIdentifiers();
-    // 2. 查询本地管理员是否已存在。
-    // 3. 缺失时创建默认管理员账号和初始余额。
-    // 4. 仅将旧的默认密码迁移到新的默认密码，保持初始化操作幂等。
-    long administratorCount =
-        userMapper.selectCount(new QueryWrapper<UserPO>().eq("username", "admin"));
-    if (administratorCount == 0) {
-      LocalDateTime currentTime = LocalDateTime.now();
-      UserPO administrator = new UserPO();
-      administrator.username = "admin";
-      administrator.passwordHash = ENCODER.encode("admin123");
-      administrator.role = "ADMIN";
-      administrator.balance = new BigDecimal("10000.00");
-      administrator.frozenBalance = BigDecimal.ZERO;
-      administrator.status = 1;
-      administrator.createdAt = currentTime;
-      administrator.updatedAt = currentTime;
-      userMapper.insert(administrator);
-      return;
-    }
-    UserPO administrator = userMapper.selectOne(new QueryWrapper<UserPO>().eq("username", "admin"));
-    if (administrator != null && ENCODER.matches("admin", administrator.passwordHash)) {
-      administrator.passwordHash = ENCODER.encode("admin123");
-      administrator.updatedAt = LocalDateTime.now();
-      userMapper.updateById(administrator);
-    }
-  }
-
-  /** 检查数据库生成身份的结构和本批有限安全余量，不执行DDL或写后伪回滚。 */
-  private void requireCompatibleIdentifiers() {
-    if (userMapper.countCompatibleIdentifierColumns() != 2
-        || userMapper.countIdentifierPrimaryColumns() != 2
-        || !safeIdentifierRange(userMapper.maximumUserIdentifier(), userMapper.nextUserIdentifier())
-        || !safeIdentifierRange(
-            userMapper.maximumAddressIdentifier(), userMapper.nextAddressIdentifier())) {
-      throw new BizException("USER_IDENTIFIER_SCHEMA_INCOMPATIBLE", "用户及地址主键尚未完成兼容迁移或安全余量不足", 503);
-    }
-  }
-
-  /** 空表MAX为零，计数器必须为正；未知或接近JS精度边界时不开放本批新增。 */
-  private boolean safeIdentifierRange(Long maximum, Long next) {
-    return maximum != null
-        && next != null
-        && maximum >= 0
-        && next > 0
-        && maximum <= MAX_SAFE_IDENTIFIER - IDENTIFIER_HEADROOM
-        && next <= MAX_SAFE_IDENTIFIER - IDENTIFIER_HEADROOM;
-  }
-
-  /** 注册用户并返回用户标识。 */
-  @PostMapping("/auth/register")
-  public ApiResponse<?> register(@Valid @RequestBody CredentialsDTO credentials) {
-    // 1. 校验用户名是否已被占用。
-    // 2. 保存密码摘要、角色和初始余额。
-    // 3. 返回新用户的公开信息。
-    long duplicateCount =
-        userMapper.selectCount(new QueryWrapper<UserPO>().eq("username", credentials.username));
-    if (duplicateCount > 0) {
-      throw new BizException("USER_DUPLICATE_USERNAME", "用户名已存在", 409);
-    }
-    LocalDateTime currentTime = LocalDateTime.now();
-    UserPO user = new UserPO();
-    user.username = credentials.username;
-    user.passwordHash = ENCODER.encode(credentials.password);
-    user.role = "USER";
-    user.balance = new BigDecimal("10000.00");
-    user.frozenBalance = BigDecimal.ZERO;
-    user.status = 1;
-    user.createdAt = currentTime;
-    user.updatedAt = currentTime;
-    userMapper.insert(user);
-    return ApiResponse.ok(Map.of("userId", user.id, "username", user.username));
-  }
-
-  /** 校验凭据并创建 Redis 登录态。 */
-  @PostMapping("/auth/login")
-  public ApiResponse<?> login(@Valid @RequestBody CredentialsDTO credentials) {
-    // 1. 按用户名读取用户事实数据。
-    // 2. 校验账号状态和密码摘要。
-    // 3. 写入两小时 Redis Token 并返回用户信息。
-    UserPO user =
-        userMapper.selectOne(new QueryWrapper<UserPO>().eq("username", credentials.username));
-    if (user == null
-        || !Objects.equals(user.status, 1)
-        || !ENCODER.matches(credentials.password, user.passwordHash)) {
-      throw new BizException("USER_LOGIN_FAILED", "用户名或密码错误", 401);
-    }
-    String token = UUID.randomUUID().toString();
-    try {
-      redis
-          .opsForValue()
-          .set("auth:token:" + token, user.id + ":" + user.role, Duration.ofHours(2));
-    } catch (DataAccessException redisFailure) {
-      throw new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
-    }
-    return ApiResponse.ok(Map.of("token", token, "user", UserVO.from(user)));
-  }
-
-  /** 使当前登录 Token 失效。 */
-  @PostMapping("/auth/logout")
-  public ApiResponse<?> logout(
-      @RequestHeader(value = "Authorization", required = false) String authorization) {
-    // 1. 读取可选的 Bearer Token。
-    // 2. 删除对应 Redis 登录态。
-    // 3. 返回登出成功响应。
-    if (authorization != null && authorization.startsWith("Bearer ")) {
-      try {
-        redis.delete("auth:token:" + authorization.substring(7).trim());
-      } catch (DataAccessException redisFailure) {
-        throw new BizException(ErrorCodes.REDIS_UNAVAILABLE, "依赖服务暂时不可用，请稍后重试", 503);
-      }
-    }
-    return ApiResponse.ok(null);
-  }
-
-  /** 查询当前用户资料。 */
-  @GetMapping("/users/me")
-  public ApiResponse<?> me() {
-    // 1. 从认证上下文获取当前用户。
-    // 2. 通过 Mapper 读取用户事实数据。
-    // 3. 转换为公开用户视图。
-    return ApiResponse.ok(UserVO.from(currentUser()));
-  }
+  /** 创建由Spring注入持久化依赖的资金服务。 */
+  public BalanceLedgerServiceImpl() {}
 
   /** 按幂等支付键扣减用户余额。 */
-  @PostMapping("/internal/users/{userId}/balance/debit")
   @Transactional(noRollbackFor = BizException.class)
-  public ApiResponse<?> debit(
-      @PathVariable Long userId,
-      @RequestHeader(value = "X-User-Id", required = false) Long callerId,
-      @Valid @RequestBody DebitRequestDTO request) {
+  @Override
+  public ApiResponse<?> debit(Long userId, Long callerId, DebitRequestDTO request) {
     // 1. 校验内部调用者身份、支付幂等键和扣款金额。
     // 2. 通过 Mapper 的条件更新原子扣减余额。
     // 3. 缓存扣款结果并返回最新余额。
@@ -256,22 +98,16 @@ public class UserServiceImpl implements UserService {
   }
 
   /** 按持久化操作键执行余额扣款。 */
-  @PostMapping("/internal/users/{userId}/balance/debits")
   @Transactional(noRollbackFor = BizException.class)
-  public ApiResponse<?> debitInternal(
-      @PathVariable Long userId,
-      @RequestHeader(value = "X-User-Id", required = false) Long callerId,
-      @Valid @RequestBody BalanceDebitRequestDTO request) {
+  @Override
+  public ApiResponse<?> debitInternal(Long userId, Long callerId, BalanceDebitRequestDTO request) {
     return debitFromLedger(userId, callerId, request);
   }
 
   /** 在同一只读快照证明主账本、原扣款及关联/pay双集合，供支付恢复判断事实。 */
-  @GetMapping("/internal/users/{userId}/balance/operations/{operationKey}")
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-  public ApiResponse<?> balanceOperation(
-      @PathVariable Long userId,
-      @PathVariable String operationKey,
-      @RequestHeader(value = "X-User-Id", required = false) Long callerId) {
+  @Override
+  public ApiResponse<?> balanceOperation(Long userId, String operationKey, Long callerId) {
     // 1. 保持调用者、主行缺失和foreign的原优先级，再证明主行字段。
     assertInternalCaller(userId, callerId);
     Long primaryCount = balanceLedgerMapper.countOperationCandidates(operationKey);
@@ -413,12 +249,10 @@ public class UserServiceImpl implements UserService {
   }
 
   /** 按唯一退款键恢复已应用扣款。 */
-  @PostMapping("/internal/users/{userId}/balance/refunds")
   @Transactional(noRollbackFor = BizException.class)
+  @Override
   public ApiResponse<?> refundInternal(
-      @PathVariable Long userId,
-      @RequestHeader(value = "X-User-Id", required = false) Long callerId,
-      @Valid @RequestBody BalanceRefundRequestDTO request) {
+      Long userId, Long callerId, BalanceRefundRequestDTO request) {
     // 1. 校验调用者和请求金额，按原顺序锁定用户。
     assertInternalCaller(userId, callerId);
     validateMoney(request.amount, "退款金额不合法");
@@ -1070,120 +904,5 @@ public class UserServiceImpl implements UserService {
     } catch (RuntimeException cacheFailure) {
       log.warn("余额账本已处理，Redis 加速缓存更新失败，operationKey={}", ledger.operationKey, cacheFailure);
     }
-  }
-
-  /** 更新当前用户允许修改的资料。 */
-  @PutMapping("/users/me")
-  public ApiResponse<?> update(@RequestBody ProfileDTO profile) {
-    // 1. 获取当前用户并整理可修改字段。
-    // 2. 通过 Mapper 更新用户资料和审计时间。
-    // 3. 重新读取并返回更新后的资料。
-    userMapper.update(
-        null,
-        new UpdateWrapper<UserPO>()
-            .eq("id", AuthContext.requireUserId())
-            .set("nickname", profile.nickname)
-            .set("phone", profile.phone)
-            .set("avatar_url", profile.avatarUrl)
-            .set("updated_at", LocalDateTime.now()));
-    return me();
-  }
-
-  /** 查询当前用户的收货地址。 */
-  @GetMapping("/users/me/addresses")
-  public ApiResponse<?> addresses() {
-    // 1. 获取当前用户标识。
-    // 2. 按默认标志和地址标识查询地址。
-    // 3. 转换为前端地址响应。
-    List<UserAddressPO> addresses =
-        userAddressMapper.selectList(
-            new QueryWrapper<UserAddressPO>()
-                .eq("user_id", AuthContext.requireUserId())
-                .orderByDesc("is_default")
-                .orderByDesc("id"));
-    return ApiResponse.ok(addresses.stream().map(UserAddressVO::from).toList());
-  }
-
-  /** 新增当前用户收货地址。 */
-  @PostMapping("/users/me/addresses")
-  public ApiResponse<?> addAddress(@Valid @RequestBody AddressRequestDTO request) {
-    // 1. 获取当前用户，新地址主键由数据库生成。
-    // 2. 必要时清除原默认地址。
-    // 3. 保存新地址并返回地址视图。
-    Long userId = AuthContext.requireUserId();
-    if (request.isDefault) {
-      clearDefaultAddress(userId, null);
-    }
-    UserAddressPO address = toAddress(null, userId, request);
-    userAddressMapper.insert(address);
-    return ApiResponse.ok(UserAddressVO.from(address));
-  }
-
-  /** 更新当前用户收货地址。 */
-  @PutMapping("/users/me/addresses/{id}")
-  public ApiResponse<?> updateAddress(
-      @PathVariable Long id, @Valid @RequestBody AddressRequestDTO request) {
-    // 1. 校验地址属于当前用户。
-    // 2. 更新地址字段和默认标志。
-    // 3. 返回更新后的地址视图。
-    Long userId = AuthContext.requireUserId();
-    UserAddressPO address = toAddress(id, userId, request);
-    if (userAddressMapper.updateOwnedAddress(address) == 0) {
-      throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
-    }
-    if (request.isDefault) {
-      clearDefaultAddress(userId, id);
-    }
-    return ApiResponse.ok(UserAddressVO.from(address));
-  }
-
-  /** 删除当前用户收货地址。 */
-  @DeleteMapping("/users/me/addresses/{id}")
-  public ApiResponse<?> deleteAddress(@PathVariable Long id) {
-    // 1. 获取当前用户标识。
-    // 2. 按用户归属删除地址。
-    // 3. 地址不存在时返回统一业务错误。
-    int changedRows =
-        userAddressMapper.delete(
-            new QueryWrapper<UserAddressPO>()
-                .eq("id", id)
-                .eq("user_id", AuthContext.requireUserId()));
-    if (changedRows == 0) {
-      throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
-    }
-    return ApiResponse.ok(null);
-  }
-
-  /** 读取当前用户事实数据。 */
-  private UserPO currentUser() {
-    UserPO user = userMapper.selectById(AuthContext.requireUserId());
-    if (user == null) {
-      throw new BizException(ErrorCodes.NOT_FOUND, "用户不存在", 404);
-    }
-    return user;
-  }
-
-  /** 取消用户的其他默认地址。 */
-  private void clearDefaultAddress(Long userId, Long excludedAddressId) {
-    UpdateWrapper<UserAddressPO> updateWrapper =
-        new UpdateWrapper<UserAddressPO>().eq("user_id", userId).set("is_default", false);
-    if (excludedAddressId != null) {
-      updateWrapper.ne("id", excludedAddressId);
-    }
-    userAddressMapper.update(null, updateWrapper);
-  }
-
-  /** 将请求对象转换为地址持久化对象。 */
-  private UserAddressPO toAddress(Long addressId, Long userId, AddressRequestDTO request) {
-    UserAddressPO address = new UserAddressPO();
-    address.id = addressId;
-    address.userId = userId;
-    address.receiverName = request.receiver;
-    address.receiverPhone = request.phone;
-    address.regionDetail = request.detailAddress;
-    address.defaultAddress = request.isDefault;
-    address.updatedAt = LocalDateTime.now();
-    address.createdAt = address.updatedAt;
-    return address;
   }
 }

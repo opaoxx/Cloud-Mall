@@ -18,8 +18,8 @@ import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceTccDebitFinalizeDTO;
 import com.cloudmall.user.domain.dto.BalanceTccDebitTryDTO;
 import com.cloudmall.user.service.BalanceTccDebitService;
+import com.cloudmall.user.service.impl.BalanceLedgerServiceImpl;
 import com.cloudmall.user.service.impl.BalanceTccDebitServiceImpl;
-import com.cloudmall.user.service.impl.UserServiceImpl;
 import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -79,7 +79,7 @@ class BalanceTccStateMySqlIT {
   private BalanceTccDebitService service;
 
   /** 生产 Legacy 扣款/退款服务的事务代理。 */
-  private UserServiceImpl legacy;
+  private BalanceLedgerServiceImpl legacy;
 
   @BeforeAll
   static void createIsolatedDatabase() throws Exception {
@@ -179,12 +179,17 @@ class BalanceTccStateMySqlIT {
         Beans.class,
         BalanceTccDebitServiceImpl.class,
         UserController.class,
+        com.cloudmall.user.service.impl.AuthenticationServiceImpl.class,
+        com.cloudmall.user.service.impl.UserProfileServiceImpl.class,
+        com.cloudmall.user.service.impl.UserAddressServiceImpl.class,
+        BalanceLedgerServiceImpl.class,
+        com.cloudmall.user.config.UserAccountInitializer.class,
         BalanceTccTableInitializer.class,
         BalanceLedgerTableInitializer.class,
         UserTableInitializer.class);
     context.refresh();
     service = context.getBean(BalanceTccDebitService.class);
-    legacy = context.getBean(UserServiceImpl.class);
+    legacy = context.getBean(BalanceLedgerServiceImpl.class);
   }
 
   @AfterEach

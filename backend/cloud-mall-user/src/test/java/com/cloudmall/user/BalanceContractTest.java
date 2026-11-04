@@ -11,11 +11,15 @@ class BalanceContractTest {
   void userRegistrationAndDebitUseTheDefaultBalanceAndAtomicGuard() throws Exception {
     String source =
         Files.readString(
-            Path.of("src/main/java/com/cloudmall/user/service/impl/UserServiceImpl.java"));
+            Path.of("src/main/java/com/cloudmall/user/service/impl/BalanceLedgerServiceImpl.java"));
     String mapper =
         Files.readString(Path.of("src/main/java/com/cloudmall/user/mapper/UserMapper.java"));
     String schema = Files.readString(Path.of("../database/schema.sql"));
-    assertTrue(source.contains("new BigDecimal(\"10000.00\")"));
+    assertTrue(
+        Files.readString(
+                Path.of(
+                    "src/main/java/com/cloudmall/user/service/impl/AuthenticationServiceImpl.java"))
+            .contains("new BigDecimal(\"10000.00\")"));
     assertTrue(mapper.contains("balance=balance-#{amount}"));
     assertTrue(mapper.contains("balance>=#{amount}"));
     assertTrue(source.contains("balance:debit:"));

@@ -16,13 +16,10 @@ import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.domain.vo.UserAddressVO;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
-import com.cloudmall.user.service.impl.UserServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /** 生成键交接、地址更新身份和只读部署兼容门，不用mock冒实库并发。 */
 class UserGeneratedIdentifierTest {
@@ -47,7 +44,7 @@ class UserGeneratedIdentifierTest {
   @Test
   void registrationReturnsGeneratedNumericKey() {
     UserMapper users = mock(UserMapper.class);
-    UserServiceImpl service = service(users, mock(UserAddressMapper.class));
+    UserAccountTestFixture service = service(users, mock(UserAddressMapper.class));
     when(users.insert(any(UserPO.class)))
         .thenAnswer(
             invocation -> {
@@ -60,9 +57,10 @@ class UserGeneratedIdentifierTest {
     credentials.username = "generated-user";
     credentials.password = "Fixture123!";
 
-    ApiResponse<?> response = service.register(credentials);
+    ApiResponse<?> response = service.controller().register(credentials);
 
-    assertEquals(GENERATED_ID, ((Map<?, ?>) response.data).get("userId"));
+    assertEquals(
+        GENERATED_ID, ((com.cloudmall.user.domain.vo.UserRegistrationVO) response.data).userId);
     var json = new ObjectMapper().valueToTree(response.data);
     assertTrue(json.get("userId").isIntegralNumber());
     assertEquals(GENERATED_ID, json.get("userId").longValue());
@@ -73,7 +71,7 @@ class UserGeneratedIdentifierTest {
   @Test
   void newAddressDelegatesIdentityAndUpdateKeepsOriginalId() {
     UserAddressMapper addresses = mock(UserAddressMapper.class);
-    UserServiceImpl service = service(mock(UserMapper.class), addresses);
+    UserAccountTestFixture service = service(mock(UserMapper.class), addresses);
     AuthContext.set(7L, "USER");
     when(addresses.insert(any(UserAddressPO.class)))
         .thenAnswer(
@@ -92,8 +90,8 @@ class UserGeneratedIdentifierTest {
             });
     AddressRequestDTO request = request();
 
-    UserAddressVO added = (UserAddressVO) service.addAddress(request).data;
-    UserAddressVO updated = (UserAddressVO) service.updateAddress(41L, request).data;
+    UserAddressVO added = (UserAddressVO) service.controller().addAddress(request).data;
+    UserAddressVO updated = (UserAddressVO) service.controller().updateAddress(41L, request).data;
 
     assertEquals(GENERATED_ID, added.id);
     assertEquals(41L, updated.id);
@@ -104,13 +102,14 @@ class UserGeneratedIdentifierTest {
   @Test
   void startupRejectsMissingAutoAndCompositePrimaryKey() {
     UserMapper users = compatibleUsers();
-    UserServiceImpl service = service(users, mock(UserAddressMapper.class));
+    UserAccountTestFixture service = service(users, mock(UserAddressMapper.class));
     when(users.countCompatibleIdentifierColumns()).thenReturn(0);
-    BizException missing = assertThrows(BizException.class, service::ensureLocalAdmin);
+    BizException missing =
+        assertThrows(BizException.class, service.initializer()::ensureLocalAdmin);
     assertEquals("USER_IDENTIFIER_SCHEMA_INCOMPATIBLE", missing.getCode());
     when(users.countCompatibleIdentifierColumns()).thenReturn(2);
     when(users.countIdentifierPrimaryColumns()).thenReturn(3);
-    assertThrows(BizException.class, service::ensureLocalAdmin);
+    assertThrows(BizException.class, service.initializer()::ensureLocalAdmin);
     verify(users, never()).selectCount(any());
     verify(users, never()).insert(any(UserPO.class));
   }
@@ -119,14 +118,14 @@ class UserGeneratedIdentifierTest {
   @Test
   void startupRejectsUnknownAndUnsafeRange() {
     UserMapper users = compatibleUsers();
-    UserServiceImpl service = service(users, mock(UserAddressMapper.class));
+    UserAccountTestFixture service = service(users, mock(UserAddressMapper.class));
     for (Long next : new Long[] {null, 0L, -1L, 9007199254740991L}) {
       when(users.nextUserIdentifier()).thenReturn(next);
-      assertThrows(BizException.class, service::ensureLocalAdmin);
+      assertThrows(BizException.class, service.initializer()::ensureLocalAdmin);
     }
     when(users.nextUserIdentifier()).thenReturn(GENERATED_ID);
     when(users.maximumAddressIdentifier()).thenReturn(9007199254740991L);
-    assertThrows(BizException.class, service::ensureLocalAdmin);
+    assertThrows(BizException.class, service.initializer()::ensureLocalAdmin);
     verify(users, never()).selectCount(any());
     verify(users, never()).insert(any(UserPO.class));
   }
@@ -135,7 +134,7 @@ class UserGeneratedIdentifierTest {
   @Test
   void bootstrapDelegatesGeneratedKeyAndRetainsExistingAdmin() {
     UserMapper users = compatibleUsers();
-    UserServiceImpl service = service(users, mock(UserAddressMapper.class));
+    UserAccountTestFixture service = service(users, mock(UserAddressMapper.class));
     when(users.insert(any(UserPO.class)))
         .thenAnswer(
             invocation -> {
@@ -144,13 +143,13 @@ class UserGeneratedIdentifierTest {
               row.id = GENERATED_ID;
               return 1;
             });
-    service.ensureLocalAdmin();
+    service.initializer().ensureLocalAdmin();
     UserPO administrator = new UserPO();
     administrator.id = GENERATED_ID;
     administrator.passwordHash = new BCryptPasswordEncoder().encode("admin123");
     when(users.selectCount(any())).thenReturn(1L);
     when(users.selectOne(any())).thenReturn(administrator);
-    service.ensureLocalAdmin();
+    service.initializer().ensureLocalAdmin();
     verify(users, times(1)).insert(any(UserPO.class));
     verify(users, never()).updateById(any(UserPO.class));
   }
@@ -166,11 +165,8 @@ class UserGeneratedIdentifierTest {
     return users;
   }
 
-  private static UserServiceImpl service(UserMapper users, UserAddressMapper addresses) {
-    UserServiceImpl service = new UserServiceImpl();
-    ReflectionTestUtils.setField(service, "userMapper", users);
-    ReflectionTestUtils.setField(service, "userAddressMapper", addresses);
-    return service;
+  private static UserAccountTestFixture service(UserMapper users, UserAddressMapper addresses) {
+    return UserAccountTestFixture.create(users, addresses);
   }
 
   private static AddressRequestDTO request() {

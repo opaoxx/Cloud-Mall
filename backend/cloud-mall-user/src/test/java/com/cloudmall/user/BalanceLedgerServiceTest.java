@@ -18,7 +18,7 @@ import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.UserMapper;
-import com.cloudmall.user.service.impl.UserServiceImpl;
+import com.cloudmall.user.service.impl.BalanceLedgerServiceImpl;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,7 +29,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 /** 余额账本跨缓存丢失场景的单元测试。 */
 class BalanceLedgerServiceTest {
-  private UserServiceImpl userService;
+  private BalanceLedgerServiceImpl userService;
   private UserMapper userMapper;
   private BalanceLedgerMapper balanceLedgerMapper;
   private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
@@ -65,7 +65,7 @@ class BalanceLedgerServiceTest {
 
   @BeforeEach
   void setUp() {
-    userService = new UserServiceImpl();
+    userService = new BalanceLedgerServiceImpl();
     userMapper = mock(UserMapper.class);
     balanceLedgerMapper = mock(BalanceLedgerMapper.class);
     when(balanceLedgerMapper.countOperationCandidates(any())).thenReturn(1L);
@@ -4158,7 +4158,7 @@ class BalanceLedgerServiceTest {
       assertOperationReadOnly();
     }
     var annotation =
-        UserServiceImpl.class
+        BalanceLedgerServiceImpl.class
             .getMethod("balanceOperation", Long.class, String.class, Long.class)
             .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
     org.junit.jupiter.api.Assertions.assertTrue(annotation.readOnly());

@@ -15,7 +15,6 @@ import com.cloudmall.user.domain.vo.UserAddressVO;
 import com.cloudmall.user.domain.vo.UserVO;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
-import com.cloudmall.user.service.impl.UserServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
@@ -50,7 +49,6 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /** 仅独立cm_user_ids_*库的真实MyBatis自增、并发和迁移验证，不写默认User业务表。 */
 class UserGeneratedIdentifierMySqlIT {
@@ -154,20 +152,22 @@ class UserGeneratedIdentifierMySqlIT {
 
     SqlSessionTemplate first = mapperSession();
     SqlSessionTemplate second = mapperSession();
-    List<UserServiceImpl> services = List.of(service(first), service(second));
+    List<UserAccountTestFixture> services = List.of(service(first), service(second));
     List<Long> users =
         parallel(
             16,
             index ->
                 identifier(
-                    services.get(index % 2).register(credentials("parallel_" + index)), "userId"));
+                    services.get(index % 2).controller().register(credentials("parallel_" + index)),
+                    "userId"));
     List<Long> addresses =
         parallel(
             16,
             index -> {
               AuthContext.set(users.get(index), "USER");
               try {
-                return ((UserAddressVO) services.get(index % 2).addAddress(addressRequest()).data)
+                return ((UserAddressVO)
+                        services.get(index % 2).controller().addAddress(addressRequest()).data)
                     .id;
               } finally {
                 AuthContext.clear();
@@ -230,17 +230,20 @@ class UserGeneratedIdentifierMySqlIT {
     }
 
     long oldMaximum = fixture.queryForObject("SELECT MAX(id) FROM mall_user", Long.class);
-    UserServiceImpl restarted = service(mapperSession());
-    long restartedIdentity = identifier(restarted.register(credentials("after_restart")), "userId");
+    UserAccountTestFixture restarted = service(mapperSession());
+    long restartedIdentity =
+        identifier(restarted.controller().register(credentials("after_restart")), "userId");
     assertTrue(restartedIdentity > oldMaximum && restartedIdentity < MAX_SAFE_ID);
-    assertThrows(BizException.class, () -> restarted.register(credentials("after_restart")));
+    assertThrows(
+        BizException.class, () -> restarted.controller().register(credentials("after_restart")));
     UserPO duplicate = user("after_restart");
     assertThrows(
         DuplicateKeyException.class, () -> first.getMapper(UserMapper.class).insert(duplicate));
 
     AuthContext.set(users.get(0), "USER");
     UserAddressVO updated =
-        (UserAddressVO) restarted.updateAddress(addresses.get(0), addressRequest()).data;
+        (UserAddressVO)
+            restarted.controller().updateAddress(addresses.get(0), addressRequest()).data;
     assertEquals(addresses.get(0), updated.id);
     assertEquals(25, fixture.queryForObject("SELECT COUNT(*) FROM user_address", Integer.class));
     assertEquals(
@@ -260,26 +263,30 @@ class UserGeneratedIdentifierMySqlIT {
       if (line.startsWith("CREATE TABLE IF NOT EXISTS mall_user ")
           || line.startsWith("CREATE TABLE IF NOT EXISTS user_address ")) fixture.execute(line);
     }
-    UserServiceImpl service = service(mapperSession());
+    UserAccountTestFixture service = service(mapperSession());
     AddressRequestDTO request = addressRequest();
     request.isDefault = true;
     AuthContext.set(7L, "USER");
-    UserAddressVO original = (UserAddressVO) service.addAddress(request).data;
+    UserAddressVO original = (UserAddressVO) service.controller().addAddress(request).data;
     AuthContext.set(8L, "USER");
-    UserAddressVO callersDefault = (UserAddressVO) service.addAddress(request).data;
+    UserAddressVO callersDefault = (UserAddressVO) service.controller().addAddress(request).data;
     List<Map<String, Object>> before =
         fixture.queryForList("SELECT * FROM user_address ORDER BY id");
 
     BizException forbidden =
-        assertThrows(BizException.class, () -> service.updateAddress(original.id, request));
+        assertThrows(
+            BizException.class, () -> service.controller().updateAddress(original.id, request));
     assertEquals(404, forbidden.getHttpStatus());
     assertEquals(com.cloudmall.common.error.ErrorCodes.NOT_FOUND, forbidden.getCode());
     assertEquals(before, fixture.queryForList("SELECT * FROM user_address ORDER BY id"));
-    assertTrue(((UserAddressVO) service.updateAddress(callersDefault.id, request).data).isDefault);
+    assertTrue(
+        ((UserAddressVO) service.controller().updateAddress(callersDefault.id, request).data)
+            .isDefault);
 
     AuthContext.set(7L, "USER");
     assertEquals(
-        original.id, ((UserAddressVO) service.updateAddress(original.id, request).data).id);
+        original.id,
+        ((UserAddressVO) service.controller().updateAddress(original.id, request).data).id);
     assertEquals(
         7L,
         fixture.queryForObject(
@@ -293,11 +300,11 @@ class UserGeneratedIdentifierMySqlIT {
       if (line.startsWith("CREATE TABLE IF NOT EXISTS mall_user ")
           || line.startsWith("CREATE TABLE IF NOT EXISTS user_address ")) fixture.execute(line);
     }
-    UserServiceImpl service = service(mapperSession());
-    service.ensureLocalAdmin();
+    UserAccountTestFixture service = service(mapperSession());
+    service.initializer().ensureLocalAdmin();
     Map<String, Object> before =
         fixture.queryForMap("SELECT * FROM mall_user WHERE username='admin'");
-    service(mapperSession()).ensureLocalAdmin();
+    service(mapperSession()).initializer().ensureLocalAdmin();
     assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM mall_user", Integer.class));
     assertEquals(before, fixture.queryForMap("SELECT * FROM mall_user WHERE username='admin'"));
     assertTrue(((Number) before.get("id")).longValue() > 0);
@@ -308,8 +315,8 @@ class UserGeneratedIdentifierMySqlIT {
   @Test
   void unmigratedSchemaFailsBeforeBootstrap() throws Exception {
     createLegacyTables();
-    UserServiceImpl service = service(mapperSession());
-    BizException error = assertThrows(BizException.class, service::ensureLocalAdmin);
+    UserAccountTestFixture service = service(mapperSession());
+    BizException error = assertThrows(BizException.class, service.initializer()::ensureLocalAdmin);
     assertEquals("USER_IDENTIFIER_SCHEMA_INCOMPATIBLE", error.getCode());
     assertEquals(1, fixture.queryForObject("SELECT COUNT(*) FROM mall_user", Integer.class));
     assertEquals(
@@ -353,7 +360,7 @@ class UserGeneratedIdentifierMySqlIT {
     migrate();
     fixture.execute("ALTER TABLE mall_user AUTO_INCREMENT=" + MAX_SAFE_ID);
     int before = fixture.queryForObject("SELECT COUNT(*) FROM mall_user", Integer.class);
-    assertThrows(BizException.class, service(mapperSession())::ensureLocalAdmin);
+    assertThrows(BizException.class, service(mapperSession()).initializer()::ensureLocalAdmin);
     assertEquals(before, fixture.queryForObject("SELECT COUNT(*) FROM mall_user", Integer.class));
   }
 
@@ -376,7 +383,9 @@ class UserGeneratedIdentifierMySqlIT {
       if (staleNullReproduced) {
         SingleConnectionDataSource cachedSource =
             new SingleConnectionDataSource(defaultConnection, true);
-        assertThrows(BizException.class, service(mapperSession(cachedSource))::ensureLocalAdmin);
+        assertThrows(
+            BizException.class,
+            service(mapperSession(cachedSource)).initializer()::ensureLocalAdmin);
       }
       long expectedUserNext = next("mall_user");
       long expectedAddressNext = next("user_address");
@@ -401,9 +410,9 @@ class UserGeneratedIdentifierMySqlIT {
           Connection restarted = restartedPool.getConnection()) {
         assertTrue(physicalConnections.add(queryLong(restarted, "SELECT CONNECTION_ID()")));
         assertEquals(0, queryLong(restarted, "SELECT @@SESSION.information_schema_stats_expiry"));
-        UserServiceImpl initialized = service(mapperSession(restartedPool));
-        initialized.ensureLocalAdmin();
-        initialized.ensureLocalAdmin();
+        UserAccountTestFixture initialized = service(mapperSession(restartedPool));
+        initialized.initializer().ensureLocalAdmin();
+        initialized.initializer().ensureLocalAdmin();
         assertEquals(2, fixture.queryForObject("SELECT COUNT(*) FROM mall_user", Integer.class));
       }
       assertEquals(
@@ -542,12 +551,9 @@ class UserGeneratedIdentifierMySqlIT {
     return new SqlSessionTemplate(factory.getObject());
   }
 
-  private static UserServiceImpl service(SqlSessionTemplate session) {
-    UserServiceImpl service = new UserServiceImpl();
-    ReflectionTestUtils.setField(service, "userMapper", session.getMapper(UserMapper.class));
-    ReflectionTestUtils.setField(
-        service, "userAddressMapper", session.getMapper(UserAddressMapper.class));
-    return service;
+  private static UserAccountTestFixture service(SqlSessionTemplate session) {
+    return UserAccountTestFixture.create(
+        session.getMapper(UserMapper.class), session.getMapper(UserAddressMapper.class));
   }
 
   private long next(String table) {
@@ -598,7 +604,7 @@ class UserGeneratedIdentifierMySqlIT {
   }
 
   private static long identifier(ApiResponse<?> response, String key) {
-    return ((Number) ((Map<?, ?>) response.data).get(key)).longValue();
+    return new ObjectMapper().valueToTree(response.data).get(key).longValue();
   }
 
   private static CredentialsDTO credentials(String username) {
