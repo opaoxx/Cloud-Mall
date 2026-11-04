@@ -6,13 +6,9 @@ import static org.mockito.Mockito.mock;
 
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
-import com.cloudmall.order.feign.CartClient;
-import com.cloudmall.order.feign.ProductClient;
-import com.cloudmall.order.feign.StockClient;
-import com.cloudmall.order.feign.UserClient;
+import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -36,13 +32,8 @@ class OrderListFailureTest {
       return Answers.RETURNS_DEFAULTS.answer(invocation);
     });
     OrderSqlMapper orderSqlMapper = new OrderSqlMapper(jdbcTemplate);
-    OrderServiceImpl orderService = new OrderServiceImpl(
-        mock(StockClient.class),
-        mock(ProductClient.class),
-        mock(UserClient.class),
-        mock(CartClient.class),
-        orderSqlMapper,
-        new ObjectMapper());
+    OrderQueryController orderService =
+        new OrderQueryController(new OrderQueryServiceImpl(orderSqlMapper));
     AuthContext.set(7L, "USER");
 
     assertThrows(
@@ -64,13 +55,8 @@ class OrderListFailureTest {
       }
       return Answers.RETURNS_DEFAULTS.answer(invocation);
     });
-    OrderServiceImpl orderService = new OrderServiceImpl(
-        mock(StockClient.class),
-        mock(ProductClient.class),
-        mock(UserClient.class),
-        mock(CartClient.class),
-        new OrderSqlMapper(jdbcTemplate),
-        new ObjectMapper());
+    OrderQueryController orderService =
+        new OrderQueryController(new OrderQueryServiceImpl(new OrderSqlMapper(jdbcTemplate)));
     AuthContext.set(7L, "USER");
 
     orderService.list(

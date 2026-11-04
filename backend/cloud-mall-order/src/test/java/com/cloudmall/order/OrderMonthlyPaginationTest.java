@@ -17,14 +17,10 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.vo.OrderVO;
-import com.cloudmall.order.feign.CartClient;
-import com.cloudmall.order.feign.ProductClient;
-import com.cloudmall.order.feign.StockClient;
-import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.Arrays;
@@ -158,13 +154,7 @@ class OrderMonthlyPaginationTest {
     return order;
   }
 
-  private static OrderServiceImpl service(OrderSqlMapper mapper) {
-    return new OrderServiceImpl(
-        mock(StockClient.class),
-        mock(ProductClient.class),
-        mock(UserClient.class),
-        mock(CartClient.class),
-        mapper,
-        new ObjectMapper());
+  private static OrderQueryController service(OrderSqlMapper mapper) {
+    return new OrderQueryController(new OrderQueryServiceImpl(mapper));
   }
 }

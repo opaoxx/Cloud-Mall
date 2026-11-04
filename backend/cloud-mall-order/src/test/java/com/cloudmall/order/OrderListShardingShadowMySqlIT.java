@@ -9,6 +9,7 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.order.config.OrderShardingRuleFactory;
+import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.dto.OrderQueryWindow;
 import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
@@ -23,6 +24,7 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
+import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.util.OrderJdbcLocalDateTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1097,8 +1099,7 @@ class OrderListShardingShadowMySqlIT {
     Page physical(String status, int page, int size, String start, String end, Barrier barrier) {
       OrderSqlMapper mapper =
           barrier == null ? new OrderSqlMapper(sql) : new BarrierMapper(sql, barrier);
-      OrderServiceImpl service =
-          new OrderServiceImpl(stock, product, user, cart, mapper, new ObjectMapper());
+      OrderQueryController service = new OrderQueryController(new OrderQueryServiceImpl(mapper));
       return transaction(base, sql, () -> project(service.list(status, page, size, start, end)));
     }
 

@@ -8,12 +8,14 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.controller.OrderController;
+import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.dto.*;
 import com.cloudmall.order.domain.po.*;
 import com.cloudmall.order.domain.vo.*;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.impl.*;
+import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import io.seata.core.context.RootContext;
@@ -667,7 +669,10 @@ class OrderShardingRuntimeMySqlIT {
             JSON.writeValueAsString(controller.get(normal.orderNo).data));
         PageResult<?> page =
             (PageResult<?>)
-                controller.list(
+                runtime
+                    .context
+                    .getBean(OrderQueryController.class)
+                    .list(
                         null,
                         1,
                         20,
@@ -1143,7 +1148,9 @@ class OrderShardingRuntimeMySqlIT {
           OrderOutboxDispatcher.class,
           OrderStockActionRecovery.class,
           SeckillMessageRecovery.class,
-          OrderController.class);
+          OrderController.class,
+          OrderQueryController.class,
+          OrderQueryServiceImpl.class);
       if (simulatedMonth == null) context.register(OrderShardingRuntimeConfiguration.class);
       else
         context.registerBean(
@@ -1232,6 +1239,10 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(fixture.database, actual.getCatalog());
       }
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderQueryController.class)));
+      assertTrue(
+          AopUtils.isAopProxy(
+              context.getBean(com.cloudmall.order.service.OrderQueryService.class)));
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderReservationIntentService.class)));
       write(
           path.resolve("bean-graph.json"),

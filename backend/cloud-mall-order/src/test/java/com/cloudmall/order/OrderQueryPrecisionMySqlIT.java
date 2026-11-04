@@ -1,19 +1,14 @@
 package com.cloudmall.order;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.mock;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
-import com.cloudmall.order.feign.CartClient;
-import com.cloudmall.order.feign.ProductClient;
-import com.cloudmall.order.feign.StockClient;
-import com.cloudmall.order.feign.UserClient;
+import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -51,7 +46,7 @@ class OrderQueryPrecisionMySqlIT {
   private JdbcTemplate fixture;
 
   /** 真实订单服务。 */
-  private OrderServiceImpl service;
+  private OrderQueryController service;
 
   /** 真实 Repeatable Read、read-only 事务模板。 */
   private TransactionTemplate transaction;
@@ -77,14 +72,7 @@ class OrderQueryPrecisionMySqlIT {
     fixture = new JdbcTemplate(dataSource);
     createTables();
     seedRows();
-    service =
-        new OrderServiceImpl(
-            mock(StockClient.class),
-            mock(ProductClient.class),
-            mock(UserClient.class),
-            mock(CartClient.class),
-            new OrderSqlMapper(fixture),
-            new ObjectMapper());
+    service = new OrderQueryController(new OrderQueryServiceImpl(new OrderSqlMapper(fixture)));
     transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
     transaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
     transaction.setReadOnly(true);

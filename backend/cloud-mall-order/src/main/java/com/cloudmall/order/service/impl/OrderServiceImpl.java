@@ -11,7 +11,6 @@ import com.cloudmall.order.config.SeckillSentinelConfiguration;
 import com.cloudmall.order.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
 import com.cloudmall.order.domain.dto.OrderItemDTO;
-import com.cloudmall.order.domain.dto.OrderQueryWindow;
 import com.cloudmall.order.domain.dto.SeckillOrderDTO;
 import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.domain.po.OrderItemPO;
@@ -33,6 +32,7 @@ import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
 import com.cloudmall.order.util.OrderCreationTime;
+import com.cloudmall.order.util.OrderSummaryAssembler;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -54,8 +54,6 @@ import org.slf4j.MDC;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DataAccessException;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -63,7 +61,7 @@ import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class OrderServiceImpl implements OrderService {
-  /** 跨月订单查询失败及错月数据的诊断日志。 */
+  /** 订单创建、购物车提交后清理等剩余业务流程的诊断日志。 */
   private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
 
   /** 既有订单/明细DECIMAL(18,2)非负数值容量上界；不表示商业限额或账户可支付余额。 */
@@ -474,104 +472,6 @@ public class OrderServiceImpl implements OrderService {
   private static void requireExactIdempotencyKey(String requestedKey, String storedKey) {
     if (!Objects.equals(requestedKey, storedKey)) {
       throw new BizException(ErrorCodes.DUPLICATE, "Idempotency-Key与已有请求不完全一致", 409);
-    }
-  }
-
-  /** 按上海时间路由月表，在同一数据库快照内计数和读取有界结果页。 */
-  @GetMapping("/orders")
-  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-  public ApiResponse<?> list(
-      @RequestParam(required = false) String status,
-      @RequestParam(defaultValue = "1") int page,
-      @RequestParam(defaultValue = "20") int pageSize,
-      @RequestParam(required = false) String startTime,
-      @RequestParam(required = false) String endTime) {
-    // 1. 规范化请求时间和分页参数，避免其他 offset 的月初时间路由错表。
-    long userId = AuthContext.requireUserId();
-    page = Math.max(1, page);
-    pageSize = Math.min(Math.max(1, pageSize), 100);
-    OrderQueryWindow window = OrderQueryWindow.from(startTime, endTime, now());
-    if (window.isEmpty()) {
-      return ApiResponse.ok(new PageResult<OrderVO>(List.of(), page, pageSize, 0));
-    }
-    long offset;
-    try {
-      offset = Math.multiplyExact((long) page - 1L, (long) pageSize);
-    } catch (ArithmeticException invalidPage) {
-      throw new BizException(ErrorCodes.INVALID, "页码超出支持范围", 400);
-    }
-    java.sql.Timestamp rangeStart = ts(window.getStart());
-    java.sql.Timestamp rangeEnd = ts(window.getEnd());
-    YearMonth firstMonth = window.getFirstMonth();
-    YearMonth lastMonth = window.getLastMonth();
-
-    // 2. 逐月计数；任何一个月的读取失败都会让整次查询失败，不返回部分结果。
-    Map<YearMonth, Long> monthlyCounts = new LinkedHashMap<>();
-    long total = 0;
-    for (YearMonth month = lastMonth; !month.isBefore(firstMonth); month = month.minusMonths(1)) {
-      String tableName = "mall_order_" + month.format(MONTH);
-      try {
-        long monthCount =
-            orderSqlMapper.countOrders(tableName, userId, rangeStart, rangeEnd, status);
-        monthlyCounts.put(month, monthCount);
-        total = Math.addExact(total, monthCount);
-      } catch (DataAccessException | ArithmeticException countFailure) {
-        throw unavailableOrderMonth(month, countFailure);
-      }
-    }
-
-    // 3. 按月倒序跳过整月，只从目标页涉及的月表读取有界 LIMIT/OFFSET。
-    List<OrderVO> items = new ArrayList<>(pageSize);
-    if (offset < total) {
-      long remainingOffset = offset;
-      for (Map.Entry<YearMonth, Long> monthCount : monthlyCounts.entrySet()) {
-        if (remainingOffset >= monthCount.getValue()) {
-          remainingOffset -= monthCount.getValue();
-          continue;
-        }
-        YearMonth month = monthCount.getKey();
-        String tableName = "mall_order_" + month.format(MONTH);
-        int limit =
-            (int) Math.min((long) pageSize - items.size(), monthCount.getValue() - remainingOffset);
-        List<Map<String, Object>> rows;
-        try {
-          rows =
-              orderSqlMapper.findOrderPage(
-                  tableName, userId, rangeStart, rangeEnd, status, remainingOffset, limit);
-        } catch (DataAccessException pageFailure) {
-          throw unavailableOrderMonth(month, pageFailure);
-        }
-        if (rows.size() != limit) {
-          throw unavailableOrderMonth(
-              month,
-              new IllegalStateException("月表页结果数量与同一快照内的 COUNT 不一致: " + rows.size() + "/" + limit));
-        }
-        for (Map<String, Object> row : rows) {
-          requireCorrectOrderMonth(row, month);
-          items.add(view(row));
-        }
-        remainingOffset = 0;
-        if (items.size() == pageSize) break;
-      }
-    }
-    return ApiResponse.ok(new PageResult<>(items, page, pageSize, total));
-  }
-
-  /** 月表缺失、查询失败或分片数据异常时只返回明确失败。 */
-  private static BizException unavailableOrderMonth(YearMonth month, RuntimeException failure) {
-    log.error("订单月表查询失败，month={}", month, failure);
-    return new BizException("ORDER_QUERY_SHARD_UNAVAILABLE", "订单列表暂不可用，请稍后重试", 503);
-  }
-
-  /** 发现目标页中的错月订单时拒绝按月份拼接出错误顺序。 */
-  private static void requireCorrectOrderMonth(Map<String, Object> row, YearMonth month) {
-    Object createdAt = row.get("created_at");
-    LocalDateTime createdLocal =
-        createdAt instanceof java.sql.Timestamp timestamp
-            ? timestamp.toLocalDateTime()
-            : createdAt instanceof LocalDateTime localDateTime ? localDateTime : null;
-    if (createdLocal == null || !YearMonth.from(createdLocal).equals(month)) {
-      throw unavailableOrderMonth(month, new IllegalStateException("订单行的 created_at 不属于所在月表"));
     }
   }
 
@@ -1133,7 +1033,7 @@ public class OrderServiceImpl implements OrderService {
     if (orderRows.isEmpty() || !Objects.equals(orderNo, orderRows.get(0).get("order_no")))
       throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
     // 3. 身份有效后保持原视图和明细顺序，调用方继续原鉴权与业务流程。
-    List<OrderVO> orders = orderRows.stream().map(this::view).toList();
+    List<OrderVO> orders = orderRows.stream().map(OrderSummaryAssembler::fromRow).toList();
     OrderVO order = orders.get(0);
     order.items =
         orderSqlMapper
@@ -1217,23 +1117,6 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 将订单数据库行转换为订单响应视图。 */
-  private OrderVO view(Map<String, Object> row) {
-    // 1. 接收并整理 view 的业务请求。
-    // 2. 执行 view 的核心业务校验与状态处理。
-    // 3. 返回 view 的处理结果。
-    OrderVO order = new OrderVO();
-    order.orderNo = String.valueOf(row.get("order_no"));
-    order.userId = ((Number) row.get("user_id")).longValue();
-    order.status = String.valueOf(row.get("status"));
-    order.totalAmount = (BigDecimal) row.get("total_amount");
-    order.payAmount = (BigDecimal) row.get("pay_amount");
-    order.addressSnapshot = String.valueOf(row.get("address_snapshot"));
-    order.createdAt = timestamp(row.get("created_at"));
-    order.expireAt = timestamp(row.get("expire_at"));
-    return order;
-  }
-
   /** 将订单明细数据库行转换为明细响应视图。 */
   private OrderItemVO viewItem(Map<String, Object> row) {
     return new OrderItemVO(
@@ -1244,20 +1127,6 @@ public class OrderServiceImpl implements OrderService {
         (BigDecimal) row.get("unit_price"),
         ((Number) row.get("quantity")).intValue(),
         (BigDecimal) row.get("line_amount"));
-  }
-
-  /** 将数据库时间值格式化为 API 使用的 ISO-8601 时间。 */
-  private static String timestamp(Object value) {
-    if (value == null) {
-      return null;
-    }
-    if (value instanceof java.sql.Timestamp timestamp) {
-      return timestamp.toInstant().atOffset(ZoneOffset.ofHours(8)).toString();
-    }
-    if (value instanceof java.time.LocalDateTime localDateTime) {
-      return localDateTime.atOffset(ZoneOffset.ofHours(8)).toString();
-    }
-    return String.valueOf(value);
   }
 
   /** 执行 table 相关操作。 */

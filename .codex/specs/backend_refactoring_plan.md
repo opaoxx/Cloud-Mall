@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，Order已完成Seata演练切片，主业务拆分待继续；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，Order已完成Seata演练和跨月列表查询切片，详情/支付状态与写业务拆分待继续；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练语义命名及代理边界切片完成，见第23节；主业务拆分待继续 |
+| Order | 进行中 | Seata演练、跨月列表查询切片完成，见第23至24节；详情/支付状态、写业务与消息职责待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1283,13 +1283,13 @@ git revert refactor/order-seata-complete-20261104
 | consumeSeckill / consumeTimeout(Message) | Rabbit入口 + REQUIRED | 保持 |
 | consumeTimeout(String) | REQUIRED，Message重载内部自调用沿已有事务 | 保持 |
 
-选择列表为本轮唯一业务切片：五个方法 `list/unavailableOrderMonth/requireCorrectOrderMonth/view/timestamp` 只服务列表，能够整体迁移且不增加共享业务包装。原OrderController及OrderServiceImpl暂保留其他入口，空OrderService会随后续写职责拆分移除；这是阶段状态而非最终分层目标。
+选择列表为本轮唯一业务切片：`list/unavailableOrderMonth/requireCorrectOrderMonth` 独立迁移；`view/timestamp` 是列表及原find共享的行映射。首次编译发现find中的 `stream.map(this::view)`，纠正前期仅检索view(...)造成的遗漏：两映射方法统一提取到无状态 `util.OrderSummaryAssembler`，不复制算法。原OrderController及OrderServiceImpl暂保留其他入口，空OrderService会随后续写职责拆分移除；这是阶段状态而非最终分层目标。
 
 ### 24.2 变更清单与契约
 
 - 新增 `controller.OrderQueryController`：唯一承接原 `GET /api/orders`，保留status/startTime/endTime可选、page默认1/pageSize默认20、参数名称和类型。构造器注入 `service.OrderQueryService`；读取可空AuthContext.userId并显式传入，Service代理返回后再构造ApiResponse。
 - 新增 `service.OrderQueryService.list(Long callerUserId,String status,int page,int pageSize,String startTime,String endTime)`，返回 `PageResult<OrderVO>`。不引入新的HTTP参数或前端字段。
-- 新增 `service.impl.OrderQueryServiceImpl`：构造器仅依赖OrderSqlMapper，承接上述五方法；原view改名 `toOrderSummary`、timestamp改名 `formatTimestamp`。原MONTH格式保持，时间窗口仍一次性使用上海偏移now；ts转换直接调用原Timestamp.from(...toInstant())，不引入新时钟或时区规则。
+- 新增 `service.impl.OrderQueryServiceImpl`：构造器仅依赖OrderSqlMapper，承接上述三个列表方法；共享 `util.OrderSummaryAssembler.fromRow` 承接原view，私有formatTimestamp承接原timestamp。原find只将this::view换为OrderSummaryAssembler::fromRow，保持读取顺序和明细装配。原MONTH格式保持，时间窗口仍一次性使用上海偏移now；ts转换直接调用原Timestamp.from(...toInstant())，不引入新时钟或时区规则。
 - 列表readOnly/RR仍在Service方法上，所有月份COUNT/目标页读取属于同一次事务。传入身份在事务内原第一步判空，保持UNAUTHORIZED/401及“请先登录”，再执行原分页/窗口验证；不把认证失败提前到事务开启之前。Controller只读取身份，不提前调用requireUserId。
 - 原list从OrderServiceImpl移除，不留转发方法，原OrderController不再继承此GET。其余方法、事务、同步锁、业务依赖、Mapper、DTO/VO和资源配置不改。列表日志使用新实现类身份，其他业务日志保持原类。
 - 保持月份倒序、完整COUNT、long偏移、DATETIME(3)向上取整、同一快照、空窗口无SQL、目标页有界读取、错月/缺页/缺表503、用户隔离和status原值。保持金额BigDecimal字符串、地址String.valueOf(null)语义、时间null、items=[]；不新增明细查询。
@@ -1307,4 +1307,38 @@ git revert refactor/order-seata-complete-20261104
 
 ### 24.4 实施结果
 
-待实施验证。后续再细化单订单读取/支付状态及写业务/消息职责。
+本轮完成独立OrderQueryController、OrderQueryService、OrderQueryServiceImpl，以及列表/详情共用的OrderSummaryAssembler。主混合实现由1319行减至1188行，移除列表HTTP方法和五个原辅助/业务方法；原详情仅替换共享映射方法引用。新查询实现没有ApiResponse或AuthContext字节码依赖，不依赖Feign、消息或其他写服务。
+
+调用链为 `GET /api/orders → OrderQueryController读取可空身份 → OrderQueryService事务代理(readOnly/RR) → 原身份/分页/时间窗口规则 → OrderSqlMapper逐月COUNT和有界PAGE → OrderSummaryAssembler → 事务成功返回 → ApiResponse包装`。原详情仍沿 `find → 原订单号精确证明 → OrderSummaryAssembler → 明细查询`，没有增加事务或调整鉴权顺序。
+
+基线Common25、Order306单测及18项MySQL/分片测试通过。实施中两处编译问题已修正并记录：遗漏this::view方法引用导致初始映射归属判断不完整，已修正为共享纯映射；新增并发夹具覆盖Mapper时错误收窄Object为Timestamp，已恢复原签名，不改生产Mapper。最终验证如下。
+
+| 范围 | 测试数 | 验证内容 |
+| --- | ---: | --- |
+| Common单测 | 25 | 既有公共契约 |
+| Order单测 | 310 | 原306项及新增MVC/真实事务拦截器4项，包含唯一GET路由、默认参数、金额/null、认证顺序、提交失败 |
+| OrderQueryPrecisionMySqlIT | 7 | 实际MySQL毫秒/纳秒窗口、offset、分页、缺月和用户隔离 |
+| OrderListShardingShadowMySqlIT | 8 | 原物理/逻辑影子、只读快照、详情及恢复边界 |
+| OrderShardingRuntimeMySqlIT | 3 | 实际生产Bean选择、分片启动与冷发布；新查询Service及原写Controller代理同时核验 |
+| OrderQuerySnapshotMySqlIT | 1 | 新Controller调用真实Service代理，COUNT后独立事务改状态并插入两单，当前页保持旧快照、下一次查询看到新事实 |
+| 合计 | 354 | 64个测试类，0失败、0错误、0跳过 |
+
+并发用例同时核对COUNT/PAGE的MySQL连接ID、JDBC autoCommit=false/readOnly=true/REPEATABLE_READ和Spring事务标记；第二用户数据不可见。新增HTTP用例通过项目金额序列化与异常处理器核对金额字符串、地址字符串null、显式null时间及空明细；原Controller和新Controller一起注册，确认没有重复GET映射。
+
+五个迁移方法体在声明的身份参数、HTTP包装、共享映射及等价时间调用变换下逐token一致；主实现其余内容逐token一致。其他84个生产/资源文件与83个原测试文件哈希保持，六个适配测试文件保留原方法。13个变更Java文件按新增全文件、既有变更行/import执行Google Java Format，diff检查通过。Order打包、八模块test-compile通过；Jar四个新类型齐全，无测试夹具，旧混合类字节码不再有list/view/timestamp方法。
+
+新实验MySQL8.0.46/19940使用独立新卷；所有UUID库清理完成，七张来源表逐表精确0行。基线与最终的四份native class-finish均created=deleted、errors为空、无preserveRequired；402份本轮新增native工件已复制并核对SHA，原工件保留。实验容器和网络移除，新mysql_data卷保留。日志、64份报告、Jar摘要、源代码对照和数据库验证见 `target/backend-refactor-20261104/order-query/verification.json` 及同目录。
+
+本轮没有启动真实TC/MQ服务，没有执行完整商城或性能测试。Order其余Controller继承关系及写/消息业务仍待后续切片，不宣称模块整体完成。
+
+### 24.5 回退与后续
+
+方案提交/基线 `6ec924cc`，标签 `refactor/order-query-baseline-20261104`；阶段完成标签 `refactor/order-query-complete-20261104`。临时Git index已验证逆补丁恢复父树，真实工作树/index未回退。
+
+```powershell
+git revert refactor/order-query-complete-20261104
+```
+
+仅回退本轮查询/共享映射提取，保留Order Seata及之前模块成果。实际回退后精确移除新增四类型和两个测试类（含嵌套类）的class残留再编译，保留target历史证据；Git不回退数据库或忽略工件。有后续依赖提交时先处理依赖/冲突，不使用reset --hard。
+
+下一步先细化单订单详情和支付状态只读查询：重点保留“先查订单、再读身份”的失败顺序、原库存动作证明/Feign降级和无新增RR保证；随后再分离创建、状态迁移与消息消费，显式维持原共享同步锁及事务边界。

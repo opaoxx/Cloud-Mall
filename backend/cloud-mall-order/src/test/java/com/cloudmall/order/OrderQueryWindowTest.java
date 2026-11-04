@@ -7,11 +7,11 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.order.config.MonthlyOrderShardingAlgorithm;
+import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.dto.OrderQueryWindow;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import com.google.common.collect.Range;
 import java.time.OffsetDateTime;
 import java.time.YearMonth;
@@ -119,14 +119,7 @@ class OrderQueryWindowTest {
   @Test
   void emptyWindowReturnsUsualPaginationWithoutCallingMapper() {
     OrderSqlMapper mapper = mock(OrderSqlMapper.class);
-    OrderServiceImpl service =
-        new OrderServiceImpl(
-            mock(StockClient.class),
-            mock(ProductClient.class),
-            mock(UserClient.class),
-            mock(CartClient.class),
-            mapper,
-            new ObjectMapper());
+    OrderQueryController service = new OrderQueryController(new OrderQueryServiceImpl(mapper));
     try {
       AuthContext.set(7L, "USER");
       PageResult<?> page =
