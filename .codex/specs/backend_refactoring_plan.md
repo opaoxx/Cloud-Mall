@@ -850,3 +850,52 @@ git revert --no-edit $userTccCommit
 反向补丁在临时Git索引中核对，源码应精确回到9e4fd741；真实工作区和索引保持当前验收版本。该检查只证明源码回退，不是运行态回滚。实际回退后按moves.json清理新包内过期class，并核对本次新增UserImplementationGroupingTest及其嵌套class，再编译和回归；不删除历史target证据。模块完成标签表示当前通过点，撤销全部User重构需按三个实现切片逆序处理依赖。
 
 下一模块为Stock：先盘点普通库存查询/预扣/确认/回滚、秒杀配额与恢复职责，以及Cm18演练类的实际调用和Mapper映射。细化命名与兼容清单、记录基线后再修改；继续保留Git阶段回退点。本会话单Agent约束仍有效。
+
+## 19. Stock 第一切片：Seata 演练语义命名与隔离边界
+
+### 19.1 范围、顺序与基线
+
+源基线为 `418cd0d0`（User完成点）。主Agent按本会话约定独立评审和执行，不启用子Agent，不改变持久协作规则。已读AGENTS、README、Bug台账以及Seata全局事务、Stock依赖保护、普通流水/快照证明规格。原Common25、Stock185单测全部通过。
+
+盘点确认StockController仍继承约1034行StockServiceImpl，空StockService未表达业务契约；普通数量查询、预扣/确认/回滚、持久状态证明、秒杀受理混合。其事务代理、Sentinel切面、独立claim与提交后Redis清理必须在下一切片一起拆分。本切片先按第7节顺序完成独立演练命名与归组，不混入普通库存/秒杀状态机变化。
+
+后续Stock切片顺序：①本节演练命名；②组合Controller及普通库存查询/预扣接口、共享原请求证明和秒杀受理入口拆分；③缓存核对、秒杀结算、outbox与恢复归组。②须在实现前进一步登记全部方法归属和事务/鉴权次序，不能套用泛化Service模板。
+
+### 19.2 精确迁移清单
+
+包根仍为 `com.cloudmall.stock`，启动类、MapperScan范围、依赖版本不变。
+
+| 原类型 | 新类型 |
+| --- | --- |
+| config.Cm18SeataStockConfiguration | config.SeataStockDemoConfiguration |
+| config.Cm18SeataXidBindingFilter | config.SeataStockXidBindingFilter |
+| controller.Cm18SeataStockDemoController | controller.SeataStockDemoController |
+| domain.dto.Cm18SeataBranchDTO | domain.dto.SeataStockBranchDTO |
+| domain.vo.Cm18SeataBranchVO | domain.vo.SeataStockBranchVO |
+| domain.po.Cm18SeataStockDemoPO | domain.po.SeataStockDemoPO |
+| mapper.Cm18SeataStockDemoMapper | mapper.SeataStockDemoMapper |
+| service.Cm18SeataStockDemoService | service.SeataStockDemoService |
+| service.Cm18SeataStockDemoOrchestrator | service.SeataStockDemoOrchestrator |
+| service.impl.Cm18SeataStockDemoServiceImpl | service.impl.seata.SeataStockDemoServiceImpl |
+| service.impl.Cm18SeataStockDemoOrchestratorImpl | service.impl.seata.SeataStockDemoOrchestratorImpl |
+
+现有 `Cm18SeataStockDemoTest` 同步改名为 `SeataStockDemoTest`。新增包说明解释本地分支与事务外编排关系；仅类型和装配表达调整，执行算法逐词核对。
+
+### 19.3 冻结契约与运行陷阱
+
+- 路径仍为 `/api/internal/cm18/seata/demo/branch`，内部Header、TX_XID、失败点、`cm18-`事务号、错误码/错误文本、JSON字段和XID摘要均保持。CM18在这些位置是已有协议标识，不能全仓替换。
+- `@Profile("!prod")`、`cloudmall.seata.cm18.enabled`、暂停配置及0–30000ms范围保持；默认关闭与prod禁用仍不创建演练入口/Filter/服务。
+- Controller、Configuration、Filter、Mapper以及两服务沿用原Spring Bean名，类型改名后通过显式组件/Bean名称保留。Mapper仍使用BaseMapper，PO表/字段/主键映射保持 `seata_cm18_stock_demo`；不改SQL/DDL。
+- 两实现放入 `service.impl.seata`。`StockDependencyAspect` 原 `!within(...impl.Cm18*)` 必须改为明确的 `!within(...impl.seata..*)`。真实Spring AOP断言演练begin/commit/rollback不进入库存业务熔断，普通库存事务仍被完整保护。
+- 编排调用独立事务代理，`STOCK_AFTER_WRITE`仍发生在本地分支提交之后；不把编排也加事务、不在同类调用中丢失代理。保留XID Filter绑定、同XID嵌套、不一致拒绝和finally清理语义。
+- Order自己的DTO/VO和Feign方法本轮不改；它们以JSON/HTTP对接，不依赖Stock Java类型。通过Order现有演练测试和八模块编译核对。
+
+### 19.4 验证、证据与回退
+
+先提交本节并打 `refactor/stock-seata-baseline-20261104`，再实施迁移。新增装配/HTTP/Filter/事务测试覆盖默认关闭、prod拒绝、开启后的原Bean名、原JSON与Header、XID清理、真实事务代理与切面排除。使用独立Compose项目和全新MySQL卷验证真实Mapper namespace/表映射、本地提交、异常回滚及分支提交后故障；不借用默认业务库。
+
+实验基于 `deploy/experiments/compose.yml`，项目名 `cloud-mall-refactor-stock-seata-20261104`，localhost MySQL端口19932，独立网段10.254.245.0/24，使用前检查冲突；凭据root/root。测试只创建UUID schema，清理自己的schema，归档容器信息/日志后down并保留卷。未启用真实TC时必须把该验收明确标为本地事务验证，不宣称AT二阶段或RM恢复已经重跑。
+
+全Stock单测、相关Order演练测试、Stock打包与八模块test-compile为本切片门槛。Google Java Format与git diff --check通过；只清理目标目录内旧类名对应的class文件，保留历史实验数据。源码与新增测试、方案按阶段提交，建立完成标签；用临时Git index验证逆补丁回到父提交，不修改真实工作树。Git回退不覆盖数据库、Redis或忽略的证据目录。
+
+证据写入 `target/backend-refactor-20261104/stock-seata/`。本节验收只表示Stock演练命名切片完成，Stock整体及普通业务拆分仍待后续任务。
