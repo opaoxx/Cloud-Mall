@@ -12,7 +12,6 @@ import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
@@ -85,9 +84,9 @@ class SeckillSettlementWriteIdentityTest {
               assertThrows(BizException.class, () -> service.settle(ORDER_NO, action))
                   .getHttpStatus());
         } else {
-          Map<?, ?> response = (Map<?, ?>) service.settle(ORDER_NO, action).data;
-          if ("CONFIRM".equals(action)) assertEquals(true, response.get("confirmed"));
-          else assertEquals("RELEASED".equals(state), response.get("rolledBack"));
+          var response = service.settle(ORDER_NO, action);
+          if ("CONFIRM".equals(action)) assertEquals(true, response.confirmed);
+          else assertEquals("RELEASED".equals(state), response.rolledBack);
         }
         verifyNoInteractions(stock);
       }

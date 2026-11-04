@@ -337,7 +337,7 @@ class SeckillLegacySkuExactMySqlIT {
   /** 未注入主settlement服务的既有兼容fallback，仍必须保持原字段身份精确。 */
   private static StockReservationVO bareRead() {
     return (StockReservationVO)
-        StockTestServices.reader(mapper, new ObjectMapper()).reservation(ORDER_NO).data;
+        StockTestServices.reader(mapper, new ObjectMapper()).reservation(ORDER_NO);
   }
 
   @Test
@@ -1014,7 +1014,7 @@ class SeckillLegacySkuExactMySqlIT {
 
   /** 原生产GET，任何数据库异常都不得当作终态证据。 */
   private static StockReservationVO read() {
-    return (StockReservationVO) service.reservation(ORDER_NO).data;
+    return (StockReservationVO) service.reservation(ORDER_NO);
   }
 
   /** 所有被测SQL只允许无锁SELECT。 */

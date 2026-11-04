@@ -1,5 +1,6 @@
 package com.cloudmall.stock;
 
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -59,13 +60,11 @@ class SeckillReliabilityTest {
         .thenReturn(acceptedRow);
     when(mapper.findSeckillOutboxByOrderNo(orderNo)).thenReturn(null);
 
-    Map<?, ?> data =
-        (Map<?, ?>)
-            service.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId()).data;
+    var data = service.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId());
 
-    assertEquals(Boolean.FALSE, data.get("accepted"));
-    assertEquals("RECOVERY_REQUIRED", data.get("reservationStatus"));
-    assertEquals("ORDER_RECOVERY_PENDING", data.get("status"));
+    assertEquals(Boolean.FALSE, data.accepted);
+    assertEquals("RECOVERY_REQUIRED", data.reservationStatus);
+    assertEquals("ORDER_RECOVERY_PENDING", data.status);
   }
 
   @Test
@@ -210,12 +209,12 @@ class SeckillReliabilityTest {
         SeckillReservationServiceImpl.class.getDeclaredMethod(
             "acceptAfterLua", long.class, String.class, String.class, String.class, String.class);
     acceptAfterLua.setAccessible(true);
-    com.cloudmall.common.api.ApiResponse<?> response =
-        (com.cloudmall.common.api.ApiResponse<?>)
+    com.cloudmall.stock.domain.vo.SeckillAcceptanceVO response =
+        (com.cloudmall.stock.domain.vo.SeckillAcceptanceVO)
             acceptAfterLua.invoke(service, 34L, "race-key", orderNo, "{}", hash);
-    Map<?, ?> data = (Map<?, ?>) response.data;
+    var data = response;
 
-    assertEquals(Boolean.TRUE, data.get("accepted"));
+    assertEquals(Boolean.TRUE, data.accepted);
     verify(redis, times(0)).execute(any(), any(), any(Object[].class));
   }
 

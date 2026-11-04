@@ -36,7 +36,7 @@ class SeckillReservationOrderIdentityTest {
               var primary = new SeckillQuotaSettlementService(settlements, stocks);
               var outer = StockTestServices.reader(stocks, new ObjectMapper());
               ReflectionTestUtils.setField(outer, "seckillSettlementService", primary);
-              assertUnknown((StockReservationVO) outer.reservation(ORDER_NO).data);
+              assertUnknown((StockReservationVO) outer.reservation(ORDER_NO));
               verifyNoInteractions(stocks);
               verify(settlements).findSettlement(ORDER_NO);
               verifyNoMoreInteractions(settlements);
@@ -72,7 +72,7 @@ class SeckillReservationOrderIdentityTest {
             var stocks = mock(StockSqlMapper.class);
             when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(legacy("202610PROOF1", state));
             var outer = StockTestServices.reader(stocks, new ObjectMapper());
-            assertUnknown((StockReservationVO) outer.reservation(ORDER_NO).data);
+            assertUnknown((StockReservationVO) outer.reservation(ORDER_NO));
             verify(stocks).findSeckillByOrderNo(ORDER_NO);
             verifyNoMoreInteractions(stocks);
           });
@@ -107,7 +107,7 @@ class SeckillReservationOrderIdentityTest {
     when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(legacy(ORDER_NO, "ACCEPTED"));
     assertEquals("RESERVED", primary.reservation(ORDER_NO).status);
     var outer = StockTestServices.reader(stocks, new ObjectMapper());
-    assertEquals("RESERVED", ((StockReservationVO) outer.reservation(ORDER_NO).data).status);
+    assertEquals("RESERVED", ((StockReservationVO) outer.reservation(ORDER_NO)).status);
   }
 
   @Test

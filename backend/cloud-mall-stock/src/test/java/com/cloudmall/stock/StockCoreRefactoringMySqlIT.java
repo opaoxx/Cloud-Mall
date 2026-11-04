@@ -146,14 +146,14 @@ class StockCoreRefactoringMySqlIT {
       assertEquals(
           "RESERVED",
           ((com.cloudmall.stock.domain.vo.StockReservationVO)
-                  service.reserve(request("core-reserve", 7, 2)).data)
+                  service.reserve(request("core-reserve", 7, 2)))
               .status);
       assertNotEquals(claimConnection.get(), writeConnection.get());
       assertEquals(writeConnection.get(), proofConnection.get());
       assertEquals(
           "ALREADY_RESERVED",
           ((com.cloudmall.stock.domain.vo.StockReservationVO)
-                  service.reserve(request("core-reserve", 7, 2)).data)
+                  service.reserve(request("core-reserve", 7, 2)))
               .status);
       assertEquals(8, fixture.quantity(7));
       assertEquals(1, fixture.count("stock_flow"));

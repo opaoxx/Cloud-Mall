@@ -12,7 +12,6 @@ import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
@@ -78,9 +77,9 @@ class SeckillReleasedReceiptEvidenceTest {
       assertEquals("ROLLED_BACK", result.status);
       assertEquals(1, result.items.size());
       assertEquals(20L, result.items.get(0).skuId);
-      var replay = (Map<?, ?>) service.settle(ORDER_NO, "ROLLBACK").data;
-      assertEquals(true, replay.get("rolledBack"));
-      assertEquals(true, replay.get("idempotent"));
+      var replay = service.settle(ORDER_NO, "ROLLBACK");
+      assertEquals(true, replay.rolledBack);
+      assertEquals(true, replay.idempotent);
       assertEquals(
           409,
           assertThrows(BizException.class, () -> service.settle(ORDER_NO, "CONFIRM"))
@@ -130,7 +129,7 @@ class SeckillReleasedReceiptEvidenceTest {
             "CONFLICT".equals(state) || "unrecognized".equals(state) ? 0 : 1, result.items.size());
       }
     when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(row("CONFIRMED", null));
-    assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "CONFIRM").data).get("confirmed"));
+    assertEquals(true, (service.settle(ORDER_NO, "CONFIRM")).confirmed);
   }
 
   /** 覆盖 SQL BIGINT 域内可持久化但不可能由原 Lua 返回的回执。 */

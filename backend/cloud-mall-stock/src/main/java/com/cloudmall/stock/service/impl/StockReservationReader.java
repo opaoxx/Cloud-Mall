@@ -2,7 +2,6 @@ package com.cloudmall.stock.service.impl;
 
 import static com.cloudmall.stock.service.impl.StockReservationSnapshotCodec.sha256;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.vo.StockReservationItemVO;
@@ -50,46 +49,45 @@ public class StockReservationReader {
   }
 
   /** 只读查询原订单预扣事实；缺证保守返回UNKNOWN，不新增事务。 */
-  public ApiResponse<StockReservationVO> reservation(String orderNo) {
+  public StockReservationVO reservation(String orderNo) {
     // 1. 优先核对秒杀结算与旧受理台账，任何非空候选都不能落普通库存分支。
     if (seckillSettlementService != null) {
       StockReservationVO seckillResult = seckillSettlementService.reservation(orderNo);
-      if (seckillResult != null) return ApiResponse.ok(seckillResult);
+      if (seckillResult != null) return seckillResult;
     }
     Map<String, Object> seckillFact = stockSqlMapper.findSeckillByOrderNo(orderNo);
     if (seckillFact != null && !seckillFact.isEmpty()) {
       // 原CI候选必须属于请求原订单；错身份不能改为NOT_FOUND或落普通路径。
       if (!Objects.equals(orderNo, seckillFact.get("order_no")))
-        return ApiResponse.ok(unknownReservationProof(orderNo));
+        return unknownReservationProof(orderNo);
       // 原SKU必须无损正long；坏legacy字段只能缺证，不能保留REJECTED或伪造明细。
       long legacySkuId;
       try {
         legacySkuId = exactReservationNumber(seckillFact.get("sku_id")).longValueExact();
-        if (legacySkuId <= 0) return ApiResponse.ok(unknownReservationProof(orderNo));
+        if (legacySkuId <= 0) return unknownReservationProof(orderNo);
       } catch (IllegalArgumentException | ArithmeticException invalidIdentity) {
-        return ApiResponse.ok(unknownReservationProof(orderNo));
+        return unknownReservationProof(orderNo);
       }
       // 与主legacy读共用原维度门；缺证不回显SKU或保留REJECTED等已知状态。
       if (!SeckillAcceptanceDimensions.hasValidContext(seckillFact))
-        return ApiResponse.ok(unknownReservationProof(orderNo));
+        return unknownReservationProof(orderNo);
       String acceptedStatus = String.valueOf(seckillFact.get("status"));
       // 历史未受支持状态不能公开原SKU；保留非null候选以阻止普通库存fallback。
       if (!"ACCEPTED".equals(acceptedStatus) && !"REJECTED".equals(acceptedStatus))
-        return ApiResponse.ok(unknownReservationProof(orderNo));
+        return unknownReservationProof(orderNo);
       String status =
           "ACCEPTED".equals(acceptedStatus)
               ? "RESERVED"
               : ("REJECTED".equals(acceptedStatus) ? "REJECTED" : "UNKNOWN");
       // 只读兼容存量台账；GET 不补表、不造回执，也不猜测最终结算。
-      return ApiResponse.ok(
-          new StockReservationVO(
-              orderNo, status, List.of(new StockReservationItemVO(legacySkuId, 1, status))));
+      return new StockReservationVO(
+          orderNo, status, List.of(new StockReservationItemVO(legacySkuId, 1, status)));
     }
     // 2. 读取普通请求和完整流水，保留原非RR观察与缺证语义。
     Map<String, Object> requestRow = stockSqlMapper.findReservationRequest(orderNo);
     List<Map<String, Object>> rows = stockSqlMapper.findReservationFlows(orderNo);
     if ((rows == null || rows.isEmpty()) && requestRow == null) {
-      return ApiResponse.ok(new StockReservationVO(orderNo, "NOT_FOUND", List.of()));
+      return new StockReservationVO(orderNo, "NOT_FOUND", List.of());
     }
     if (rows == null || rows.isEmpty()) {
       String requestStatus = String.valueOf(requestRow.get("status"));
@@ -98,13 +96,12 @@ public class StockReservationReader {
           || "ROLLED_BACK".equals(requestStatus)) {
         throw new IllegalStateException("库存请求状态与持久流水不一致: " + orderNo);
       }
-      return ApiResponse.ok(
-          new StockReservationVO(
-              orderNo,
-              requestStatus,
-              itemsFromSnapshot(String.valueOf(requestRow.get("items_snapshot")), requestStatus)));
+      return new StockReservationVO(
+          orderNo,
+          requestStatus,
+          itemsFromSnapshot(String.valueOf(requestRow.get("items_snapshot")), requestStatus));
     }
-    return ApiResponse.ok(normalReservationProof(orderNo, requestRow, rows));
+    return normalReservationProof(orderNo, requestRow, rows);
   }
 
   /** 核验普通流水和存在的原请求快照；全部SKU同向且原载荷一致才有已知状态。 */
@@ -237,17 +234,17 @@ public class StockReservationReader {
   }
 
   /** 返回同一订单号、同一 SKU 快照的幂等预扣结果。 */
-  public ApiResponse<StockReservationVO> alreadyReserved(String orderNo) {
-    ApiResponse<StockReservationVO> response;
+  public StockReservationVO alreadyReserved(String orderNo) {
+    StockReservationVO reservationResult;
     try {
-      response = reservation(orderNo);
+      reservationResult = reservation(orderNo);
     } catch (RuntimeException unavailableProof) {
       throw reservationProofUnavailable();
     }
-    if (response == null || response.data == null || !"RESERVED".equals(response.data.status))
+    if (reservationResult == null || !"RESERVED".equals(reservationResult.status))
       throw reservationProofUnavailable();
-    response.data.status = "ALREADY_RESERVED";
-    return response;
+    reservationResult.status = "ALREADY_RESERVED";
+    return reservationResult;
   }
 
   /** 重放证据缺失保持原事实，不返回底层错误或强制ACK成功。 */

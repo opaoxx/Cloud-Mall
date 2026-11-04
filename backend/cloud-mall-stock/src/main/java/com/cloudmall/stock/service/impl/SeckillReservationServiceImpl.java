@@ -2,12 +2,12 @@ package com.cloudmall.stock.service.impl;
 
 import com.alibaba.csp.sentinel.Entry;
 import com.alibaba.csp.sentinel.slots.block.BlockException;
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.stock.config.SeckillSentinelConfiguration;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
+import com.cloudmall.stock.domain.vo.SeckillAcceptanceVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.SeckillReservationService;
 import com.cloudmall.stock.util.StockDependencyGuard;
@@ -94,7 +94,7 @@ public class SeckillReservationServiceImpl implements SeckillReservationService 
 
   /** 校验请求归属后进入限流、持久认领和Lua受理。 */
   @Override
-  public ApiResponse<?> seckill(SeckillReservationDTO request, long userId) {
+  public SeckillAcceptanceVO seckill(SeckillReservationDTO request, long userId) {
     // 1. 依次验证必填维度、身份归属及幂等键，尚不触及持久认领。
     String activityId = String.valueOf(request == null ? null : request.activityId),
         skuId = String.valueOf(request == null ? null : request.skuId),
@@ -129,7 +129,7 @@ public class SeckillReservationServiceImpl implements SeckillReservationService 
   }
 
   /** Sentinel 放行后才进入指纹、持久认领、Redis 预扣与 outbox 受理流程。 */
-  private ApiResponse<?> seckillAfterSentinel(
+  private SeckillAcceptanceVO seckillAfterSentinel(
       SeckillReservationDTO request,
       long userId,
       String activityId,
@@ -172,16 +172,8 @@ public class SeckillReservationServiceImpl implements SeckillReservationService 
       return acceptedOrRecovering(claimed, orderNo, requestHash);
     }
     if ("REJECTED".equals(claimedStatus)) {
-      return ApiResponse.ok(
-          Map.of(
-              "accepted",
-              false,
-              "orderNo",
-              orderNo,
-              "eventId",
-              SeckillRequestFingerprint.eventId(orderNo),
-              "reservationStatus",
-              claimedStatus));
+      return SeckillAcceptanceVO.rejected(
+          orderNo, claimedStatus, SeckillRequestFingerprint.eventId(orderNo));
     }
     String requestPayload = String.valueOf(claimed.get("request_payload"));
     if (requestPayload.isBlank()
@@ -320,23 +312,12 @@ public class SeckillReservationServiceImpl implements SeckillReservationService 
   }
 
   /** 构造沿用原事件号和支付待处理状态的受理响应。 */
-  private ApiResponse<?> accepted(String orderNo, String reservationStatus, String eventId) {
-    return ApiResponse.ok(
-        Map.of(
-            "accepted",
-            true,
-            "orderNo",
-            orderNo,
-            "eventId",
-            eventId,
-            "reservationStatus",
-            reservationStatus,
-            "status",
-            "PENDING_PAYMENT"));
+  private SeckillAcceptanceVO accepted(String orderNo, String reservationStatus, String eventId) {
+    return SeckillAcceptanceVO.accepted(orderNo, reservationStatus, eventId);
   }
 
   /** 旧版 ACCEPTED 记录必须先确认同一 eventId 的 outbox 已持久化。 */
-  private ApiResponse<?> acceptedOrRecovering(
+  private SeckillAcceptanceVO acceptedOrRecovering(
       Map<String, Object> claimed, String orderNo, String requestHash) {
     String eventId = SeckillRequestFingerprint.eventId(orderNo);
     try {
@@ -378,25 +359,12 @@ public class SeckillReservationServiceImpl implements SeckillReservationService 
   }
 
   /** 保留原订单与事件身份，返回可重查的未知受理状态。 */
-  private ApiResponse<?> recoveryRequired(String orderNo, String eventId, String reason) {
-    return ApiResponse.ok(
-        Map.of(
-            "accepted",
-            false,
-            "orderNo",
-            orderNo,
-            "eventId",
-            eventId,
-            "reservationStatus",
-            "RECOVERY_REQUIRED",
-            "status",
-            "ORDER_RECOVERY_PENDING",
-            "reason",
-            reason));
+  private SeckillAcceptanceVO recoveryRequired(String orderNo, String eventId, String reason) {
+    return SeckillAcceptanceVO.recoveryRequired(orderNo, eventId, reason);
   }
 
   /** 在 Redis Lua 成功后以同一 eventId 提交受理台账和 outbox。 */
-  private ApiResponse<?> acceptAfterLua(
+  private SeckillAcceptanceVO acceptAfterLua(
       long userId, String idempotencyKey, String orderNo, String payload, String requestHash) {
     try {
       String eventId = SeckillRequestFingerprint.eventId(orderNo);

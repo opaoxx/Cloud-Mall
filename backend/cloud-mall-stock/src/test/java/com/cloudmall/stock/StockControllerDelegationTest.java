@@ -6,12 +6,13 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.web.GlobalExceptionHandler;
 import com.cloudmall.stock.controller.StockController;
 import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
+import com.cloudmall.stock.domain.vo.SeckillAcceptanceVO;
+import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
@@ -20,7 +21,6 @@ import com.cloudmall.stock.service.StockQueryService;
 import com.cloudmall.stock.service.StockReservationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -44,29 +44,19 @@ class StockControllerDelegationTest {
     var controller = new StockController(queries, reservations, seckill);
     assertEquals(Object.class, StockController.class.getSuperclass());
     var mvc = mvc(controller);
-    when(queries.get(7L)).thenReturn(ApiResponse.ok(new StockQuantityVO(7L, 3)));
+    when(queries.get(7L)).thenReturn(new StockQuantityVO(7L, 3));
     when(queries.reservation("original-order"))
-        .thenReturn(ApiResponse.ok(new StockReservationVO("original-order", "UNKNOWN", List.of())));
-    doReturn(ApiResponse.ok(new StockReservationVO("original-order", "RESERVED", List.of())))
+        .thenReturn(new StockReservationVO("original-order", "UNKNOWN", List.of()));
+    doReturn(new StockReservationVO("original-order", "RESERVED", List.of()))
         .when(reservations)
         .reserve(any());
-    doReturn(ApiResponse.ok(Map.of("confirmed", true, "idempotent", false)))
+    doReturn(StockActionResultVO.confirmed(false))
         .when(reservations)
         .confirm(eq("original-order"), isNull());
-    doReturn(ApiResponse.ok(Map.of("rolledBack", false, "pending", true, "status", "UNKNOWN")))
+    doReturn(StockActionResultVO.pendingRollback())
         .when(reservations)
         .rollback(eq("original-order"), any());
-    doReturn(
-            ApiResponse.ok(
-                Map.of(
-                    "accepted",
-                    false,
-                    "orderNo",
-                    "original-order",
-                    "eventId",
-                    "original-event",
-                    "reservationStatus",
-                    "REJECTED")))
+    doReturn(SeckillAcceptanceVO.rejected("original-order", "REJECTED", "original-event"))
         .when(seckill)
         .seckill(any(), eq(8L));
 

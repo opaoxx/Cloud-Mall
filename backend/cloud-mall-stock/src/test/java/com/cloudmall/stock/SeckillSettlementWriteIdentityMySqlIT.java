@@ -204,10 +204,10 @@ class SeckillSettlementWriteIdentityMySqlIT {
       seedAccepted(ORDER_NO);
       var unaffected = normalAndAcceptanceFacts();
       tracked.checking = true;
-      Map<?, ?> response = (Map<?, ?>) service.settle(ORDER_NO, action).data;
+      var response = service.settle(ORDER_NO, action);
       assertEquals(
           "CONFIRM".equals(action) ? Boolean.TRUE : Boolean.FALSE,
-          response.get("CONFIRM".equals(action) ? "confirmed" : "rolledBack"));
+          ("CONFIRM".equals(action) ? response.confirmed : response.rolledBack));
       assertEquals(3, tracked.sql.size());
       Map<String, Object> settlement =
           fixture.queryForMap("SELECT * FROM seckill_quota_settlement");
@@ -232,7 +232,7 @@ class SeckillSettlementWriteIdentityMySqlIT {
     seedSettlement(ORDER_NO, "RELEASED");
     var released = facts();
     tracked.checking = true;
-    assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "ROLLBACK").data).get("idempotent"));
+    assertEquals(true, (service.settle(ORDER_NO, "ROLLBACK")).idempotent);
     assertEquals(released, facts());
     assertEquals(3, tracked.sql.size());
     reset();

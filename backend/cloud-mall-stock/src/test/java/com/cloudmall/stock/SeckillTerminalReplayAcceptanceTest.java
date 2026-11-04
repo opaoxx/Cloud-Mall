@@ -10,7 +10,6 @@ import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** 同向终态重放不能只凭标签成功；source观察不冒称源事实冻结。 */
@@ -47,12 +46,9 @@ class SeckillTerminalReplayAcceptanceTest {
       when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(original);
       when(mapper.findMatchingAcceptanceId(same(original))).thenReturn(1L);
       var response =
-          (Map<?, ?>)
-              new SeckillQuotaSettlementService(mapper, stocks)
-                  .settle(ORDER_NO, action(state))
-                  .data;
-      assertEquals(true, response.get("idempotent"));
-      assertEquals(true, response.get("CONFIRMED".equals(state) ? "confirmed" : "rolledBack"));
+          new SeckillQuotaSettlementService(mapper, stocks).settle(ORDER_NO, action(state));
+      assertEquals(true, response.idempotent);
+      assertEquals(true, ("CONFIRMED".equals(state) ? response.confirmed : response.rolledBack));
       verify(mapper).insertOpenIfAbsent(eq(ORDER_NO), any());
       verify(mapper).findSettlementForUpdate(ORDER_NO);
       verify(mapper).findMatchingAcceptanceId(same(original));
@@ -128,11 +124,9 @@ class SeckillTerminalReplayAcceptanceTest {
     when(pendingMapper.findMatchingAcceptanceId(same(pending))).thenReturn(1L);
     assertEquals(
         true,
-        ((Map<?, ?>)
-                new SeckillQuotaSettlementService(pendingMapper, mock(StockSqlMapper.class))
-                    .settle(ORDER_NO, "ROLLBACK")
-                    .data)
-            .get("pending"));
+        new SeckillQuotaSettlementService(pendingMapper, mock(StockSqlMapper.class))
+            .settle(ORDER_NO, "ROLLBACK")
+            .pending);
     verify(pendingMapper).findMatchingAcceptanceId(same(pending));
 
     var openMapper = mock(SeckillQuotaSettlementMapper.class);
@@ -141,11 +135,9 @@ class SeckillTerminalReplayAcceptanceTest {
     when(openMapper.transitionOpenToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L)).thenReturn(1);
     assertEquals(
         true,
-        ((Map<?, ?>)
-                new SeckillQuotaSettlementService(openMapper, mock(StockSqlMapper.class))
-                    .settle(ORDER_NO, "CONFIRM")
-                    .data)
-            .get("confirmed"));
+        new SeckillQuotaSettlementService(openMapper, mock(StockSqlMapper.class))
+            .settle(ORDER_NO, "CONFIRM")
+            .confirmed);
     verify(openMapper, never()).findMatchingAcceptanceId(any());
   }
 

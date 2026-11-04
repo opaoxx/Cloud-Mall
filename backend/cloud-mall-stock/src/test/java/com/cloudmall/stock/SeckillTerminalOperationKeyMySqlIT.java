@@ -287,8 +287,7 @@ class SeckillTerminalOperationKeyMySqlIT {
       assertEquals("SUCCEEDED", orderFallback("CONFIRMED".equals(state) ? "PAID" : "CANCELLED"));
       tracked.sql.clear();
       tracked.writePhase = true;
-      assertEquals(
-          true, ((Map<?, ?>) settlementService.settle(ORDER_NO, action).data).get("idempotent"));
+      assertEquals(true, (settlementService.settle(ORDER_NO, action)).idempotent);
       assertEquals(3, tracked.sql.size());
       assertEquals(before, facts());
       tracked.sql.clear();
@@ -454,12 +453,12 @@ class SeckillTerminalOperationKeyMySqlIT {
             assertEquals("OPEN".equals(state) ? 3 : 2, tracked.sql.size());
             assertEquals(before, facts());
           } else {
-            Map<?, ?> response = (Map<?, ?>) settlementService.settle(ORDER_NO, action).data;
-            if ("CONFIRM".equals(action)) assertEquals(true, response.get("confirmed"));
+            var response = settlementService.settle(ORDER_NO, action);
+            if ("CONFIRM".equals(action)) assertEquals(true, response.confirmed);
             else {
-              assertEquals(false, response.get("rolledBack"));
-              assertEquals(true, response.get("pending"));
-              assertEquals("UNKNOWN", response.get("status"));
+              assertEquals(false, response.rolledBack);
+              assertEquals(true, response.pending);
+              assertEquals("UNKNOWN", response.status);
             }
             var after = facts();
             for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
@@ -657,12 +656,12 @@ class SeckillTerminalOperationKeyMySqlIT {
           tracked.sql.clear();
           tracked.writePhase = true;
           String action = "CONFIRMED".equals(state) ? "CONFIRM" : "ROLLBACK";
-          var response = (Map<?, ?>) settlementService.settle(ORDER_NO, action).data;
+          var response = settlementService.settle(ORDER_NO, action);
           if ("CONFIRMED".equals(state) || "RELEASED".equals(state))
-            assertEquals(true, response.get("idempotent"));
+            assertEquals(true, response.idempotent);
           else {
-            assertEquals(true, response.get("pending"));
-            assertEquals(false, response.get("rolledBack"));
+            assertEquals(true, response.pending);
+            assertEquals(false, response.rolledBack);
           }
           assertEquals(3, tracked.sql.size());
           assertEquals(before, facts());
@@ -792,9 +791,9 @@ class SeckillTerminalOperationKeyMySqlIT {
       assertOnlySelects();
       tracked.sql.clear();
       tracked.writePhase = true;
-      var replay = (Map<?, ?>) settlementService.settle(ORDER_NO, "ROLLBACK").data;
-      assertEquals(true, replay.get("rolledBack"));
-      assertEquals(true, replay.get("idempotent"));
+      var replay = settlementService.settle(ORDER_NO, "ROLLBACK");
+      assertEquals(true, replay.rolledBack);
+      assertEquals(true, replay.idempotent);
       assertEquals(3, tracked.sql.size());
       tracked.sql.clear();
       assertEquals(
@@ -924,11 +923,12 @@ class SeckillTerminalOperationKeyMySqlIT {
         tracked.writePhase = true;
         tracked.allowTransition = true;
         var response = settlementService.settle(ORDER_NO, transitionAction(transition));
-        assertEquals("0", response.code);
+        // 统一响应码由Controller契约测试覆盖，此处验证真实事务的业务结果。
+        assertNotNull(response);
         if ("open-rollback".equals(transition)) {
-          assertEquals(false, ((Map<?, ?>) response.data).get("rolledBack"));
-          assertEquals(true, ((Map<?, ?>) response.data).get("pending"));
-        } else assertEquals(true, ((Map<?, ?>) response.data).get("confirmed"));
+          assertEquals(false, (response).rolledBack);
+          assertEquals(true, (response).pending);
+        } else assertEquals(true, (response).confirmed);
         assertEquals(3, tracked.sql.size());
         var after = facts();
         for (int tableIndex = 0; tableIndex < TABLES.size(); tableIndex++)
@@ -1232,9 +1232,9 @@ class SeckillTerminalOperationKeyMySqlIT {
         var before = facts();
         tracked.checking = true;
         tracked.writePhase = true;
-        var response = (Map<?, ?>) settlementService.settle(ORDER_NO, action).data;
-        assertEquals(true, response.get("idempotent"));
-        assertEquals(true, response.get("CONFIRMED".equals(state) ? "confirmed" : "rolledBack"));
+        var response = settlementService.settle(ORDER_NO, action);
+        assertEquals(true, response.idempotent);
+        assertEquals(true, ("CONFIRMED".equals(state) ? response.confirmed : response.rolledBack));
         assertEquals(3, tracked.sql.size());
         assertEquals(before, facts());
         tracked.sql.clear();
@@ -1507,10 +1507,10 @@ class SeckillTerminalOperationKeyMySqlIT {
         var before = facts();
         tracked.checking = true;
         tracked.writePhase = true;
-        var response = (Map<?, ?>) settlementService.settle(ORDER_NO, "ROLLBACK").data;
-        assertEquals(false, response.get("rolledBack"));
-        assertEquals(true, response.get("pending"));
-        assertEquals("UNKNOWN", response.get("status"));
+        var response = settlementService.settle(ORDER_NO, "ROLLBACK");
+        assertEquals(false, response.rolledBack);
+        assertEquals(true, response.pending);
+        assertEquals("UNKNOWN", response.status);
         assertEquals(3, tracked.sql.size());
         assertEquals(before, facts());
         assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
@@ -1567,7 +1567,7 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   /** 原生产GET，任何数据库异常都不得当作终态证据。 */
   private static StockReservationVO read() {
-    return (StockReservationVO) service.reservation(ORDER_NO).data;
+    return (StockReservationVO) service.reservation(ORDER_NO);
   }
 
   /** 所有被测SQL只允许无锁SELECT。 */

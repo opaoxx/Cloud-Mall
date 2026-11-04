@@ -10,7 +10,6 @@ import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** 已存在待释放重试也须观察原受理来源，不把缺证包装为已受理。 */
@@ -48,12 +47,10 @@ class SeckillPendingReplayAcceptanceTest {
       var stocks = mock(StockSqlMapper.class);
       when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(original);
       when(mapper.findMatchingAcceptanceId(same(original))).thenReturn(1L);
-      var response =
-          (Map<?, ?>)
-              new SeckillQuotaSettlementService(mapper, stocks).settle(ORDER_NO, "ROLLBACK").data;
-      assertEquals(false, response.get("rolledBack"));
-      assertEquals(true, response.get("pending"));
-      assertEquals("UNKNOWN", response.get("status"));
+      var response = new SeckillQuotaSettlementService(mapper, stocks).settle(ORDER_NO, "ROLLBACK");
+      assertEquals(false, response.rolledBack);
+      assertEquals(true, response.pending);
+      assertEquals("UNKNOWN", response.status);
       verify(mapper).insertOpenIfAbsent(eq(ORDER_NO), any());
       verify(mapper).findSettlementForUpdate(ORDER_NO);
       verify(mapper).findMatchingAcceptanceId(same(original));
@@ -119,7 +116,7 @@ class SeckillPendingReplayAcceptanceTest {
     open.operationKey = null;
     when(mapper.findSettlementForUpdate(ORDER_NO)).thenReturn(open);
     when(mapper.transitionToReleasePending(ORDER_NO, ORDER_NO + ":ROLLBACK", 2L)).thenReturn(1);
-    assertEquals(true, ((Map<?, ?>) service.settle(ORDER_NO, "ROLLBACK").data).get("pending"));
+    assertEquals(true, (service.settle(ORDER_NO, "ROLLBACK")).pending);
     verify(mapper, never()).findMatchingAcceptanceId(any());
   }
 

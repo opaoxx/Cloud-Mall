@@ -2,12 +2,13 @@ package com.cloudmall.stock.service.impl;
 
 import static com.cloudmall.stock.service.impl.StockReservationSnapshotCodec.sha256;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
+import com.cloudmall.stock.domain.vo.StockActionResultVO;
+import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockReservationService;
 import java.time.OffsetDateTime;
@@ -94,7 +95,7 @@ public class StockReservationServiceImpl implements StockReservationService {
 
   /** 按原订单号认领快照并原子预扣整笔普通库存。 */
   @Transactional(noRollbackFor = StockReservationRejectedException.class)
-  public ApiResponse<?> reserve(StockReservationDTO request) {
+  public StockReservationVO reserve(StockReservationDTO request) {
     validate(request);
     List<StockLineDTO> lines =
         merge(request.items).stream().sorted(Comparator.comparing(line -> line.skuId)).toList();
@@ -165,11 +166,11 @@ public class StockReservationServiceImpl implements StockReservationService {
 
   /** 按原操作键确认秒杀配额或普通库存，重复动作读取同一终态。 */
   @Transactional
-  public ApiResponse<?> confirm(String orderNo, StockActionDTO action) {
+  public StockActionResultVO confirm(String orderNo, StockActionDTO action) {
     // 1. 校验稳定动作键，秒杀结算由独立持久状态机处理。
     validateActionKey(orderNo, "CONFIRM", action);
     if (seckillSettlementService != null) {
-      ApiResponse<?> seckillResult = seckillSettlementService.settle(orderNo, "CONFIRM");
+      StockActionResultVO seckillResult = seckillSettlementService.settle(orderNo, "CONFIRM");
       if (seckillResult != null) return seckillResult;
       requireNoUnsettledSeckillFact(orderNo);
     }
@@ -180,8 +181,7 @@ public class StockReservationServiceImpl implements StockReservationService {
         throw new BizException(
             "STOCK_SALES_EVENT_CONFLICT", "Original reservation identity conflicts", 409);
       String status = String.valueOf(requestRow.get("status"));
-      if ("CONFIRMED".equals(status))
-        return ApiResponse.ok(Map.of("confirmed", true, "idempotent", true));
+      if ("CONFIRMED".equals(status)) return StockActionResultVO.confirmed(true);
       if (!"RESERVED".equals(status))
         throw new BizException(ErrorCodes.CONFLICT, "库存预扣状态不允许确认", 409);
     }
@@ -193,22 +193,22 @@ public class StockReservationServiceImpl implements StockReservationService {
                 orderNo, "RESERVED", "CONFIRMED", null, now())
             != 1) throw new BizException(ErrorCodes.CONFLICT, "库存确认状态已变化", 409);
     clearLegacyReservationAfterCommit(orderNo);
-    return ApiResponse.ok(Map.of("confirmed", true, "idempotent", lines.isEmpty()));
+    return StockActionResultVO.confirmed(lines.isEmpty());
   }
 
   /** 兼容已有内部调用，统一使用订单号标识同一库存动作。 */
   @Transactional
-  public ApiResponse<?> confirm(String orderNo) {
+  public StockActionResultVO confirm(String orderNo) {
     return confirm(orderNo, null);
   }
 
   /** 按原操作键释放秒杀配额或普通预扣，秒杀 Redis 投影由提交后恢复器执行。 */
   @Transactional
-  public ApiResponse<?> rollback(String orderNo, StockActionDTO action) {
+  public StockActionResultVO rollback(String orderNo, StockActionDTO action) {
     // 1. 校验稳定动作键，秒杀仅提交唯一释放意图。
     validateActionKey(orderNo, "ROLLBACK", action);
     if (seckillSettlementService != null) {
-      ApiResponse<?> seckillResult = seckillSettlementService.settle(orderNo, "ROLLBACK");
+      StockActionResultVO seckillResult = seckillSettlementService.settle(orderNo, "ROLLBACK");
       if (seckillResult != null) return seckillResult;
       requireNoUnsettledSeckillFact(orderNo);
     }
@@ -217,7 +217,7 @@ public class StockReservationServiceImpl implements StockReservationService {
     if (requestRow != null) {
       String status = String.valueOf(requestRow.get("status"));
       if ("ROLLED_BACK".equals(status) || "REJECTED".equals(status))
-        return ApiResponse.ok(Map.of("rolledBack", true, "idempotent", true));
+        return StockActionResultVO.rolledBack(true);
       if (!"RESERVED".equals(status))
         throw new BizException(ErrorCodes.CONFLICT, "库存预扣结果尚未确定", 409);
     }
@@ -229,12 +229,12 @@ public class StockReservationServiceImpl implements StockReservationService {
                 orderNo, "RESERVED", "ROLLED_BACK", null, now())
             != 1) throw new BizException(ErrorCodes.CONFLICT, "库存回滚状态已变化", 409);
     clearLegacyReservationAfterCommit(orderNo);
-    return ApiResponse.ok(Map.of("rolledBack", true, "idempotent", lines.isEmpty()));
+    return StockActionResultVO.rolledBack(lines.isEmpty());
   }
 
   /** 兼容已有内部调用，统一使用订单号标识同一库存动作。 */
   @Transactional
-  public ApiResponse<?> rollback(String orderNo) {
+  public StockActionResultVO rollback(String orderNo) {
     return rollback(orderNo, null);
   }
 

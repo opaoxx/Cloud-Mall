@@ -258,7 +258,7 @@ class SeckillReservationOrderIdentityMySqlIT {
               assertOnlySelects();
               tracked.sql.clear();
               var bare = StockTestServices.reader(mapper, new ObjectMapper());
-              var fallback = (StockReservationVO) bare.reservation(ORDER_NO).data;
+              var fallback = (StockReservationVO) bare.reservation(ORDER_NO);
               assertEquals("UNKNOWN", fallback.status);
               assertTrue(fallback.items.isEmpty());
               assertEquals(1, tracked.sql.size());
@@ -396,7 +396,7 @@ class SeckillReservationOrderIdentityMySqlIT {
 
   /** 原生产GET，任何数据库异常都不得当作终态证据。 */
   private static StockReservationVO read() {
-    return (StockReservationVO) service.reservation(ORDER_NO).data;
+    return (StockReservationVO) service.reservation(ORDER_NO);
   }
 
   /** 所有被测SQL只允许无锁SELECT。 */

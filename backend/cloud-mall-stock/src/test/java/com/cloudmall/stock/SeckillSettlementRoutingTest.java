@@ -9,9 +9,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.dto.StockActionDTO;
+import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
@@ -46,7 +46,7 @@ class SeckillSettlementRoutingTest {
                 "private-idem"));
     StockReservationReader service = StockTestServices.reader(stockMapper, new ObjectMapper());
 
-    StockReservationVO fact = (StockReservationVO) service.reservation("cm24-order").data;
+    StockReservationVO fact = (StockReservationVO) service.reservation("cm24-order");
 
     assertEquals("RESERVED", fact.status);
   }
@@ -55,16 +55,16 @@ class SeckillSettlementRoutingTest {
   void rollbackRoutesToSeckillWithoutTouchingNormalFlows() {
     StockSqlMapper stockMapper = mock(StockSqlMapper.class);
     SeckillQuotaSettlementService settlement = mock(SeckillQuotaSettlementService.class);
-    doReturn(ApiResponse.ok(Map.of("rolledBack", false, "pending", true)))
+    doReturn(StockActionResultVO.pendingRollback())
         .when(settlement)
         .settle("cm24-order", "ROLLBACK");
     StockReservationServiceImpl service =
         StockTestServices.normal(mock(StringRedisTemplate.class), stockMapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillSettlementService", settlement);
 
-    Map<?, ?> response = (Map<?, ?>) service.rollback("cm24-order").data;
+    var response = service.rollback("cm24-order");
 
-    assertEquals(false, response.get("rolledBack"));
+    assertEquals(false, response.rolledBack);
     verify(stockMapper, never()).findOpenReservations(anyString());
   }
 

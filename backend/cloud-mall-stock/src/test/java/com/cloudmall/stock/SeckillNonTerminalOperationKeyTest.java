@@ -12,7 +12,6 @@ import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
@@ -94,12 +93,12 @@ class SeckillNonTerminalOperationKeyTest {
                 .thenReturn(1);
             when(mapper.transitionBlockedToConfirmed(ORDER_NO, ORDER_NO + ":CONFIRM", 2L))
                 .thenReturn(1);
-            Map<?, ?> response = (Map<?, ?>) service.settle(ORDER_NO, action).data;
-            if ("CONFIRM".equals(action)) assertEquals(true, response.get("confirmed"));
+            var response = service.settle(ORDER_NO, action);
+            if ("CONFIRM".equals(action)) assertEquals(true, response.confirmed);
             else {
-              assertEquals(false, response.get("rolledBack"));
-              assertEquals(true, response.get("pending"));
-              assertEquals("UNKNOWN", response.get("status"));
+              assertEquals(false, response.rolledBack);
+              assertEquals(true, response.pending);
+              assertEquals("UNKNOWN", response.status);
             }
           }
         }

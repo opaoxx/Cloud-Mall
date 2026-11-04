@@ -10,7 +10,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
@@ -56,9 +55,9 @@ class StockServiceRecoveryTest {
                     0L)));
     StockReservationServiceImpl stockService = service(redis, stockSqlMapper);
 
-    ApiResponse<?> response = stockService.reserve(request("old-order-1", 7L, 2));
+    var response = stockService.reserve(request("old-order-1", 7L, 2));
 
-    assertEquals("ALREADY_RESERVED", ((StockReservationVO) response.data).status);
+    assertEquals("ALREADY_RESERVED", ((StockReservationVO) response).status);
     verify(stockSqlMapper, never()).updateAvailableWithVersion(any(), any(Integer.class), any(Integer.class), any());
     verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
   }
@@ -108,9 +107,9 @@ class StockServiceRecoveryTest {
         .thenReturn(1);
     StockReservationServiceImpl stockService = service(redis, stockSqlMapper);
 
-    ApiResponse<?> response = stockService.rollback("order-4");
+    var response = stockService.rollback("order-4");
 
-    assertEquals(Boolean.TRUE, ((Map<?, ?>) response.data).get("rolledBack"));
+    assertEquals(Boolean.TRUE, (response).rolledBack);
     verify(stockSqlMapper).insertCacheRepair(eq(7L), eq(10), eq(5), any(OffsetDateTime.class));
     verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
   }

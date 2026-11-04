@@ -11,7 +11,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
@@ -101,11 +100,11 @@ class StockBatch3ProjectionTest {
                     0L)));
     StockReservationServiceImpl stockService = service(redis, stockSqlMapper, requestService);
 
-    ApiResponse<?> first = stockService.reserve(request("order-1"));
-    ApiResponse<?> replay = stockService.reserve(request("order-1"));
+    var first = stockService.reserve(request("order-1"));
+    var replay = stockService.reserve(request("order-1"));
 
-    assertEquals("RESERVED", ((StockReservationVO) first.data).status);
-    assertEquals("ALREADY_RESERVED", ((StockReservationVO) replay.data).status);
+    assertEquals("RESERVED", ((StockReservationVO) first).status);
+    assertEquals("ALREADY_RESERVED", ((StockReservationVO) replay).status);
     verify(stockSqlMapper).updateAvailableWithVersion(eq(7L), eq(2), eq(4), any());
     verify(stockSqlMapper).insertCacheRepair(eq(7L), eq(8), eq(5), any());
     verify(redis, never()).execute(any(DefaultRedisScript.class), any(), any(Object[].class));
@@ -136,9 +135,9 @@ class StockBatch3ProjectionTest {
     StockReservationReader stockService =
         StockTestServices.reader(stockSqlMapper, new ObjectMapper());
 
-    ApiResponse<?> response = stockService.reservation("old-order-2");
+    var response = stockService.reservation("old-order-2");
 
-    assertEquals("CONFIRMED", ((StockReservationVO) response.data).status);
+    assertEquals("CONFIRMED", ((StockReservationVO) response).status);
   }
 
   @Test

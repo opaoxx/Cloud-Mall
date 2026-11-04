@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，Stock演练命名和主业务拆分已完成，下一步为Stock响应VO与缓存/恢复职责整理；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，Stock演练命名、主业务拆分及主接口响应VO已完成，下一步为Stock内部查询VO与缓存/恢复职责整理；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -444,7 +444,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
-| Stock | 进行中 | Seata命名、主业务拆分完成；响应VO及缓存/恢复归组待实施，见第19、20节 |
+| Stock | 进行中 | Seata命名、主业务拆分、主接口VO完成；内部查询VO及缓存/恢复归组待实施，见第19至21节 |
 | Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1050,3 +1050,39 @@ git revert refactor/stock-core-complete-20261104
 运行Stock全部单测/实库、Common、Pay→Stock实际HTTP/Feign，以及Order库存动作和秒杀消费契约专项。新建独立Compose项目 `cloud-mall-refactor-stock-response-20261104`，MySQL19935、Redis19936、网段10.254.247.0/24（先核对冲突），全新卷、root/root；复用已验证空源DDL与UUID库隔离方式，测试后核对并归档、移除本次容器/网络、保留卷。证据放 `target/backend-refactor-20261104/stock-response/`。
 
 结果构造按旧Map字段与VO工厂逐项比对，其余执行词法不变；Stock打包、八模块test-compile、Google Java Format和git diff --check通过后提交，并用临时index验证逆补丁。该切片可独立回退，不回退前两次Stock拆分或历史夹具修正。真实TC/RM、商城全链及性能不在本轮；后续仍有内部查询VO与缓存/恢复职责归组。
+
+### 21.5 实际改动、核对与验收
+
+已新增不可变的StockActionResultVO、SeckillAcceptanceVO及各分支语义工厂。三项主Service接口、五个业务/读取实现均不再引用ApiResponse，六个Controller方法各在业务正常返回后包装一次。普通及秒杀最终动作、受理重放与待恢复返回具体VO；settle无秒杀候选仍返回null，不改变普通库存fallback。旧查询VO及全局Jackson配置未改。
+
+调用链现为HTTP绑定/身份 → 原Service事务或Sentinel代理 → 原业务规则与持久操作 → 具体VO → Service代理提交/回滚结束 → Controller统一包装。Reader重放仍拒绝null或非RESERVED证明，成功时修改同一原VO为ALREADY_RESERVED。requestId仍为UUID、仅在HTTP包装时生成，未引入消息/数据库关联字段变化。新增真实AOP+MVC用例证明提交失败仍返回503/STOCK_SERVICE_UNAVAILABLE，而不是成功响应。
+
+55个方法/重载位置经限定归一化对照通过：只移除ApiResponse包装、把VO工厂展开为原字段Map、折叠原wrapper/data的重放null检查，其余执行词法一致；12个Mapper及资源文件保持。两种VO的八个具体结果组合（确认/回滚首次与重放、待释放、秒杀成功/拒绝/待恢复）通过独立JSON字段集合矩阵；false保留、未适用字段省略、必填null拒绝及旧查询显式null均检查。HTTP包装完整字段、UUID及通用Feign解码后的Map内容也核对一致。
+
+迁移首轮测试编译发现两处旧多行Map强转和一处在Service上读取统一响应码的断言。已改为具体VO字段，并将code/message/data/requestId检查放到Controller契约测试；原业务状态与数据库事实断言保留。这批问题仅在测试迁移中出现，未改生产异常分类或放宽测试条件，失败日志保留。
+
+最终65类431项全部通过，零失败、错误和跳过：
+
+| 范围 | 项数 | 验证边界 |
+| --- | ---: | --- |
+| Common | 25 | 公共返回及其它既有契约 |
+| Stock单测/MVC/AOP | 201 | 原194项及新增VO/包装契约6、提交失败HTTP1 |
+| Stock真实MySQL/Redis | 171 | 全部MySqlIT；并发防超卖、重放、销量outbox、提交后清理、Lua及恢复/证明 |
+| Order契约专项 | 28 | StockFeignDefaultActionContractTest、OrderStockActionRecoveryTest、SeckillAddressPropagationTest、SeckillSentinelFeignMappingTest |
+| Pay→Stock | 6 | 实际HTTP/Feign只读取证、上下文恢复与两库事实 |
+
+Stock打包与八模块生产/测试源码编译通过。Jar包含两个新VO，八个主业务接口/实现的字节码均无ApiResponse引用，不含新增测试夹具。改动Java文件已执行Google Java Format 1.22.0，大型历史文件限定改动范围；git diff --check通过。Order/Pay生产和测试文件、Feign签名、PO、SQL、配置、Lua及消息均未修改。
+
+全部独占UUID库已清理；源Stock10表、Pay2表精确COUNT均为0，Redis DB0/15均为0键。日志、inspect、65类报告、字段/执行对照已归档，另复制并校验20份本轮销量原子性工件；本轮两个容器及网络已移除，两个新卷保留。默认中间件与历史target数据未变。证据索引为 `target/backend-refactor-20261104/stock-response/verification.json`。
+
+### 21.6 回退与下一步
+
+方案提交/基线为 `69767b00`，标签 `refactor/stock-response-baseline-20261104`；验收标签为 `refactor/stock-response-complete-20261104`。撤销本切片：
+
+```powershell
+git revert refactor/stock-response-complete-20261104
+```
+
+逆补丁通过临时index验证可恢复父提交 `69767b00` 的完整树，真实工作树/index未回退。此操作恢复原主Service的ApiResponse/Map返回和原测试调用，保留前两次Stock拆分及历史夹具修正。实际回退后仅清理两个新增VO、StockResponseContractTest及其嵌套class的准确构建产物，再编译；保留历史target证据。Git不回退运行数据，后续若有依赖提交应按依赖逆序撤销。
+
+本轮未运行真实TC/RM恢复、完整商城或性能测试。下一切片处理内部受理事实查询的显式null/缺省字段VO，再整理缓存核对、outbox和恢复类的包归属及切面匹配；仍需先落盘精确清单，不改变状态机、Lua、CAS、租约与公平扫描算法。

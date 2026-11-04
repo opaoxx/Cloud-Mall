@@ -60,9 +60,7 @@ class SeckillLegacyContextDimensionsTest {
               when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(candidate);
               var result =
                   (StockReservationVO)
-                      StockTestServices.reader(stocks, new ObjectMapper())
-                          .reservation(ORDER_NO)
-                          .data;
+                      StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO);
               assertEquals("UNKNOWN", result.status);
               assertTrue(result.items.isEmpty());
               assertEquals(ORDER_NO, result.orderNo);
@@ -102,7 +100,7 @@ class SeckillLegacyContextDimensionsTest {
                   : "REJECTED".equals(state) ? "REJECTED" : "UNKNOWN";
           var bare =
               (StockReservationVO)
-                  StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO).data;
+                  StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO);
           assertEquals(expected, bare.status);
           if ("PENDING".equals(state)) {
             assertTrue(bare.items.isEmpty());
@@ -139,7 +137,7 @@ class SeckillLegacyContextDimensionsTest {
         assertThrows(BizException.class, () -> primary.reservation(ORDER_NO)).getMessage());
     var bare =
         (StockReservationVO)
-            StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO).data;
+            StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO);
     assertEquals("UNKNOWN", bare.status);
     assertTrue(bare.items.isEmpty());
     original.put("status", "REJECTED");

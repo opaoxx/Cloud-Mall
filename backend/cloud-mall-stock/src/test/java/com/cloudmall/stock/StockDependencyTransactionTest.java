@@ -12,10 +12,10 @@ import static org.mockito.Mockito.when;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.alibaba.csp.sentinel.slots.clusterbuilder.ClusterBuilderSlot;
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.config.StockDependencyAspect;
 import com.cloudmall.stock.controller.StockController;
+import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillAcceptanceService;
@@ -71,6 +71,31 @@ class StockDependencyTransactionTest {
   }
 
   @Test
+  void commitFailureThroughControllerCannotProduceSuccessEnvelope() throws Exception {
+    try (var context = context()) {
+      context.getBean(TransactionProbe.class).failCommit = true;
+      var mvc =
+          org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                  context.getBean(StockController.class))
+              .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
+              .build();
+      mvc.perform(
+              org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                  "/api/stock/reservations/order-test/confirm"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.status()
+                  .isServiceUnavailable())
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                  .value("STOCK_SERVICE_UNAVAILABLE"))
+          .andExpect(
+              org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.data")
+                  .value(org.hamcrest.Matchers.nullValue()));
+      assertFalse(StockDependencyGuard.mysqlActive());
+    }
+  }
+
+  @Test
   void queryGuardWrapsOnlyPersistentStatusAndLeavesCacheHitOutsideMysql() {
     try (AnnotationConfigApplicationContext context = context()) {
       var query = context.getBean(com.cloudmall.stock.service.StockQueryService.class);
@@ -83,7 +108,7 @@ class StockDependencyTransactionTest {
                 assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
                 return null;
               });
-      assertEquals("NOT_FOUND", query.reservation("read-order").data.status);
+      assertEquals("NOT_FOUND", query.reservation("read-order").status);
       assertFalse(StockDependencyGuard.mysqlActive());
       var redis = context.getBean(StringRedisTemplate.class);
       org.springframework.data.redis.core.HashOperations<String, Object, Object> hash =
@@ -97,7 +122,7 @@ class StockDependencyTransactionTest {
                 assertFalse(StockDependencyGuard.mysqlActive());
                 return "12";
               });
-      assertEquals(12, query.get(7L).data.availableQuantity);
+      assertEquals(12, query.get(7L).availableQuantity);
       org.mockito.Mockito.verify(stocks, org.mockito.Mockito.never()).findStock(7L);
     }
   }
@@ -234,7 +259,7 @@ class StockDependencyTransactionTest {
     @Bean
     SeckillQuotaSettlementService settlement() {
       SeckillQuotaSettlementService settlement = mock(SeckillQuotaSettlementService.class);
-      doReturn(ApiResponse.ok(java.util.Map.of("confirmed", true)))
+      doReturn(StockActionResultVO.confirmed(false))
           .when(settlement)
           .settle(anyString(), anyString());
       return settlement;

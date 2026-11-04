@@ -26,7 +26,7 @@ class StockDependencyFallbackTest {
     when(database.findStock(7L)).thenReturn(Map.of("available_quantity", 15));
 
     StockQuantityVO result =
-        (StockQuantityVO) StockTestServices.query(redis, database, new ObjectMapper()).get(7L).data;
+        (StockQuantityVO) StockTestServices.query(redis, database, new ObjectMapper()).get(7L);
 
     assertEquals(15, result.availableQuantity);
   }

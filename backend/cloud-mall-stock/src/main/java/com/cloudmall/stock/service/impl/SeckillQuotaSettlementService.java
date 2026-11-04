@@ -1,8 +1,8 @@
 package com.cloudmall.stock.service.impl;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
+import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
@@ -104,7 +104,7 @@ public class SeckillQuotaSettlementService {
 
   /** 按既有库存动作协议确认或释放秒杀配额；rollback 只提交待投影事实。 */
   @Transactional
-  public ApiResponse<?> settle(String orderNo, String actionType) {
+  public StockActionResultVO settle(String orderNo, String actionType) {
     if (orderNo == null || orderNo.isBlank()) return null;
     if (!"CONFIRM".equals(actionType) && !"ROLLBACK".equals(actionType)) {
       throw new BizException("COMMON_INVALID_ARGUMENT", "秒杀结算动作无效", 400);
@@ -133,7 +133,7 @@ public class SeckillQuotaSettlementService {
         // 同向终态重放也核原受理来源；只读观察不替代原事实，不宣称源冻结。
         if (settlementMapper.findMatchingAcceptanceId(settlement) == null)
           throw unknownCas(orderNo);
-        return ApiResponse.ok(Map.of("confirmed", true, "idempotent", true));
+        return StockActionResultVO.confirmed(true);
       }
       if ("RELEASED".equals(status)
           || "RELEASE_PENDING".equals(status)
@@ -155,14 +155,14 @@ public class SeckillQuotaSettlementService {
           salesMetrics.seckill(orderNo, settlement.skuId,
               ((Number) sku.get("product_id")).longValue(), persisted.revision, org.slf4j.MDC.get("traceId"));
         }
-        return ApiResponse.ok(Map.of("confirmed", true, "idempotent", false));
+        return StockActionResultVO.confirmed(false);
       }
       throw unknownCas(orderNo);
     }
     if ("RELEASED".equals(status)) {
       // 同向释放终态复查原受理来源；反向冲突仍保原语义且不读取来源。
       if (settlementMapper.findMatchingAcceptanceId(settlement) == null) throw unknownCas(orderNo);
-      return ApiResponse.ok(Map.of("rolledBack", true, "idempotent", true));
+      return StockActionResultVO.rolledBack(true);
     }
     if ("CONFIRMED".equals(status)) return conflict();
     if ("OPEN".equals(status)) {
@@ -180,12 +180,12 @@ public class SeckillQuotaSettlementService {
   }
 
   /** 对外隐藏待投影内部状态，避免订单动作误判为成功。 */
-  private static ApiResponse<?> pendingRollback() {
-    return ApiResponse.ok(Map.of("rolledBack", false, "pending", true, "status", "UNKNOWN"));
+  private static StockActionResultVO pendingRollback() {
+    return StockActionResultVO.pendingRollback();
   }
 
   /** 返回与普通库存动作一致的冲突语义。 */
-  private static ApiResponse<?> conflict() {
+  private static StockActionResultVO conflict() {
     throw new BizException("SECKILL_SETTLEMENT_CONFLICT", "秒杀结算动作与既有终态冲突", 409);
   }
 

@@ -144,8 +144,7 @@ class StockReservationSnapshotProofTest {
     when(mapper.findReservationRequest("order-proof")).thenReturn(request(SNAPSHOT));
     when(mapper.findReservationFlows("order-proof")).thenReturn(flows());
     var service = StockTestServices.reader(mapper, json);
-    assertEquals(
-        "CONFIRMED", ((StockReservationVO) service.reservation("order-proof").data).status);
+    assertEquals("CONFIRMED", ((StockReservationVO) service.reservation("order-proof")).status);
     assertEquals(
         duplicates,
         json.getFactory()
@@ -215,7 +214,7 @@ class StockReservationSnapshotProofTest {
     Map<String, Object> before = request == null ? null : new HashMap<>(request);
     var result =
         (StockReservationVO)
-            StockTestServices.reader(mapper, new ObjectMapper()).reservation("order-proof").data;
+            StockTestServices.reader(mapper, new ObjectMapper()).reservation("order-proof");
     assertEquals(before, request);
     verify(mapper).findSeckillByOrderNo("order-proof");
     verify(mapper).findReservationRequest("order-proof");

@@ -8,7 +8,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
@@ -24,12 +23,12 @@ class SeckillQuotaSettlementServiceTest {
     when(mapper.findSettlementForUpdate("order-1")).thenReturn(row);
     when(mapper.transitionOpenToConfirmed("order-1", "order-1:CONFIRM", 1L)).thenReturn(1);
 
-    ApiResponse<?> response =
+    var response =
         new SeckillQuotaSettlementService(
                 mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
             .settle("order-1", "CONFIRM");
 
-    assertEquals(true, ((java.util.Map<?, ?>) response.data).get("confirmed"));
+    assertEquals(true, (response).confirmed);
     verify(mapper).transitionOpenToConfirmed("order-1", "order-1:CONFIRM", 1L);
   }
 
@@ -41,14 +40,14 @@ class SeckillQuotaSettlementServiceTest {
     when(mapper.findSettlementForUpdate("order-2")).thenReturn(row);
     when(mapper.transitionToReleasePending("order-2", "order-2:ROLLBACK", 1L)).thenReturn(1);
 
-    ApiResponse<?> response =
+    var response =
         new SeckillQuotaSettlementService(
                 mapper, mock(com.cloudmall.stock.mapper.StockSqlMapper.class))
             .settle("order-2", "ROLLBACK");
 
-    java.util.Map<?, ?> result = (java.util.Map<?, ?>) response.data;
-    assertEquals(false, result.get("rolledBack"));
-    assertEquals(true, result.get("pending"));
+    var result = response;
+    assertEquals(false, result.rolledBack);
+    assertEquals(true, result.pending);
   }
 
   @Test

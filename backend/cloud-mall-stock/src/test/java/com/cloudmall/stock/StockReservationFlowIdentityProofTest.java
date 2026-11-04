@@ -94,7 +94,7 @@ class StockReservationFlowIdentityProofTest {
     var before = new HashMap<>(row);
     var result =
         (StockReservationVO)
-            StockTestServices.reader(mapper, new ObjectMapper()).reservation("order-proof").data;
+            StockTestServices.reader(mapper, new ObjectMapper()).reservation("order-proof");
     assertEquals(before, row);
     verify(mapper).findSeckillByOrderNo("order-proof");
     verify(mapper).findReservationRequest("order-proof");

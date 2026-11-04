@@ -1,6 +1,6 @@
 package com.cloudmall.stock.service.impl;
 
-import com.cloudmall.common.api.ApiResponse;
+
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
@@ -38,14 +38,14 @@ public class StockQueryServiceImpl implements StockQueryService {
 
   /** 在既有只读依赖保护内读取预扣事实，不新增数据库事务。 */
   @Override
-  public ApiResponse<StockReservationVO> reservation(String orderNo) {
+  public StockReservationVO reservation(String orderNo) {
     return reservationReader.reservation(orderNo);
   }
 
   /** 读取SKU可用量，缓存故障时回退持久事实。 */
   @Override
-  public ApiResponse<StockQuantityVO> get(Long skuId) {
-    return ApiResponse.ok(new StockQuantityVO(skuId, quantity(skuId)));
+  public StockQuantityVO get(Long skuId) {
+    return new StockQuantityVO(skuId, quantity(skuId));
   }
 
   /** 优先读取Redis版本投影，失败或缺值时只读MySQL事实。 */

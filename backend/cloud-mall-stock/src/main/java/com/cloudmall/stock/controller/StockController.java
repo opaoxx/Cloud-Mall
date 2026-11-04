@@ -5,6 +5,8 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.dto.StockReservationDTO;
+import com.cloudmall.stock.domain.vo.SeckillAcceptanceVO;
+import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.service.SeckillReservationService;
@@ -43,40 +45,40 @@ public class StockController {
   /** 查询SKU可用库存。 */
   @GetMapping("/skus/{skuId}")
   public ApiResponse<StockQuantityVO> get(@PathVariable("skuId") Long skuId) {
-    return queryService.get(skuId);
+    return ApiResponse.ok(queryService.get(skuId));
   }
 
   /** 按原订单号预扣普通库存。 */
   @PostMapping("/reservations")
-  public ApiResponse<?> reserve(@RequestBody StockReservationDTO request) {
-    return reservationService.reserve(request);
+  public ApiResponse<StockReservationVO> reserve(@RequestBody StockReservationDTO request) {
+    return ApiResponse.ok(reservationService.reserve(request));
   }
 
   /** 确认原订单的普通库存或秒杀配额。 */
   @PostMapping("/reservations/{orderNo}/confirm")
-  public ApiResponse<?> confirm(
+  public ApiResponse<StockActionResultVO> confirm(
       @PathVariable("orderNo") String orderNo,
       @RequestBody(required = false) StockActionDTO action) {
-    return reservationService.confirm(orderNo, action);
+    return ApiResponse.ok(reservationService.confirm(orderNo, action));
   }
 
   /** 释放原订单的普通库存或秒杀配额。 */
   @PostMapping("/reservations/{orderNo}/rollback")
-  public ApiResponse<?> rollback(
+  public ApiResponse<StockActionResultVO> rollback(
       @PathVariable("orderNo") String orderNo,
       @RequestBody(required = false) StockActionDTO action) {
-    return reservationService.rollback(orderNo, action);
+    return ApiResponse.ok(reservationService.rollback(orderNo, action));
   }
 
   /** 查询远程写响应未知时可用于恢复的持久预扣事实。 */
   @GetMapping("/reservations/{orderNo}")
   public ApiResponse<StockReservationVO> reservation(@PathVariable("orderNo") String orderNo) {
-    return queryService.reservation(orderNo);
+    return ApiResponse.ok(queryService.reservation(orderNo));
   }
 
   /** 在与原实现相同的首个业务检查点读取身份，再委托秒杀受理。 */
   @PostMapping("/seckill/reservations")
-  public ApiResponse<?> seckill(@RequestBody SeckillReservationDTO request) {
-    return seckillService.seckill(request, AuthContext.requireUserId());
+  public ApiResponse<SeckillAcceptanceVO> seckill(@RequestBody SeckillReservationDTO request) {
+    return ApiResponse.ok(seckillService.seckill(request, AuthContext.requireUserId()));
   }
 }

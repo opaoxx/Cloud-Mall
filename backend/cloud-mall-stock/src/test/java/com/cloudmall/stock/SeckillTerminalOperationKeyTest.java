@@ -80,8 +80,7 @@ class SeckillTerminalOperationKeyTest {
       var result = service.reservation(ORDER_NO);
       assertEquals("CONFIRMED".equals(state) ? "CONFIRMED" : "ROLLED_BACK", result.status);
       assertEquals(1, result.items.size());
-      assertEquals(
-          true, ((java.util.Map<?, ?>) service.settle(ORDER_NO, direction).data).get("idempotent"));
+      assertEquals(true, (service.settle(ORDER_NO, direction)).idempotent);
       assertEquals(
           409,
           assertThrows(

@@ -86,7 +86,7 @@ class StockReservationTerminalProofTest {
         .thenReturn(Map.of("status", "INIT", "items_snapshot", "[{\"skuId\":7,\"quantity\":2}]"));
     when(pendingMapper.findReservationFlows("pending")).thenReturn(List.of());
     var pendingService = StockTestServices.reader(pendingMapper, new ObjectMapper());
-    var pending = (StockReservationVO) pendingService.reservation("pending").data;
+    var pending = (StockReservationVO) pendingService.reservation("pending");
     assertEquals("INIT", pending.status);
     assertEquals(2, pending.items.get(0).quantity);
     when(pendingMapper.findReservationRequest("pending")).thenReturn(Map.of("status", "CONFIRMED"));
@@ -180,7 +180,7 @@ class StockReservationTerminalProofTest {
     when(mapper.findReservationRequest("order-proof")).thenReturn(request);
     when(mapper.findReservationFlows("order-proof")).thenReturn(rows);
     StockReservationReader service = StockTestServices.reader(mapper, new ObjectMapper());
-    var report = (StockReservationVO) service.reservation("order-proof").data;
+    var report = (StockReservationVO) service.reservation("order-proof");
     verify(mapper).findSeckillByOrderNo("order-proof");
     verify(mapper).findReservationRequest("order-proof");
     verify(mapper).findReservationFlows("order-proof");
