@@ -24,6 +24,7 @@ import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.CartService;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.config.CommonWebConfiguration;
@@ -244,6 +245,7 @@ class CartHttpContractTest {
   @Import({
     CartController.class,
     CartServiceImpl.class,
+    CartStorage.class,
     CommonWebConfiguration.class,
     GlobalExceptionHandler.class
   })

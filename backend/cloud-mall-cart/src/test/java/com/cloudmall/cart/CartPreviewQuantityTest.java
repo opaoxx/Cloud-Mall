@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -47,7 +48,8 @@ class CartPreviewQuantityTest {
           .thenReturn(
               ApiResponse.ok(new ProductClient.SkuView(8L, 88L, "product8", "88.00", Map.of())));
       CartController controller =
-          new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+          new CartController(
+              new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
       BizException failure =
           assertThrows(
               BizException.class, () -> controller.preview(Map.of("skuIds", List.of(7L, 8L))));

@@ -7,6 +7,7 @@ import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -128,7 +129,8 @@ class CartCleanupSnapshotTest {
 
     /** 实际被测快照和清理编排。 */
     final CartController controller =
-        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+        new CartController(
+            new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");

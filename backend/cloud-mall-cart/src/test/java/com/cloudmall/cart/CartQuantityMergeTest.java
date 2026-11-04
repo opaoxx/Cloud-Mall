@@ -8,6 +8,7 @@ import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -61,7 +62,8 @@ class CartQuantityMergeTest {
           assertThrows(
               BizException.class,
               () ->
-                  new CartController(new CartServiceImpl(redis, new ObjectMapper(), products))
+                  new CartController(
+                          new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products))
                       .add(request));
       assertEquals(values[0] < 1 ? 500 : 400, failure.getHttpStatus());
       assertEquals(values[0] < 1 ? ErrorCodes.INTERNAL : ErrorCodes.INVALID, failure.getCode());

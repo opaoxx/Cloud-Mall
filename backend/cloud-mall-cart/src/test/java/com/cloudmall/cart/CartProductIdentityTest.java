@@ -8,6 +8,7 @@ import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -49,7 +50,8 @@ class CartProductIdentityTest {
         if ("error-code".equals(variant)) response.code = "COMMON_INTERNAL_ERROR";
         when(products.getSku(7L)).thenReturn(response);
         CartController controller =
-            new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+            new CartController(
+                new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
         BizException failure =
             assertThrows(
                 BizException.class,
@@ -82,7 +84,8 @@ class CartProductIdentityTest {
     IllegalStateException original = new IllegalStateException("product unavailable");
     when(products.getSku(7L)).thenThrow(original);
     CartController controller =
-        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+        new CartController(
+            new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
     assertSame(
         original, assertThrows(IllegalStateException.class, () -> controller.add(request())));
     verifyNoInteractions(redis);

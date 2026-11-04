@@ -406,3 +406,7 @@ Controller 已组合注入真实 CartService，九个 HTTP 入口与 Service 业
 Redis 实验默认地址池耗尽的启动问题通过本次局部 Compose 覆盖解决，新增 lab 子网为已核查未占用的 `10.254.240.0/24`，Redis 宿主端口为 `19923`，项目为 `cloud-mall-refactor-cart-20261104`。覆盖文件仅包含 `networks.lab.ipam.config`，位于本次 target 证据目录，后续复现前重新检查网段和端口。基线十类 Redis IT 共 42 项已通过。
 
 核心调用链为 CartController → CartServiceImpl → 原 ProductClient 与 Redis 脚本。HTTP 成功响应在 Controller 装配，业务异常交原 GlobalExceptionHandler。原 JSON 字符串比较、脚本参数、未知结果处理及条件重读次数已逐段对照。
+
+Cart 第二切片开始。第一切片提交为 `c1e34c4cf48cb23ccf56dda0aadda4b75645a680`，其验证范围为 Common25、Cart75、Order14。存储提取同时将 CartItemVO 改为独立响应类，逐字段保持原名称、默认值、金额与时间字符串，原继承依赖断言迁移为 VO。CartStorage 的写入/读取方法限本包调用，构造器用于 Spring 装配，业务服务仅依赖存储与商品客户端。
+
+Cart 第二切片验收通过。CartStorage 承担完整 Hash 与原 JSON 读取、条件写删、TTL、证明解析和 Redis 故障映射，Service 保留商品事实、数量/勾选及结算编排。两个 Lua 初始化文本与第一切片逐字比对一致，CartItemVO 已独立于 PO 且字段和默认值完整保留。Common25、Cart33 单测/MVC与42 Redis IT 全部通过，零失败、零错误、零跳过。初次编译发现的测试持久化对象强转误改已修复并回归。记录位于 `F:/Cloud-Mall/target/backend-refactor-20261104/cart-storage`。调用链为 HTTP → CartService → CartStorage / ProductClient，包内存储方法通过真实业务入口验证。

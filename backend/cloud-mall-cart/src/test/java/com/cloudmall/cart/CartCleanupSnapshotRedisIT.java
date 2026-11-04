@@ -9,6 +9,7 @@ import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -110,7 +111,7 @@ class CartCleanupSnapshotRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    controller = new CartController(new CartServiceImpl(redis, mapper, products));
+    controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
   @AfterEach
@@ -217,7 +218,7 @@ class CartCleanupSnapshotRedisIT {
         assertThrows(
             BizException.class,
             () ->
-                new CartController(new CartServiceImpl(observed, mapper, products))
+                new CartController(new CartServiceImpl(new CartStorage(observed, mapper), products))
                     .cleanupItem(7L, snapshot));
     assertEquals(500, failure.getHttpStatus());
     assertEquals(1, scripts.get());

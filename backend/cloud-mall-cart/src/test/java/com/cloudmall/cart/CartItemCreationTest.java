@@ -16,6 +16,7 @@ import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,7 +63,7 @@ class CartItemCreationTest {
 
     CartItemVO response =
         (CartItemVO)
-            new CartController(new CartServiceImpl(redis, objectMapper, products))
+            new CartController(new CartServiceImpl(new CartStorage(redis, objectMapper), products))
                 .add(request)
                 .data;
 

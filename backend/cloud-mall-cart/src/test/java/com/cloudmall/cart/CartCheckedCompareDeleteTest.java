@@ -7,6 +7,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
@@ -136,7 +137,8 @@ class CartCheckedCompareDeleteTest {
 
     /** 实际购物车业务实现。 */
     final CartController controller =
-        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+        new CartController(
+            new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");

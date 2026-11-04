@@ -9,6 +9,7 @@ import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -208,7 +209,8 @@ class CartRefreshCompareWriteTest {
 
     /** 实际被测购物车实现。 */
     final CartController controller =
-        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+        new CartController(
+            new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");

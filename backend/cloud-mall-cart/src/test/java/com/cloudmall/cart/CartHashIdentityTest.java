@@ -7,6 +7,7 @@ import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
+import com.cloudmall.cart.service.impl.CartStorage;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
@@ -61,7 +62,8 @@ class CartHashIdentityTest {
             .thenReturn(
                 ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "product", "12.30", Map.of())));
         CartController controller =
-            new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+            new CartController(
+                new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
         CartItemDTO request = new CartItemDTO();
         request.skuId = 7L;
         request.quantity = 1;
