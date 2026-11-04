@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.product.controller.ProductController;
 import com.cloudmall.product.domain.dto.ProductMetricEventDTO;
 import com.cloudmall.product.domain.dto.ProductMetricInitialApplySnapshotDTO;
 import com.cloudmall.product.domain.po.*;
@@ -43,7 +44,7 @@ class ProductOnlineMetricsTest {
   void requestIdentityCountsOnlyFinalSuccessfulPublicResult() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
     ProductMetricService metrics = mock(ProductMetricService.class);
-    ProductServiceImpl service = service(mapper, metrics, null);
+    ProductController service = service(mapper, metrics, null);
     when(mapper.findProduct(41L)).thenReturn(List.of(fact(41, 7)));
     ApiResponse<?> first = service.product(41L), second = service.product(41L);
     assertNotEquals(first.requestId, second.requestId);
@@ -56,8 +57,9 @@ class ProductOnlineMetricsTest {
     assertThrows(BizException.class, () -> service.product(99L));
     verifyNoMoreInteractions(metrics);
     ProductKeywordSearch search = mock(ProductKeywordSearch.class);
-    ReflectionTestUtils.setField(service, "searchEnabled", true);
-    ReflectionTestUtils.setField(service, "productKeywordSearch", search);
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "searchEnabled", true);
+    ReflectionTestUtils.setField(
+        ProductTestServices.queries(service), "productKeywordSearch", search);
     ProductSearchHit hit =
         new ProductSearchHit(41, 3, "Metric product", new BigDecimal("12.00"), 1, 7, epoch());
     when(search.search("metric", null, 1, 0, 20, null))
@@ -657,15 +659,15 @@ class ProductOnlineMetricsTest {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
     ProductMetricService metrics = mock(ProductMetricService.class);
     ProductKeywordSearch search = mock(ProductKeywordSearch.class);
-    ProductServiceImpl service = service(mapper, metrics, search);
-    ReflectionTestUtils.setField(service, "metricSortMode", "ONLINE");
-    ReflectionTestUtils.setField(service, "searchEnabled", true);
+    ProductController service = service(mapper, metrics, search);
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "metricSortMode", "ONLINE");
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "searchEnabled", true);
     javax.sql.DataSource resource = mock(javax.sql.DataSource.class);
     java.sql.Connection physical = mock(java.sql.Connection.class);
     when(resource.getConnection()).thenReturn(physical);
     when(physical.getAutoCommit()).thenReturn(true);
     ReflectionTestUtils.setField(
-        service,
+        ProductTestServices.queries(service),
         "transactionManager",
         new org.springframework.jdbc.datasource.DataSourceTransactionManager(resource));
     AtomicReference<Object> postSnapshot = new AtomicReference<>();
@@ -783,10 +785,12 @@ class ProductOnlineMetricsTest {
     verify(metrics, times(2)).cut();
     verifyNoInteractions(search);
     verify(metrics, never()).registerSearchPage(anyString(), anyList(), any());
-    ReflectionTestUtils.setField(service, "metricSortMode", "online");
-    assertThrows(IllegalStateException.class, service::validateMetricConfiguration);
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "metricSortMode", "online");
+    assertThrows(
+        IllegalStateException.class,
+        ProductTestServices.queries(service)::validateMetricConfiguration);
     verifyCompletedAuditPruning();
-    ReflectionTestUtils.setField(service, "metricSortMode", "ONLINE");
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "metricSortMode", "ONLINE");
     doReturn(cut).when(metrics).cut();
     // A concurrent readiness/revision change still fails the original final RR admission.
     clearInvocations(metrics, search);
@@ -1119,17 +1123,18 @@ class ProductOnlineMetricsTest {
     assertEquals(true, consumerState(consumer, field));
   }
 
-  private static ProductServiceImpl service(
+  private static ProductController service(
       ProductSqlMapper mapper, ProductMetricService metrics, ProductKeywordSearch search) {
-    ProductServiceImpl service =
-        new ProductServiceImpl(
+    ProductController service =
+        ProductTestServices.controller(
             mapper,
             mock(StringRedisTemplate.class),
             new ObjectMapper(),
             mock(ProductIndexOutboxService.class));
-    ReflectionTestUtils.setField(service, "metricsEnabled", true);
-    ReflectionTestUtils.setField(service, "metrics", metrics);
-    ReflectionTestUtils.setField(service, "productKeywordSearch", search);
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "metricsEnabled", true);
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "metrics", metrics);
+    ReflectionTestUtils.setField(
+        ProductTestServices.queries(service), "productKeywordSearch", search);
     return service;
   }
 

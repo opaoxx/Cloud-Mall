@@ -742,6 +742,12 @@ class ProductOnlineMetricsMySqlIT {
   @MapperScan("com.cloudmall.product.mapper")
   @Import({
     ProductController.class,
+    com.cloudmall.product.service.impl.ProductQueryServiceImpl.class,
+    com.cloudmall.product.service.impl.ProductManagementServiceImpl.class,
+    com.cloudmall.product.service.impl.CategoryServiceImpl.class,
+    com.cloudmall.product.service.impl.SeckillActivityServiceImpl.class,
+    com.cloudmall.product.service.impl.ProductCatalogReader.class,
+    com.cloudmall.product.util.ProductValueCodec.class,
     ProductReadExceptionHandler.class,
     GlobalExceptionHandler.class,
     ProductMetricService.class,

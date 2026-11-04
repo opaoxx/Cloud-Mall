@@ -76,10 +76,12 @@ class ProductReadDependencyFailureTest {
         .thenThrow(
             new SQLTransientConnectionException(
                 "HikariPool - Connection is not available, request timed out"));
-    ProductController controller = new ProductController();
-    ReflectionTestUtils.setField(controller, "productSqlMapper", mapper);
+    ProductController controller = ProductTestServices.controller(mapper);
+
     ReflectionTestUtils.setField(
-        controller, "transactionManager", new DataSourceTransactionManager(connections));
+        ProductTestServices.queries(controller),
+        "transactionManager",
+        new DataSourceTransactionManager(connections));
     MockMvc transactional =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(
@@ -122,8 +124,8 @@ class ProductReadDependencyFailureTest {
   }
 
   private MockMvc mvc() {
-    ProductController controller = new ProductController();
-    ReflectionTestUtils.setField(controller, "productSqlMapper", mapper);
+    ProductController controller = ProductTestServices.controller(mapper);
+
     return MockMvcBuilders.standaloneSetup(controller)
         .setControllerAdvice(new ProductReadExceptionHandler(metrics), new GlobalExceptionHandler())
         .build();

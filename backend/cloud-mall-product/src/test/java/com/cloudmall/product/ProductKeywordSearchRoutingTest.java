@@ -13,12 +13,12 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.product.controller.ProductController;
 import com.cloudmall.product.domain.po.ProductSearchHit;
 import com.cloudmall.product.domain.po.ProductSearchPage;
 import com.cloudmall.product.mapper.ProductSqlMapper;
 import com.cloudmall.product.service.ProductIndexOutboxService;
 import com.cloudmall.product.service.ProductKeywordSearch;
-import com.cloudmall.product.service.impl.ProductServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -37,12 +37,12 @@ class ProductKeywordSearchRoutingTest {
   void esFailureDoesNotCallLegacyLike() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
     ProductKeywordSearch search = mock(ProductKeywordSearch.class);
-    ProductServiceImpl service = service(mapper, search);
+    ProductController service = service(mapper, search);
     when(search.search(eq("旅行箱"), eq(null), eq(1), eq(0), eq(20), eq(null)))
         .thenThrow(new IllegalStateException("ES unavailable"));
 
-    BizException error = assertThrows(BizException.class,
-        () -> service.products(" 旅行箱 ", null, 1, 1, 20, null));
+    BizException error =
+        assertThrows(BizException.class, () -> service.products(" 旅行箱 ", null, 1, 1, 20, null));
 
     assertEquals(503, error.getHttpStatus());
     assertEquals("PRODUCT_SEARCH_UNAVAILABLE", error.getCode());
@@ -55,17 +55,38 @@ class ProductKeywordSearchRoutingTest {
   void matchingPageUsesMysqlFactsWithoutLike() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
     ProductKeywordSearch search = mock(ProductKeywordSearch.class);
-    ProductServiceImpl service = service(mapper, search);
+    ProductController service = service(mapper, search);
     LocalDateTime updatedAt = LocalDateTime.of(2026, 10, 4, 8, 30);
-    long epochMillis = updatedAt.atZone(ZoneId.of("Asia/Shanghai"))
-        .toInstant().toEpochMilli();
+    long epochMillis = updatedAt.atZone(ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
     when(search.search("旅行箱", null, 1, 0, 20, "price_asc"))
-        .thenReturn(new ProductSearchPage(List.of(new ProductSearchHit(42L, 3L,
-            "旅行箱", new BigDecimal("99.00"), 1, 7L, epochMillis)), 12293L));
-    when(mapper.findProductFacts(List.of(42L))).thenReturn(List.of(Map.of(
-        "id", 42L, "category_id", 3L, "name", "旅行箱", "main_image", "image",
-        "description", "desc", "price", new BigDecimal("99.00"), "status", 1,
-        "version", 7L, "updated_at", Timestamp.valueOf(updatedAt))));
+        .thenReturn(
+            new ProductSearchPage(
+                List.of(
+                    new ProductSearchHit(
+                        42L, 3L, "旅行箱", new BigDecimal("99.00"), 1, 7L, epochMillis)),
+                12293L));
+    when(mapper.findProductFacts(List.of(42L)))
+        .thenReturn(
+            List.of(
+                Map.of(
+                    "id",
+                    42L,
+                    "category_id",
+                    3L,
+                    "name",
+                    "旅行箱",
+                    "main_image",
+                    "image",
+                    "description",
+                    "desc",
+                    "price",
+                    new BigDecimal("99.00"),
+                    "status",
+                    1,
+                    "version",
+                    7L,
+                    "updated_at",
+                    Timestamp.valueOf(updatedAt))));
 
     ApiResponse<?> response = service.products("旅行箱", null, 1, 1, 20, "price_asc");
 
@@ -81,15 +102,17 @@ class ProductKeywordSearchRoutingTest {
   void staleIndexPageIsRejectedAfterBoundedRetry() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
     ProductKeywordSearch search = mock(ProductKeywordSearch.class);
-    ProductServiceImpl service = service(mapper, search);
+    ProductController service = service(mapper, search);
     when(search.search("旅行箱", null, 1, 0, 20, null))
-        .thenReturn(new ProductSearchPage(List.of(new ProductSearchHit(42L, 3L,
-            "旅行箱", new BigDecimal("99.00"), 1, 7L, 1L)), 1L));
-    when(mapper.findProductFacts(List.of(42L))).thenReturn(List.of(Map.of("version", 8L,
-        "id", 42L)));
+        .thenReturn(
+            new ProductSearchPage(
+                List.of(new ProductSearchHit(42L, 3L, "旅行箱", new BigDecimal("99.00"), 1, 7L, 1L)),
+                1L));
+    when(mapper.findProductFacts(List.of(42L)))
+        .thenReturn(List.of(Map.of("version", 8L, "id", 42L)));
 
-    BizException error = assertThrows(BizException.class,
-        () -> service.products("旅行箱", null, 1, 1, 20, null));
+    BizException error =
+        assertThrows(BizException.class, () -> service.products("旅行箱", null, 1, 1, 20, null));
 
     assertEquals("PRODUCT_SEARCH_RETRYABLE", error.getCode());
     verify(search, org.mockito.Mockito.times(2)).search("旅行箱", null, 1, 0, 20, null);
@@ -97,12 +120,16 @@ class ProductKeywordSearchRoutingTest {
   }
 
   /** 构造搜索开关开启的服务实例。 */
-  private static ProductServiceImpl service(ProductSqlMapper mapper, ProductKeywordSearch search) {
-    ProductServiceImpl service = new ProductServiceImpl(mapper,
-        mock(StringRedisTemplate.class), new ObjectMapper(),
-        mock(ProductIndexOutboxService.class));
-    ReflectionTestUtils.setField(service, "searchEnabled", true);
-    ReflectionTestUtils.setField(service, "productKeywordSearch", search);
+  private static ProductController service(ProductSqlMapper mapper, ProductKeywordSearch search) {
+    ProductController service =
+        ProductTestServices.controller(
+            mapper,
+            mock(StringRedisTemplate.class),
+            new ObjectMapper(),
+            mock(ProductIndexOutboxService.class));
+    ReflectionTestUtils.setField(ProductTestServices.queries(service), "searchEnabled", true);
+    ReflectionTestUtils.setField(
+        ProductTestServices.queries(service), "productKeywordSearch", search);
     return service;
   }
 }

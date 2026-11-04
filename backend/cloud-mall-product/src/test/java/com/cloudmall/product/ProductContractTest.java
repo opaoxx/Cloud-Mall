@@ -2,26 +2,30 @@ package com.cloudmall.product;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.product.controller.ProductController;
 import com.cloudmall.product.domain.dto.CategoryDTO;
 import com.cloudmall.product.domain.dto.ProductDTO;
+import com.cloudmall.product.domain.dto.ProductOperatorDTO;
 import com.cloudmall.product.domain.dto.ProductParameterDTO;
 import com.cloudmall.product.domain.dto.SkuDTO;
 import com.cloudmall.product.mapper.ProductSqlMapper;
-import com.cloudmall.product.service.impl.ProductServiceImpl;
+import com.cloudmall.product.service.impl.CategoryServiceImpl;
+import com.cloudmall.product.service.impl.ProductManagementServiceImpl;
+import com.cloudmall.product.util.ProductEventEnvelope;
+import com.cloudmall.product.util.SeckillActivityStock;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -62,18 +66,19 @@ class ProductContractTest {
     OffsetDateTime now = OffsetDateTime.of(2026, 9, 4, 12, 0, 0, 0, ZoneOffset.ofHours(8));
     OffsetDateTime end = now.plusHours(1);
 
-    assertEquals(7, ProductServiceImpl.resolveRemainingStock("7", "STARTED", end, now));
-    assertEquals(0, ProductServiceImpl.resolveRemainingStock(null, "STARTED", end, now));
+    assertEquals(7, SeckillActivityStock.remainingStock("7", "STARTED", end, now));
+    assertEquals(0, SeckillActivityStock.remainingStock(null, "STARTED", end, now));
     assertEquals(
-        0, ProductServiceImpl.resolveRemainingStock("100", "STARTED", now.minusSeconds(1), now));
-    assertEquals(0, ProductServiceImpl.resolveRemainingStock("not-a-number", "STARTED", end, now));
+        0, SeckillActivityStock.remainingStock("100", "STARTED", now.minusSeconds(1), now));
+    assertEquals(0, SeckillActivityStock.remainingStock("not-a-number", "STARTED", end, now));
   }
 
   @Test
   void productEventUsesTheFrozenEnvelopeAndMdcTraceId() {
     MDC.put("traceId", "trace-from-request");
     try {
-      JsonNode event = mapper.valueToTree(ProductServiceImpl.eventEnvelope("PRODUCT_CHANGED", 42L));
+      JsonNode event =
+          mapper.valueToTree(ProductEventEnvelope.eventEnvelope("PRODUCT_CHANGED", 42L));
 
       assertTrue(event.hasNonNull("eventId"));
       assertEquals("PRODUCT_CHANGED", event.get("eventType").asText());
@@ -91,7 +96,7 @@ class ProductContractTest {
   void productEventProvidesTraceableFallbackWhenMdcIsAbsent() {
     MDC.clear();
 
-    JsonNode event = mapper.valueToTree(ProductServiceImpl.eventEnvelope("CATEGORY_CHANGED", 7L));
+    JsonNode event = mapper.valueToTree(ProductEventEnvelope.eventEnvelope("CATEGORY_CHANGED", 7L));
 
     assertTrue(event.get("traceId").asText().startsWith("cloudmall-product-"));
     assertEquals(7L, event.get("categoryId").asLong());
@@ -102,53 +107,59 @@ class ProductContractTest {
   @Test
   void everyProductEventPublishingWriteEndpointIsTransactional() throws Exception {
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("create", ProductDTO.class)
+        ProductManagementServiceImpl.class
+            .getDeclaredMethod("create", ProductOperatorDTO.class, ProductDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("update", Long.class, ProductDTO.class)
+        ProductManagementServiceImpl.class
+            .getDeclaredMethod("update", ProductOperatorDTO.class, Long.class, ProductDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("publish", Long.class)
+        ProductManagementServiceImpl.class
+            .getDeclaredMethod("publish", ProductOperatorDTO.class, Long.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("unpublish", Long.class)
+        ProductManagementServiceImpl.class
+            .getDeclaredMethod("unpublish", ProductOperatorDTO.class, Long.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("addCategory", CategoryDTO.class)
+        CategoryServiceImpl.class
+            .getDeclaredMethod("addCategory", ProductOperatorDTO.class, CategoryDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("updateCategory", Long.class, CategoryDTO.class)
+        CategoryServiceImpl.class
+            .getDeclaredMethod(
+                "updateCategory", ProductOperatorDTO.class, Long.class, CategoryDTO.class)
             .isAnnotationPresent(Transactional.class));
     assertTrue(
-        ProductServiceImpl.class
-            .getDeclaredMethod("deleteCategory", Long.class)
+        CategoryServiceImpl.class
+            .getDeclaredMethod("deleteCategory", ProductOperatorDTO.class, Long.class)
             .isAnnotationPresent(Transactional.class));
   }
 
   @Test
-  void outboxWriteFailureIsPropagatedToTheTransactionalCaller() throws Exception {
+  void outboxWriteFailureIsPropagatedToTheTransactionalCaller() {
     com.cloudmall.product.service.ProductIndexOutboxService outbox =
         mock(com.cloudmall.product.service.ProductIndexOutboxService.class);
-    org.mockito.Mockito.doThrow(new IllegalStateException("database unavailable"))
-        .when(outbox).append(org.mockito.ArgumentMatchers.anyString(),
-            org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(),
-            org.mockito.ArgumentMatchers.anyString());
-    ProductServiceImpl controller =
-        new ProductServiceImpl(
+    IllegalStateException originalFailure = new IllegalStateException("database unavailable");
+    org.mockito.Mockito.doThrow(originalFailure)
+        .when(outbox)
+        .append(
+            org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyString());
+    ProductController controller =
+        ProductTestServices.controller(
             mock(ProductSqlMapper.class), mock(StringRedisTemplate.class), mapper, outbox);
-    Method event = ProductServiceImpl.class.getDeclaredMethod("event", String.class, long.class);
-    event.setAccessible(true);
-
-    InvocationTargetException thrown =
-        assertThrows(
-            InvocationTargetException.class,
-            () -> event.invoke(controller, "PRODUCT_CHANGED", 42L));
-    assertTrue(thrown.getCause() instanceof IllegalStateException);
+    ProductDTO request = new ProductDTO();
+    request.name = "test product";
+    request.price = "12.00";
+    AuthContext.set(7L, "ADMIN");
+    try {
+      assertSame(
+          originalFailure,
+          assertThrows(IllegalStateException.class, () -> controller.create(request)));
+    } finally {
+      AuthContext.clear();
+    }
   }
 }

@@ -18,7 +18,7 @@ import org.yaml.snakeyaml.Yaml;
 class BackendP1RulesTest {
   @Test
   void productPersistsAndReadsParameters() throws Exception {
-    String source = source("cloud-mall-product", "ProductServiceImpl.java");
+    String source = source("cloud-mall-product", "ProductManagementServiceImpl.java");
     String compact = compact(source);
     assertTrue(source.contains("parameters"));
     assertTrue(source.contains("replaceParameters"));
@@ -29,11 +29,13 @@ class BackendP1RulesTest {
 
   @Test
   void productMapsDatabaseSnakeCaseToApiDtos() throws Exception {
-    String source = source("cloud-mall-product", "ProductServiceImpl.java");
+    String source =
+        source("cloud-mall-product", "SeckillActivityServiceImpl.java")
+            + source("cloud-mall-product", "ProductQueryServiceImpl.java");
     String compact = compact(source);
     String activity = source("cloud-mall-product", "ActivityVO.java");
     String hot = source("cloud-mall-product", "HotStatVO.java");
-    assertTrue(compact.contains("toActivityResponse(activityRecord(id))"));
+    assertTrue(compact.contains("toActivityResponse(activityRecord(activityId))"));
     assertTrue(compact.contains("newHotStatVO"));
     assertTrue(activity.contains("activityId"));
     assertTrue(activity.contains("remainingStock"));
@@ -68,8 +70,11 @@ class BackendP1RulesTest {
 
   @Test
   void productEventUsesTransactionalOutbox() throws Exception {
-    String product = source("cloud-mall-product", "ProductServiceImpl.java");
-    assertTrue(product.contains("productIndexOutboxService.append(type, id, productVersion, traceId)"));
+    String product = source("cloud-mall-product", "ProductManagementServiceImpl.java");
+    assertTrue(
+        product.contains(
+            "productIndexOutboxService.append(\"PRODUCT_CHANGED\", productId, productVersion,"
+                + " traceId)"));
     assertTrue(!product.contains("rabbit.convertAndSend"));
   }
 
@@ -95,7 +100,8 @@ class BackendP1RulesTest {
         config.contains(
             "uri: lb://cloud-mall-order, predicates:"
                 + " [\"Path=/api/seckill/orders,/api/seckill/orders/**\"]"));
-    assertTrue(config.contains("uri: lb://cloud-mall-order, predicates: [\"Path=/api/orders/**\"]"));
+    assertTrue(
+        config.contains("uri: lb://cloud-mall-order, predicates: [\"Path=/api/orders/**\"]"));
     assertTrue(!config.contains("Path=/api/seckill/**"));
   }
 

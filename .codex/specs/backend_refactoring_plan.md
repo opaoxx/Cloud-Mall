@@ -524,3 +524,20 @@ ProductCatalogReader通过现有ProductSqlMapper读取事实并装配VO，Mapper
 必要回归包括原商品/索引/指标单测、Common源码规则断言迁移后的同等保障、真实MVC响应与身份边界、Spring事务代理中的提交/回滚和outbox协同、已有ES页内事实及ONLINE登记测试。对涉及数据库写入的迁移使用新独立Compose项目和新MySQL卷执行实际数据库回归。真实ES/MQ端到端与冻结性能runner的执行范围独立记录，测试结果逐项标注。
 
 重命名或移动完成后检查新旧类与Spring Bean注册，八模块生产/测试源码编译，Product打包，原格式工具与diff检查。每个完成切片提交，并在本节记录验收范围和可回退节点。
+
+
+### Product 核心职责切片验收
+
+ProductController已改为组合调用四项Service契约，空ProductService与原集中实现已移除。分类、商品查询、商品写入和活动实现各自独立，公共读装配与字段编解码形成具体实现。商品写及分类写的事务注解保留在真实Service入口，指标关联号由内部查询结果传到HTTP响应，VO保留原ID字符串注解与金额/null表示。
+
+首轮编译发现的方法引用与测试入口迁移遗漏已修正。最终Product原57项、响应模型3项、真实MySQL/MVC五项与Common25项共90项通过，零失败/错误/跳过。实库用例经过真实事务代理和Mapper，覆盖十七个HTTP入口、创建/更新的outbox故障回滚、版本递增、分类鉴权与停用、活动时间及Redis失败后的原已提交状态。每次实库运行创建并清除UUID数据库。
+
+实验使用 `deploy/experiments/compose.yml` 新项目 `cloud-mall-refactor-product-20261104` 与新MySQL卷，端口19924，已核查的局部子网10.254.241.0/24。初次与最终日志位于 product/core/full-regression.log 和 product/core/verified-regression.log。
+
+### Product 包结构切片细化
+
+进一步核查确认原ProductKeywordSearch为具体ES实现，归入 `service.impl.search.ElasticsearchProductKeywordSearch`，显式保留Spring Bean名productKeywordSearch。现有ProductIndexWriter继续作为接口，ElasticsearchProductIndexWriter与八个索引实现归入service.impl.index。六个ProductMetric实现及ProductHotStatFreshnessAudit归入service.impl.metrics。
+
+测试辅助类改名为JdbcTransactionAnchorObserver、TransactionPhaseAnchorBridge、JdbcTransactionAnchorQualificationIT，对应两项单测类同步命名。当前Java引用、配置Import和资源定位字符串同步迁移，历史冻结runner与归档文件保留原版本引用。
+
+已发现Product模块target中存在cm21-online-metrics、cm21-pipeline等历史记录，本模块采用精确清除已移除全限定名对应class文件的方式重建，清理范围仅限target/classes与target/test-classes，避免清理历史测试证据目录。打包前核验旧类缺失及新类存在。
