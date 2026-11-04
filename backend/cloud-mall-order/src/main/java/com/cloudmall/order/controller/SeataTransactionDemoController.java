@@ -2,11 +2,11 @@ package com.cloudmall.order.controller;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
-import com.cloudmall.order.domain.dto.Cm18SeataDemoDTO;
-import com.cloudmall.order.domain.vo.Cm18SeataDemoVO;
-import com.cloudmall.order.service.impl.Cm18ControlledRollbackException;
-import com.cloudmall.order.service.impl.Cm18SeataDemoFacade;
-import com.cloudmall.order.service.impl.Cm18UnknownTransactionException;
+import com.cloudmall.order.domain.dto.SeataTransactionDemoDTO;
+import com.cloudmall.order.domain.vo.SeataTransactionDemoVO;
+import com.cloudmall.order.service.SeataDemoControlledRollbackException;
+import com.cloudmall.order.service.SeataDemoUnknownTransactionException;
+import com.cloudmall.order.service.SeataTransactionDemoService;
 import io.seata.common.exception.FrameworkException;
 import javax.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -22,16 +22,16 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /** CM-18 Seata 受控演练内部入口，仅在显式演练开关下注册。 */
-@RestController
+@RestController("cm18SeataDemoController")
 @RequestMapping("/api/internal/cm18/seata/demo")
 @Profile("!prod")
 @ConditionalOnProperty(prefix = "cloudmall.seata.cm18", name = "enabled", havingValue = "true")
-public class Cm18SeataDemoController {
-  /** CM-18 全局事务编排服务。 */
-  private final Cm18SeataDemoFacade demoFacade;
+public class SeataTransactionDemoController {
+  /** 在全局代理返回后确认提交事实的演练入口服务。 */
+  private final SeataTransactionDemoService demoFacade;
 
   /** 创建 CM-18 演练 Controller。 */
-  public Cm18SeataDemoController(Cm18SeataDemoFacade demoFacade) {
+  public SeataTransactionDemoController(SeataTransactionDemoService demoFacade) {
     this.demoFacade = demoFacade;
   }
 
@@ -43,42 +43,48 @@ public class Cm18SeataDemoController {
    * @return 事务状态
    */
   @PostMapping
-  public ResponseEntity<ApiResponse<Cm18SeataDemoVO>> execute(
-      @Valid @RequestBody Cm18SeataDemoDTO request,
+  public ResponseEntity<ApiResponse<SeataTransactionDemoVO>> execute(
+      @Valid @RequestBody SeataTransactionDemoDTO request,
       @RequestHeader(value = "X-Internal-Service", required = false) String internalService) {
     if (!"cloud-mall-cm18-test".equals(internalService)) {
       throw new BizException("COMMON_FORBIDDEN", "CM18 仅允许内部演练调用", 403);
     }
     try {
       return ResponseEntity.ok(ApiResponse.ok(demoFacade.execute(request)));
-    } catch (Cm18ControlledRollbackException exception) {
-      return ResponseEntity.ok(ApiResponse.ok(new Cm18SeataDemoVO(request.txId, "", "ROLLED_BACK")));
-    } catch (Cm18UnknownTransactionException exception) {
-      ApiResponse<Cm18SeataDemoVO> response = new ApiResponse<>(
-          "CM18_SEATA_UNKNOWN", "Seata 全局事务结果待确认",
-          new Cm18SeataDemoVO(request.txId, "", "UNKNOWN"));
+    } catch (SeataDemoControlledRollbackException exception) {
+      return ResponseEntity.ok(
+          ApiResponse.ok(new SeataTransactionDemoVO(request.txId, "", "ROLLED_BACK")));
+    } catch (SeataDemoUnknownTransactionException exception) {
+      ApiResponse<SeataTransactionDemoVO> response =
+          new ApiResponse<>(
+              "CM18_SEATA_UNKNOWN",
+              "Seata 全局事务结果待确认",
+              new SeataTransactionDemoVO(request.txId, "", "UNKNOWN"));
       return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-          .cacheControl(CacheControl.noStore()).body(response);
+          .cacheControl(CacheControl.noStore())
+          .body(response);
     } catch (DuplicateKeyException exception) {
       // 唯一键竞争只表示同一 txId 已有并发演练，不提前把全局结果判定为 COMMITTED。
-      ApiResponse<Cm18SeataDemoVO> response =
+      ApiResponse<SeataTransactionDemoVO> response =
           new ApiResponse<>(
               "CM18_IN_PROGRESS",
               "相同 txId 的全局事务正在完成，请稍后重试",
-              new Cm18SeataDemoVO(request.txId, "", "UNKNOWN"));
+              new SeataTransactionDemoVO(request.txId, "", "UNKNOWN"));
       return ResponseEntity.status(HttpStatus.ACCEPTED)
-          .cacheControl(CacheControl.noStore()).body(response);
+          .cacheControl(CacheControl.noStore())
+          .body(response);
     } catch (FrameworkException exception) {
       if (!isSeataConnectivityFailure(exception)) {
         throw exception;
       }
-      ApiResponse<Cm18SeataDemoVO> response =
+      ApiResponse<SeataTransactionDemoVO> response =
           new ApiResponse<>(
               "CM18_SEATA_UNKNOWN",
               "Seata 协调器连接状态未知，请稍后查询",
-              new Cm18SeataDemoVO(request.txId, "", "UNKNOWN"));
+              new SeataTransactionDemoVO(request.txId, "", "UNKNOWN"));
       return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-          .cacheControl(CacheControl.noStore()).body(response);
+          .cacheControl(CacheControl.noStore())
+          .body(response);
     }
   }
 

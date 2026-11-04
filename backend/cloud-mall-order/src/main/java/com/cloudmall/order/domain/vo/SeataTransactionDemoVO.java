@@ -1,7 +1,7 @@
 package com.cloudmall.order.domain.vo;
 
 /** CM-18 Seata 受控演练响应。 */
-public class Cm18SeataDemoVO {
+public class SeataTransactionDemoVO {
   /** 演练请求标识。 */
   public String txId;
 
@@ -12,10 +12,10 @@ public class Cm18SeataDemoVO {
   public String status;
 
   /** 创建演练响应。 */
-  public Cm18SeataDemoVO() {}
+  public SeataTransactionDemoVO() {}
 
   /** 创建演练响应。 */
-  public Cm18SeataDemoVO(String txId, String xid, String status) {
+  public SeataTransactionDemoVO(String txId, String xid, String status) {
     this.txId = txId;
     this.xid = xid;
     this.status = status;

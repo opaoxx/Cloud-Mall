@@ -8,7 +8,7 @@ import java.time.LocalDateTime;
 
 /** CM-18 Seata order 侧独立演练表持久化对象。 */
 @TableName("seata_cm18_order_demo")
-public class Cm18SeataOrderDemoPO {
+public class SeataOrderDemoPO {
   /** 演练请求标识。 */
   @TableId(type = IdType.INPUT)
   public String txId;

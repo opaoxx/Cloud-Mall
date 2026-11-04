@@ -1,14 +1,14 @@
 package com.cloudmall.order.feign;
 
 import com.cloudmall.common.api.ApiResponse;
-import com.cloudmall.order.domain.dto.Cm18SeataBranchDTO;
-import com.cloudmall.order.domain.vo.Cm18SeataBranchVO;
+import com.cloudmall.order.domain.dto.SeataStockDemoBranchDTO;
+import com.cloudmall.order.domain.vo.SeataStockDemoBranchVO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import java.util.List;
 import java.util.Map;
 import org.springframework.cloud.openfeign.FeignClient;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -17,8 +17,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 public interface StockClient {
   /** 调用 Stock 的 CM-18 独立演练分支并传播 Seata XID。 */
   @PostMapping("/api/internal/cm18/seata/demo/branch")
-  ApiResponse<Cm18SeataBranchVO> cm18SeataBranch(
-      @RequestBody Cm18SeataBranchDTO request,
+  ApiResponse<SeataStockDemoBranchVO> executeSeataDemoBranch(
+      @RequestBody SeataStockDemoBranchDTO request,
       @RequestHeader("TX_XID") String xid,
       @RequestHeader("X-CM18-Failure-Point") String failurePoint,
       @RequestHeader("X-Internal-Service") String internalService);

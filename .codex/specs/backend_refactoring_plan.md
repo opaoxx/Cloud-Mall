@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，下一模块为Order；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，Order已完成Seata演练切片，主业务拆分待继续；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,8 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
+| Order | 进行中 | Seata演练语义命名及代理边界切片完成，见第23节；主业务拆分待继续 |
+| Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -1223,4 +1224,45 @@ Order下一步先盘点创建/查询/状态流转、秒杀接收、超时消息�
 
 ### 23.5 实施结果
 
-待实施与验证。后续Order主业务拆分将单独冻结方法归属、同步锁、事务、认证顺序、Feign及分片/消息调用边界。
+本切片完成12个生产类型迁移、三个单方法Service接口及seata包职责说明；StockClient同步语义方法名，原三个测试类按职责改名且9个既有用例保持。所有Controller/Service依赖均以对应业务接口注入，原五个Bean名显式保留。未调整主OrderServiceImpl、普通订单Mapper、分片配置或任何资源文件。
+
+逐行复盘后的调用链为：
+
+```text
+原演练HTTP → SeataTransactionDemoController（原绑定/开关/身份/响应）
+  → SeataTransactionDemoServiceImpl（事务外入口）
+    → SeataTransactionDemoOrchestrator代理（原cm18-seata-demo全局事务）
+      → 只重放COMMITTED事实 / 读取RootContext
+      → SeataOrderDemoBranchService代理 → 原演练表CREATED本地提交
+      → 原故障点 / StockClient.executeSeataDemoBranch（原HTTP协议）
+      → 原分支响应证明 / 原Stock后故障点 / 全局代理完成
+    → markCommitted；0行时读取原行确认，否则UNKNOWN
+  → 原COMMITTED/ROLLED_BACK/UNKNOWN及202/503映射
+```
+
+16个迁移/引用文件（12个生产类型、StockClient、3个测试）的执行token在声明的命名、接口、Bean元数据变换下全部一致；其余68个生产源码/资源文件哈希保持。85份原测试源码的方法保留检查通过。24个变更Java文件执行Google Java Format，diff检查通过。旧class精确检查未发现残留；Order Jar中12个旧类型缺席、12个新类型及三个接口存在，无测试夹具。
+
+| 验证范围 | 测试数 | 实际结论 |
+| --- | ---: | --- |
+| Common单测 | 25 | 公共认证、返回及基础契约 |
+| Order单测 | 306 | 原299项及新增HTTP/Feign/代理边界7项 |
+| Order演练MySQL | 3 | 真实扫描/Bean名、原PO/Mapper、提交后远程观察、事务外确认、插入后异常回滚、原键重写 |
+| Stock演练单测 | 9 | 原分支HTTP、配置、身份与XID契约 |
+| Stock演练MySQL | 2 | 同一新实验中核对原表映射及真实本地提交/回滚 |
+| 合计 | 345 | 63个测试类，0失败、0错误、0跳过 |
+
+Order打包及八模块test-compile通过。新HTTP用例使用真实MockMvc和项目异常处理器；Feign用实际StockClient、SpringMvcContract、序列化/解码器和本地受控HTTP服务器，核验原路径、POST、三个请求头及字段；不冒充真实Stock Boot/Nacos链。代理时序使用受控Spring代理，实际MySQL用例启用真实本地事务代理；全局事务注解元数据保持，但本轮未启动TC，未验收AT二阶段、RM重启或跨库全局回滚。普通订单分片、真实MQ故障链、商城全链和性能未在本切片重跑。
+
+实验 `cloud-mall-refactor-order-seata-20261104` 使用全新MySQL卷，版本8.0.46、端口19939。五个用例自有UUID库全部删除，结束时只余空的cloudmall_order/cloudmall_stock及系统库，没有业务表或测试行。63份报告、日志、inspect、源码对照和Jar摘要归档到 `target/backend-refactor-20261104/order-seata/verification.json` 及同目录；实验容器和网络已移除，新mysql_data卷保留，默认环境未变。
+
+### 23.6 回退与下一切片
+
+方案提交/基线为 `271dc371`，标签 `refactor/order-seata-baseline-20261104`；完成标签为 `refactor/order-seata-complete-20261104`。临时Git index验证当前提交的逆补丁可恢复父提交完整树，不改变真实工作树/index。
+
+```powershell
+git revert refactor/order-seata-complete-20261104
+```
+
+这只撤销Order首切片，保留此前Stock等模块成果。实际回退后应按本节清单精确清理新类型/测试及其嵌套class残留再编译，保留target历史证据；有后续依赖提交时先处理依赖与冲突。Git不回退运行数据或忽略工件，不使用reset --hard。
+
+下一切片继续Order主业务拆分：先明确创建、查询、状态迁移、秒杀与超时消费的方法归属，再逐项冻结现有同步锁、REQUIRED/REQUIRES_NEW/只读RR、身份读取顺序、库存动作恢复及分片调用边界。具体类名和是否分多步以实际方法清单为准，方案先落盘再改代码；本轮不宣称Order模块整体重构完成。
