@@ -61,7 +61,7 @@ import org.springframework.transaction.annotation.AnnotationTransactionAttribute
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-/** 两个owned库及真实User GET/Feign验证；只监听随机loopback端口，finally精确清理。 */
+/** 两个owned库及真实User GET/Feign验证；CONFIRMED状态6次读取加账户报告4次，保持精确预算。 */
 class PayTccUserAccountEvidenceMySqlIT {
   /** 原库只读指纹和owned schema管理连接。 */
   private static JdbcTemplate source;
@@ -267,7 +267,8 @@ class PayTccUserAccountEvidenceMySqlIT {
         mappers.get(index).getMethod("ensureTable").invoke(instances[index]);
     }
     Class<?> queryType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -276,7 +277,8 @@ class PayTccUserAccountEvidenceMySqlIT {
             new DataSourceTransactionManager(userTracked),
             new AnnotationTransactionAttributeSource()));
     Class<?> httpType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationService");
     var httpService =
         httpType.getConstructors()[0].newInstance(proxy.getProxy(userClasses), true, "ops-secret");
     Object controller =
@@ -434,7 +436,7 @@ class PayTccUserAccountEvidenceMySqlIT {
     assertEquals("USER_EVIDENCE_INCOMPLETE", report.classification);
     assertTrue(report.reasonCodes.contains("USER_REFUNDED_FIXED_PROOF_MISSING"));
     assertEquals(12, tracked.statements.size());
-    assertEquals(9, userTracked.statements.size());
+    assertEquals(10, userTracked.statements.size());
     assertUnchanged(payBefore, userBefore);
   }
 
@@ -453,7 +455,7 @@ class PayTccUserAccountEvidenceMySqlIT {
     assertEquals("PAY_USER_ACCOUNT_OBSERVED_ONLY", report.scope);
     assertEquals("10.00", report.userAccountEvidence.tryingFrozenTotal());
     assertEquals(12, tracked.statements.size());
-    assertEquals(9, userTracked.statements.size());
+    assertEquals(10, userTracked.statements.size());
     assertUnchanged(payBefore, userBefore);
   }
 
@@ -487,7 +489,7 @@ class PayTccUserAccountEvidenceMySqlIT {
       assertEquals(2, tracked.connections);
       assertEquals(12, tracked.statements.size());
       assertEquals(1, userTracked.connections);
-      assertEquals(9, userTracked.statements.size());
+      assertEquals("CONFIRMED".equals(state) ? 10 : 11, userTracked.statements.size());
       assertUnchanged(payBefore, userBefore);
     }
     assertEquals(2, getRequests.get());

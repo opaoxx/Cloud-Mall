@@ -288,7 +288,8 @@ class PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT {
               return result;
             });
     Class<?> queryType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -298,7 +299,8 @@ class PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> frozenType =
         userClasses.loadClass(
@@ -497,7 +499,8 @@ class PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT {
       }
       assertEquals(12, tracked.statements.size());
       assertEquals(2, tracked.connections);
-      assertEquals(22, userTracked.statements.size());
+      // 基础账户/候选为11或12次；CONFIRMED peer7次，CANCELLED peer8次。
+      assertEquals("CONFIRMED".equals(state) ? 26 : 27, userTracked.statements.size());
       assertEquals(1, userTracked.connections);
       assertUnchanged(payBefore, userBefore);
     }
@@ -517,7 +520,7 @@ class PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT {
     assertEquals(0, empty.userTerminalFrozenOwnershipEvidence.observedCount());
     assertEquals(0, empty.userTerminalFrozenOwnershipEvidence.validatedCancelledCount());
     assertTrue(empty.attemptOnlyCancelledNotInspected);
-    assertEquals(10, userTracked.statements.size());
+    assertEquals(12, userTracked.statements.size());
     assertUnchanged(payBefore, userBefore);
   }
 
@@ -580,11 +583,11 @@ class PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT {
         assertEquals(100, report.userTerminalFrozenOwnershipEvidence.observedCount());
         assertEquals(1, report.userTerminalFrozenOwnershipEvidence.validatedConfirmedCount());
         assertEquals(99, report.userTerminalFrozenOwnershipEvidence.validatedCancelledCount());
-        assertEquals(610, userTracked.statements.size());
+        assertEquals(11 + 7 + 8 * (count - 1), userTracked.statements.size());
       } else {
         assertEquals("USER_EVIDENCE_INCOMPLETE", report.classification);
         assertNull(report.userTerminalFrozenOwnershipEvidence.observedCount());
-        assertEquals(10, userTracked.statements.size());
+        assertEquals(11, userTracked.statements.size());
       }
       assertUnchanged(payBefore, userBefore);
     }
@@ -601,12 +604,12 @@ class PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT {
     enableChecks();
     var first = inspectUser();
     assertEquals(2, first.userTerminalFrozenOwnershipEvidence.observedCount());
-    assertEquals(22, userTracked.statements.size());
+    assertEquals(26, userTracked.statements.size());
     tracked.reset();
     userTracked.reset();
     var next = inspectUser();
     assertEquals(3, next.userTerminalFrozenOwnershipEvidence.observedCount());
-    assertEquals(28, userTracked.statements.size());
+    assertEquals(33, userTracked.statements.size());
     assertNotEquals(
         first.userTerminalFrozenOwnershipEvidence.vectorSha256(),
         next.userTerminalFrozenOwnershipEvidence.vectorSha256());

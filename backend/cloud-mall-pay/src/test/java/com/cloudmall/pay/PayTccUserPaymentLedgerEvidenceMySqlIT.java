@@ -292,7 +292,8 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
               return result;
             });
     Class<?> queryType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -302,7 +303,8 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> linkedType =
         userClasses.loadClass(
@@ -327,7 +329,8 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
             new DataSourceTransactionManager(userTracked),
             new AnnotationTransactionAttributeSource()));
     Class<?> paymentGateType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserPaymentLedgerEvidenceService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserPaymentLedgerEvidenceService");
     Object paymentGate =
         paymentGateType.getConstructors()[0].newInstance(
             baseGate, paymentProxy.getProxy(userClasses), true);
@@ -492,7 +495,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
     assertEquals(0, report.paymentLedgerEvidence.validatedRefundCount());
     assertEquals("0.00", report.paymentLedgerEvidence.validatedRefundTotalAmount());
     assertEquals(12, tracked.statements.size());
-    assertEquals(12, userTracked.statements.size());
+    assertEquals(13, userTracked.statements.size());
     assertUnchanged(payBefore, userBefore);
 
     seed("ROLLEDBACK");
@@ -509,7 +512,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
     assertEquals(0, cancelled.paymentLedgerEvidence.validatedRefundCount());
     assertEquals("0.00", cancelled.paymentLedgerEvidence.validatedRefundTotalAmount());
     assertEquals(12, tracked.statements.size());
-    assertEquals(11, userTracked.statements.size());
+    assertEquals(13, userTracked.statements.size());
     assertUnchanged(cancelledPayBefore, cancelledUserBefore);
   }
 
@@ -533,7 +536,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
     assertNotNull(report.userAccountEvidence);
     assertEquals(12, tracked.statements.size());
     assertEquals(2, tracked.connections);
-    assertEquals(16, userTracked.statements.size());
+    assertEquals(17, userTracked.statements.size());
     assertEquals(1, userTracked.connections);
     assertEquals("cm18-reconciliation", receivedService.get());
     assertEquals("ops-secret", receivedToken.get());
@@ -560,7 +563,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
     assertEquals("10.00", report.paymentLedgerEvidence.validatedRefundTotalAmount());
     assertEquals(12, tracked.statements.size());
     assertEquals(2, tracked.connections);
-    assertEquals(14, userTracked.statements.size());
+    assertEquals(15, userTracked.statements.size());
     assertEquals(1, userTracked.connections);
     assertEquals("cm18-reconciliation", receivedService.get());
     assertEquals("ops-secret", receivedToken.get());
@@ -622,11 +625,18 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
       var payBefore = facts();
       var userBefore = userFacts();
       enableChecks();
+      int previousReadCount = userTracked.statements.size();
       var report = inspectUser();
-      assertTrue(
-          Set.of("USER_EVIDENCE_INCOMPLETE", "USER_EVIDENCE_CONFLICT")
-              .contains(report.classification),
-          mutation);
+      if (List.of("extra-debit", "wrong-type").contains(mutation)) {
+        // 同pay额外DEBIT使基础state门先返回HTTP409，不伪造后续候选报告。
+        assertEquals("USER_EVIDENCE_UNAVAILABLE", report.classification, mutation);
+        assertEquals(6, userTracked.statements.size() - previousReadCount);
+      } else {
+        assertTrue(
+            Set.of("USER_EVIDENCE_INCOMPLETE", "USER_EVIDENCE_CONFLICT")
+                .contains(report.classification),
+            mutation);
+      }
       assertNull(report.userAccountEvidence, mutation);
       assertNull(report.linkedRefundEvidence, mutation);
       if (List.of("null-origin", "wrong-origin").contains(mutation))
@@ -662,13 +672,14 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
         assertEquals(99, report.paymentLedgerEvidence.validatedRefundCount());
         assertEquals(1, report.paymentLedgerEvidence.validatedDebitCount());
         assertEquals("10.00", report.paymentLedgerEvidence.validatedRefundTotalAmount());
-        assertEquals(210, userTracked.statements.size());
+        // 基础账户10 + linked候选1 + 99个COUNT + pay候选1 + 100个COUNT。
+        assertEquals(13 + 2 * refundCount, userTracked.statements.size());
       } else {
         assertEquals("USER_EVIDENCE_INCOMPLETE", report.classification);
         assertNull(report.paymentLedgerEvidence.observedCount());
-        assertEquals(111, userTracked.statements.size());
+        assertEquals(112, userTracked.statements.size());
         // 原linked范围已核100个key，新同pay范围遇101哨兵后停止COUNT。
-        assertTrue(userTracked.statements.get(110).contains("WHERE PAY_NO"));
+        assertTrue(userTracked.statements.get(111).contains("WHERE PAY_NO"));
         assertEquals(
             100,
             userTracked.statements.stream()
@@ -692,14 +703,14 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
     assertEquals(1, first.paymentLedgerEvidence.observedCount());
     assertEquals(1, first.paymentLedgerEvidence.validatedDebitCount());
     assertEquals(0, first.paymentLedgerEvidence.validatedRefundCount());
-    assertEquals(12, userTracked.statements.size());
+    assertEquals(13, userTracked.statements.size());
     tracked.reset();
     userTracked.reset();
     var next = inspectUser();
     assertEquals("USER_EVIDENCE_INCOMPLETE", next.classification);
     assertNull(next.paymentLedgerEvidence.observedCount());
     assertNull(next.paymentLedgerEvidence.validatedRefundTotalAmount());
-    assertEquals(12, userTracked.statements.size());
+    assertEquals(13, userTracked.statements.size());
     assertNull(transportAssertion.get());
     assertEquals(0, writeRequests.get());
   }

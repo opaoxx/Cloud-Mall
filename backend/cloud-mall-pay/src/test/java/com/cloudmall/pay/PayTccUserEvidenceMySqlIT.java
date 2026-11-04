@@ -243,7 +243,8 @@ class PayTccUserEvidenceMySqlIT {
       instances[index] = userSession.getMapper(mappers.get(index));
       mappers.get(index).getMethod("ensureTable").invoke(instances[index]);
     }
-    Class<?> queryType = userClasses.loadClass("com.cloudmall.user.service.impl.UserTccStateQuery");
+    Class<?> queryType =
+        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccStateQuery");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -251,11 +252,12 @@ class PayTccUserEvidenceMySqlIT {
         new TransactionInterceptor(
             new DataSourceTransactionManager(userTracked),
             new AnnotationTransactionAttributeSource()));
-    Class<?> httpType = userClasses.loadClass("com.cloudmall.user.service.impl.UserTccHttpService");
+    Class<?> httpType =
+        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccHttpService");
     // GET仅需要query；写资源不注入，任何意外写调用必须失败。
     var httpService =
         httpType.getConstructors()[0].newInstance(
-            null, null, proxy.getProxy(userClasses), null, "ops-secret");
+            null, null, proxy.getProxy(userClasses), null, "ops-secret", false);
     Object controller =
         userClasses
             .loadClass("com.cloudmall.user.controller.UserTccController")
@@ -426,7 +428,8 @@ class PayTccUserEvidenceMySqlIT {
       assertEquals(2, tracked.connections);
       assertEquals(12, tracked.statements.size());
       assertEquals(1, userTracked.connections);
-      assertEquals(5, userTracked.statements.size());
+      // 固定来源4次；CONFIRMED另读DEBIT范围/Fence，CANCELLED还读完整pay账本范围。
+      assertEquals("CONFIRMED".equals(state) ? 6 : 7, userTracked.statements.size());
       assertUnchanged(payBefore, userBefore);
     }
     assertEquals(2, getRequests.get());
@@ -435,7 +438,7 @@ class PayTccUserEvidenceMySqlIT {
 
   @Test
   void unknownMissingReceiveAndMissingAppliedLedgerAreDistinctBlockedResultsWithoutWrites() {
-    for (String variant : List.of("unknown", "receive", "ledger")) {
+    for (String variant : List.of("unknown", "receive", "ledger", "legacy-state")) {
       tracked.checking = false;
       userTracked.checking = false;
       seedUser("CONFIRMED");
@@ -443,6 +446,8 @@ class PayTccUserEvidenceMySqlIT {
         for (String table : USER_TABLES) {
           if (!"user_tcc_receive".equals(table)) userFixture.update("DELETE FROM " + table);
         }
+      else if ("legacy-state".equals(variant))
+        userFixture.update("UPDATE user_tcc_receive SET state='ACCEPTED'");
       else
         userFixture.update(
             "DELETE FROM " + ("receive".equals(variant) ? "user_tcc_receive" : "balance_ledger"));
@@ -644,7 +649,7 @@ class PayTccUserEvidenceMySqlIT {
     userFixture.update(
         "INSERT INTO"
             + " user_tcc_receive(id,pay_no,xid,branch_id,user_id,order_no,amount,operation_key,ledger_key,state,created_at,updated_at)"
-            + " VALUES(1,'pay1','tc-private:8091:original',202,7,'202610order1',10,'tcc-debit:pay1','pay1','ACCEPTED',?,?)",
+            + " VALUES(1,'pay1','tc-private:8091:original',202,7,'202610order1',10,'tcc-debit:pay1','pay1','CLAIMED',?,?)",
         time,
         time);
     userFixture.update(

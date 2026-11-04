@@ -288,7 +288,8 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
               return result;
             });
     Class<?> queryType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -298,7 +299,8 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> frozenType =
         userClasses.loadClass(
@@ -313,7 +315,8 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
             new DataSourceTransactionManager(userTracked),
             new AnnotationTransactionAttributeSource()));
     Class<?> frozenGateType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceService");
     Object frozenGate =
         frozenGateType.getConstructors()[0].newInstance(
             baseGate, frozenProxy.getProxy(userClasses), true);
@@ -475,7 +478,7 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
     assertTrue(report.terminalFrozenRowsNotInspected);
     assertEquals(0, report.userFrozenOwnershipEvidence.observedCount());
     assertEquals(12, tracked.statements.size());
-    assertEquals(10, userTracked.statements.size());
+    assertEquals(11, userTracked.statements.size());
     assertUnchanged(payBefore, userBefore);
   }
 
@@ -512,7 +515,8 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
       assertEquals(2, tracked.connections);
       assertEquals(12, tracked.statements.size());
       assertEquals(1, userTracked.connections);
-      assertEquals(10 + 5 * peers, userTracked.statements.size());
+      // CONFIRMED基础账户10次、候选1次、每个TRYING peer7次。
+      assertEquals(11 + 7 * peers, userTracked.statements.size());
       assertUnchanged(payBefore, userBefore);
     }
   }
@@ -569,11 +573,11 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
         assertEquals("BLOCKED_REMAINING_EVIDENCE", report.classification);
         assertEquals(100, report.userFrozenOwnershipEvidence.observedCount());
         assertEquals("1.00", report.userFrozenOwnershipEvidence.validatedFrozenTotal());
-        assertEquals(510, userTracked.statements.size());
+        assertEquals(11 + 7 * count, userTracked.statements.size());
       } else {
         assertEquals("USER_EVIDENCE_INCOMPLETE", report.classification);
         assertNull(report.userFrozenOwnershipEvidence.observedCount());
-        assertEquals(10, userTracked.statements.size());
+        assertEquals(11, userTracked.statements.size());
       }
       assertUnchanged(payBefore, userBefore);
     }
@@ -596,13 +600,13 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
     var first = inspectUser();
     assertEquals(1, first.userFrozenOwnershipEvidence.observedCount());
     assertEquals("0.01", first.userFrozenOwnershipEvidence.validatedFrozenTotal());
-    assertEquals(15, userTracked.statements.size());
+    assertEquals(18, userTracked.statements.size());
     tracked.reset();
     userTracked.reset();
     var next = inspectUser();
     assertEquals(2, next.userFrozenOwnershipEvidence.observedCount());
     assertEquals("0.02", next.userFrozenOwnershipEvidence.validatedFrozenTotal());
-    assertEquals(20, userTracked.statements.size());
+    assertEquals(25, userTracked.statements.size());
     assertNull(transportAssertion.get());
   }
 

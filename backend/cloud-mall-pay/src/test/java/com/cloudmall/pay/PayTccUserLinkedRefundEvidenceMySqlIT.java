@@ -292,7 +292,8 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
               return result;
             });
     Class<?> queryType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -302,7 +303,8 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccReconciliationService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> linkedType =
         userClasses.loadClass(
@@ -315,7 +317,8 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
             new DataSourceTransactionManager(userTracked),
             new AnnotationTransactionAttributeSource()));
     Class<?> linkedGateType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserLinkedRefundEvidenceService");
+        userClasses.loadClass(
+            "com.cloudmall.user.service.impl.UserLinkedRefundEvidenceService");
     Object linkedGate =
         linkedGateType.getConstructors()[0].newInstance(
             baseGate, linkedProxy.getProxy(userClasses), true);
@@ -479,7 +482,7 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
     assertEquals(0, report.linkedRefundEvidence.observedCount());
     assertEquals("0.00", report.linkedRefundEvidence.validatedTotalAmount());
     assertEquals(12, tracked.statements.size());
-    assertEquals(10, userTracked.statements.size());
+    assertEquals(11, userTracked.statements.size());
     assertUnchanged(payBefore, userBefore);
   }
 
@@ -499,7 +502,7 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
     assertNotNull(report.userAccountEvidence);
     assertEquals(12, tracked.statements.size());
     assertEquals(2, tracked.connections);
-    assertEquals(12, userTracked.statements.size());
+    assertEquals(13, userTracked.statements.size());
     assertEquals(1, userTracked.connections);
     assertEquals("cm18-reconciliation", receivedService.get());
     assertEquals("ops-secret", receivedToken.get());
@@ -523,7 +526,7 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
     assertEquals("10.00", report.linkedRefundEvidence.validatedTotalAmount());
     assertEquals(12, tracked.statements.size());
     assertEquals(2, tracked.connections);
-    assertEquals(11, userTracked.statements.size());
+    assertEquals(12, userTracked.statements.size());
     assertEquals(1, userTracked.connections);
     assertEquals("cm18-reconciliation", receivedService.get());
     assertEquals("ops-secret", receivedToken.get());
@@ -566,11 +569,18 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
       var payBefore = facts();
       var userBefore = userFacts();
       enableChecks();
+      int previousReadCount = userTracked.statements.size();
       var report = inspectUser();
-      assertTrue(
-          Set.of("USER_EVIDENCE_INCOMPLETE", "USER_EVIDENCE_CONFLICT")
-              .contains(report.classification),
-          mutation);
+      if ("wrong-type".equals(mutation)) {
+        // 额外DEBIT在基础state门HTTP409短路；Pay尚未获得候选报告，按原传输失败分类。
+        assertEquals("USER_EVIDENCE_UNAVAILABLE", report.classification, mutation);
+        assertEquals(6, userTracked.statements.size() - previousReadCount);
+      } else {
+        assertTrue(
+            Set.of("USER_EVIDENCE_INCOMPLETE", "USER_EVIDENCE_CONFLICT")
+                .contains(report.classification),
+            mutation);
+      }
       assertNull(report.linkedRefundEvidence.observedCount(), mutation);
       assertNull(report.linkedRefundEvidence.validatedTotalAmount(), mutation);
       assertUnchanged(payBefore, userBefore);
@@ -596,11 +606,12 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
         assertEquals("BLOCKED_REMAINING_EVIDENCE", report.classification);
         assertEquals(100, report.linkedRefundEvidence.observedCount());
         assertEquals("10.00", report.linkedRefundEvidence.validatedTotalAmount());
-        assertEquals(110, userTracked.statements.size());
+        // CONFIRMED基础账户10次、linked候选1次、100个全局键COUNT。
+        assertEquals(11 + candidateCount, userTracked.statements.size());
       } else {
         assertEquals("USER_EVIDENCE_INCOMPLETE", report.classification);
         assertNull(report.linkedRefundEvidence.observedCount());
-        assertEquals(10, userTracked.statements.size());
+        assertEquals(11, userTracked.statements.size());
         assertEquals(
             0,
             userTracked.statements.stream()
@@ -623,14 +634,14 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
     var first = inspectUser();
     assertEquals("USER_EVIDENCE_INCOMPLETE", first.classification);
     assertNull(first.linkedRefundEvidence.observedCount());
-    assertEquals(11, userTracked.statements.size());
+    assertEquals(12, userTracked.statements.size());
     tracked.reset();
     userTracked.reset();
     var next = inspectUser();
     assertEquals(2, next.linkedRefundEvidence.observedCount());
     assertNotEquals(
         first.linkedRefundEvidence.vectorSha256(), next.linkedRefundEvidence.vectorSha256());
-    assertEquals(12, userTracked.statements.size());
+    assertEquals(13, userTracked.statements.size());
     assertEquals("BLOCKED_REMAINING_EVIDENCE", next.classification);
     assertNull(transportAssertion.get());
     assertEquals(0, writeRequests.get());
