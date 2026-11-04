@@ -1009,3 +1009,44 @@ git revert refactor/stock-core-complete-20261104
 逆补丁以临时index核对可恢复父提交 `7153ad65` 的完整树，真实工作树/index未执行回退。因此回退结构拆分仍保留五类历史夹具修正，以及上一切片Seata命名。实际回退后仅按新类型与新增夹具的准确class清单清理构建残留，再编译；保留target中的历史证据，不使用reset --hard。Git不回退数据库/Redis或忽略的工件。
 
 本切片未启用真实TC/RM恢复，也未跑完整商城链路或性能实验。Stock整体仍在进行中：下一步先逐端点登记Map的可选字段与null语义，把响应装配移回Controller并形成VO，再细化缓存核对、outbox和恢复实现的归组清单；不得顺带改Lua、CAS、租约或公平扫描算法。
+
+## 21. Stock 第三切片：主接口响应VO与HTTP包装
+
+### 21.1 范围与评审
+
+基线为 `c16419e4`，已验证Common25、Stock194单测/171实库、Pay→Stock6共396项。本会话仍由主Agent独立评审实施。已复读AGENTS、README、Bug台账、API规格库存部分与依赖保护规格；不修改外部接口契约。
+
+本切片只处理StockController的六个主接口：三个Service接口、对应实现、共享StockReservationReader及SeckillQuotaSettlementService返回具体VO，ApiResponse只在Controller成功返回处创建。确认/回滚仍委托同一个结算状态机，settle没有秒杀事实时仍返回null，不能变成空VO。
+
+内部受理事实GET暂保留现有Map：其已观察字段可以显式null，未观察字段则不存在，与本节结果Map的非null规则不同。将在后续内部查询VO及恢复归组切片单独冻结，禁止本轮套用NON_NULL而改变证据语义。Seata演练入口已有VO，不改。
+
+### 21.2 原JSON形状与新类型
+
+| 结果分支 | 新类型 | 精确data字段 |
+| --- | --- | --- |
+| 数量查询 | 原StockQuantityVO | skuId、availableQuantity，沿用原类型/null规则 |
+| 预扣/状态查询 | 原StockReservationVO | orderNo、status、items，沿用原明细、UNKNOWN及ALREADY_RESERVED规则 |
+| 确认首次/幂等 | StockActionResultVO | confirmed=true、idempotent=false/true；其它字段不存在 |
+| 回滚完成首次/幂等 | StockActionResultVO | rolledBack=true、idempotent=false/true；其它字段不存在 |
+| 秒杀释放待投影 | StockActionResultVO | rolledBack=false、pending=true、status=UNKNOWN；idempotent/confirmed不存在 |
+| 秒杀受理成功/重放 | SeckillAcceptanceVO | accepted=true、orderNo、eventId、reservationStatus、status=PENDING_PAYMENT；reason不存在 |
+| 已有REJECTED受理 | SeckillAcceptanceVO | accepted=false、orderNo、eventId、reservationStatus=REJECTED；status/reason不存在 |
+| 受理待恢复 | SeckillAcceptanceVO | accepted=false、orderNo、eventId、reservationStatus=RECOVERY_REQUIRED、status=ORDER_RECOVERY_PENDING、reason |
+
+两个新VO位于domain.vo，字段不可变，通过语义工厂生成合法分支。可选字段仅使用NON_NULL省略，不使用NON_DEFAULT/NON_EMPTY；false必须保留。必填字符串保留原Map.of拒绝null语义，恢复reason仍必填。原数量/预扣VO不加新的全局包含规则，ObjectMapper配置不改。
+
+### 21.3 返回边界与兼容核验
+
+- StockQueryService返回StockQuantityVO/StockReservationVO；StockReservationService.reserve返回StockReservationVO，confirm/rollback两个重载均返回StockActionResultVO；SeckillReservationService返回SeckillAcceptanceVO。
+- Reader返回原VO；alreadyReserved将原wrapper/data两层缺证检查折为VO非null且status精确RESERVED，保持读取异常503、原对象状态修改为ALREADY_RESERVED的顺序。
+- SeckillQuotaSettlementService.settle/pendingRollback/conflict仅改变Java返回类型和结果构造；所有null候选、校验、CAS、锁、事务、幂等与未知结果门保持。辅助受理方法同样只改结果构造。
+- 六个Controller方法在Service正常返回后调用一次ApiResponse.ok，成功code/message/data/requestId字段保持。requestId仍由公共包装器生成UUID；生成时机由事务内转为Service代理返回后。本模块没有把该响应requestId写入DB/Redis/outbox，销量事件关联使用原MDC traceId或已有显式null，均不改。
+- 异常不被Controller包装为成功，原HTTP错误码、状态与响应头保持。路径、请求DTO、Feign签名/JSON、金额、时间、Redis Key、Lua、消息以及事务/切面均不改。Order、Pay生产代码不引入Stock Java类型依赖。
+
+### 21.4 验证与提交
+
+先提交本节并建立 `refactor/stock-response-baseline-20261104`，再实现。现有测试仅把直接Service返回值从ApiResponse/Map改为具体VO，HTTP/Feign仍断言原统一包装；原所有业务断言保留。新增完整JSON字段集合矩阵、false/缺省/null控制、必填null拒绝、Controller包装及事务提交失败不返回成功的检查。
+
+运行Stock全部单测/实库、Common、Pay→Stock实际HTTP/Feign，以及Order库存动作和秒杀消费契约专项。新建独立Compose项目 `cloud-mall-refactor-stock-response-20261104`，MySQL19935、Redis19936、网段10.254.247.0/24（先核对冲突），全新卷、root/root；复用已验证空源DDL与UUID库隔离方式，测试后核对并归档、移除本次容器/网络、保留卷。证据放 `target/backend-refactor-20261104/stock-response/`。
+
+结果构造按旧Map字段与VO工厂逐项比对，其余执行词法不变；Stock打包、八模块test-compile、Google Java Format和git diff --check通过后提交，并用临时index验证逆补丁。该切片可独立回退，不回退前两次Stock拆分或历史夹具修正。真实TC/RM、商城全链及性能不在本轮；后续仍有内部查询VO与缓存/恢复职责归组。
