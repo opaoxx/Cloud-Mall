@@ -14,11 +14,17 @@ import com.cloudmall.user.config.BalanceTccTableInitializer;
 import com.cloudmall.user.config.UserAccountInitializer;
 import com.cloudmall.user.config.UserTableInitializer;
 import com.cloudmall.user.controller.UserController;
-import com.cloudmall.user.service.BalanceLedgerService;
+import com.cloudmall.user.service.BalanceDebitService;
+import com.cloudmall.user.service.BalanceOperationQueryService;
+import com.cloudmall.user.service.BalanceRefundService;
 import com.cloudmall.user.service.impl.AuthenticationServiceImpl;
-import com.cloudmall.user.service.impl.BalanceLedgerServiceImpl;
 import com.cloudmall.user.service.impl.UserAddressServiceImpl;
 import com.cloudmall.user.service.impl.UserProfileServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceDebitServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceOperationQueryServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceOwnershipEvidence;
+import com.cloudmall.user.service.impl.balance.BalanceRefundEvidence;
+import com.cloudmall.user.service.impl.balance.BalanceRefundServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
@@ -117,7 +123,11 @@ class UserAccountRefactoringIT {
         AuthenticationServiceImpl.class,
         UserProfileServiceImpl.class,
         UserAddressServiceImpl.class,
-        BalanceLedgerServiceImpl.class,
+        BalanceDebitServiceImpl.class,
+        BalanceRefundServiceImpl.class,
+        BalanceOperationQueryServiceImpl.class,
+        BalanceOwnershipEvidence.class,
+        BalanceRefundEvidence.class,
         UserAccountInitializer.class,
         UserTableInitializer.class,
         BalanceTccTableInitializer.class,
@@ -125,7 +135,9 @@ class UserAccountRefactoringIT {
     context.refresh();
     redis = context.getBean(StringRedisTemplate.class);
     assertEquals(Set.of(), redis.keys("*"), "Explicit experiment Redis DB15 must start empty");
-    assertTrue(AopUtils.isAopProxy(context.getBean(BalanceLedgerService.class)));
+    assertTrue(AopUtils.isAopProxy(context.getBean(BalanceDebitService.class)));
+    assertTrue(AopUtils.isAopProxy(context.getBean(BalanceRefundService.class)));
+    assertTrue(AopUtils.isAopProxy(context.getBean(BalanceOperationQueryService.class)));
     assertFalse(AopUtils.isAopProxy(context.getBean(UserController.class)));
     long routes =
         context.getBean(RequestMappingHandlerMapping.class).getHandlerMethods().values().stream()

@@ -9,7 +9,9 @@ import com.cloudmall.user.domain.dto.CredentialsDTO;
 import com.cloudmall.user.domain.dto.DebitRequestDTO;
 import com.cloudmall.user.domain.dto.ProfileDTO;
 import com.cloudmall.user.service.AuthenticationService;
-import com.cloudmall.user.service.BalanceLedgerService;
+import com.cloudmall.user.service.BalanceDebitService;
+import com.cloudmall.user.service.BalanceOperationQueryService;
+import com.cloudmall.user.service.BalanceRefundService;
 import com.cloudmall.user.service.UserAddressService;
 import com.cloudmall.user.service.UserProfileService;
 import javax.validation.Valid;
@@ -38,19 +40,29 @@ public class UserController {
   /** 所属收货地址维护。 */
   private final UserAddressService userAddressService;
 
-  /** 持久化余额操作与证明。 */
-  private final BalanceLedgerService balanceLedgerService;
+  /** 持久化余额扣款。 */
+  private final BalanceDebitService balanceDebitService;
 
-  /** 注入四项独立业务能力。 */
+  /** 原来源证明后的退款。 */
+  private final BalanceRefundService balanceRefundService;
+
+  /** 余额操作只读证明。 */
+  private final BalanceOperationQueryService balanceOperationQueryService;
+
+  /** 注入账号与资金业务能力。 */
   public UserController(
       AuthenticationService authenticationService,
       UserProfileService userProfileService,
       UserAddressService userAddressService,
-      BalanceLedgerService balanceLedgerService) {
+      BalanceDebitService balanceDebitService,
+      BalanceRefundService balanceRefundService,
+      BalanceOperationQueryService balanceOperationQueryService) {
     this.authenticationService = authenticationService;
     this.userProfileService = userProfileService;
     this.userAddressService = userAddressService;
-    this.balanceLedgerService = balanceLedgerService;
+    this.balanceDebitService = balanceDebitService;
+    this.balanceRefundService = balanceRefundService;
+    this.balanceOperationQueryService = balanceOperationQueryService;
   }
 
   /** 注册用户并返回用户标识。 */
@@ -118,7 +130,7 @@ public class UserController {
       @PathVariable Long userId,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId,
       @Valid @RequestBody DebitRequestDTO request) {
-    return balanceLedgerService.debit(userId, callerId, request);
+    return ApiResponse.ok(balanceDebitService.debit(userId, callerId, request));
   }
 
   /** 按持久化操作键执行余额扣款。 */
@@ -127,7 +139,7 @@ public class UserController {
       @PathVariable Long userId,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId,
       @Valid @RequestBody BalanceDebitRequestDTO request) {
-    return balanceLedgerService.debitInternal(userId, callerId, request);
+    return ApiResponse.ok(balanceDebitService.debitInternal(userId, callerId, request));
   }
 
   /** 在同一只读快照证明主账本、原扣款及关联/pay双集合，供支付恢复判断事实。 */
@@ -136,7 +148,8 @@ public class UserController {
       @PathVariable Long userId,
       @PathVariable String operationKey,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId) {
-    return balanceLedgerService.balanceOperation(userId, operationKey, callerId);
+    return ApiResponse.ok(
+        balanceOperationQueryService.balanceOperation(userId, operationKey, callerId));
   }
 
   /** 按唯一退款键恢复已应用扣款。 */
@@ -145,6 +158,6 @@ public class UserController {
       @PathVariable Long userId,
       @RequestHeader(value = "X-User-Id", required = false) Long callerId,
       @Valid @RequestBody BalanceRefundRequestDTO request) {
-    return balanceLedgerService.refundInternal(userId, callerId, request);
+    return ApiResponse.ok(balanceRefundService.refundInternal(userId, callerId, request));
   }
 }

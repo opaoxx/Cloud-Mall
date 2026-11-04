@@ -9,7 +9,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
 import com.cloudmall.user.domain.po.BalanceDebitAttemptPO;
@@ -18,18 +17,32 @@ import com.cloudmall.user.domain.po.UserPO;
 import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.UserMapper;
-import com.cloudmall.user.service.impl.BalanceLedgerServiceImpl;
+import com.cloudmall.user.service.BalanceDebitService;
+import com.cloudmall.user.service.BalanceOperationQueryService;
+import com.cloudmall.user.service.BalanceRefundService;
+import com.cloudmall.user.service.impl.balance.BalanceDebitServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceOperationQueryServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceOwnershipEvidence;
+import com.cloudmall.user.service.impl.balance.BalanceRefundEvidence;
+import com.cloudmall.user.service.impl.balance.BalanceRefundServiceImpl;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /** 余额账本跨缓存丢失场景的单元测试。 */
 class BalanceLedgerServiceTest {
-  private BalanceLedgerServiceImpl userService;
+  /** 按实际业务边界装配的扣款实现。 */
+  private BalanceDebitService debitService;
+
+  /** 与扣款共享持久化边界的退款实现。 */
+  private BalanceRefundService refundService;
+
+  /** 操作事实查询实现。 */
+  private BalanceOperationQueryService queryService;
+
   private UserMapper userMapper;
   private BalanceLedgerMapper balanceLedgerMapper;
   private BalanceDebitAttemptMapper balanceDebitAttemptMapper;
@@ -65,7 +78,6 @@ class BalanceLedgerServiceTest {
 
   @BeforeEach
   void setUp() {
-    userService = new BalanceLedgerServiceImpl();
     userMapper = mock(UserMapper.class);
     balanceLedgerMapper = mock(BalanceLedgerMapper.class);
     when(balanceLedgerMapper.countOperationCandidates(any())).thenReturn(1L);
@@ -77,13 +89,21 @@ class BalanceLedgerServiceTest {
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
     valueOperations = mock(ValueOperations.class);
     when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-    ReflectionTestUtils.setField(userService, "userMapper", userMapper);
-    ReflectionTestUtils.setField(userService, "balanceLedgerMapper", balanceLedgerMapper);
-    ReflectionTestUtils.setField(
-        userService, "balanceDebitAttemptMapper", balanceDebitAttemptMapper);
-    ReflectionTestUtils.setField(userService, "redis", redisTemplate);
-    ReflectionTestUtils.setField(userService, "balanceTccDebitMapper", balanceTccDebitMapper);
-    ReflectionTestUtils.setField(userService, "userTccReceiveMapper", userTccReceiveMapper);
+    BalanceOwnershipEvidence ownershipEvidence =
+        new BalanceOwnershipEvidence(
+            balanceDebitAttemptMapper, balanceTccDebitMapper, userTccReceiveMapper);
+    BalanceRefundEvidence refundEvidence = new BalanceRefundEvidence(balanceLedgerMapper);
+    debitService =
+        new BalanceDebitServiceImpl(
+            userMapper,
+            balanceLedgerMapper,
+            balanceDebitAttemptMapper,
+            redisTemplate,
+            ownershipEvidence);
+    refundService =
+        new BalanceRefundServiceImpl(
+            userMapper, balanceLedgerMapper, ownershipEvidence, refundEvidence);
+    queryService = new BalanceOperationQueryServiceImpl(balanceLedgerMapper, ownershipEvidence);
   }
 
   @Test
@@ -99,11 +119,11 @@ class BalanceLedgerServiceTest {
     BalanceDebitRequestDTO request = debitRequest();
     when(balanceLedgerMapper.findPaymentLedgerCandidates(request.payNo))
         .thenReturn(java.util.List.of());
-    ApiResponse<?> first = userService.debitInternal(7L, 7L, request);
-    ApiResponse<?> replay = userService.debitInternal(7L, 7L, request);
+    var first = debitService.debitInternal(7L, 7L, request);
+    var replay = debitService.debitInternal(7L, 7L, request);
 
-    assertEquals("90.00", ((com.cloudmall.user.domain.vo.BalanceDebitVO) first.data).balance);
-    assertEquals("90.00", ((com.cloudmall.user.domain.vo.BalanceDebitVO) replay.data).balance);
+    assertEquals("90.00", ((com.cloudmall.user.domain.vo.BalanceDebitVO) first).balance);
+    assertEquals("90.00", ((com.cloudmall.user.domain.vo.BalanceDebitVO) replay).balance);
     verify(userMapper, times(1))
         .debitBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
     verify(balanceLedgerMapper, times(1)).findPaymentLedgerCandidates(request.payNo);
@@ -128,11 +148,11 @@ class BalanceLedgerServiceTest {
         .thenReturn(1);
 
     BalanceRefundRequestDTO request = refundRequest();
-    ApiResponse<?> first = userService.refundInternal(7L, 7L, request);
-    ApiResponse<?> replay = userService.refundInternal(7L, 7L, request);
+    var first = refundService.refundInternal(7L, 7L, request);
+    var replay = refundService.refundInternal(7L, 7L, request);
 
-    assertEquals("100.00", ((com.cloudmall.user.domain.vo.BalanceRefundVO) first.data).balance);
-    assertEquals("100.00", ((com.cloudmall.user.domain.vo.BalanceRefundVO) replay.data).balance);
+    assertEquals("100.00", ((com.cloudmall.user.domain.vo.BalanceRefundVO) first).balance);
+    assertEquals("100.00", ((com.cloudmall.user.domain.vo.BalanceRefundVO) replay).balance);
     verify(userMapper, times(1))
         .creditBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
   }
@@ -174,8 +194,8 @@ class BalanceLedgerServiceTest {
     request.orderNo = "order-tcc";
     request.amount = new BigDecimal("10.00");
 
-    userService.refundInternal(7L, 7L, request);
-    userService.refundInternal(7L, 7L, request);
+    refundService.refundInternal(7L, 7L, request);
+    refundService.refundInternal(7L, 7L, request);
 
     verify(userMapper, times(1))
         .creditBalance(eq(7L), eq(new BigDecimal("10.00")), any(LocalDateTime.class));
@@ -205,7 +225,7 @@ class BalanceLedgerServiceTest {
     request.amount = new BigDecimal("10.00");
     assertThrows(
         com.cloudmall.common.error.BizException.class,
-        () -> userService.refundInternal(7L, 7L, request));
+        () -> refundService.refundInternal(7L, 7L, request));
 
     BalanceDebitAttemptPO trying = confirmedTccAttempt();
     trying.payNo = "pay-disabled";
@@ -215,7 +235,7 @@ class BalanceLedgerServiceTest {
     when(balanceDebitAttemptMapper.selectByPayNo("pay-disabled")).thenReturn(trying);
     assertThrows(
         com.cloudmall.common.error.BizException.class,
-        () -> userService.refundInternal(7L, 7L, request));
+        () -> refundService.refundInternal(7L, 7L, request));
   }
 
   /** CI候选及非法原来源不能成为新增退款或disabled重放证明。 */
@@ -319,14 +339,14 @@ class BalanceLedgerServiceTest {
       originalRefundFreeze.amount = originalRefundDebit.amount;
       originalRefundFreeze.balanceBefore = originalRefundDebit.balanceBefore;
       originalRefundFreeze.balanceAfterTry = originalRefundDebit.balanceAfter;
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(userMapper, times("disabled-replay".equals(mode) ? 0 : 1))
           .creditBalance(any(), any(), any());
     }
     var request = installRefundProofMode("active-fresh");
     installCompleteRefundReplay(appliedRefund("refund-1", new BigDecimal("100.00")));
 
-    userService.refundInternal(7L, 7L, request);
+    refundService.refundInternal(7L, 7L, request);
     verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
   }
@@ -341,7 +361,8 @@ class BalanceLedgerServiceTest {
       when(balanceLedgerMapper.selectDebitForUpdate("pay-1")).thenThrow(unavailable);
       org.junit.jupiter.api.Assertions.assertSame(
           unavailable,
-          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          assertThrows(
+              RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     }
@@ -352,7 +373,8 @@ class BalanceLedgerServiceTest {
       when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenThrow(unavailable);
       org.junit.jupiter.api.Assertions.assertSame(
           unavailable,
-          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          assertThrows(
+              RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     }
@@ -433,7 +455,7 @@ class BalanceLedgerServiceTest {
       existing.balanceBefore = amount;
       when(userMapper.selectActiveForUpdate(7L)).thenReturn(activeUser(amount));
       when(balanceLedgerMapper.selectByOperationKey("pay-1")).thenReturn(existing);
-      userService.debitInternal(7L, 7L, request);
+      debitService.debitInternal(7L, 7L, request);
       verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
       setUp();
       var refund = refundRequest();
@@ -449,7 +471,7 @@ class BalanceLedgerServiceTest {
           .thenReturn(java.util.List.of(original));
       when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenReturn(java.util.List.of());
       when(userMapper.creditBalance(any(), any(), any())).thenReturn(1);
-      userService.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       verify(userMapper).creditBalance(eq(7L), eq(amount), any());
     }
   }
@@ -459,16 +481,16 @@ class BalanceLedgerServiceTest {
     if ("debit".equals(operation)) {
       var request = debitRequest();
       request.amount = amount;
-      userService.debitInternal(7L, callerId, request);
+      debitService.debitInternal(7L, callerId, request);
     } else if ("refund".equals(operation)) {
       var request = refundRequest();
       request.amount = amount;
-      userService.refundInternal(7L, callerId, request);
+      refundService.refundInternal(7L, callerId, request);
     } else {
       var request = new com.cloudmall.user.domain.dto.DebitRequestDTO();
       request.paymentKey = "pay-1";
       request.amount = amount;
-      userService.debit(7L, callerId, request);
+      debitService.debit(7L, callerId, request);
     }
   }
 
@@ -495,7 +517,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals(409, failure.getHttpStatus());
               assertEquals("BALANCE_REFUND_FAILED", failure.getCode());
               verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -518,7 +540,7 @@ class BalanceLedgerServiceTest {
               var request = installRefundProofMode(mode);
               when(balanceLedgerMapper.insert(any())).thenReturn(insertedRows);
               assertThrows(
-                  IllegalStateException.class, () -> userService.refundInternal(7L, 7L, request));
+                  IllegalStateException.class, () -> refundService.refundInternal(7L, 7L, request));
               verify(userMapper).creditBalance(any(), any(), any());
               verify(balanceLedgerMapper).insert(any());
             });
@@ -530,7 +552,7 @@ class BalanceLedgerServiceTest {
     var failure =
         assertThrows(
             com.cloudmall.common.error.BizException.class,
-            () -> userService.refundInternal(7L, 7L, request));
+            () -> refundService.refundInternal(7L, 7L, request));
     assertEquals("BALANCE_REFUND_FAILED", failure.getCode());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
   }
@@ -543,14 +565,14 @@ class BalanceLedgerServiceTest {
             BigDecimal.ZERO, new BigDecimal("90.000"), new BigDecimal("9999999999999989.99"))) {
       var request = installRefundProofMode("active-fresh");
       when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(balance));
-      var response = userService.refundInternal(7L, 7L, request);
+      var response = refundService.refundInternal(7L, 7L, request);
       var captor = org.mockito.ArgumentCaptor.forClass(BalanceLedgerPO.class);
       verify(balanceLedgerMapper).insert(captor.capture());
       assertEquals(balance, captor.getValue().balanceBefore);
       assertEquals(balance.add(request.amount), captor.getValue().balanceAfter);
       assertEquals(
           balance.add(request.amount).toPlainString(),
-          ((com.cloudmall.user.domain.vo.BalanceRefundVO) response.data).balance);
+          ((com.cloudmall.user.domain.vo.BalanceRefundVO) response).balance);
     }
     var request = installRefundProofMode("active-fresh");
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(null));
@@ -564,7 +586,7 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_EXCEEDED",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, excessRequest))
+                () -> refundService.refundInternal(7L, 7L, excessRequest))
             .getCode());
     request = installRefundProofMode("active-fresh");
     when(userMapper.selectByIdForUpdate(7L)).thenReturn(activeUser(null));
@@ -574,7 +596,7 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_INVALID",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, sourceRequest))
+                () -> refundService.refundInternal(7L, 7L, sourceRequest))
             .getCode());
   }
 
@@ -587,7 +609,7 @@ class BalanceLedgerServiceTest {
       if (mode.startsWith("disabled")) user.status = 0;
       when(userMapper.selectByIdForUpdate(7L)).thenReturn(user);
       installCompleteRefundReplay(appliedRefund("refund-1", new BigDecimal("100.00")));
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     }
@@ -663,7 +685,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals(409, failure.getHttpStatus());
               assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
               verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -692,10 +714,10 @@ class BalanceLedgerServiceTest {
         existing.amount = new BigDecimal("10.000");
         existing.balanceBefore = before;
         installCompleteRefundReplay(existing);
-        var response = userService.refundInternal(7L, 7L, request);
+        var response = refundService.refundInternal(7L, 7L, request);
         assertEquals(
             existing.balanceAfter.toPlainString(),
-            ((com.cloudmall.user.domain.vo.BalanceRefundVO) response.data).balance);
+            ((com.cloudmall.user.domain.vo.BalanceRefundVO) response).balance);
         verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
         verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
         if (!disabled)
@@ -716,7 +738,7 @@ class BalanceLedgerServiceTest {
         "COMMON_NOT_FOUND",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request))
+                () -> refundService.refundInternal(7L, 7L, request))
             .getCode());
     var activeRequest = installRefundProofMode("active-fresh");
     var unavailable =
@@ -726,7 +748,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertSame(
         unavailable,
         assertThrows(
-            RuntimeException.class, () -> userService.refundInternal(7L, 7L, activeRequest)));
+            RuntimeException.class, () -> refundService.refundInternal(7L, 7L, activeRequest)));
   }
 
   /** NULL归属金额必须404而不是NPE，原错误归属先于新增freeze查询。 */
@@ -756,7 +778,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals(404, failure.getHttpStatus());
               assertEquals("COMMON_NOT_FOUND", failure.getCode());
               org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
@@ -816,7 +838,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals(404, failure.getHttpStatus());
               assertEquals("COMMON_NOT_FOUND", failure.getCode());
               verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -831,14 +853,14 @@ class BalanceLedgerServiceTest {
   @Test
   void disabledRefundFreezeProofKeepsHealthyMoneyAndReadFailure() {
     var activeRequest = installRefundProofMode("active-fresh");
-    userService.refundInternal(7L, 7L, activeRequest);
+    refundService.refundInternal(7L, 7L, activeRequest);
     verify(balanceDebitAttemptMapper).selectByPayNo(activeRequest.payNo);
     verify(balanceTccDebitMapper).selectByPayNo(activeRequest.payNo);
     var request = installRefundProofMode("disabled-fresh");
     originalRefundFreeze.amount = new BigDecimal("10.000");
     originalRefundFreeze.balanceBefore = new BigDecimal("100.000");
     originalRefundFreeze.balanceAfterTry = new BigDecimal("90.000");
-    userService.refundInternal(7L, 7L, request);
+    refundService.refundInternal(7L, 7L, request);
     verify(userMapper).creditBalance(any(), any(), any());
     var failureRequest = installRefundProofMode("disabled-fresh");
     var unavailable =
@@ -847,7 +869,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertSame(
         unavailable,
         assertThrows(
-            RuntimeException.class, () -> userService.refundInternal(7L, 7L, failureRequest)));
+            RuntimeException.class, () -> refundService.refundInternal(7L, 7L, failureRequest)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
   }
 
@@ -1080,7 +1102,7 @@ class BalanceLedgerServiceTest {
         403,
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, key, 8L))
+                () -> queryService.balanceOperation(7L, key, 8L))
             .getHttpStatus());
     org.mockito.Mockito.verifyNoInteractions(balanceLedgerMapper);
     when(balanceLedgerMapper.selectByOperationKey(key)).thenReturn(null);
@@ -1088,7 +1110,7 @@ class BalanceLedgerServiceTest {
         404,
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, key, 7L))
+                () -> queryService.balanceOperation(7L, key, 7L))
             .getHttpStatus());
     String foreignKey = installOperationQuery("REFUND");
     operationLedger.userId = 8L;
@@ -1097,7 +1119,7 @@ class BalanceLedgerServiceTest {
         404,
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, foreignKey, 7L))
+                () -> queryService.balanceOperation(7L, foreignKey, 7L))
             .getHttpStatus());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
     assertOperationReadOnly();
@@ -1130,7 +1152,7 @@ class BalanceLedgerServiceTest {
             org.junit.jupiter.api.Assertions.assertSame(
                 unavailable,
                 assertThrows(
-                    RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+                    RuntimeException.class, () -> queryService.balanceOperation(7L, key, 7L)));
             assertOperationReadOnly();
           });
     }
@@ -1144,7 +1166,7 @@ class BalanceLedgerServiceTest {
       String key = installOperationQuery(mode);
       var response =
           (com.cloudmall.user.domain.vo.BalanceOperationVO)
-              userService.balanceOperation(7L, key, 7L).data;
+              queryService.balanceOperation(7L, key, 7L);
       assertEquals(key, response.operationKey);
       assertEquals("REJECTED".equals(mode) ? "DEBIT" : mode, response.type);
       assertEquals("REJECTED".equals(mode) ? "REJECTED" : "APPLIED", response.state);
@@ -1165,7 +1187,7 @@ class BalanceLedgerServiceTest {
       when(balanceLedgerMapper.selectFirstRefundOperationKey("pay-1")).thenReturn("prior-0");
       var response =
           (com.cloudmall.user.domain.vo.BalanceOperationVO)
-              userService.balanceOperation(7L, key, 7L).data;
+              queryService.balanceOperation(7L, key, 7L);
       assertEquals("prior-0", response.refundOperationKey);
       assertOperationReadOnly();
     }
@@ -1204,7 +1226,7 @@ class BalanceLedgerServiceTest {
     var failure =
         assertThrows(
             com.cloudmall.common.error.BizException.class,
-            () -> userService.balanceOperation(7L, key, 7L));
+            () -> queryService.balanceOperation(7L, key, 7L));
     assertEquals(409, failure.getHttpStatus());
     assertEquals("COMMON_CONFLICT", failure.getCode());
     assertEquals("余额账本事实待核对", failure.getMessage());
@@ -1279,7 +1301,7 @@ class BalanceLedgerServiceTest {
             .selectByPayNo(operationSource.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+          assertThrows(RuntimeException.class, () -> queryService.balanceOperation(7L, key, 7L)));
       assertOperationReadOnly();
     }
     for (String gate : java.util.List.of("source", "collection", "selector")) {
@@ -1303,7 +1325,7 @@ class BalanceLedgerServiceTest {
         installAppliedOperationOwner(mode);
         var response =
             (com.cloudmall.user.domain.vo.BalanceOperationVO)
-                userService.balanceOperation(7L, key, 7L).data;
+                queryService.balanceOperation(7L, key, 7L);
         assertEquals(key, response.operationKey);
         assertEquals("APPLIED", response.state);
         verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
@@ -1312,7 +1334,7 @@ class BalanceLedgerServiceTest {
       }
     }
     String rejectedKey = installOperationQuery("REJECTED");
-    userService.balanceOperation(7L, rejectedKey, 7L);
+    queryService.balanceOperation(7L, rejectedKey, 7L);
     verify(balanceDebitAttemptMapper).selectByPayNo(operationSource.payNo);
     verify(balanceTccDebitMapper).selectByPayNo(operationSource.payNo);
     assertOperationReadOnly();
@@ -1410,7 +1432,7 @@ class BalanceLedgerServiceTest {
             .selectByPayNo(operationSource.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+          assertThrows(RuntimeException.class, () -> queryService.balanceOperation(7L, key, 7L)));
       assertOperationReadOnly();
     }
     for (String gate : java.util.List.of("primary", "collection", "selector")) {
@@ -1434,7 +1456,7 @@ class BalanceLedgerServiceTest {
       owner.amount = new BigDecimal("10.000");
       var response =
           (com.cloudmall.user.domain.vo.BalanceOperationVO)
-              userService.balanceOperation(7L, key, 7L).data;
+              queryService.balanceOperation(7L, key, 7L);
       assertEquals("REJECTED", response.state);
       assertEquals("10.00", response.amount);
       assertEquals(null, response.refundOperationKey);
@@ -1489,13 +1511,13 @@ class BalanceLedgerServiceTest {
           .findByPayNo(operationSource.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+          assertThrows(RuntimeException.class, () -> queryService.balanceOperation(7L, key, 7L)));
       assertOperationReadOnly();
       String healthyKey = installOperationQuery("REJECTED");
       installRejectedOperationOwner(ownerPresent);
       var response =
           (com.cloudmall.user.domain.vo.BalanceOperationVO)
-              userService.balanceOperation(7L, healthyKey, 7L).data;
+              queryService.balanceOperation(7L, healthyKey, 7L);
       assertEquals("REJECTED", response.state);
       assertEquals("10.00", response.amount);
       assertEquals(null, response.refundOperationKey);
@@ -1550,7 +1572,7 @@ class BalanceLedgerServiceTest {
       var failure =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.balanceOperation(7L, key, "caller".equals(gate) ? 8L : 7L));
+              () -> queryService.balanceOperation(7L, key, "caller".equals(gate) ? 8L : 7L));
       assertEquals(expectedCode, failure.getCode());
       org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
       assertOperationReadOnly();
@@ -1566,7 +1588,7 @@ class BalanceLedgerServiceTest {
         assertEquals(
             "APPLIED",
             ((com.cloudmall.user.domain.vo.BalanceOperationVO)
-                    userService.balanceOperation(7L, key, 7L).data)
+                    queryService.balanceOperation(7L, key, 7L))
                 .state);
         if ("TCC".equals(mode)) org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
         else verify(userTccReceiveMapper).findByPayNo(operationSource.payNo);
@@ -1675,7 +1697,7 @@ class BalanceLedgerServiceTest {
       org.mockito.Mockito.doThrow(new AssertionError("disabled keeps original receive budget"))
           .when(userTccReceiveMapper)
           .findByPayNo(request.payNo);
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       org.mockito.Mockito.verifyNoInteractions(userTccReceiveMapper);
     }
   }
@@ -1696,13 +1718,13 @@ class BalanceLedgerServiceTest {
   }
 
   /** 按原Service接口调用四条来源校验链，不使用私有方法绕过前置校验。 */
-  private ApiResponse<?> invokeAppliedReceiveRoute(String route, BalanceRefundRequestDTO request) {
+  private Object invokeAppliedReceiveRoute(String route, BalanceRefundRequestDTO request) {
     if (route.endsWith("get"))
-      return userService.balanceOperation(
+      return queryService.balanceOperation(
           7L,
           "refund-get".equals(route) ? request.refundOperationKey : request.originalOperationKey,
           7L);
-    return userService.refundInternal(7L, 7L, request);
+    return refundService.refundInternal(7L, 7L, request);
   }
 
   /** 来源拒绝后无钱包/账本/缓存写入；GET额外保持钱包零读取。 */
@@ -2027,7 +2049,7 @@ class BalanceLedgerServiceTest {
     }
     if (route.startsWith("disabled")) {
       var request = installRefundProofMode(route);
-      return () -> userService.refundInternal(7L, 7L, request);
+      return () -> refundService.refundInternal(7L, 7L, request);
     }
     return installReceiveClassificationRoute(route);
   }
@@ -2141,7 +2163,7 @@ class BalanceLedgerServiceTest {
             assertThrows(
                 com.cloudmall.common.error.BizException.class,
                 () -> {
-                  if ("caller".equals(gate)) userService.debitInternal(7L, 8L, request);
+                  if ("caller".equals(gate)) debitService.debitInternal(7L, 8L, request);
                   else invokeLegacyDebit(entry, request);
                 });
         assertEquals(expectedCode, rejected.getCode());
@@ -2265,7 +2287,7 @@ class BalanceLedgerServiceTest {
     if ("rejected-get".equals(route)) {
       String key = installOperationQuery("REJECTED");
       installRejectedOperationOwner(true);
-      return () -> userService.balanceOperation(7L, key, 7L);
+      return () -> queryService.balanceOperation(7L, key, 7L);
     }
     String appliedRoute =
         switch (route) {
@@ -2319,7 +2341,7 @@ class BalanceLedgerServiceTest {
         var failure =
             assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, key, 7L));
+                () -> queryService.balanceOperation(7L, key, 7L));
         assertEquals("COMMON_NOT_FOUND", failure.getCode());
         assertEquals(404, failure.getHttpStatus());
       } else assertOperationConflict(key);
@@ -2345,7 +2367,7 @@ class BalanceLedgerServiceTest {
         "COMMON_NOT_FOUND",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, foreignKey, 7L))
+                () -> queryService.balanceOperation(7L, foreignKey, 7L))
             .getCode());
     verify(balanceLedgerMapper).countOperationCandidates(foreignKey);
     String callerKey = installOperationQuery("DEBIT");
@@ -2353,7 +2375,7 @@ class BalanceLedgerServiceTest {
         403,
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, callerKey, 8L))
+                () -> queryService.balanceOperation(7L, callerKey, 8L))
             .getHttpStatus());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).countOperationCandidates(any());
   }
@@ -2378,7 +2400,7 @@ class BalanceLedgerServiceTest {
           .countOperationCandidates(countedKey);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+          assertThrows(RuntimeException.class, () -> queryService.balanceOperation(7L, key, 7L)));
       assertOperationReadOnly();
     }
     for (String gate : java.util.List.of("collection", "marker", "owner")) {
@@ -2416,7 +2438,7 @@ class BalanceLedgerServiceTest {
           .thenReturn(payment);
       when(balanceLedgerMapper.selectFirstRefundOperationKey(operationSource.operationKey))
           .thenReturn(candidates.get(0).operationKey);
-      userService.balanceOperation(7L, key, 7L);
+      queryService.balanceOperation(7L, key, 7L);
       verify(balanceLedgerMapper, times(101)).countOperationCandidates(any());
       verify(balanceLedgerMapper).countOperationCandidates(key);
       if ("REFUND".equals(type))
@@ -2424,7 +2446,7 @@ class BalanceLedgerServiceTest {
       assertOperationReadOnly();
     }
     String rejectedKey = installOperationQuery("REJECTED");
-    userService.balanceOperation(7L, rejectedKey, 7L);
+    queryService.balanceOperation(7L, rejectedKey, 7L);
     verify(balanceLedgerMapper).countOperationCandidates(rejectedKey);
     assertOperationReadOnly();
   }
@@ -2644,7 +2666,7 @@ class BalanceLedgerServiceTest {
           var response = invokeLegacyDebit(entry, request);
           assertEquals(
               balance.subtract(request.amount).toPlainString(),
-              ((com.cloudmall.user.domain.vo.BalanceDebitVO) response.data).balance);
+              ((com.cloudmall.user.domain.vo.BalanceDebitVO) response).balance);
           verify(userMapper).debitBalance(eq(7L), eq(request.amount), any());
         }
         verify(balanceDebitAttemptMapper).insert(any());
@@ -2660,8 +2682,7 @@ class BalanceLedgerServiceTest {
           legacyDebitLedger.balanceAfter = new BigDecimal("0.000");
           when(balanceDebitAttemptMapper.selectByPayNo("pay-1")).thenReturn(null);
           var response = invokeLegacyDebit(entry, request);
-          assertEquals(
-              "0.000", ((com.cloudmall.user.domain.vo.BalanceDebitVO) response.data).balance);
+          assertEquals("0.000", ((com.cloudmall.user.domain.vo.BalanceDebitVO) response).balance);
           verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
           verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
         } else {
@@ -2927,7 +2948,7 @@ class BalanceLedgerServiceTest {
         } else {
           assertEquals(
               "90.00",
-              ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, request).data)
+              ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, request))
                   .balance);
           verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).insert(any());
           verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
@@ -3019,7 +3040,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
               assertEquals("原扣款不存在或未应用", failure.getMessage());
               assertEquals(409, failure.getHttpStatus());
@@ -3100,7 +3121,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
               assertEquals("原扣款不存在或未应用", failure.getMessage());
               assertEquals(409, failure.getHttpStatus());
@@ -3128,7 +3149,8 @@ class BalanceLedgerServiceTest {
           .findDebitCandidatesByPayNo(request.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          assertThrows(
+              RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
@@ -3153,12 +3175,12 @@ class BalanceLedgerServiceTest {
       candidate.balanceAfter = new BigDecimal("90.000");
       when(balanceLedgerMapper.findDebitCandidatesByPayNo(request.payNo))
           .thenReturn(java.util.List.of(candidate));
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(balanceLedgerMapper).findDebitCandidatesByPayNo(request.payNo);
       verify(userMapper).creditBalance(any(), any(), any());
       var replayRequest = installRefundProofMode(mode);
       installCompleteRefundReplay(appliedRefund("refund-1", new BigDecimal("100.00")));
-      userService.refundInternal(7L, 7L, replayRequest);
+      refundService.refundInternal(7L, 7L, replayRequest);
       verify(balanceLedgerMapper).findDebitCandidatesByPayNo(replayRequest.payNo);
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
@@ -3177,7 +3199,8 @@ class BalanceLedgerServiceTest {
           .findDebitCandidatesByPayNo(request.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          assertThrows(
+              RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
@@ -3190,7 +3213,7 @@ class BalanceLedgerServiceTest {
       var rejected =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, invalidRequest));
+              () -> refundService.refundInternal(7L, 7L, invalidRequest));
       assertEquals(
           mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",
           rejected.getCode());
@@ -3210,7 +3233,7 @@ class BalanceLedgerServiceTest {
       assertEquals(
           "100.00",
           ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                  userService.refundInternal(7L, 7L, request).data)
+                  refundService.refundInternal(7L, 7L, request))
               .balance);
       verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
       verify(balanceLedgerMapper).findDebitCandidatesByPayNo(request.payNo);
@@ -3437,7 +3460,7 @@ class BalanceLedgerServiceTest {
             assertThrows(
                 com.cloudmall.common.error.BizException.class,
                 () -> {
-                  if ("caller".equals(gate)) userService.debitInternal(7L, 8L, guarded);
+                  if ("caller".equals(gate)) debitService.debitInternal(7L, 8L, guarded);
                   else invokeLegacyDebit(entry, guarded);
                 });
         assertEquals(expectedCode, rejected.getCode());
@@ -3462,7 +3485,7 @@ class BalanceLedgerServiceTest {
         } else {
           assertEquals(
               "90.00",
-              ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, healthy).data)
+              ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, healthy))
                   .balance);
           verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
           verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).insert(any());
@@ -3570,7 +3593,7 @@ class BalanceLedgerServiceTest {
             var failure =
                 assertThrows(
                     com.cloudmall.common.error.BizException.class,
-                    () -> userService.refundInternal(7L, 7L, request));
+                    () -> refundService.refundInternal(7L, 7L, request));
             assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
             assertEquals(409, failure.getHttpStatus());
             assertEquals("原扣款不存在或未应用", failure.getMessage());
@@ -3603,7 +3626,8 @@ class BalanceLedgerServiceTest {
             .selectByPayNo(request.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          assertThrows(
+              RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     }
@@ -3617,7 +3641,7 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_INVALID",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request))
+                () -> refundService.refundInternal(7L, 7L, request))
             .getCode());
     verify(balanceDebitAttemptMapper, org.mockito.Mockito.never()).selectByPayNo(any());
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -3642,7 +3666,7 @@ class BalanceLedgerServiceTest {
           when(balanceTccDebitMapper.selectByPayNo(request.payNo)).thenReturn(null);
         }
       }
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
       verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
       verify(userMapper).creditBalance(any(), any(), any());
@@ -3650,7 +3674,7 @@ class BalanceLedgerServiceTest {
     var request = installRefundProofMode("active-fresh");
     installCompleteRefundReplay(appliedRefund("refund-1", new BigDecimal("100.00")));
 
-    userService.refundInternal(7L, 7L, request);
+    refundService.refundInternal(7L, 7L, request);
     verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
     verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -3710,7 +3734,7 @@ class BalanceLedgerServiceTest {
             var failure =
                 assertThrows(
                     com.cloudmall.common.error.BizException.class,
-                    () -> userService.refundInternal(7L, 7L, request));
+                    () -> refundService.refundInternal(7L, 7L, request));
             assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
             assertEquals(409, failure.getHttpStatus());
             assertEquals("原扣款不存在或未应用", failure.getMessage());
@@ -3737,7 +3761,7 @@ class BalanceLedgerServiceTest {
     originalRefundAttempt.branchId = null;
     originalRefundAttempt.amount = new BigDecimal("10.000");
     when(balanceTccDebitMapper.selectByPayNo(request.payNo)).thenReturn(null);
-    userService.refundInternal(7L, 7L, request);
+    refundService.refundInternal(7L, 7L, request);
     verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
     verify(balanceTccDebitMapper).selectByPayNo(request.payNo);
     verify(userMapper).creditBalance(any(), any(), any());
@@ -3749,7 +3773,7 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_INVALID",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request))
+                () -> refundService.refundInternal(7L, 7L, request))
             .getCode());
     verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
     org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
@@ -3780,7 +3804,7 @@ class BalanceLedgerServiceTest {
       var failure =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, request));
+              () -> refundService.refundInternal(7L, 7L, request));
       assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
       assertEquals("原扣款不存在或未应用", failure.getMessage());
       assertEquals(409, failure.getHttpStatus());
@@ -3803,7 +3827,7 @@ class BalanceLedgerServiceTest {
     org.mockito.Mockito.doThrow(failure).when(balanceTccDebitMapper).selectByPayNo(request.payNo);
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
-        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        assertThrows(RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     var invalidRequest = installRefundProofMode("active-fresh");
@@ -3816,7 +3840,7 @@ class BalanceLedgerServiceTest {
     var historicalRequest = installRefundProofMode("active-fresh");
     when(balanceDebitAttemptMapper.selectByPayNo(historicalRequest.payNo)).thenReturn(null);
     when(balanceTccDebitMapper.selectByPayNo(historicalRequest.payNo)).thenReturn(null);
-    userService.refundInternal(7L, 7L, historicalRequest);
+    refundService.refundInternal(7L, 7L, historicalRequest);
     verify(balanceDebitAttemptMapper).selectByPayNo(historicalRequest.payNo);
     verify(balanceTccDebitMapper).selectByPayNo(historicalRequest.payNo);
     verify(userMapper).creditBalance(any(), any(), any());
@@ -3839,7 +3863,7 @@ class BalanceLedgerServiceTest {
       var failure =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, request));
+              () -> refundService.refundInternal(7L, 7L, request));
       assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
       assertEquals("原扣款不存在或未应用", failure.getMessage());
       assertEquals(409, failure.getHttpStatus());
@@ -3861,7 +3885,7 @@ class BalanceLedgerServiceTest {
     org.mockito.Mockito.doThrow(failure).when(balanceTccDebitMapper).selectByPayNo(request.payNo);
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
-        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        assertThrows(RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     var invalidRequest = installLegacyRefundWithNoFreeze();
@@ -3873,11 +3897,11 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_INVALID",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, invalidRequest))
+                () -> refundService.refundInternal(7L, 7L, invalidRequest))
             .getCode());
     org.mockito.Mockito.verifyNoInteractions(balanceTccDebitMapper);
     var validRequest = installLegacyRefundWithNoFreeze();
-    userService.refundInternal(7L, 7L, validRequest);
+    refundService.refundInternal(7L, 7L, validRequest);
     verify(balanceDebitAttemptMapper).selectByPayNo(validRequest.payNo);
     verify(balanceTccDebitMapper).selectByPayNo(validRequest.payNo);
     verify(userMapper).creditBalance(any(), any(), any());
@@ -3962,7 +3986,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
               assertEquals("退款累计证据不完整或不一致", failure.getMessage());
               assertEquals(409, failure.getHttpStatus());
@@ -4005,7 +4029,7 @@ class BalanceLedgerServiceTest {
       var failure =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, request));
+              () -> refundService.refundInternal(7L, 7L, request));
       assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
@@ -4024,7 +4048,7 @@ class BalanceLedgerServiceTest {
         .findRefundPaymentLedgerCandidates(request.payNo);
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
-        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        assertThrows(RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
     var invalidRequest = installRefundProofMode("active-fresh");
@@ -4037,7 +4061,7 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_INVALID",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, invalidRequest))
+                () -> refundService.refundInternal(7L, 7L, invalidRequest))
             .getCode());
     verify(balanceLedgerMapper, org.mockito.Mockito.never())
         .findRefundPaymentLedgerCandidates(any());
@@ -4049,7 +4073,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
         assertThrows(
-            RuntimeException.class, () -> userService.refundInternal(7L, 7L, replayRequest)));
+            RuntimeException.class, () -> refundService.refundInternal(7L, 7L, replayRequest)));
     verify(balanceLedgerMapper).findRefundPaymentLedgerCandidates(replayRequest.payNo);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
   }
@@ -4121,7 +4145,7 @@ class BalanceLedgerServiceTest {
         .findRefundPaymentLedgerCandidates("pay-1");
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
-        assertThrows(RuntimeException.class, () -> userService.balanceOperation(7L, key, 7L)));
+        assertThrows(RuntimeException.class, () -> queryService.balanceOperation(7L, key, 7L)));
     assertOperationReadOnly();
     String invalidKey = installOperationQuery("DEBIT");
     when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1"))
@@ -4138,7 +4162,7 @@ class BalanceLedgerServiceTest {
         "COMMON_NOT_FOUND",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.balanceOperation(7L, missingKey, 7L))
+                () -> queryService.balanceOperation(7L, missingKey, 7L))
             .getCode());
     verify(balanceLedgerMapper, org.mockito.Mockito.never())
         .findRefundPaymentLedgerCandidates(any());
@@ -4151,14 +4175,14 @@ class BalanceLedgerServiceTest {
       String key = installOperationQuery(mode);
       var response =
           (com.cloudmall.user.domain.vo.BalanceOperationVO)
-              userService.balanceOperation(7L, key, 7L).data;
+              queryService.balanceOperation(7L, key, 7L);
       assertEquals("REJECTED".equals(mode) ? "REJECTED" : "APPLIED", response.state);
       verify(balanceLedgerMapper).findLinkedRefundCandidates("pay-1");
       verify(balanceLedgerMapper).findRefundPaymentLedgerCandidates("pay-1");
       assertOperationReadOnly();
     }
     var annotation =
-        BalanceLedgerServiceImpl.class
+        BalanceOperationQueryServiceImpl.class
             .getMethod("balanceOperation", Long.class, String.class, Long.class)
             .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
     org.junit.jupiter.api.Assertions.assertTrue(annotation.readOnly());
@@ -4249,7 +4273,7 @@ class BalanceLedgerServiceTest {
           assertEquals(
               "90.00",
               ((com.cloudmall.user.domain.vo.BalanceDebitVO)
-                      invokeLegacyDebit(entry, replayRequest).data)
+                      invokeLegacyDebit(entry, replayRequest))
                   .balance);
         verify(balanceTccDebitMapper).selectByPayNo(replayRequest.payNo);
         verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
@@ -4313,7 +4337,7 @@ class BalanceLedgerServiceTest {
             var failure =
                 assertThrows(
                     com.cloudmall.common.error.BizException.class,
-                    () -> userService.refundInternal(7L, 7L, request));
+                    () -> refundService.refundInternal(7L, 7L, request));
             assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
             assertEquals(409, failure.getHttpStatus());
             assertEquals("原扣款不存在或未应用", failure.getMessage());
@@ -4340,7 +4364,7 @@ class BalanceLedgerServiceTest {
         .selectDebitForUpdate(request.originalOperationKey);
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
-        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        assertThrows(RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     var invalidRequest = installRefundProofMode("active-fresh");
     var invalid = appliedRefund("refund-1", new BigDecimal("100.00"));
@@ -4354,7 +4378,7 @@ class BalanceLedgerServiceTest {
         "IDEMPOTENCY_CONFLICT",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, invalidRequest))
+                () -> refundService.refundInternal(7L, 7L, invalidRequest))
             .getCode());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitForUpdate(any());
     var healthyRequest = installRefundProofMode("active-fresh");
@@ -4363,7 +4387,7 @@ class BalanceLedgerServiceTest {
     assertEquals(
         "100.00",
         ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                userService.refundInternal(7L, 7L, healthyRequest).data)
+                refundService.refundInternal(7L, 7L, healthyRequest))
             .balance);
     verify(balanceLedgerMapper).selectDebitForUpdate(healthyRequest.originalOperationKey);
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -4387,14 +4411,14 @@ class BalanceLedgerServiceTest {
         var failure =
             assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request));
+                () -> refundService.refundInternal(7L, 7L, request));
         assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
         assertEquals("原扣款不存在或未应用", failure.getMessage());
         assertEquals(409, failure.getHttpStatus());
       } else {
         var response =
             (com.cloudmall.user.domain.vo.BalanceRefundVO)
-                userService.refundInternal(7L, 7L, request).data;
+                refundService.refundInternal(7L, 7L, request);
         assertEquals("100.00", response.balance);
       }
       verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
@@ -4424,7 +4448,7 @@ class BalanceLedgerServiceTest {
         "COMMON_NOT_FOUND",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request))
+                () -> refundService.refundInternal(7L, 7L, request))
             .getCode());
     var rowRequest = installRefundProofMode("disabled-replay");
     originalRefundDebit.amount = new BigDecimal("9.00");
@@ -4439,7 +4463,7 @@ class BalanceLedgerServiceTest {
         "IDEMPOTENCY_CONFLICT",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, rowRequest))
+                () -> refundService.refundInternal(7L, 7L, rowRequest))
             .getCode());
     var faultRequest = installRefundProofMode("disabled-replay");
     var failure =
@@ -4451,7 +4475,7 @@ class BalanceLedgerServiceTest {
     org.junit.jupiter.api.Assertions.assertSame(
         failure,
         assertThrows(
-            RuntimeException.class, () -> userService.refundInternal(7L, 7L, faultRequest)));
+            RuntimeException.class, () -> refundService.refundInternal(7L, 7L, faultRequest)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
   }
@@ -4538,8 +4562,7 @@ class BalanceLedgerServiceTest {
       when(balanceTccDebitMapper.selectByPayNo(healthyRequest.payNo)).thenReturn(null);
       assertEquals(
           "90.00",
-          ((com.cloudmall.user.domain.vo.BalanceDebitVO)
-                  invokeLegacyDebit(entry, healthyRequest).data)
+          ((com.cloudmall.user.domain.vo.BalanceDebitVO) invokeLegacyDebit(entry, healthyRequest))
               .balance);
       verify(balanceTccDebitMapper).selectByPayNo(healthyRequest.payNo);
       verify(userMapper, org.mockito.Mockito.never()).debitBalance(any(), any(), any());
@@ -4592,7 +4615,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
               assertEquals(409, failure.getHttpStatus());
               verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -4623,7 +4646,8 @@ class BalanceLedgerServiceTest {
             .selectByPayNo(request.payNo);
       org.junit.jupiter.api.Assertions.assertSame(
           failure,
-          assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+          assertThrows(
+              RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     }
     var invalidRequest = installActiveRefundReplayOwner("TCC");
@@ -4632,7 +4656,7 @@ class BalanceLedgerServiceTest {
         "BALANCE_REFUND_INVALID",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, invalidRequest))
+                () -> refundService.refundInternal(7L, 7L, invalidRequest))
             .getCode());
     org.mockito.Mockito.verifyNoInteractions(balanceDebitAttemptMapper, balanceTccDebitMapper);
     for (String mode : java.util.List.of("TCC", "LEGACY", "missing")) {
@@ -4641,7 +4665,7 @@ class BalanceLedgerServiceTest {
       assertEquals(
           "100.00",
           ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                  userService.refundInternal(7L, 7L, request).data)
+                  refundService.refundInternal(7L, 7L, request))
               .balance);
       verify(balanceLedgerMapper).selectDebitForUpdate(request.originalOperationKey);
       verify(balanceDebitAttemptMapper).selectByPayNo(request.payNo);
@@ -4707,14 +4731,15 @@ class BalanceLedgerServiceTest {
   }
 
   /** 两个Legacy入口共用生产扣款路径，不连接真实Redis或数据库。 */
-  private ApiResponse<?> invokeLegacyDebit(String entry, BalanceDebitRequestDTO request) {
+  private com.cloudmall.user.domain.vo.BalanceDebitVO invokeLegacyDebit(
+      String entry, BalanceDebitRequestDTO request) {
     if ("compat".equals(entry)) {
       var compatible = new com.cloudmall.user.domain.dto.DebitRequestDTO();
       compatible.paymentKey = request.operationKey;
       compatible.amount = request.amount;
-      return userService.debit(7L, 7L, compatible);
+      return debitService.debit(7L, 7L, compatible);
     }
-    return userService.debitInternal(7L, 7L, request);
+    return debitService.debitInternal(7L, 7L, request);
   }
 
   /** 缺证停止时不得认领归属、改变金额、增账本或更新缓存。 */
@@ -4805,7 +4830,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request),
+                      () -> refundService.refundInternal(7L, 7L, request),
                       mode + ":" + mutation);
               assertEquals(409, failure.getHttpStatus());
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
@@ -4840,7 +4865,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request),
+                      () -> refundService.refundInternal(7L, 7L, request),
                       mode + ":" + scenario);
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
               verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -4880,18 +4905,18 @@ class BalanceLedgerServiceTest {
             "exceeded".equals(scenario) ? "BALANCE_REFUND_EXCEEDED" : "BALANCE_REFUND_INVALID",
             assertThrows(
                     com.cloudmall.common.error.BizException.class,
-                    () -> userService.refundInternal(7L, 7L, request))
+                    () -> refundService.refundInternal(7L, 7L, request))
                 .getCode());
         verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       } else {
-        userService.refundInternal(7L, 7L, request);
+        refundService.refundInternal(7L, 7L, request);
         verify(userMapper).creditBalance(eq(7L), eq(request.amount), any());
       }
     }
     for (String mode : java.util.List.of("active-fresh", "disabled-replay")) {
       var request = installRefundProofMode(mode);
       installCompleteRefundReplay(appliedRefund("refund-1", new BigDecimal("100.00")));
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(balanceLedgerMapper).findLinkedRefundCandidates(request.originalOperationKey);
       verify(balanceLedgerMapper).findRefundPaymentLedgerCandidates(request.payNo);
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
@@ -4907,7 +4932,7 @@ class BalanceLedgerServiceTest {
     when(balanceLedgerMapper.findLinkedRefundCandidates("pay-1")).thenThrow(unavailable);
     org.junit.jupiter.api.Assertions.assertSame(
         unavailable,
-        assertThrows(RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+        assertThrows(RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
     verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
   }
@@ -5014,7 +5039,7 @@ class BalanceLedgerServiceTest {
               var failure =
                   assertThrows(
                       com.cloudmall.common.error.BizException.class,
-                      () -> userService.refundInternal(7L, 7L, request));
+                      () -> refundService.refundInternal(7L, 7L, request));
               assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
               assertEquals(409, failure.getHttpStatus());
               assertEquals("退款累计证据不完整或不一致", failure.getMessage());
@@ -5046,7 +5071,7 @@ class BalanceLedgerServiceTest {
         org.junit.jupiter.api.Assertions.assertSame(
             failure,
             assertThrows(
-                RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+                RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
         verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
         verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
         if ("linked".equals(phase))
@@ -5059,7 +5084,7 @@ class BalanceLedgerServiceTest {
       var failure =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, request));
+              () -> refundService.refundInternal(7L, 7L, request));
       assertEquals("原扣款不存在或未应用", failure.getMessage());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
       verify(balanceLedgerMapper, org.mockito.Mockito.never())
@@ -5073,7 +5098,7 @@ class BalanceLedgerServiceTest {
           "IDEMPOTENCY_CONFLICT",
           assertThrows(
                   com.cloudmall.common.error.BizException.class,
-                  () -> userService.refundInternal(7L, 7L, rowRequest))
+                  () -> refundService.refundInternal(7L, 7L, rowRequest))
               .getCode());
       verify(balanceLedgerMapper, org.mockito.Mockito.never()).findLinkedRefundCandidates(any());
     }
@@ -5109,7 +5134,7 @@ class BalanceLedgerServiceTest {
         assertEquals(
             current.balanceAfter.toPlainString(),
             ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                    userService.refundInternal(7L, 7L, request).data)
+                    refundService.refundInternal(7L, 7L, request))
                 .balance);
         verify(balanceLedgerMapper).findLinkedRefundCandidates(request.originalOperationKey);
         verify(balanceLedgerMapper).findRefundPaymentLedgerCandidates(request.payNo);
@@ -5127,14 +5152,14 @@ class BalanceLedgerServiceTest {
       for (int count : java.util.List.of(0, 99, 100, 101)) {
         var request = installFreshRefundCapacity(mode, count);
         if (count < 100) {
-          userService.refundInternal(7L, 7L, request);
+          refundService.refundInternal(7L, 7L, request);
           verify(userMapper).creditBalance(eq(7L), eq(request.amount), any());
           verify(balanceLedgerMapper).insert(any());
         } else {
           var failure =
               assertThrows(
                   com.cloudmall.common.error.BizException.class,
-                  () -> userService.refundInternal(7L, 7L, request));
+                  () -> refundService.refundInternal(7L, 7L, request));
           assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
           assertEquals(409, failure.getHttpStatus());
           assertEquals(count == 100 ? "退款记录数量已达上限" : "退款累计证据不完整或不一致", failure.getMessage());
@@ -5173,7 +5198,7 @@ class BalanceLedgerServiceTest {
         var failure =
             assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request));
+                () -> refundService.refundInternal(7L, 7L, request));
         assertEquals(
             "over-amount".equals(scenario)
                 ? "BALANCE_REFUND_EXCEEDED"
@@ -5210,7 +5235,7 @@ class BalanceLedgerServiceTest {
         org.junit.jupiter.api.Assertions.assertSame(
             failure,
             assertThrows(
-                RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+                RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
         verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       }
     }
@@ -5245,7 +5270,7 @@ class BalanceLedgerServiceTest {
           var failure =
               assertThrows(
                   com.cloudmall.common.error.BizException.class,
-                  () -> userService.refundInternal(7L, 7L, request));
+                  () -> refundService.refundInternal(7L, 7L, request));
           assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
           assertEquals(409, failure.getHttpStatus());
           assertEquals("退款累计证据不完整或不一致", failure.getMessage());
@@ -5274,7 +5299,7 @@ class BalanceLedgerServiceTest {
         org.junit.jupiter.api.Assertions.assertSame(
             failure,
             assertThrows(
-                RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+                RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
         verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
         verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
       }
@@ -5295,7 +5320,7 @@ class BalanceLedgerServiceTest {
       var failure =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, request));
+              () -> refundService.refundInternal(7L, 7L, request));
       assertEquals(
           "amount".equals(gate) ? "BALANCE_REFUND_EXCEEDED" : "BALANCE_REFUND_INVALID",
           failure.getCode());
@@ -5304,7 +5329,7 @@ class BalanceLedgerServiceTest {
     }
     for (String mode : java.util.List.of("active-fresh", "disabled-fresh")) {
       var request = installFreshRefundCapacity(mode, 99);
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(balanceLedgerMapper, times(100)).countOperationCandidates(any());
       verify(balanceLedgerMapper).countOperationCandidates(request.originalOperationKey);
       verify(userMapper).creditBalance(eq(7L), eq(request.amount), any());
@@ -5326,7 +5351,7 @@ class BalanceLedgerServiceTest {
           .thenReturn(payment);
       when(userMapper.selectByIdForUpdate(7L))
           .thenReturn(mode.startsWith("disabled") ? disabledUserWithoutWallet() : activeUser(null));
-      userService.refundInternal(7L, 7L, request);
+      refundService.refundInternal(7L, 7L, request);
       verify(balanceLedgerMapper, times(101)).countOperationCandidates(any());
       verify(balanceLedgerMapper).countOperationCandidates(request.originalOperationKey);
       verify(balanceLedgerMapper).countOperationCandidates(request.refundOperationKey);
@@ -5378,7 +5403,7 @@ class BalanceLedgerServiceTest {
           var rejected =
               assertThrows(
                   com.cloudmall.common.error.BizException.class,
-                  () -> userService.refundInternal(7L, 7L, request));
+                  () -> refundService.refundInternal(7L, 7L, request));
           assertEquals("BALANCE_REFUND_INVALID", rejected.getCode());
           assertEquals(409, rejected.getHttpStatus());
           assertEquals("退款累计证据不完整或不一致", rejected.getMessage());
@@ -5425,7 +5450,7 @@ class BalanceLedgerServiceTest {
           org.junit.jupiter.api.Assertions.assertSame(
               failure,
               assertThrows(
-                  RuntimeException.class, () -> userService.refundInternal(7L, 7L, request)));
+                  RuntimeException.class, () -> refundService.refundInternal(7L, 7L, request)));
           verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
           verify(balanceLedgerMapper, org.mockito.Mockito.never()).insert(any());
         }
@@ -5436,13 +5461,13 @@ class BalanceLedgerServiceTest {
       var missing =
           assertThrows(
               com.cloudmall.common.error.BizException.class,
-              () -> userService.refundInternal(7L, 7L, missingRequest));
+              () -> refundService.refundInternal(7L, 7L, missingRequest));
       assertEquals(
           mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",
           missing.getCode());
       verify(userMapper, org.mockito.Mockito.never()).creditBalance(any(), any(), any());
       var healthy = installRefundGlobalEvidence(mode);
-      userService.refundInternal(7L, 7L, healthy);
+      refundService.refundInternal(7L, 7L, healthy);
       verify(balanceLedgerMapper).selectByOperationKey(healthy.refundOperationKey);
       verify(balanceLedgerMapper).selectDebitForUpdate(healthy.originalOperationKey);
       verify(userMapper, times(mode.endsWith("replay") ? 0 : 1)).creditBalance(any(), any(), any());
@@ -5459,7 +5484,7 @@ class BalanceLedgerServiceTest {
         "IDEMPOTENCY_CONFLICT",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, request))
+                () -> refundService.refundInternal(7L, 7L, request))
             .getCode());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectDebitForUpdate(any());
     var userMissing = installRefundGlobalEvidence("active-fresh");
@@ -5468,7 +5493,7 @@ class BalanceLedgerServiceTest {
         "COMMON_NOT_FOUND",
         assertThrows(
                 com.cloudmall.common.error.BizException.class,
-                () -> userService.refundInternal(7L, 7L, userMissing))
+                () -> refundService.refundInternal(7L, 7L, userMissing))
             .getCode());
     verify(balanceLedgerMapper, org.mockito.Mockito.never()).selectByOperationKey(any());
   }
@@ -5522,7 +5547,7 @@ class BalanceLedgerServiceTest {
     var failure =
         assertThrows(
             com.cloudmall.common.error.BizException.class,
-            () -> userService.refundInternal(7L, 7L, request));
+            () -> refundService.refundInternal(7L, 7L, request));
     assertEquals(mode.startsWith("disabled") ? 404 : 409, failure.getHttpStatus());
     assertEquals(
         mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",

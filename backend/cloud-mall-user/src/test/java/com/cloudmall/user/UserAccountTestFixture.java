@@ -6,7 +6,9 @@ import com.cloudmall.user.config.UserAccountInitializer;
 import com.cloudmall.user.controller.UserController;
 import com.cloudmall.user.mapper.UserAddressMapper;
 import com.cloudmall.user.mapper.UserMapper;
-import com.cloudmall.user.service.BalanceLedgerService;
+import com.cloudmall.user.service.BalanceDebitService;
+import com.cloudmall.user.service.BalanceOperationQueryService;
+import com.cloudmall.user.service.BalanceRefundService;
 import com.cloudmall.user.service.impl.AuthenticationServiceImpl;
 import com.cloudmall.user.service.impl.UserAddressServiceImpl;
 import com.cloudmall.user.service.impl.UserProfileServiceImpl;
@@ -21,7 +23,9 @@ record UserAccountTestFixture(UserController controller, UserAccountInitializer 
             new AuthenticationServiceImpl(users, mock(StringRedisTemplate.class)),
             new UserProfileServiceImpl(users),
             new UserAddressServiceImpl(addresses),
-            mock(BalanceLedgerService.class)),
+            mock(BalanceDebitService.class),
+            mock(BalanceRefundService.class),
+            mock(BalanceOperationQueryService.class)),
         new UserAccountInitializer(users));
   }
 }

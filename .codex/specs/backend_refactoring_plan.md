@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart、Gateway、Product 重构及 User 账号首切片，最新验证与回退信息见文末实施记录。User 下一切片为资金职责与响应解耦。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart、Gateway、Product 重构及 User 账号、资金两个切片，最新验证与回退信息见文末实施记录。User 下一切片为TCC/Fence与只读取证实现的命名和归组。
 
 ## 1. 使用方式与范围
 
@@ -443,7 +443,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Cart | 三个切片验收通过 | 已具备逐模块重构样板 |
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
-| User | 账号首切片完成 | 认证、资料、地址、初始化与HTTP委托完成；资金职责拆分及TCC/证据归组待继续 |
+| User | 账号、资金切片完成 | 认证、资料、地址及资金三项能力拆分完成；TCC/Fence与只读取证归组待继续 |
 | Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -696,3 +696,51 @@ git revert --no-edit $userAccountCommit
 测试只将旧混合对象调用改为三项真实业务能力，反射故障注入改到实际拥有Mapper的Service或证明Bean；不得用旧转发壳维持假边界。记录40方法迁移清单与剔除明确接收者/响应包装后的词法对照。User package、八模块test-compile、Java格式化、git diff --check通过后提交并标记完成。临时MySQL/Redis使用deploy/experiments/compose.yml全新项目和卷，归档后移除容器/网络，保留卷。
 
 本切片完成后继续User TCC/Fence及只读取证实现的命名和归组。真实Seata RM/TC进程、跨服务全链路与性能实验不由本地状态机/事务回归替代。
+
+### 17.5 实际实现与调用链复盘
+
+已按17.2完成拆分：扣款实现279行、退款158行、查询141行、归属证明193行、退款集合证明208行、纯规则107行。行数仅作导航参考；三个业务接口分别只暴露2/1/1个方法。依赖Mapper的证明类注册为Component，其方法限于实现包内可见，内部独用方法保持private；纯规则类不注册Bean。所有依赖均为构造器注入的final字段。
+
+核心调用链逐项复盘如下：
+
+- 四个资金HTTP路由由UserController保持原绑定与校验，再分别调用扣款/退款/查询接口。Service返回原三个VO，Controller包装ApiResponse；不改其他九个账号路由。
+- 扣款事务入口 → 私有debitFromLedger → 原caller/金额校验 → 钱包行锁 → 归属与账本范围检查 → BalanceOwnershipEvidence冻结/receive互斥 → 原attempt/余额/ledger写入 → 原Redis加速值 → VO。兼容支付键入口在同一实例和同一事务中转换DTO，未经过第二个Service代理。
+- 退款事务入口 → 钱包行锁 → 原DEBIT/状态/重放字段校验 → BalanceOwnershipEvidence确认来源 → BalanceRefundEvidence同pay唯一扣款、linked/pay双集合、金额额度与全局键证明 → 原credit/ledger写入 → VO。证明Bean不新开事务或重新读取钱包。
+- 查询只读RR入口 → primary/source唯一性 → 原候选集合 → 退款纯规则校验 → 原selector/membership → BalanceOwnershipEvidence终态归属 → 全局观察键唯一性 → VO。数据读取仍由原入口按原次序发起，纯校验不隐藏额外SQL。
+
+40个原方法各迁移一次，`method-moves.json`记录去向；`method-parity.json`证明忽略注释、格式、明确的证明对象接收者和ApiResponse包装后40个方法体词法一致。`BalanceLedgerServiceTest`保持106项测试，断言/verify调用数量核对一致；资金实库原103项全部保留，并增加退款Service与共享证明使用同一写事务连接的专项。既有同连接RR查询测试的反射观察点迁至queryService和BalanceOwnershipEvidence，原顺序、快照和零写入断言保留。
+
+首次完整420项回归通过。新增退款同连接检查也已单独通过，覆盖来源查询、双集合证明、钱包credit、ledger insert及返回后事务结束。最终带新增项的整批回归、打包和跨模块编译结果在下一节登记。
+
+### 17.6 第二切片验收
+
+第二切片完成，源码基线提交为 `c5dd2a54`，基线标签 `refactor/user-balance-baseline-20261104`，通过标签 `refactor/user-balance-complete-20261104`。当前Java源码、测试装配、反射观察点及源码契约测试均已同步新类型；HTTP映射、DTO/VO字段、Feign、Mapper、SQL、配置和依赖版本保持。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 原基线 | User281与Common25单测通过 |
+| 定向回归 | 106项余额单测及1项源码契约通过 |
+| 完整最终回归 | 24类421项，0失败、0错误、0跳过：Common25、User单测281、资金MySQL104、生成ID MySQL7、账号MySQL/Redis/MVC4 |
+| 新事务专项 | 退款来源、集合证明、credit与ledger insert使用同一写事务连接，RR隔离级别保持，返回后无事务残留 |
+| 编译与制品 | User package通过；八模块生产/测试源码test-compile通过；Jar包含9个新类型且不含旧混合接口/实现 |
+| 源码检查 | 40方法迁移词法对照通过，106项余额单测断言/verify数量一致；格式化与git diff --check通过 |
+
+测试涵盖原兼容/持久扣款入口、幂等重放、金额域/尾零、禁用用户退款、原来源和双集合证明、100条退款上限、并发及跨协议互斥、退款/扣款数据库故障回滚、REJECTED账本提交、查询同连接RR快照与原错误优先级。最终以 `F:/Cloud-Mall/target/backend-refactor-20261104/user-balance/final-regression.log` 为准；verification.json记录逐类统计、方法迁移及制品信息。真实RM/TC进程回调、跨服务端到端与性能实验未运行，User整体尚待下一切片验收。
+
+开发过程仅发现验证夹具/工具问题：词法脚本误识别缩进行、测试代理不能用BaseMapper声明类判断委托对象、缺少assertFalse静态import，均已记录并修正。原资金业务规则未作缺陷修复或行为扩展。
+
+本轮使用全新Compose项目cloud-mall-refactor-user-balance-20261104，MySQL19927、Redis19928及独立子网10.254.243.0/24。UUID测试库均已删除，实验来源表仍为空且校验和保持，Redis DB15最终0键。归档inspect与容器日志后，两容器和网络已移除，两个命名卷保留。只精确移除旧BalanceLedgerService.class与BalanceLedgerServiceImpl.class，User target下历史证据保持。
+
+### 17.7 回退与后续任务
+
+仅撤销本次资金拆分、保留账号重构及地址归属修复：
+
+```powershell
+$userBalanceCommit = git rev-parse 'refactor/user-balance-complete-20261104^{commit}'
+git show --stat $userBalanceCommit
+git revert --no-edit $userBalanceCommit
+```
+
+源码反向补丁在临时Git索引中核对，应精确回到c5dd2a54；此检查不修改真实工作区/索引，也不等于运行态回滚。实际回退后依据17.2的9个新类型清单精确清理target/classes中的过期class，再编译并回归；不清空含历史证据的target，不将Git回退当作数据库或Redis回退。
+
+下一步盘点User的LocalTCC资源、Fence回调、HTTP接收状态、只读状态查询和取证报告实现，在service.impl内按真实职责归组。先冻结Bean名/条件装配、actionName、回调入口、Mapper引用和测试入口，再执行迁移；不改RM身份、状态机、取证分类或协议字段。

@@ -11,7 +11,8 @@ class BalanceContractTest {
   void userRegistrationAndDebitUseTheDefaultBalanceAndAtomicGuard() throws Exception {
     String source =
         Files.readString(
-            Path.of("src/main/java/com/cloudmall/user/service/impl/BalanceLedgerServiceImpl.java"));
+            Path.of(
+                "src/main/java/com/cloudmall/user/service/impl/balance/BalanceDebitServiceImpl.java"));
     String mapper =
         Files.readString(Path.of("src/main/java/com/cloudmall/user/mapper/UserMapper.java"));
     String schema = Files.readString(Path.of("../database/schema.sql"));

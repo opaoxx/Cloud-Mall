@@ -1,6 +1,7 @@
 package com.cloudmall.user;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -17,9 +18,16 @@ import com.cloudmall.user.domain.dto.BalanceDebitRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceRefundRequestDTO;
 import com.cloudmall.user.domain.dto.BalanceTccDebitFinalizeDTO;
 import com.cloudmall.user.domain.dto.BalanceTccDebitTryDTO;
+import com.cloudmall.user.service.BalanceDebitService;
+import com.cloudmall.user.service.BalanceOperationQueryService;
+import com.cloudmall.user.service.BalanceRefundService;
 import com.cloudmall.user.service.BalanceTccDebitService;
-import com.cloudmall.user.service.impl.BalanceLedgerServiceImpl;
 import com.cloudmall.user.service.impl.BalanceTccDebitServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceDebitServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceOperationQueryServiceImpl;
+import com.cloudmall.user.service.impl.balance.BalanceOwnershipEvidence;
+import com.cloudmall.user.service.impl.balance.BalanceRefundEvidence;
+import com.cloudmall.user.service.impl.balance.BalanceRefundServiceImpl;
 import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -79,7 +87,13 @@ class BalanceTccStateMySqlIT {
   private BalanceTccDebitService service;
 
   /** 生产 Legacy 扣款/退款服务的事务代理。 */
-  private BalanceLedgerServiceImpl legacy;
+  private BalanceDebitService debitService;
+
+  /** 生产退款事务代理。 */
+  private BalanceRefundService refundService;
+
+  /** 生产操作查询事务代理。 */
+  private BalanceOperationQueryService queryService;
 
   @BeforeAll
   static void createIsolatedDatabase() throws Exception {
@@ -182,14 +196,20 @@ class BalanceTccStateMySqlIT {
         com.cloudmall.user.service.impl.AuthenticationServiceImpl.class,
         com.cloudmall.user.service.impl.UserProfileServiceImpl.class,
         com.cloudmall.user.service.impl.UserAddressServiceImpl.class,
-        BalanceLedgerServiceImpl.class,
+        BalanceDebitServiceImpl.class,
+        BalanceRefundServiceImpl.class,
+        BalanceOperationQueryServiceImpl.class,
+        BalanceOwnershipEvidence.class,
+        BalanceRefundEvidence.class,
         com.cloudmall.user.config.UserAccountInitializer.class,
         BalanceTccTableInitializer.class,
         BalanceLedgerTableInitializer.class,
         UserTableInitializer.class);
     context.refresh();
     service = context.getBean(BalanceTccDebitService.class);
-    legacy = context.getBean(BalanceLedgerServiceImpl.class);
+    debitService = context.getBean(BalanceDebitService.class);
+    refundService = context.getBean(BalanceRefundService.class);
+    queryService = context.getBean(BalanceOperationQueryService.class);
   }
 
   @AfterEach
@@ -420,7 +440,8 @@ class BalanceTccStateMySqlIT {
                 () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
                 () -> {
                   var failure =
-                      assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertThrows(
+                          BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                   assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                   assertEquals(409, failure.getHttpStatus());
                 },
@@ -463,8 +484,8 @@ class BalanceTccStateMySqlIT {
                 compatible.amount = request.amount;
                 org.junit.jupiter.api.function.Executable debit =
                     () -> {
-                      if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                      else legacy.debitInternal(7L, 7L, request);
+                      if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                      else debitService.debitInternal(7L, 7L, request);
                     };
                 if (history.startsWith("REJECTED"))
                   assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
@@ -608,8 +629,9 @@ class BalanceTccStateMySqlIT {
                             assertThrows(
                                 BizException.class,
                                 () -> {
-                                  if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                                  else legacy.debitInternal(7L, 7L, request);
+                                  if ("compat".equals(entry))
+                                    debitService.debit(7L, 7L, compatible);
+                                  else debitService.debitInternal(7L, 7L, request);
                                 });
                         assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
                         assertEquals("支付号已有 TCC 接收事实", failure.getMessage());
@@ -662,7 +684,7 @@ class BalanceTccStateMySqlIT {
                     fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                   }
                   var current = refundRequest(original, "point-current-refund", "2.00");
-                  if (!"fresh-source".equals(stage)) legacy.refundInternal(7L, 7L, current);
+                  if (!"fresh-source".equals(stage)) refundService.refundInternal(7L, 7L, current);
                   String duplicatedKey =
                       "current".equals(stage) ? current.refundOperationKey : original.ledgerKey;
                   String duplicateAlias =
@@ -708,7 +730,8 @@ class BalanceTccStateMySqlIT {
                       () -> {
                         var failure =
                             assertThrows(
-                                BizException.class, () -> legacy.refundInternal(7L, 7L, current));
+                                BizException.class,
+                                () -> refundService.refundInternal(7L, 7L, current));
                         assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                         assertEquals("退款累计证据不完整或不一致", failure.getMessage());
                       },
@@ -768,10 +791,10 @@ class BalanceTccStateMySqlIT {
                       setEnabled(false);
                       fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                     }
-                    legacy.refundInternal(
+                    refundService.refundInternal(
                         7L, 7L, refundRequest(original, "prior-global-refund", "1.00"));
                     var current = refundRequest(original, "current-global-refund", "2.00");
-                    if ("replay".equals(entry)) legacy.refundInternal(7L, 7L, current);
+                    if ("replay".equals(entry)) refundService.refundInternal(7L, 7L, current);
                     String duplicatedKey =
                         "source".equals(shadow) ? original.ledgerKey : "prior-global-refund";
                     String duplicateAlias =
@@ -818,7 +841,8 @@ class BalanceTccStateMySqlIT {
                         () -> {
                           var failure =
                               assertThrows(
-                                  BizException.class, () -> legacy.refundInternal(7L, 7L, current));
+                                  BizException.class,
+                                  () -> refundService.refundInternal(7L, 7L, current));
                           assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                           assertEquals("退款累计证据不完整或不一致", failure.getMessage());
                         },
@@ -913,7 +937,7 @@ class BalanceTccStateMySqlIT {
                       var failure =
                           assertThrows(
                               BizException.class,
-                              () -> legacy.balanceOperation(7L, primaryKey, 7L));
+                              () -> queryService.balanceOperation(7L, primaryKey, 7L));
                       assertEquals("COMMON_CONFLICT", failure.getCode());
                       assertEquals("余额账本事实待核对", failure.getMessage());
                     },
@@ -2085,8 +2109,8 @@ class BalanceTccStateMySqlIT {
                 compatible.amount = original.amount;
                 org.junit.jupiter.api.function.Executable legacyDebit =
                     () -> {
-                      if (route.endsWith("compat")) legacy.debit(7L, 7L, compatible);
-                      else legacy.debitInternal(7L, 7L, debit);
+                      if (route.endsWith("compat")) debitService.debit(7L, 7L, compatible);
+                      else debitService.debitInternal(7L, 7L, debit);
                     };
                 if (confirmed) {
                   service.tryDebit(original);
@@ -2105,7 +2129,7 @@ class BalanceTccStateMySqlIT {
                         "disabled-replay",
                         "tcc-refund-get",
                         "tcc-active-replay")
-                    .contains(route)) legacy.refundInternal(7L, 7L, refund);
+                    .contains(route)) refundService.refundInternal(7L, 7L, refund);
                 if (disabled) fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                 String queryKey =
                     List.of("applied-refund-get", "tcc-refund-get").contains(route)
@@ -2179,8 +2203,8 @@ class BalanceTccStateMySqlIT {
                             assertThrows(
                                 BizException.class,
                                 () -> {
-                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
-                                  else if (refunding) legacy.refundInternal(7L, 7L, refund);
+                                  if (getter) queryService.balanceOperation(7L, queryKey, 7L);
+                                  else if (refunding) refundService.refundInternal(7L, 7L, refund);
                                   else legacyDebit.execute();
                                 });
                         assertEquals(expectedCode, failure.getCode());
@@ -2266,8 +2290,8 @@ class BalanceTccStateMySqlIT {
                 compatible.amount = original.amount;
                 org.junit.jupiter.api.function.Executable legacyDebit =
                     () -> {
-                      if (route.endsWith("compat")) legacy.debit(7L, 7L, compatible);
-                      else legacy.debitInternal(7L, 7L, debit);
+                      if (route.endsWith("compat")) debitService.debit(7L, 7L, compatible);
+                      else debitService.debitInternal(7L, 7L, debit);
                     };
                 if (disabled) {
                   service.tryDebit(original);
@@ -2281,7 +2305,7 @@ class BalanceTccStateMySqlIT {
                 var refund =
                     refundRequest(original, "owner-multi-refund:" + original.payNo, "2.00");
                 if (List.of("applied-refund-get", "active-replay", "disabled-replay")
-                    .contains(route)) legacy.refundInternal(7L, 7L, refund);
+                    .contains(route)) refundService.refundInternal(7L, 7L, refund);
                 if (disabled) fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                 String queryKey =
                     "applied-refund-get".equals(route) ? refund.refundOperationKey : original.payNo;
@@ -2349,8 +2373,8 @@ class BalanceTccStateMySqlIT {
                             assertThrows(
                                 BizException.class,
                                 () -> {
-                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
-                                  else if (refunding) legacy.refundInternal(7L, 7L, refund);
+                                  if (getter) queryService.balanceOperation(7L, queryKey, 7L);
+                                  else if (refunding) refundService.refundInternal(7L, 7L, refund);
                                   else legacyDebit.execute();
                                 });
                         assertEquals(expectedCode, failure.getCode());
@@ -2417,8 +2441,8 @@ class BalanceTccStateMySqlIT {
                   compatible.amount = request.amount;
                   org.junit.jupiter.api.function.Executable debit =
                       () -> {
-                        if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                        else legacy.debitInternal(7L, 7L, request);
+                        if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                        else debitService.debitInternal(7L, 7L, request);
                       };
                   if ("REJECTED".equals(state))
                     assertEquals(
@@ -2552,7 +2576,7 @@ class BalanceTccStateMySqlIT {
                 var refund =
                     refundRequest(original, "receive-multi-refund:" + original.payNo, "2.00");
                 if (List.of("applied-refund-get", "active-replay").contains(route))
-                  legacy.refundInternal(7L, 7L, refund);
+                  refundService.refundInternal(7L, 7L, refund);
                 String queryKey =
                     "applied-refund-get".equals(route) ? refund.refundOperationKey : original.payNo;
                 try {
@@ -2616,11 +2640,11 @@ class BalanceTccStateMySqlIT {
                             assertThrows(
                                 BizException.class,
                                 () -> {
-                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
-                                  else if (refunding) legacy.refundInternal(7L, 7L, refund);
+                                  if (getter) queryService.balanceOperation(7L, queryKey, 7L);
+                                  else if (refunding) refundService.refundInternal(7L, 7L, refund);
                                   else if (route.endsWith("compat"))
-                                    legacy.debit(7L, 7L, compatible);
-                                  else legacy.debitInternal(7L, 7L, debit);
+                                    debitService.debit(7L, 7L, compatible);
+                                  else debitService.debitInternal(7L, 7L, debit);
                                 });
                         assertEquals(expectedCode, failure.getCode());
                         assertEquals(expectedMessage, failure.getMessage());
@@ -2679,7 +2703,7 @@ class BalanceTccStateMySqlIT {
                 debitLegacy(original.payNo, original.payNo, 7L, "10.00");
                 var refund = refundRequest(original, "receive-refund:" + original.payNo, "2.00");
                 if (List.of("refund-get", "replay-refund").contains(route))
-                  legacy.refundInternal(7L, 7L, refund);
+                  refundService.refundInternal(7L, 7L, refund);
                 if (!ownerPresent) fixture.update("DELETE FROM balance_debit_attempt");
                 String queryKey =
                     "refund-get".equals(route) ? refund.refundOperationKey : original.payNo;
@@ -2735,8 +2759,8 @@ class BalanceTccStateMySqlIT {
                             assertThrows(
                                 BizException.class,
                                 () -> {
-                                  if (getter) legacy.balanceOperation(7L, queryKey, 7L);
-                                  else legacy.refundInternal(7L, 7L, refund);
+                                  if (getter) queryService.balanceOperation(7L, queryKey, 7L);
+                                  else refundService.refundInternal(7L, 7L, refund);
                                 });
                         assertEquals(
                             getter ? "COMMON_CONFLICT" : "BALANCE_REFUND_INVALID",
@@ -2775,10 +2799,10 @@ class BalanceTccStateMySqlIT {
           confirmed.ledgerKey);
       assertEquals(200, operationHttp(confirmed.ledgerKey).getResponse().getStatus());
       var refund = refundRequest(confirmed, "applied-receive-tcc-refund", "2.00");
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       var before = allFundsFacts();
       var receiptBefore = fixture.queryForList("SELECT * FROM user_tcc_receive ORDER BY id");
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       assertEquals(200, operationHttp(refund.refundOperationKey).getResponse().getStatus());
       assertEquals(before, allFundsFacts());
       assertEquals(
@@ -2791,7 +2815,7 @@ class BalanceTccStateMySqlIT {
   /** REJECTED查询任意接收来源均待核，归属/冻结/接收同只读RR且五表不写。 */
   @Test
   void rejectedOperationRejectsObservedReceiveWithoutWriting() {
-    Object target = AopTestUtils.getUltimateTargetObject(legacy);
+    Object target = context.getBean(BalanceOwnershipEvidence.class);
     var actualMappers = new java.util.LinkedHashMap<String, Object>();
     var observations = new ArrayList<String>();
     var connectionIds = new ArrayList<Integer>();
@@ -2897,7 +2921,7 @@ class BalanceTccStateMySqlIT {
                         var failure =
                             assertThrows(
                                 BizException.class,
-                                () -> legacy.balanceOperation(7L, original.ledgerKey, 7L));
+                                () -> queryService.balanceOperation(7L, original.ledgerKey, 7L));
                         assertEquals("COMMON_CONFLICT", failure.getCode());
                         assertEquals("余额账本事实待核对", failure.getMessage());
                       },
@@ -3012,7 +3036,7 @@ class BalanceTccStateMySqlIT {
                   if (healthy) {
                     var result =
                         (com.cloudmall.user.domain.vo.BalanceOperationVO)
-                            legacy.balanceOperation(7L, original.ledgerKey, 7L).data;
+                            queryService.balanceOperation(7L, original.ledgerKey, 7L);
                     assertEquals("REJECTED", result.state);
                     assertEquals("101.00", result.amount);
                     assertEquals(null, result.refundOperationKey);
@@ -3020,7 +3044,7 @@ class BalanceTccStateMySqlIT {
                     var failure =
                         assertThrows(
                             BizException.class,
-                            () -> legacy.balanceOperation(7L, original.ledgerKey, 7L));
+                            () -> queryService.balanceOperation(7L, original.ledgerKey, 7L));
                     assertEquals("COMMON_CONFLICT", failure.getCode());
                     assertEquals("余额账本事实待核对", failure.getMessage());
                   }
@@ -3058,7 +3082,7 @@ class BalanceTccStateMySqlIT {
                 service.confirmDebit(finalizeRequest(original));
               } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
               var refund = refundRequest(original, "completed-owner-refund", "2.00");
-              legacy.refundInternal(7L, 7L, refund);
+              refundService.refundInternal(7L, 7L, refund);
               switch (variant) {
                 case "owner-state" ->
                     fixture.update("UPDATE balance_debit_attempt SET state='TRYING'");
@@ -3101,7 +3125,8 @@ class BalanceTccStateMySqlIT {
                           () -> {
                             var failure =
                                 assertThrows(
-                                    BizException.class, () -> legacy.balanceOperation(7L, key, 7L));
+                                    BizException.class,
+                                    () -> queryService.balanceOperation(7L, key, 7L));
                             assertEquals("COMMON_CONFLICT", failure.getCode());
                             assertEquals("余额账本事实待核对", failure.getMessage());
                           },
@@ -3142,7 +3167,7 @@ class BalanceTccStateMySqlIT {
                 service.confirmDebit(finalizeRequest(original));
               } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
               var refund = refundRequest(original, "completed-owner-refund", "2.00");
-              legacy.refundInternal(7L, 7L, refund);
+              refundService.refundInternal(7L, 7L, refund);
               switch (variant) {
                 case "owner-state" ->
                     fixture.update("UPDATE balance_debit_attempt SET state='TRYING'");
@@ -3190,7 +3215,7 @@ class BalanceTccStateMySqlIT {
                   () -> {
                     var failure =
                         assertThrows(
-                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                            BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                     assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                   },
                   () -> assertEquals(before, allFundsFacts()));
@@ -3226,8 +3251,8 @@ class BalanceTccStateMySqlIT {
                 compatible.amount = request.amount;
                 org.junit.jupiter.api.function.Executable debit =
                     () -> {
-                      if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                      else legacy.debitInternal(7L, 7L, request);
+                      if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                      else debitService.debitInternal(7L, 7L, request);
                     };
                 if ("REJECTED".equals(state))
                   assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
@@ -3295,7 +3320,7 @@ class BalanceTccStateMySqlIT {
             service.tryDebit(original);
             service.confirmDebit(finalizeRequest(original));
             var refund = refundRequest(original, "completed-disabled-cap", "2.00");
-            legacy.refundInternal(7L, 7L, refund);
+            refundService.refundInternal(7L, 7L, refund);
             if ("1.00".equals(sourceAmount)) {
               fixture.update(
                   "UPDATE balance_ledger SET amount=1,balance_after=99 WHERE operation_key=?",
@@ -3326,13 +3351,13 @@ class BalanceTccStateMySqlIT {
                   () -> {
                     var failure =
                         assertThrows(
-                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                            BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                     assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                   },
                   () -> assertEquals(before, allFundsFacts()));
             } else {
               assertEquals(200, response.getResponse().getStatus());
-              legacy.refundInternal(7L, 7L, refund);
+              refundService.refundInternal(7L, 7L, refund);
               assertEquals(before, allFundsFacts());
             }
           });
@@ -3361,7 +3386,7 @@ class BalanceTccStateMySqlIT {
                 service.confirmDebit(finalizeRequest(original));
               } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
               var refund = refundRequest(original, "completed-refund-source", "2.00");
-              legacy.refundInternal(7L, 7L, refund);
+              refundService.refundInternal(7L, 7L, refund);
               switch (variant) {
                 case "missing" ->
                     fixture.update(
@@ -3413,7 +3438,7 @@ class BalanceTccStateMySqlIT {
                   () -> {
                     var failure =
                         assertThrows(
-                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                            BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                     assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                     assertEquals("原扣款不存在或未应用", failure.getMessage());
                   },
@@ -3482,8 +3507,8 @@ class BalanceTccStateMySqlIT {
                           assertThrows(
                               BizException.class,
                               () -> {
-                                if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                                else legacy.debitInternal(7L, 7L, request);
+                                if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                                else debitService.debitInternal(7L, 7L, request);
                               });
                       assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
                       assertEquals("支付号已有TCC冻结事实", failure.getMessage());
@@ -3533,7 +3558,7 @@ class BalanceTccStateMySqlIT {
               String queryKey = original.payNo;
               if (scenario.endsWith("refund")) {
                 var refund = refundRequest(original, "valid-operation-refund", "2.00");
-                legacy.refundInternal(7L, 7L, refund);
+                refundService.refundInternal(7L, 7L, refund);
                 queryKey = refund.refundOperationKey;
               }
               fixture.update(
@@ -3560,7 +3585,7 @@ class BalanceTccStateMySqlIT {
                     var failure =
                         assertThrows(
                             BizException.class,
-                            () -> legacy.balanceOperation(7L, operationKey, 7L));
+                            () -> queryService.balanceOperation(7L, operationKey, 7L));
                     assertEquals("COMMON_CONFLICT", failure.getCode());
                     assertEquals("余额账本事实待核对", failure.getMessage());
                   },
@@ -3644,7 +3669,7 @@ class BalanceTccStateMySqlIT {
                 if (partial) {
                   var previous = refundRequest(original, "legitimate-linked-refund", "3.00");
                   previous.originalOperationKey = debitKey;
-                  legacy.refundInternal(7L, 7L, previous);
+                  refundService.refundInternal(7L, 7L, previous);
                 }
                 BigDecimal priorBalance =
                     fixture.queryForObject(
@@ -3694,7 +3719,8 @@ class BalanceTccStateMySqlIT {
                     () -> {
                       var failure =
                           assertThrows(
-                              BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                              BizException.class,
+                              () -> refundService.refundInternal(7L, 7L, refund));
                       assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                       assertEquals(409, failure.getHttpStatus());
                     },
@@ -3759,7 +3785,8 @@ class BalanceTccStateMySqlIT {
                 () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
                 () -> {
                   var failure =
-                      assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertThrows(
+                          BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                   assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                   assertEquals(409, failure.getHttpStatus());
                 },
@@ -3816,7 +3843,8 @@ class BalanceTccStateMySqlIT {
                 () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
                 () -> {
                   var failure =
-                      assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertThrows(
+                          BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                   assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                   assertEquals(409, failure.getHttpStatus());
                 },
@@ -3885,7 +3913,8 @@ class BalanceTccStateMySqlIT {
                 () -> assertHttpCode(response, "BALANCE_REFUND_INVALID"),
                 () -> {
                   var failure =
-                      assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                      assertThrows(
+                          BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                   assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                   assertEquals(409, failure.getHttpStatus());
                 },
@@ -3930,10 +3959,10 @@ class BalanceTccStateMySqlIT {
                 service.confirmDebit(finalizeRequest(original));
               }
               var refund = refundRequest(original, "completed-collection-refund", "2.00");
-              legacy.refundInternal(7L, 7L, refund);
+              refundService.refundInternal(7L, 7L, refund);
               boolean healthy = List.of("partial", "full", "limit100").contains(variant);
               if (healthy && !"limit100".equals(variant)) {
-                legacy.refundInternal(
+                refundService.refundInternal(
                     7L,
                     7L,
                     refundRequest(
@@ -4003,12 +4032,13 @@ class BalanceTccStateMySqlIT {
                       assertEquals(
                           "92.00",
                           ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                                  legacy.refundInternal(7L, 7L, refund).data)
+                                  refundService.refundInternal(7L, 7L, refund))
                               .balance);
                     else {
                       var failure =
                           assertThrows(
-                              BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                              BizException.class,
+                              () -> refundService.refundInternal(7L, 7L, refund));
                       assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                       assertEquals("退款累计证据不完整或不一致", failure.getMessage());
                     }
@@ -4050,7 +4080,7 @@ class BalanceTccStateMySqlIT {
               }
               var refund = refundRequest(original, "completed-refund-source-check", "1.00");
               refund.originalOperationKey = debitKey;
-              legacy.refundInternal(7L, 7L, refund);
+              refundService.refundInternal(7L, 7L, refund);
               int extraCount = "three".equals(variant) ? 2 : 1;
               for (int index = 1; index <= extraCount; index++) {
                 fixture.update(
@@ -4099,13 +4129,13 @@ class BalanceTccStateMySqlIT {
                       assertEquals(
                           "91.00",
                           ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                                  legacy.refundInternal(7L, 7L, refund).data)
+                                  refundService.refundInternal(7L, 7L, refund))
                               .balance);
                       return;
                     }
                     BizException failure =
                         assertThrows(
-                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                            BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                     assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                     assertEquals(409, failure.getHttpStatus());
                     assertEquals("原扣款不存在或未应用", failure.getMessage());
@@ -4184,7 +4214,7 @@ class BalanceTccStateMySqlIT {
                   () -> {
                     BizException failure =
                         assertThrows(
-                            BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                            BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                     assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
                     assertEquals(409, failure.getHttpStatus());
                     assertEquals("原扣款不存在或未应用", failure.getMessage());
@@ -4263,8 +4293,8 @@ class BalanceTccStateMySqlIT {
                           assertThrows(
                               BizException.class,
                               () -> {
-                                if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                                else legacy.debitInternal(7L, 7L, request);
+                                if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                                else debitService.debitInternal(7L, 7L, request);
                               });
                       assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
                       assertEquals(409, failure.getHttpStatus());
@@ -4307,8 +4337,8 @@ class BalanceTccStateMySqlIT {
               compatible.amount = request.amount;
               org.junit.jupiter.api.function.Executable debit =
                   () -> {
-                    if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                    else legacy.debitInternal(7L, 7L, request);
+                    if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                    else debitService.debitInternal(7L, 7L, request);
                   };
               if ("REJECTED".equals(state)) {
                 assertEquals("PAYMENT_FAILED", assertThrows(BizException.class, debit).getCode());
@@ -4323,7 +4353,7 @@ class BalanceTccStateMySqlIT {
                 refund.payNo = request.payNo;
                 refund.orderNo = request.orderNo;
                 refund.amount = new BigDecimal("2.00");
-                legacy.refundInternal(7L, 7L, refund);
+                refundService.refundInternal(7L, 7L, refund);
                 assertFunds(7L, "92.00", "0.00");
                 if ("history-no-attempt".equals(state))
                   fixture.update("DELETE FROM balance_debit_attempt");
@@ -4442,8 +4472,8 @@ class BalanceTccStateMySqlIT {
                           assertThrows(
                               BizException.class,
                               () -> {
-                                if ("compat".equals(entry)) legacy.debit(7L, 7L, compatible);
-                                else legacy.debitInternal(7L, 7L, request);
+                                if ("compat".equals(entry)) debitService.debit(7L, 7L, compatible);
+                                else debitService.debitInternal(7L, 7L, request);
                               });
                       assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
                       assertEquals(409, failure.getHttpStatus());
@@ -4661,7 +4691,7 @@ class BalanceTccStateMySqlIT {
     var original = request("scope-healthy", 7L, "10.000");
     service.tryDebit(original);
     service.confirmDebit(finalizeRequest(original));
-    legacy.refundInternal(7L, 7L, refundRequest(original, "scope-partial-refund", "2.00"));
+    refundService.refundInternal(7L, 7L, refundRequest(original, "scope-partial-refund", "2.00"));
     fixture.update("UPDATE mall_user SET balance=123.45 WHERE id=7");
     var before = allFundsFacts();
     assertEquals("CONFIRMED", service.tryDebit(original).state);
@@ -4766,14 +4796,15 @@ class BalanceTccStateMySqlIT {
                 }
                 var refund = refundRequest(original, "refund-proof-key", "10.00");
                 refund.originalOperationKey = debitKey;
-                if ("disabled-replay".equals(mode)) legacy.refundInternal(7L, 7L, refund);
+                if ("disabled-replay".equals(mode)) refundService.refundInternal(7L, 7L, refund);
                 if (mode.startsWith("disabled"))
                   fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                 fixture.update(
                     "UPDATE balance_ledger SET " + mutation + " WHERE operation_key=?", debitKey);
                 var before = allFundsFacts();
                 var failure =
-                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertThrows(
+                        BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                 assertEquals(mode.startsWith("disabled") ? 404 : 409, failure.getHttpStatus());
                 assertEquals(
                     mode.startsWith("disabled") ? "COMMON_NOT_FOUND" : "BALANCE_REFUND_INVALID",
@@ -4803,10 +4834,10 @@ class BalanceTccStateMySqlIT {
       assertFunds(7L, "0.00", "0.00");
       if (disabled) fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
       var refund = refundRequest(original, "refund-valid-key", "100.000");
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       assertFunds(7L, "100.00", "0.00");
       var before = allFundsFacts();
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       assertEquals(before, allFundsFacts());
       assertEquals(2, ledgerCount());
     }
@@ -4827,7 +4858,7 @@ class BalanceTccStateMySqlIT {
         service.tryDebit(original);
         service.confirmDebit(finalizeRequest(original));
         var refund = refundRequest(original, "refund-http-proof", "10.00");
-        if ("disabled-replay".equals(mode)) legacy.refundInternal(7L, 7L, refund);
+        if ("disabled-replay".equals(mode)) refundService.refundInternal(7L, 7L, refund);
         if (mode.startsWith("disabled")) fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
         fixture.update(
             "UPDATE balance_ledger SET " + mutation + " WHERE operation_key=?", original.ledgerKey);
@@ -4894,7 +4925,7 @@ class BalanceTccStateMySqlIT {
                         if ("debit".equals(operation))
                           debitLegacy("money-invalid", "money-invalid", 7L, amountText);
                         else
-                          legacy.refundInternal(
+                          refundService.refundInternal(
                               7L, 7L, refundRequest(original, "refund-money-invalid", amountText));
                       });
               assertEquals(400, failure.getHttpStatus());
@@ -4966,7 +4997,8 @@ class BalanceTccStateMySqlIT {
               .setScale(2, java.math.RoundingMode.UNNECESSARY)
               .toPlainString(),
           "0.00");
-      legacy.refundInternal(7L, 7L, refundRequest(original, "refund-money-valid", amountText));
+      refundService.refundInternal(
+          7L, 7L, refundRequest(original, "refund-money-valid", amountText));
       assertFunds(7L, "100.00", "0.00");
       for (BigDecimal stored :
           fixture.queryForList("SELECT amount FROM balance_ledger ORDER BY id", BigDecimal.class))
@@ -5012,7 +5044,8 @@ class BalanceTccStateMySqlIT {
                 var before = allFundsFacts();
                 var refund = refundRequest(original, "refund-wallet-proof", "10.00");
                 var failure =
-                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertThrows(
+                        BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                 assertEquals("BALANCE_REFUND_FAILED", failure.getCode());
                 assertEquals(409, failure.getHttpStatus());
                 assertEquals(before, allFundsFacts());
@@ -5103,13 +5136,13 @@ class BalanceTccStateMySqlIT {
                               throw failure.getCause();
                             }
                           });
-              Object target = AopTestUtils.getUltimateTargetObject(legacy);
+              Object target = AopTestUtils.getUltimateTargetObject(refundService);
               ReflectionTestUtils.setField(target, "balanceLedgerMapper", fault);
               try {
                 assertThrows(
                     IllegalStateException.class,
                     () ->
-                        legacy.refundInternal(
+                        refundService.refundInternal(
                             7L, 7L, refundRequest(original, "refund-ledger-atomic", "10.00")));
                 assertEquals(1, intercepted.get());
                 assertEquals(before, allFundsFacts());
@@ -5135,7 +5168,7 @@ class BalanceTccStateMySqlIT {
       service.confirmDebit(finalizeRequest(original));
       fixture.update("UPDATE mall_user SET balance=? WHERE id=7", balance);
       var refund = refundRequest(original, "refund-wallet-valid", "10.000");
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       BigDecimal expected = new BigDecimal(balance).add(new BigDecimal("10.00"));
       assertFunds(7L, expected.toPlainString(), "0.00");
       var row =
@@ -5145,7 +5178,7 @@ class BalanceTccStateMySqlIT {
       assertEquals(new BigDecimal(balance), row.get("balance_before"));
       assertEquals(expected, row.get("balance_after"));
       var before = allFundsFacts();
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       assertEquals(before, allFundsFacts());
       assertEquals(2, ledgerCount());
     }
@@ -5185,7 +5218,7 @@ class BalanceTccStateMySqlIT {
                 }
                 var refund = refundRequest(original, "refund-replay-proof", "10.00");
                 refund.originalOperationKey = debitKey;
-                legacy.refundInternal(7L, 7L, refund);
+                refundService.refundInternal(7L, 7L, refund);
                 if (mode.startsWith("disabled"))
                   fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                 fixture.update(
@@ -5193,7 +5226,8 @@ class BalanceTccStateMySqlIT {
                     refund.refundOperationKey);
                 var before = allFundsFacts();
                 var failure =
-                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertThrows(
+                        BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                 assertEquals(409, failure.getHttpStatus());
                 assertEquals("IDEMPOTENCY_CONFLICT", failure.getCode());
                 assertEquals(before, allFundsFacts());
@@ -5253,10 +5287,10 @@ class BalanceTccStateMySqlIT {
       service.confirmDebit(finalizeRequest(original));
       fixture.update("UPDATE mall_user SET balance=0 WHERE id=7");
       var refund = refundRequest(original, "refund-replay-valid", "10.000");
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       fixture.update("UPDATE mall_user SET balance=50,status=? WHERE id=7", disabled ? 0 : 1);
       var before = allFundsFacts();
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       assertEquals(before, allFundsFacts());
       assertFunds(7L, "50.00", "0.00");
       assertEquals(2, ledgerCount());
@@ -5308,7 +5342,7 @@ class BalanceTccStateMySqlIT {
                 service.tryDebit(original);
                 service.confirmDebit(finalizeRequest(original));
                 var refund = refundRequest(original, "refund-freeze-proof", "10.00");
-                if (replay) legacy.refundInternal(7L, 7L, refund);
+                if (replay) refundService.refundInternal(7L, 7L, refund);
                 fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
                 switch (mutation) {
                   case "missing" -> fixture.update("DELETE FROM balance_tcc_debit");
@@ -5324,7 +5358,8 @@ class BalanceTccStateMySqlIT {
                 }
                 var before = allFundsFacts();
                 var failure =
-                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertThrows(
+                        BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                 assertEquals(404, failure.getHttpStatus());
                 assertEquals("COMMON_NOT_FOUND", failure.getCode());
                 assertEquals(before, allFundsFacts());
@@ -5483,8 +5518,8 @@ class BalanceTccStateMySqlIT {
     refund.payNo = request.payNo;
     refund.orderNo = request.orderNo;
     refund.amount = request.amount;
-    legacy.refundInternal(7L, 7L, refund);
-    legacy.refundInternal(7L, 7L, refund);
+    refundService.refundInternal(7L, 7L, refund);
+    refundService.refundInternal(7L, 7L, refund);
     assertFunds(7L, "100.00", "0.00");
     assertEquals(2, ledgerCount());
   }
@@ -5499,14 +5534,14 @@ class BalanceTccStateMySqlIT {
     fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
 
     BalanceRefundRequestDTO refund = refundRequest(confirmed, "refund:disabled-confirmed", "10.00");
-    legacy.refundInternal(7L, 7L, refund);
-    legacy.refundInternal(7L, 7L, refund);
+    refundService.refundInternal(7L, 7L, refund);
+    refundService.refundInternal(7L, 7L, refund);
     assertFunds(7L, "80.00", "20.00");
     assertEquals(2, ledgerCount());
 
     BalanceRefundRequestDTO excess =
         refundRequest(confirmed, "refund:disabled-confirmed-extra", "11.00");
-    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, excess));
+    assertThrows(BizException.class, () -> refundService.refundInternal(7L, 7L, excess));
     assertFunds(7L, "80.00", "20.00");
   }
 
@@ -5521,7 +5556,7 @@ class BalanceTccStateMySqlIT {
     refund.payNo = "disabled-legacy";
     refund.orderNo = "order-disabled-legacy";
     refund.amount = new BigDecimal("10.00");
-    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+    assertThrows(BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
     fixture.update(
         "INSERT INTO"
             + " balance_ledger(id,user_id,operation_key,operation_type,original_operation_key,pay_no,order_no,amount,state,balance_before,balance_after,created_at)"
@@ -5532,7 +5567,7 @@ class BalanceTccStateMySqlIT {
         "disabled-legacy",
         "order-disabled-legacy",
         new BigDecimal("10.00"));
-    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+    assertThrows(BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
     assertFunds(7L, "90.00", "0.00");
   }
 
@@ -5544,7 +5579,7 @@ class BalanceTccStateMySqlIT {
     fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
     BalanceRefundRequestDTO refund = refundRequest(trying, "refund:disabled-trying", "10.00");
 
-    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+    assertThrows(BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
     assertFunds(7L, "90.00", "10.00");
     assertEquals(0, ledgerCount());
   }
@@ -5727,7 +5762,7 @@ class BalanceTccStateMySqlIT {
 
     assertEquals(
         List.of(true, true),
-        race(() -> service.tryDebit(request), () -> legacy.refundInternal(7L, 7L, refund)));
+        race(() -> service.tryDebit(request), () -> refundService.refundInternal(7L, 7L, refund)));
 
     assertFunds(7L, "20.00", "80.00");
     service.cancelDebit(finalizeRequest(request));
@@ -6382,11 +6417,110 @@ class BalanceTccStateMySqlIT {
     org.junit.jupiter.api.Assertions.assertAll(assertions);
   }
 
+  /** 拆分后的退款来源/双集合证明与钱包和账本写入仍处于同一个写事务连接。 */
+  @Test
+  void refundEvidenceAndWritesShareOneTransactionConnection() throws Exception {
+    var original = request("refund-shared-transaction", 7L, "10.00");
+    debitLegacy(original.payNo, original.payNo, 7L, "10.00");
+    Object refundTarget = AopTestUtils.getUltimateTargetObject(refundService);
+    Object evidenceTarget = context.getBean(BalanceRefundEvidence.class);
+    Object actualUsers = ReflectionTestUtils.getField(refundTarget, "userMapper");
+    Object actualLedger = ReflectionTestUtils.getField(refundTarget, "balanceLedgerMapper");
+    Object actualEvidenceLedger =
+        ReflectionTestUtils.getField(evidenceTarget, "balanceLedgerMapper");
+    assertSame(actualLedger, actualEvidenceLedger);
+    var observations = new ArrayList<String>();
+    var connections = new java.util.HashSet<Integer>();
+    java.lang.reflect.InvocationHandler observation =
+        (proxy, method, arguments) -> {
+          String methodName = method.getName();
+          if (List.of(
+                  "selectByIdForUpdate",
+                  "selectByOperationKey",
+                  "selectDebitForUpdate",
+                  "findDebitCandidatesByPayNo",
+                  "findLinkedRefundCandidates",
+                  "findRefundPaymentLedgerCandidates",
+                  "countOperationCandidates",
+                  "creditBalance",
+                  "insert")
+              .contains(methodName)) {
+            assertTrue(
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isActualTransactionActive());
+            assertFalse(
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isCurrentTransactionReadOnly());
+            java.sql.Connection connection =
+                org.springframework.jdbc.datasource.DataSourceUtils.getConnection(testDataSource);
+            try {
+              connections.add(System.identityHashCode(connection));
+              assertEquals(
+                  java.sql.Connection.TRANSACTION_REPEATABLE_READ,
+                  connection.getTransactionIsolation());
+              observations.add(methodName);
+            } finally {
+              org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(
+                  connection, testDataSource);
+            }
+          }
+          Object delegate =
+              proxy instanceof com.cloudmall.user.mapper.UserMapper ? actualUsers : actualLedger;
+          try {
+            return method.invoke(delegate, arguments);
+          } catch (java.lang.reflect.InvocationTargetException failure) {
+            throw failure.getCause();
+          }
+        };
+    Object observedUsers =
+        java.lang.reflect.Proxy.newProxyInstance(
+            actualUsers.getClass().getClassLoader(),
+            new Class<?>[] {com.cloudmall.user.mapper.UserMapper.class},
+            observation);
+    Object observedLedger =
+        java.lang.reflect.Proxy.newProxyInstance(
+            actualLedger.getClass().getClassLoader(),
+            new Class<?>[] {com.cloudmall.user.mapper.BalanceLedgerMapper.class},
+            observation);
+    ReflectionTestUtils.setField(refundTarget, "userMapper", observedUsers);
+    ReflectionTestUtils.setField(refundTarget, "balanceLedgerMapper", observedLedger);
+    ReflectionTestUtils.setField(evidenceTarget, "balanceLedgerMapper", observedLedger);
+    try {
+      var refunded =
+          refundService.refundInternal(
+              7L, 7L, refundRequest(original, "refund-shared-transaction-result", "10.00"));
+      assertEquals("100.00", refunded.balance);
+      assertEquals(
+          List.of(
+              "selectByIdForUpdate",
+              "selectByOperationKey",
+              "selectDebitForUpdate",
+              "findDebitCandidatesByPayNo",
+              "findLinkedRefundCandidates",
+              "findRefundPaymentLedgerCandidates",
+              "countOperationCandidates",
+              "creditBalance",
+              "insert"),
+          observations);
+      assertEquals(1, connections.size());
+      assertFalse(
+          org.springframework.transaction.support.TransactionSynchronizationManager
+              .isActualTransactionActive());
+      assertFunds(7L, "100.00", "0.00");
+      assertEquals(2, ledgerCount());
+    } finally {
+      ReflectionTestUtils.setField(refundTarget, "userMapper", actualUsers);
+      ReflectionTestUtils.setField(refundTarget, "balanceLedgerMapper", actualLedger);
+      ReflectionTestUtils.setField(evidenceTarget, "balanceLedgerMapper", actualEvidenceLedger);
+    }
+  }
+
   /** 同连接只读RR观察旧快照，外部owned写入不使后续集合读混用新事实；正常历史仍可查询。 */
   @Test
   void operationQueryUsesOneReadOnlySnapshotAndKeepsHealthyHistory() throws Exception {
     resetOperationFixture("refund");
-    Object target = AopTestUtils.getUltimateTargetObject(legacy);
+    Object target = AopTestUtils.getUltimateTargetObject(queryService);
+    Object ownershipTarget = context.getBean(BalanceOwnershipEvidence.class);
     var actualMapper =
         (com.cloudmall.user.mapper.BalanceLedgerMapper)
             ReflectionTestUtils.getField(target, "balanceLedgerMapper");
@@ -6464,7 +6598,7 @@ class BalanceTccStateMySqlIT {
     var ownerMappers = new java.util.LinkedHashMap<String, Object>();
     for (String fieldName :
         List.of("balanceDebitAttemptMapper", "balanceTccDebitMapper", "userTccReceiveMapper")) {
-      Object actualOwnerMapper = ReflectionTestUtils.getField(target, fieldName);
+      Object actualOwnerMapper = ReflectionTestUtils.getField(ownershipTarget, fieldName);
       ownerMappers.put(fieldName, actualOwnerMapper);
       Class<?> mapperType =
           "balanceDebitAttemptMapper".equals(fieldName)
@@ -6506,7 +6640,7 @@ class BalanceTccStateMySqlIT {
                   throw failure.getCause();
                 }
               });
-      ReflectionTestUtils.setField(target, fieldName, observedOwnerMapper);
+      ReflectionTestUtils.setField(ownershipTarget, fieldName, observedOwnerMapper);
     }
     try {
       assertEquals(200, operationHttp("query-debit").getResponse().getStatus());
@@ -6541,7 +6675,7 @@ class BalanceTccStateMySqlIT {
     } finally {
       ReflectionTestUtils.setField(target, "balanceLedgerMapper", actualMapper);
       ownerMappers.forEach(
-          (fieldName, mapper) -> ReflectionTestUtils.setField(target, fieldName, mapper));
+          (fieldName, mapper) -> ReflectionTestUtils.setField(ownershipTarget, fieldName, mapper));
     }
     for (String scenario : List.of("rejected", "no-attempt", "wallet-null")) {
       closeContext();
@@ -6586,7 +6720,7 @@ class BalanceTccStateMySqlIT {
       service.tryDebit(original);
       service.confirmDebit(finalizeRequest(original));
     } else debitLegacy(original.payNo, original.payNo, 7L, "10.00");
-    legacy.refundInternal(7L, 7L, refundRequest(original, "query-refund", "2.00"));
+    refundService.refundInternal(7L, 7L, refundRequest(original, "query-refund", "2.00"));
   }
 
   /** 使用原GET协议调用真实Controller，不启动HTTP监听或绕开Spring事务代理。 */
@@ -6623,7 +6757,7 @@ class BalanceTccStateMySqlIT {
       var original = request("operation-refund-proof", 7L, "10.00");
       debitLegacy(original.payNo, original.payNo, 7L, "10.00");
       var refund = refundRequest(original, "actual-refund-proof", amount);
-      legacy.refundInternal(7L, 7L, refund);
+      refundService.refundInternal(7L, 7L, refund);
       var before = allFundsFacts();
       var mvc =
           org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
@@ -6954,11 +7088,12 @@ class BalanceTccStateMySqlIT {
                 compatibleRequest.amount = new BigDecimal("101.00");
                 assertEquals(
                     "PAYMENT_FAILED",
-                    assertThrows(BizException.class, () -> legacy.debit(7L, 7L, compatibleRequest))
+                    assertThrows(
+                            BizException.class, () -> debitService.debit(7L, 7L, compatibleRequest))
                         .getCode());
                 expectedCode = "PAYMENT_FAILED";
               } else {
-                legacy.debit(7L, 7L, compatibleRequest);
+                debitService.debit(7L, 7L, compatibleRequest);
                 if ("attempt-null".equals(scenario)) {
                   fixture.update(
                       "UPDATE balance_debit_attempt SET amount=NULL WHERE pay_no=?",
@@ -6972,7 +7107,7 @@ class BalanceTccStateMySqlIT {
               }
               var beforeCompatibleReplay = allFundsFacts();
               if ("applied-replay".equals(scenario)) {
-                legacy.debit(7L, 7L, compatibleRequest);
+                debitService.debit(7L, 7L, compatibleRequest);
                 var response = postCompatibleLegacyDebit(compatibleRequest);
                 assertEquals(200, response.getResponse().getStatus());
                 var body =
@@ -6983,7 +7118,8 @@ class BalanceTccStateMySqlIT {
               } else {
                 assertEquals(
                     expectedCode,
-                    assertThrows(BizException.class, () -> legacy.debit(7L, 7L, compatibleRequest))
+                    assertThrows(
+                            BizException.class, () -> debitService.debit(7L, 7L, compatibleRequest))
                         .getCode());
                 var response = postCompatibleLegacyDebit(compatibleRequest);
                 assertEquals(409, response.getResponse().getStatus());
@@ -7095,8 +7231,8 @@ class BalanceTccStateMySqlIT {
                 BalanceRefundRequestDTO secondRefund =
                     refundRequest(original, "refund-candidate-b", "4.00");
                 secondRefund.originalOperationKey = debitKey;
-                legacy.refundInternal(7L, 7L, firstRefund);
-                legacy.refundInternal(7L, 7L, secondRefund);
+                refundService.refundInternal(7L, 7L, firstRefund);
+                refundService.refundInternal(7L, 7L, secondRefund);
                 if ("disabled-tcc".equals(mode)) {
                   setEnabled(false);
                   fixture.update("UPDATE mall_user SET status=0 WHERE id=7");
@@ -7179,7 +7315,8 @@ class BalanceTccStateMySqlIT {
                             .value("BALANCE_REFUND_INVALID"));
                 assertEquals(before, allFundsFacts());
                 BizException directFailure =
-                    assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                    assertThrows(
+                        BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
                 assertEquals(409, directFailure.getHttpStatus());
                 assertEquals("BALANCE_REFUND_INVALID", directFailure.getCode());
                 assertEquals(before, allFundsFacts());
@@ -7246,7 +7383,7 @@ class BalanceTccStateMySqlIT {
                 assertEquals(
                     "90.01",
                     ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                            legacy.refundInternal(7L, 7L, refund).data)
+                            refundService.refundInternal(7L, 7L, refund))
                         .balance);
                 assertEquals(
                     200, operationHttp(refund.refundOperationKey).getResponse().getStatus());
@@ -7258,7 +7395,8 @@ class BalanceTccStateMySqlIT {
                     () -> {
                       var failure =
                           assertThrows(
-                              BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+                              BizException.class,
+                              () -> refundService.refundInternal(7L, 7L, refund));
                       assertEquals(
                           count == 100 ? "退款记录数量已达上限" : "退款累计证据不完整或不一致", failure.getMessage());
                     },
@@ -7303,7 +7441,7 @@ class BalanceTccStateMySqlIT {
       assertEquals(
           "90.01",
           ((com.cloudmall.user.domain.vo.BalanceRefundVO)
-                  legacy.refundInternal(7L, 7L, accepted).data)
+                  refundService.refundInternal(7L, 7L, accepted))
               .balance);
       assertEquals(200, operationHttp(accepted.refundOperationKey).getResponse().getStatus());
       assertEquals(beforeReplay, allFundsFacts());
@@ -7313,7 +7451,7 @@ class BalanceTccStateMySqlIT {
   /** 并发失败必须是容量409，SQL异常或其它业务错误不能被race归为正常竞争。 */
   private Object refundAtCapacity(BalanceRefundRequestDTO request) {
     try {
-      return legacy.refundInternal(7L, 7L, request);
+      return refundService.refundInternal(7L, 7L, request);
     } catch (BizException failure) {
       assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
       assertEquals("退款记录数量已达上限", failure.getMessage());
@@ -7338,7 +7476,7 @@ class BalanceTccStateMySqlIT {
           refundRequest(original, "refund-limit-request", candidateCount == 99 ? "1.00" : "0.01");
       if (candidateCount == 99) {
         int beforeLedgerCount = ledgerCount();
-        legacy.refundInternal(7L, 7L, refund);
+        refundService.refundInternal(7L, 7L, refund);
         assertEquals(beforeLedgerCount + 1, ledgerCount());
         assertEquals(
             "99.00",
@@ -7346,7 +7484,7 @@ class BalanceTccStateMySqlIT {
                 "SELECT CAST(balance AS CHAR) FROM mall_user WHERE id=7", String.class));
       } else {
         BizException failure =
-            assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, refund));
+            assertThrows(BizException.class, () -> refundService.refundInternal(7L, 7L, refund));
         assertEquals(409, failure.getHttpStatus());
         assertEquals("BALANCE_REFUND_INVALID", failure.getCode());
         assertEquals(before, allFundsFacts());
@@ -7363,17 +7501,17 @@ class BalanceTccStateMySqlIT {
     service.tryDebit(original);
     service.confirmDebit(finalizeRequest(original));
     BalanceRefundRequestDTO firstRefund = refundRequest(original, "refund-aggregate-a", "4.00");
-    legacy.refundInternal(7L, 7L, firstRefund);
+    refundService.refundInternal(7L, 7L, firstRefund);
     BalanceRefundRequestDTO secondRefund = refundRequest(original, "refund-aggregate-b", "5.00");
-    legacy.refundInternal(7L, 7L, secondRefund);
+    refundService.refundInternal(7L, 7L, secondRefund);
     BalanceRefundRequestDTO refund = refundRequest(original, "refund-aggregate-new", "1.00");
-    legacy.refundInternal(7L, 7L, refund);
+    refundService.refundInternal(7L, 7L, refund);
     var afterFirst = allFundsFacts();
-    legacy.refundInternal(7L, 7L, refund);
+    refundService.refundInternal(7L, 7L, refund);
     assertEquals(afterFirst, allFundsFacts());
     BalanceRefundRequestDTO excess = refundRequest(original, "refund-aggregate-excess", "1.00");
     BizException failure =
-        assertThrows(BizException.class, () -> legacy.refundInternal(7L, 7L, excess));
+        assertThrows(BizException.class, () -> refundService.refundInternal(7L, 7L, excess));
     assertEquals(409, failure.getHttpStatus());
     assertEquals("BALANCE_REFUND_EXCEEDED", failure.getCode());
     assertEquals(afterFirst, allFundsFacts());
@@ -7487,7 +7625,7 @@ class BalanceTccStateMySqlIT {
     request.operationKey = operationKey;
     request.orderNo = "order-" + payNo;
     request.amount = new BigDecimal(amount);
-    return legacy.debitInternal(userId, userId, request);
+    return debitService.debitInternal(userId, userId, request);
   }
 
   /** 同时核对可用额与冻结额，避免只看状态掩盖资金遗漏。 */
