@@ -244,7 +244,7 @@ class PayTccUserEvidenceMySqlIT {
       mappers.get(index).getMethod("ensureTable").invoke(instances[index]);
     }
     Class<?> queryType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccStateQuery");
+        userClasses.loadClass("com.cloudmall.user.service.impl.tcc.UserTccStateQuery");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -253,7 +253,7 @@ class PayTccUserEvidenceMySqlIT {
             new DataSourceTransactionManager(userTracked),
             new AnnotationTransactionAttributeSource()));
     Class<?> httpType =
-        userClasses.loadClass("com.cloudmall.user.service.impl.UserTccHttpService");
+        userClasses.loadClass("com.cloudmall.user.service.impl.tcc.UserTccHttpService");
     // GET仅需要query；写资源不注入，任何意外写调用必须失败。
     var httpService =
         httpType.getConstructors()[0].newInstance(

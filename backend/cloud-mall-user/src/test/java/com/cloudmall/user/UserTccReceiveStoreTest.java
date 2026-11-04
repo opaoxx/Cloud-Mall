@@ -8,7 +8,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.dto.UserTccTryDTO;
 import com.cloudmall.user.domain.po.UserTccReceivePO;
 import com.cloudmall.user.mapper.UserTccReceiveMapper;
-import com.cloudmall.user.service.impl.UserTccReceiveStore;
+import com.cloudmall.user.service.impl.tcc.UserTccReceiveStore;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

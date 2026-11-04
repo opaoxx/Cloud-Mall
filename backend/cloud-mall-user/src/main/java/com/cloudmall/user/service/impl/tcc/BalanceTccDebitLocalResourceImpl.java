@@ -1,4 +1,4 @@
-package com.cloudmall.user.service.impl;
+package com.cloudmall.user.service.impl.tcc;
 
 import com.cloudmall.user.domain.dto.BalanceTccBranchDTO;
 import com.cloudmall.user.domain.dto.BalanceTccDebitTryDTO;

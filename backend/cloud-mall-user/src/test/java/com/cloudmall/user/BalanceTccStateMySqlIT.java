@@ -22,12 +22,12 @@ import com.cloudmall.user.service.BalanceDebitService;
 import com.cloudmall.user.service.BalanceOperationQueryService;
 import com.cloudmall.user.service.BalanceRefundService;
 import com.cloudmall.user.service.BalanceTccDebitService;
-import com.cloudmall.user.service.impl.BalanceTccDebitServiceImpl;
 import com.cloudmall.user.service.impl.balance.BalanceDebitServiceImpl;
 import com.cloudmall.user.service.impl.balance.BalanceOperationQueryServiceImpl;
 import com.cloudmall.user.service.impl.balance.BalanceOwnershipEvidence;
 import com.cloudmall.user.service.impl.balance.BalanceRefundEvidence;
 import com.cloudmall.user.service.impl.balance.BalanceRefundServiceImpl;
+import com.cloudmall.user.service.impl.tcc.BalanceTccDebitServiceImpl;
 import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -312,10 +312,10 @@ class BalanceTccStateMySqlIT {
   }
 
   /** 原生产Mapper与真实资金事务代理，不注册RM或绑定全局XID。 */
-  private com.cloudmall.user.service.impl.BalanceTccDebitLocalResourceImpl localFenceResource() {
-    return new com.cloudmall.user.service.impl.BalanceTccDebitLocalResourceImpl(
+  private com.cloudmall.user.service.impl.tcc.BalanceTccDebitLocalResourceImpl localFenceResource() {
+    return new com.cloudmall.user.service.impl.tcc.BalanceTccDebitLocalResourceImpl(
         context.getBean(PlatformTransactionManager.class),
-        new com.cloudmall.user.service.impl.BalanceTccDebitBusinessCallback(service),
+        new com.cloudmall.user.service.impl.tcc.BalanceTccDebitBusinessCallback(service),
         context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class),
         context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
         context.getBean(com.cloudmall.user.mapper.BalanceTccResourceEvidenceMapper.class));
@@ -965,21 +965,21 @@ class BalanceTccStateMySqlIT {
   void disabledModeFreshHttpCannotConsumeReceiptDispatchRight() {
     context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccReceiveStore.class,
+        com.cloudmall.user.service.impl.tcc.UserTccReceiveStore.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccReceiveStore(
+            new com.cloudmall.user.service.impl.tcc.UserTccReceiveStore(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class)));
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccStateQuery(
+            new com.cloudmall.user.service.impl.tcc.UserTccStateQuery(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
                 context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
-    var receives = context.getBean(com.cloudmall.user.service.impl.UserTccReceiveStore.class);
-    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    var receives = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccReceiveStore.class);
+    var query = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class);
     var resource =
         org.mockito.Mockito.mock(com.cloudmall.user.service.BalanceTccDebitLocalResource.class);
     var transactions =
@@ -1008,7 +1008,7 @@ class BalanceTccStateMySqlIT {
                   });
             });
     var closedBridge =
-        new com.cloudmall.user.service.impl.UserTccHttpService(
+        new com.cloudmall.user.service.impl.tcc.UserTccHttpService(
             resource,
             receives,
             query,
@@ -1021,7 +1021,7 @@ class BalanceTccStateMySqlIT {
             .setControllerAdvice(new com.cloudmall.common.web.GlobalExceptionHandler())
             .build();
     var openBridge =
-        new com.cloudmall.user.service.impl.UserTccHttpService(
+        new com.cloudmall.user.service.impl.tcc.UserTccHttpService(
             resource,
             receives,
             query,
@@ -1140,21 +1140,21 @@ class BalanceTccStateMySqlIT {
   void disabledFreshHttpCannotConsumeReceiptDispatchRight() {
     context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccReceiveStore.class,
+        com.cloudmall.user.service.impl.tcc.UserTccReceiveStore.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccReceiveStore(
+            new com.cloudmall.user.service.impl.tcc.UserTccReceiveStore(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class)));
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccStateQuery(
+            new com.cloudmall.user.service.impl.tcc.UserTccStateQuery(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
                 context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
-    var receives = context.getBean(com.cloudmall.user.service.impl.UserTccReceiveStore.class);
-    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    var receives = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccReceiveStore.class);
+    var query = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class);
     var resource =
         org.mockito.Mockito.mock(com.cloudmall.user.service.BalanceTccDebitLocalResource.class);
     var transactions =
@@ -1183,7 +1183,7 @@ class BalanceTccStateMySqlIT {
                   });
             });
     var bridge =
-        new com.cloudmall.user.service.impl.UserTccHttpService(
+        new com.cloudmall.user.service.impl.tcc.UserTccHttpService(
             resource,
             receives,
             query,
@@ -1296,11 +1296,11 @@ class BalanceTccStateMySqlIT {
   void receiveStoreDuplicatesRollbackIndependentMetadataWrites() {
     context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccReceiveStore.class,
+        com.cloudmall.user.service.impl.tcc.UserTccReceiveStore.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccReceiveStore(
+            new com.cloudmall.user.service.impl.tcc.UserTccReceiveStore(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class)));
-    var store = context.getBean(com.cloudmall.user.service.impl.UserTccReceiveStore.class);
+    var store = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccReceiveStore.class);
     Object storeTarget = AopTestUtils.getUltimateTargetObject(store);
     Object actualMapper = ReflectionTestUtils.getField(storeTarget, "mapper");
     var writeCounts = new ArrayList<Integer>();
@@ -1490,15 +1490,15 @@ class BalanceTccStateMySqlIT {
   void unknownStateRejectsOtherPaymentLedgerWithoutWrites() {
     context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccStateQuery(
+            new com.cloudmall.user.service.impl.tcc.UserTccStateQuery(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
                 context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
-    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    var query = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class);
     Object queryTarget = AopTestUtils.getUltimateTargetObject(query);
     Object actualLedgerMapper = ReflectionTestUtils.getField(queryTarget, "ledgers");
     var observations = new ArrayList<String>();
@@ -1647,15 +1647,15 @@ class BalanceTccStateMySqlIT {
   void tccStatePointDuplicatesKeepReadOnlyBusinessConflict() {
     context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class).ensureTable();
     context.registerBean(
-        com.cloudmall.user.service.impl.UserTccStateQuery.class,
+        com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class,
         () ->
-            new com.cloudmall.user.service.impl.UserTccStateQuery(
+            new com.cloudmall.user.service.impl.tcc.UserTccStateQuery(
                 context.getBean(com.cloudmall.user.mapper.UserTccReceiveMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceDebitAttemptMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceTccDebitMapper.class),
                 context.getBean(com.cloudmall.user.mapper.BalanceLedgerMapper.class),
                 context.getBean(com.cloudmall.user.mapper.TccFenceLogMapper.class)));
-    var query = context.getBean(com.cloudmall.user.service.impl.UserTccStateQuery.class);
+    var query = context.getBean(com.cloudmall.user.service.impl.tcc.UserTccStateQuery.class);
     assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(query));
     Object queryTarget = AopTestUtils.getUltimateTargetObject(query);
     var actualMappers = new java.util.LinkedHashMap<String, Object>();

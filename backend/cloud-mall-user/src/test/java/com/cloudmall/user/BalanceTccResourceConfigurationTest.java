@@ -66,9 +66,9 @@ class BalanceTccResourceConfigurationTest {
         incoming.setActionName(com.cloudmall.user.service.BalanceTccDebitLocalResource.ACTION_NAME);
         incoming.setActionContext(java.util.Map.of("request", request));
         var resource =
-            new com.cloudmall.user.service.impl.BalanceTccDebitLocalResourceImpl(
+            new com.cloudmall.user.service.impl.tcc.BalanceTccDebitLocalResourceImpl(
                 manager,
-                new com.cloudmall.user.service.impl.BalanceTccDebitBusinessCallback(funds),
+                new com.cloudmall.user.service.impl.tcc.BalanceTccDebitBusinessCallback(funds),
                 fences,
                 attempts,
                 evidence);

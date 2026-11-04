@@ -3,7 +3,7 @@ package com.cloudmall.user.controller;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.vo.UserFrozenOwnershipEvidenceVO;
-import com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceService;
+import com.cloudmall.user.service.impl.evidence.UserFrozenOwnershipEvidenceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;

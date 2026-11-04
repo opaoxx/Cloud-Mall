@@ -293,7 +293,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
             });
     Class<?> queryType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -304,11 +304,11 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> linkedType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserLinkedRefundEvidenceReadService");
+            "com.cloudmall.user.service.impl.evidence.UserLinkedRefundEvidenceReadService");
     Object linkedQuery = linkedType.getConstructors()[0].newInstance(baseProxy, instances[3]);
     ProxyFactory linkedProxy = new ProxyFactory(linkedQuery);
     linkedProxy.setProxyTargetClass(true);
@@ -318,7 +318,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Class<?> paymentType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserPaymentLedgerEvidenceReadService");
+            "com.cloudmall.user.service.impl.evidence.UserPaymentLedgerEvidenceReadService");
     Object paymentQuery =
         paymentType.getConstructors()[0].newInstance(
             linkedProxy.getProxy(userClasses), instances[3]);
@@ -330,7 +330,7 @@ class PayTccUserPaymentLedgerEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Class<?> paymentGateType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserPaymentLedgerEvidenceService");
+            "com.cloudmall.user.service.impl.evidence.UserPaymentLedgerEvidenceService");
     Object paymentGate =
         paymentGateType.getConstructors()[0].newInstance(
             baseGate, paymentProxy.getProxy(userClasses), true);

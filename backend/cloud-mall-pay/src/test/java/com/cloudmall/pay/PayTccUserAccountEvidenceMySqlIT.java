@@ -268,7 +268,7 @@ class PayTccUserAccountEvidenceMySqlIT {
     }
     Class<?> queryType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -278,7 +278,7 @@ class PayTccUserAccountEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Class<?> httpType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationService");
     var httpService =
         httpType.getConstructors()[0].newInstance(proxy.getProxy(userClasses), true, "ops-secret");
     Object controller =

@@ -1,4 +1,4 @@
-package com.cloudmall.user.service.impl;
+package com.cloudmall.user.service.impl.evidence;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.vo.UserTerminalFrozenOwnershipEvidenceVO;

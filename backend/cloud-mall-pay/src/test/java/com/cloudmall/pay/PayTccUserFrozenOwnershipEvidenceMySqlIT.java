@@ -289,7 +289,7 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
             });
     Class<?> queryType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -300,11 +300,11 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> frozenType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceReadService");
+            "com.cloudmall.user.service.impl.evidence.UserFrozenOwnershipEvidenceReadService");
     Object frozenQuery =
         frozenType.getConstructors()[0].newInstance(
             baseProxy, instances[0], instances[1], instances[2], instances[3], instances[4]);
@@ -316,7 +316,7 @@ class PayTccUserFrozenOwnershipEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Class<?> frozenGateType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserFrozenOwnershipEvidenceService");
+            "com.cloudmall.user.service.impl.evidence.UserFrozenOwnershipEvidenceService");
     Object frozenGate =
         frozenGateType.getConstructors()[0].newInstance(
             baseGate, frozenProxy.getProxy(userClasses), true);

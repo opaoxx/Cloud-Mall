@@ -1,4 +1,4 @@
-package com.cloudmall.user.service.impl;
+package com.cloudmall.user.service.impl.tcc;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.dto.BalanceTccDebitFinalizeDTO;
@@ -28,7 +28,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** User 本地资金事务；后续 Seata 适配器可加入相同的 REQUIRED 事务。 */
+/** User 本地资金状态机，Seata Fence适配器通过相同的REQUIRED事务调用。 */
 @Service
 public class BalanceTccDebitServiceImpl implements BalanceTccDebitService {
   /** DATETIME 的固定业务时区。 */

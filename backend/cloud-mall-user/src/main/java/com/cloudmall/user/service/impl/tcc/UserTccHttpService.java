@@ -1,4 +1,4 @@
-package com.cloudmall.user.service.impl;
+package com.cloudmall.user.service.impl.tcc;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.dto.BalanceTccBranchDTO;
@@ -87,7 +87,7 @@ public class UserTccHttpService {
     }
   }
 
-  /** 只读查询不绑定事务，也不修改接收凭据。 */
+  /** 只读查询不绑定Seata XID，也不修改接收凭据；本地RR由查询代理提供。 */
   public UserTccStateVO state(
       Long userId,
       Long callerId,

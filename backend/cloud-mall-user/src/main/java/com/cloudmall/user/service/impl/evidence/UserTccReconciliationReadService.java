@@ -1,4 +1,4 @@
-package com.cloudmall.user.service.impl;
+package com.cloudmall.user.service.impl.evidence;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.po.BalanceLedgerPO;
@@ -12,6 +12,7 @@ import com.cloudmall.user.mapper.BalanceTccDebitMapper;
 import com.cloudmall.user.mapper.TccFenceLogMapper;
 import com.cloudmall.user.mapper.UserMapper;
 import com.cloudmall.user.mapper.UserTccReceiveMapper;
+import com.cloudmall.user.service.impl.tcc.UserTccStateQuery;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;

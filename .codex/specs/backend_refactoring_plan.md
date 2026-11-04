@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart、Gateway、Product 重构及 User 账号、资金两个切片，最新验证与回退信息见文末实施记录。User 下一切片为TCC/Fence与只读取证实现的命名和归组。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，最新验证与回退信息见文末实施记录。下一模块为Stock。
 
 ## 1. 使用方式与范围
 
@@ -443,7 +443,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Cart | 三个切片验收通过 | 已具备逐模块重构样板 |
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
-| User | 账号、资金切片完成 | 认证、资料、地址及资金三项能力拆分完成；TCC/Fence与只读取证归组待继续 |
+| User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -785,6 +785,68 @@ git revert --no-edit $userBalanceCommit
 
 真实Seata验证分两次独立Maven测试JVM：BalanceTccFenceSeataIT（6项真实TC回调/Fence场景），BalanceTccRmFailureIT（9项独立RM进程、提交窗口崩溃与连接中断恢复）。后者禁止与其他注册RM的测试共享JVM，沿用原Process句柄与未决保留规则；只终止本测试创建的子进程，不接触既有服务。若事务未收敛，保留该UUID数据库和TC会话证据，不宣告通过或覆盖现场。
 
-中间件使用deploy/experiments/compose.yml加本次独立override，项目cloud-mall-refactor-user-tcc-20261104，新建MySQL/Redis/Seata三个卷；MySQL19929、Redis19930、TC19931，子网10.254.244.0/24（启动前核对无重叠）。TC复用固定镜像seataio/seata-server:1.5.2、file模式；显式SEATA_IP=127.0.0.1、SEATA_PORT=19931且宿主/容器端口一致，使XID中的TC地址对宿主测试进程可达。不得复用默认TC会话或原中间件卷。额外TC仅在本次override声明，不改常驻部署。
+中间件使用deploy/experiments/compose.yml加本次独立override，项目cloud-mall-refactor-user-tcc-20261104，新建MySQL/Redis/Seata三个卷；MySQL19929、Redis19930、TC19931，子网10.254.244.0/24（启动前核对无重叠）。TC复用固定镜像seataio/seata-server:1.5.2、file模式，SEATA_PORT=19931且宿主/容器端口一致，客户端显式grouplist指向127.0.0.1:19931。override另设SEATA_IP=127.0.0.1，但实测XID使用容器地址10.254.244.4:19931，不能仅从环境变量推断发布地址；以实际SDK连接日志及RPC/恢复验收判断本轮可达性。不得复用默认TC会话或原中间件卷。额外TC仅在本次override声明，不改常驻部署。
 
 全部专项收敛后归档日志、源码词法/装配证据、TC/RM工件，移除本次容器与网络并保留卷。User打包、八模块test-compile、旧class精确清理、Java格式化及git diff --check通过后提交并建立完成标签。源码回退只撤销该归组提交，账号/资金及地址归属修复保留；Git不回退运行态或数据。User本轮验收结束后再转向Stock。
+
+引用核对补充：6个Pay取证MySqlIT通过标准sibling target/classes和URLClassLoader反射加载User实现，需同步FQN字符串并实际回归，不能只依赖编译。范围为PayTccUserEvidenceMySqlIT以及Account/FrozenOwnership/LinkedRefund/PaymentLedger/TerminalFrozenOwnership五个EvidenceMySqlIT；只改变反射类路径，Pay业务源码不动。在同一独立MySQL内创建空cloudmall_pay来源表，所有测试仍创建自有UUID库并核对来源校验和；不访问默认Pay数据库。
+
+运行前置补充：真实TC/RM测试按README既有命令带 `-DargLine=--add-opens=java.base/java.lang=ALL-UNNAMED`。实际Boot扫描复现账号测试@Configuration缺少Profile的历史隔离缺陷；修复为只在其所属测试上下文激活，独立提交 `0b50c167`。本次归组回退可保留该测试修复。
+
+### 18.5 实际迁移与调用链核对
+
+16个实现已移动，稳定接口、所有原Bean方法名和default-off配置保持。新增两个package-info说明运行实现与只读取证的边界，校正“只读不绑定事务”等易误读注释为“不绑定Seata XID、仍使用本地RR”，并准确描述既有诊断日志输出的用户/支付号；日志行为未变。`lexical-parity.json`确认16类除声明位置/import/注释/格式外执行词法一致，`reference-parity.json`确认34个已有Java引用文件只发生声明的FQN/import变化，其中6个是Pay反射加载测试。
+
+逐行复盘修改、入口装配与主要事务调用链：
+
+- BalanceTccResourceConfiguration依原开关与DependsOn准备同库Fence，原LocalTCC接口注册稳定action；资源适配器TransactionTemplate → 官方TCCFenceHandler → 公开BusinessCallback → 本地资金Service事务代理。反射方法名、分支身份、回滚标志和终态核验保持。
+- UserTccHttpConfiguration依资源条件装配桥、接收Store和状态Query。Controller → 认证/参数门 → Store.claim的REQUIRES_NEW提交 → 唯一winner调用LocalTCC → 状态只读查询 → Store.bindBranch独立提交。重放不再派发，RootContext只清理由当前方法建立的绑定。
+- 取证Controller → 非事务Service门 → 对应ReadService RR代理。基础Reader构造plain UserTccStateQuery并读取同一快照；冻结Reader的peer Query同样加入现有快照，未增加Spring同类型Bean或RM调用。
+- 关联退款、当前/历史冻结及同pay账本Reader按原依赖复用基础报告或已证明退款报告，保留候选上限、金额/身份核对、指纹、缺证/冲突分类和固定no-store接口行为。
+
+组件扫描新增3项验证覆盖11个稳定Service Bean名、事务代理、默认关闭时无RM/HTTP桥与无Mapper/事务访问、缺资源时HTTP配置拒绝、以及开启HTTP后的Store/Query/桥Bean名。夹具本身使用专用Profile，防止进入其他真实Boot测试；Runner需在配置注册前通过环境属性激活该Profile。
+
+真实Fence/TC 6项和独立RM故障9项均已通过，后者包含Try/Confirm/Cancel提交窗口、应答前崩溃和TC连接中断两种决议恢复。9个场景全部结束，资金及TC状态收敛后精确删除测试库；93个本轮RM日志/快照/参数工件已复制并校验哈希，原target/cm15b_rm_it目录保留。完整本地及Pay取证回归结果在最终验收节登记。
+
+### 18.6 补测发现的Pay测试契约滞后
+
+6个Pay取证IT原用例在当前User代码上复现构造参数和读取预算失配，属于归组前已存在的测试滞后：User迁移16类执行词法未变。UserTccHttpService实际旧测试传5参，遗漏现有debitEnabled第6参；GET夹具继续保留写依赖null并显式传false，不开放POST。
+
+按已冻结的User TCC全pay DEBIT范围及无资金全账本范围规格，健康CONFIRMED state需要6次SELECT，TRYING/CANCELLED需要7次；基础账户报告另加receive定位、账户、冻结汇总、固定退款共4次。当前冻结报告为CONFIRMED基础10+候选1+每个TRYING peer7；历史终态Reader还保留每个peer独立scope检查，CONFIRMED/CANCELLED peer分别7/8次。linked报告为CONFIRMED基础10+候选1+每个合法refund的COUNT；payment报告再加同pay集合及其每个合法键COUNT。101哨兵仍禁止后续逐行读，不删减预算断言。
+
+同pay额外DEBIT现在会在基础User state门先以HTTP409拒绝，未到后续候选报告。Pay取证Service沿既有Runtime/HTTP失败契约返回USER_EVIDENCE_UNAVAILABLE；不能将它误当已收到LOCAL_CONFLICT报告的USER_EVIDENCE_CONFLICT。相关测试按具体额外DEBIT变体断言固定UNAVAILABLE和6次User读取，其他坏候选仍保留原缺证/冲突报告断言。所有单连接、只读、上下文恢复、禁止POST、两库事实/校验和断言保留。该测试校正独立提交，生产读取顺序、错误映射和资金业务不改。
+
+构造修正后还暴露最早state GET夹具的健康接收状态仍为ACCEPTED，现行receive元数据契约只接受CLAIMED。健康seed改为CLAIMED，同时在拒绝变体中显式保留ACCEPTED，禁止把旧错误数据放行为健康。账户双状态循环分别采用10/11次读取；变体循环内新增的6次短路预算按单次调用增量核对，保留原累计SQL日志。现阶段受影响4类34项定向回归通过，6类组合结果作为最终验收依据。
+
+### 18.7 最终验收与资源归档
+
+User本轮三个重构切片全部完成。第三切片基线为 `3a2ce3c4`，期间两个独立测试修正为 `0b50c167`（账号测试配置隔离）与 `9e4fd741`（Pay取证夹具契约同步）。归组通过标签为 `refactor/user-tcc-complete-20261104`，模块通过标签为 `refactor/user-complete-20261104`。
+
+最终取各类最后一次成功执行结果，39类547项，0失败、0错误、0跳过，不重复累计基线/定向重跑次数：
+
+| 验证范围 | 结果与证据 |
+| --- | --- |
+| User/Common本地完整回归 | 31类483项：Common25、User单测284、8类MySQL170、账号真实MySQL/Redis/MVC4；local-regression.log |
+| 真实TC/Fence回调 | 1类6项；fence-verified.log，独立TC会话 |
+| 独立RM进程故障恢复 | 1类9项；rm-failure.log，9场景均收敛并清理测试库 |
+| Pay/User真实只读取证HTTP/Feign | 6类49项；pay-evidence-final.log，所有来源校验和与零写入断言通过 |
+| 构建与制品 | User package及八模块生产/测试test-compile通过；16个新实现路径存在、旧路径及测试控制辅助类不进入Jar |
+| 源码与格式 | 16类执行词法对照、34个引用文件仅声明的路径变化，Java格式化及git diff --check通过 |
+
+证据根为 `F:/Cloud-Mall/target/backend-refactor-20261104/user-tcc`，verification.json汇总逐类统计、制品哈希、独立修正及回退检查。93个RM工件已复制并逐文件核对哈希，原 `backend/cloud-mall-user/target/cm15b_rm_it_77e066b9c7ab44bf8a23f06f934d635b` 保留。真实RM/TC与本地资金、只读取证链已经覆盖；商城完整下单/支付/库存全链及性能实验未在本轮执行，不将本次结构重构视作历史CM18/CM21项目整体闭环。
+
+全部测试结束后SHOW DATABASES仅剩系统库及空的实验cloudmall_user/cloudmall_pay来源库，所有UUID测试库已删除；来源行数和测试校验和保持，Redis DB15为0键。三个容器的inspect/日志归档后，cloud-mall-refactor-user-tcc-20261104容器和网络已移除，mysql_data、redis_data、seata_data三个命名卷保留。既有中间件与历史实验卷未修改。编译后核查旧16个实现class已不存在，无需清空User target历史工件。
+
+### 18.8 回退与下一模块
+
+仅撤销本次TCC/取证归组，保留账号/资金重构、地址修复及两个独立测试修正：
+
+```powershell
+$userTccCommit = git rev-parse 'refactor/user-tcc-complete-20261104^{commit}'
+git show --stat $userTccCommit
+git revert --no-edit $userTccCommit
+```
+
+反向补丁在临时Git索引中核对，源码应精确回到9e4fd741；真实工作区和索引保持当前验收版本。该检查只证明源码回退，不是运行态回滚。实际回退后按moves.json清理新包内过期class，并核对本次新增UserImplementationGroupingTest及其嵌套class，再编译和回归；不删除历史target证据。模块完成标签表示当前通过点，撤销全部User重构需按三个实现切片逆序处理依赖。
+
+下一模块为Stock：先盘点普通库存查询/预扣/确认/回滚、秒杀配额与恢复职责，以及Cm18演练类的实际调用和Mapper映射。细化命名与兼容清单、记录基线后再修改；继续保留Git阶段回退点。本会话单Agent约束仍有效。

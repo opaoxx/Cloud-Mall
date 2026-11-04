@@ -1,4 +1,4 @@
-package com.cloudmall.user.service.impl;
+package com.cloudmall.user.service.impl.evidence;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.user.domain.vo.UserTccReconciliationVO;
@@ -15,7 +15,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 /** 默认关闭的非事务诊断门；所有校验先于连接，不依赖资金写RM。 */
 @Service
 public class UserTccReconciliationService {
-  /** 审计不记录资金标识、凭证或底层异常。 */
+  /** 审计记录用户、支付号与分类，不记录凭证或底层异常。 */
   private static final Logger log = LoggerFactory.getLogger(UserTccReconciliationService.class);
 
   /** 校验后才进入的只读事务代理。 */
@@ -45,7 +45,7 @@ public class UserTccReconciliationService {
     // 2. 数据库错误不伪装为没冻结或没退款，不泄露连接文本。
     try {
       var report = reader.inspect(userId, payNo);
-      // 3. 固定分类审计不打印原标识、金额、账户或退款账本。
+      // 3. 记录用户、支付号与固定分类，不打印凭证、金额或账本内容。
       log.info(
           "CM18 User取证 userId={} payNo={} classification={}", userId, payNo, report.classification);
       return report;

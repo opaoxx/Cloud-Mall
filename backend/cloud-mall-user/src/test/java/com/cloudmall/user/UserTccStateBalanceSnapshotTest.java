@@ -18,7 +18,7 @@ import com.cloudmall.user.mapper.BalanceTccDebitMapper;
 import com.cloudmall.user.mapper.TccFenceLogMapper;
 import com.cloudmall.user.mapper.UserTccReceiveMapper;
 import com.cloudmall.user.service.BalanceTccDebitLocalResource;
-import com.cloudmall.user.service.impl.UserTccStateQuery;
+import com.cloudmall.user.service.impl.tcc.UserTccStateQuery;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;

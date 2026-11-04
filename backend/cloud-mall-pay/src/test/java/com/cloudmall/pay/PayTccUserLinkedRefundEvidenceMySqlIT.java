@@ -293,7 +293,7 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
             });
     Class<?> queryType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationReadService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationReadService");
     var query = queryType.getConstructors()[0].newInstance(instances);
     var proxy = new ProxyFactory(query);
     proxy.setProxyTargetClass(true);
@@ -304,11 +304,11 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
     Object baseProxy = proxy.getProxy(userClasses);
     Class<?> httpType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserTccReconciliationService");
+            "com.cloudmall.user.service.impl.evidence.UserTccReconciliationService");
     Object baseGate = httpType.getConstructors()[0].newInstance(baseProxy, true, "ops-secret");
     Class<?> linkedType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserLinkedRefundEvidenceReadService");
+            "com.cloudmall.user.service.impl.evidence.UserLinkedRefundEvidenceReadService");
     Object linkedQuery = linkedType.getConstructors()[0].newInstance(baseProxy, instances[3]);
     ProxyFactory linkedProxy = new ProxyFactory(linkedQuery);
     linkedProxy.setProxyTargetClass(true);
@@ -318,7 +318,7 @@ class PayTccUserLinkedRefundEvidenceMySqlIT {
             new AnnotationTransactionAttributeSource()));
     Class<?> linkedGateType =
         userClasses.loadClass(
-            "com.cloudmall.user.service.impl.UserLinkedRefundEvidenceService");
+            "com.cloudmall.user.service.impl.evidence.UserLinkedRefundEvidenceService");
     Object linkedGate =
         linkedGateType.getConstructors()[0].newInstance(
             baseGate, linkedProxy.getProxy(userClasses), true);

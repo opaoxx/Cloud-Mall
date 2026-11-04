@@ -3,7 +3,7 @@ package com.cloudmall.user.controller;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.user.domain.dto.UserTccTryDTO;
 import com.cloudmall.user.domain.vo.UserTccStateVO;
-import com.cloudmall.user.service.impl.UserTccHttpService;
+import com.cloudmall.user.service.impl.tcc.UserTccHttpService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.*;
 

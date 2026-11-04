@@ -20,7 +20,7 @@ import com.cloudmall.user.mapper.BalanceDebitAttemptMapper;
 import com.cloudmall.user.mapper.BalanceLedgerMapper;
 import com.cloudmall.user.mapper.BalanceTccDebitMapper;
 import com.cloudmall.user.mapper.UserMapper;
-import com.cloudmall.user.service.impl.BalanceTccDebitServiceImpl;
+import com.cloudmall.user.service.impl.tcc.BalanceTccDebitServiceImpl;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
