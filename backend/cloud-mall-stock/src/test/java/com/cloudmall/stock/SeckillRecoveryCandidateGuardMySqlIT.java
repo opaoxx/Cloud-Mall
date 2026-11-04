@@ -1841,8 +1841,8 @@ class SeckillRecoveryCandidateGuardMySqlIT {
         original.operationKey);
     fixture.update(
         "INSERT INTO"
-            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at)"
-            + " VALUES(1,?,?,?,?,?,'ACCEPTED','1999-12-31','1999-12-31')",
+            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at,request_hash,request_payload)"
+            + " VALUES(1,?,?,?,?,?,'ACCEPTED','1999-12-31','1999-12-31',REPEAT('0',64),'{}')",
         original.orderNo,
         original.activityId,
         original.skuId,

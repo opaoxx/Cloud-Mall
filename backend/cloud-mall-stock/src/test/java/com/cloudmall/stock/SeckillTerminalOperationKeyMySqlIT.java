@@ -1539,8 +1539,8 @@ class SeckillTerminalOperationKeyMySqlIT {
         "RELEASED".equals(state) ? 4L : null);
     fixture.update(
         "INSERT INTO"
-            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at)"
-            + " VALUES(1,?,10,20,8,'private-idem','ACCEPTED','2026-10-10','2026-10-10')",
+            + " seckill_reservation(id,order_no,activity_id,sku_id,user_id,idempotency_key,status,created_at,updated_at,request_hash,request_payload)"
+            + " VALUES(1,?,10,20,8,'private-idem','ACCEPTED','2026-10-10','2026-10-10',REPEAT('0',64),'{}')",
         ORDER_NO);
   }
 

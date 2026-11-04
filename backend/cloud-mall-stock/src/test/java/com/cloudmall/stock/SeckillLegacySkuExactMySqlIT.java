@@ -1002,8 +1002,8 @@ class SeckillLegacySkuExactMySqlIT {
   private static void seedLegacy(String state, Object sku) {
     fixture.update(
         "INSERT INTO"
-            + " seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,created_at,updated_at)"
-            + " VALUES(1,10,?,8,?,'private-idem',?,'2026-10-11','2026-10-11')",
+            + " seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,created_at,updated_at,request_hash,request_payload)"
+            + " VALUES(1,10,?,8,?,'private-idem',?,'2026-10-11','2026-10-11',REPEAT('0',64),'{}')",
         sku,
         ORDER_NO,
         state);
