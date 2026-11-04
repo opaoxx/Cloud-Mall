@@ -3,7 +3,7 @@ package com.cloudmall.product;
 import com.cloudmall.product.domain.dto.ProductMetricEventDTO;
 import com.cloudmall.product.domain.po.ProductOnlineStatPO;
 import com.cloudmall.product.mapper.ProductMetricMapper;
-import com.cloudmall.product.service.ProductMetricService;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.LocalDateTime;

@@ -1,4 +1,4 @@
-package com.cloudmall.product.service;
+package com.cloudmall.product.service.impl.metrics;
 
 import com.cloudmall.product.domain.dto.ProductMetricBatchApplyResultDTO;
 import com.cloudmall.product.domain.dto.ProductMetricBatchEventResultDTO;

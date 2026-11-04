@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 /** Independent, opt-in qualification observer; it does not establish transaction transparency. */
-public final class Cm21JdbcAnchorObserver {
+public final class JdbcTransactionAnchorObserver {
   /** The pending current statement query deliberately returns every pending row. */
   public static final String ANCHOR_SQL =
       "SELECT @@server_uuid AS uuid, CONNECTION_ID() AS connection_id,"
@@ -39,7 +39,7 @@ public final class Cm21JdbcAnchorObserver {
           "event_name",
           "nesting_level");
 
-  private Cm21JdbcAnchorObserver() {}
+  private JdbcTransactionAnchorObserver() {}
 
   /** Qualification identity established before observing the held borrow. */
   public record Context(

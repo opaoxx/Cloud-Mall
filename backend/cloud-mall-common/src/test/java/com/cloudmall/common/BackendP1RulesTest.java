@@ -19,9 +19,11 @@ class BackendP1RulesTest {
   @Test
   void productPersistsAndReadsParameters() throws Exception {
     String source = source("cloud-mall-product", "ProductManagementServiceImpl.java");
-    String compact = compact(source);
+    String reader = compact(source("cloud-mall-product", "ProductCatalogReader.java"));
     assertTrue(source.contains("parameters"));
     assertTrue(source.contains("replaceParameters"));
+    assertTrue(reader.contains("productSqlMapper.findParameters(productId)"));
+    assertTrue(reader.contains("map(this::parameterView)"));
     String mapper = source("cloud-mall-product", "ProductSqlMapper.java");
     assertTrue(mapper.contains("product_parameter"));
     assertTrue(mapper.contains("delete from product_parameter where product_id=?"));

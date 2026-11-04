@@ -6,7 +6,7 @@ import static org.mockito.Mockito.when;
 
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.mapper.ProductIndexMapper;
-import com.cloudmall.product.service.ProductIndexDocumentLoader;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -36,7 +36,8 @@ class ProductIndexDocumentLoaderTest {
     row.put("metric_source_ref", "hm-item.item");
     when(mapper.selectIndexSourcesAfter(0L, 200)).thenReturn(List.of(row));
 
-    ProductIndexDocument document = new ProductIndexDocumentLoader(mapper).loadBatch(0L, 200).get(0);
+    ProductIndexDocument document =
+        new ProductIndexDocumentLoader(mapper).loadBatch(0L, 200).get(0);
 
     assertEquals(updatedAt, document.updatedAt());
     assertEquals(9L, document.viewCount());

@@ -17,10 +17,10 @@ import org.junit.jupiter.api.Test;
 /**
  * No-network fake JDBC checks of delegate/resource semantics, not server transaction equivalence.
  */
-class Cm21JdbcAnchorObserverTest {
+class JdbcTransactionAnchorObserverTest {
   /** Fixed qualification-only identity used by every complete fake row. */
-  private static final Cm21JdbcAnchorObserver.Context CONTEXT =
-      new Cm21JdbcAnchorObserver.Context(
+  private static final JdbcTransactionAnchorObserver.Context CONTEXT =
+      new JdbcTransactionAnchorObserver.Context(
           "0123456789abcdef0123456789abcdef",
           "qualification-1",
           "borrow-1",
@@ -32,7 +32,7 @@ class Cm21JdbcAnchorObserverTest {
   @Test
   void disabledDoesNotValidateContextCreateSqlOrCallSink() throws Exception {
     FakeJdbc fake = new FakeJdbc();
-    Cm21JdbcAnchorObserver.commit(fake.connection(), null, ignored -> fail("disabled sink"));
+    JdbcTransactionAnchorObserver.commit(fake.connection(), null, ignored -> fail("disabled sink"));
     assertEquals(List.of("commit"), fake.calls);
   }
 
@@ -45,15 +45,15 @@ class Cm21JdbcAnchorObserverTest {
         original,
         assertThrows(
             SQLException.class,
-            () -> Cm21JdbcAnchorObserver.commit(fake.connection(), null, false, null)));
+            () -> JdbcTransactionAnchorObserver.commit(fake.connection(), null, false, null)));
     assertEquals(List.of("commit"), fake.calls);
   }
 
   @Test
   void enabledOrdersPreDelegateAndPostAndClosesOnlyObserverResources() throws Exception {
     FakeJdbc fake = new FakeJdbc();
-    List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
-    Cm21JdbcAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
+    List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
+    JdbcTransactionAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
     assertEquals(
         List.of(
             "create1",
@@ -68,7 +68,7 @@ class Cm21JdbcAnchorObserverTest {
         fake.calls);
     assertEquals(
         List.of("PRE", "DELEGATE_RETURNED", "POST"),
-        observations.stream().map(Cm21JdbcAnchorObserver.Observation::kind).toList());
+        observations.stream().map(JdbcTransactionAnchorObserver.Observation::kind).toList());
     assertEquals("VALID", observations.get(0).anchor().status());
     assertEquals("VALID", observations.get(2).anchor().status());
     assertEquals(1, fake.commits);
@@ -103,8 +103,8 @@ class Cm21JdbcAnchorObserverTest {
   void postQueryFailureDoesNotChangeOriginalReturn() throws Exception {
     FakeJdbc fake = new FakeJdbc();
     fake.failureAt = "query2";
-    List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
-    Cm21JdbcAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
+    List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
+    JdbcTransactionAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
     assertEquals(1, fake.commits);
     assertEquals(
         "UNKNOWN",
@@ -120,7 +120,7 @@ class Cm21JdbcAnchorObserverTest {
   @Test
   void allSinkFailuresAreIsolatedIncludingDelegateNotification() throws Exception {
     FakeJdbc fake = new FakeJdbc();
-    Cm21JdbcAnchorObserver.commit(
+    JdbcTransactionAnchorObserver.commit(
         fake.connection(),
         CONTEXT,
         true,
@@ -149,7 +149,7 @@ class Cm21JdbcAnchorObserverTest {
   @Test
   void invalidContextIsObservationFailureButDelegateStillRuns() throws Exception {
     FakeJdbc fake = new FakeJdbc();
-    Cm21JdbcAnchorObserver.commit(fake.connection(), null, true, null);
+    JdbcTransactionAnchorObserver.commit(fake.connection(), null, true, null);
     assertEquals(List.of("commit"), fake.calls);
   }
 
@@ -157,7 +157,7 @@ class Cm21JdbcAnchorObserverTest {
   void retainsAllPendingRowsAndRejectsMultipleRows() {
     FakeJdbc fake = new FakeJdbc();
     fake.rows.add(row());
-    Cm21JdbcAnchorObserver.AnchorResult result = anchor(fake);
+    JdbcTransactionAnchorObserver.AnchorResult result = anchor(fake);
     assertEquals("UNKNOWN", result.status());
     assertEquals("PENDING_ROW_COUNT", result.reason());
     assertEquals(2, result.rows().size());
@@ -176,9 +176,9 @@ class Cm21JdbcAnchorObserverTest {
       fake.rows.get(0).put(mutation.getKey(), mutation.getValue());
       assertEquals("PENDING_STATEMENT_SHAPE", anchor(fake).reason());
     }
-    assertFalse(Cm21JdbcAnchorObserver.ANCHOR_SQL.contains("LIMIT"));
-    assertFalse(Cm21JdbcAnchorObserver.ANCHOR_SQL.contains("MAX("));
-    assertTrue(Cm21JdbcAnchorObserver.ANCHOR_SQL.endsWith("END_EVENT_ID IS NULL"));
+    assertFalse(JdbcTransactionAnchorObserver.ANCHOR_SQL.contains("LIMIT"));
+    assertFalse(JdbcTransactionAnchorObserver.ANCHOR_SQL.contains("MAX("));
+    assertTrue(JdbcTransactionAnchorObserver.ANCHOR_SQL.endsWith("END_EVENT_ID IS NULL"));
   }
 
   @Test
@@ -220,20 +220,20 @@ class Cm21JdbcAnchorObserverTest {
   void closeErrorsAreSeparatelyRecordedAfterFullyDrainedRows() {
     FakeJdbc fake = new FakeJdbc();
     fake.failureAt = "bothClose";
-    Cm21JdbcAnchorObserver.AnchorResult result = anchor(fake);
+    JdbcTransactionAnchorObserver.AnchorResult result = anchor(fake);
     assertTrue(result.responseDrained());
     assertFalse(result.resultSetClosed());
     assertFalse(result.statementClosed());
     assertEquals(
         List.of("RESULT_SET_CLOSE", "STATEMENT_CLOSE"),
-        result.failures().stream().map(Cm21JdbcAnchorObserver.Failure::stage).toList());
+        result.failures().stream().map(JdbcTransactionAnchorObserver.Failure::stage).toList());
   }
 
   @Test
   void successfulNoopCannotBecomeCompletedCommitEvidence() throws Exception {
     FakeJdbc fake = new FakeJdbc();
-    List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
-    Cm21JdbcAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
+    List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
+    JdbcTransactionAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
     // This helper deliberately supplies no MATCHED root or historical COMMIT assertion.
     assertEquals(1, fake.commits);
     assertTrue(
@@ -249,8 +249,8 @@ class Cm21JdbcAnchorObserverTest {
   private static void assertPreFailure(String stage) throws Exception {
     FakeJdbc fake = new FakeJdbc();
     fake.failureAt = stage;
-    List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
-    Cm21JdbcAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
+    List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
+    JdbcTransactionAnchorObserver.commit(fake.connection(), CONTEXT, true, observations::add);
     assertEquals(1, fake.commits);
     assertEquals(2, fake.statements);
     assertEquals("UNKNOWN", observations.get(0).anchor().status());
@@ -270,7 +270,7 @@ class Cm21JdbcAnchorObserverTest {
         assertThrows(
             original.getClass(),
             () ->
-                Cm21JdbcAnchorObserver.commit(
+                JdbcTransactionAnchorObserver.commit(
                     fake.connection(),
                     CONTEXT,
                     true,
@@ -282,9 +282,9 @@ class Cm21JdbcAnchorObserverTest {
     assertEquals(1, fake.statements);
   }
 
-  private static Cm21JdbcAnchorObserver.AnchorResult anchor(FakeJdbc fake) {
-    return Cm21JdbcAnchorObserver.readAnchor(
-        fake.connection(), CONTEXT, Cm21JdbcAnchorObserver.Side.PRE);
+  private static JdbcTransactionAnchorObserver.AnchorResult anchor(FakeJdbc fake) {
+    return JdbcTransactionAnchorObserver.readAnchor(
+        fake.connection(), CONTEXT, JdbcTransactionAnchorObserver.Side.PRE);
   }
 
   private static Map<String, Object> row() {
@@ -347,7 +347,7 @@ class Cm21JdbcAnchorObserverTest {
           Statement.class,
           (proxy, method, arguments) -> {
             if (method.getName().equals("executeQuery")) {
-              assertEquals(Cm21JdbcAnchorObserver.ANCHOR_SQL, arguments[0]);
+              assertEquals(JdbcTransactionAnchorObserver.ANCHOR_SQL, arguments[0]);
               step("query" + ordinal);
               return resultSet(ordinal);
             }

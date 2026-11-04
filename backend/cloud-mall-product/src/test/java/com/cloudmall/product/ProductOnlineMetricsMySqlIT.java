@@ -10,6 +10,10 @@ import com.cloudmall.product.domain.dto.ProductDTO;
 import com.cloudmall.product.domain.dto.ProductMetricEventDTO;
 import com.cloudmall.product.mapper.*;
 import com.cloudmall.product.service.*;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxService;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
+import com.cloudmall.product.service.impl.search.ElasticsearchProductKeywordSearch;
 import com.cloudmall.product.util.ProductMetricEvents;
 import com.fasterxml.jackson.databind.*;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -79,7 +83,8 @@ class ProductOnlineMetricsMySqlIT {
         get(port, "/api/products/skus/71");
         assertEquals(4L, db.count("product_metric_outbox"));
         var target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(controller);
-        ProductKeywordSearch controlled = org.mockito.Mockito.mock(ProductKeywordSearch.class);
+        ElasticsearchProductKeywordSearch controlled =
+            org.mockito.Mockito.mock(ElasticsearchProductKeywordSearch.class);
         org.springframework.test.util.ReflectionTestUtils.setField(target, "searchEnabled", true);
         org.springframework.test.util.ReflectionTestUtils.setField(
             target, "productKeywordSearch", controlled);
@@ -573,7 +578,8 @@ class ProductOnlineMetricsMySqlIT {
                 ProductMetricEvents.contentFingerprint(original),
                 ProductMetricEvents.metricFingerprint(online));
         var target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(controller);
-        ProductKeywordSearch controlled = org.mockito.Mockito.mock(ProductKeywordSearch.class);
+        ElasticsearchProductKeywordSearch controlled =
+            org.mockito.Mockito.mock(ElasticsearchProductKeywordSearch.class);
         org.springframework.test.util.ReflectionTestUtils.setField(
             target, "metricSortMode", "ONLINE");
         org.springframework.test.util.ReflectionTestUtils.setField(target, "searchEnabled", true);

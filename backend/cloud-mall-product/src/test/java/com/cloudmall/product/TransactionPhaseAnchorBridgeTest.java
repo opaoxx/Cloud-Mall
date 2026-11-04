@@ -26,18 +26,19 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** Real Spring transaction ordering over memory-only JDBC; no database equivalence is claimed. */
-class Cm21PhaseAnchorBridgeTest {
+class TransactionPhaseAnchorBridgeTest {
   /** Complete explicitly fake identity; no server query establishes these values. */
-  private static final Cm21PhaseAnchorBridge.Identity IDENTITY =
-      new Cm21PhaseAnchorBridge.Identity("0123456789abcdef0123456789abcdef", "fake-uuid", 31, 53);
+  private static final TransactionPhaseAnchorBridge.Identity IDENTITY =
+      new TransactionPhaseAnchorBridge.Identity(
+          "0123456789abcdef0123456789abcdef", "fake-uuid", 31, 53);
 
   /** Callback response completed in memory, not a native history event. */
-  private static final Cm21PhaseAnchorBridge.AnchorOutcome COMPLETE =
-      new Cm21PhaseAnchorBridge.AnchorOutcome(true, true, true);
+  private static final TransactionPhaseAnchorBridge.AnchorOutcome COMPLETE =
+      new TransactionPhaseAnchorBridge.AnchorOutcome(true, true, true);
 
   @Test
   void disabledNeverReadsClockIdentityOrCallback() throws Throwable {
-    Cm21PhaseAnchorBridge bridge = Cm21PhaseAnchorBridge.disabled();
+    TransactionPhaseAnchorBridge bridge = TransactionPhaseAnchorBridge.disabled();
     Object marker = new Object();
     bridge.captureAcknowledged(1);
     bridge.serviceEntered(1, 0, "apply");
@@ -48,12 +49,12 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void trueAndUnknownPropertiesFailClosed() {
-    Cm21PhaseAnchorBridge.requireDisabledProperty("false");
+    TransactionPhaseAnchorBridge.requireDisabledProperty("false");
     for (String value : new String[] {"true", "TRUE", "", "yes", null}) {
       IllegalArgumentException rejected =
           assertThrows(
               IllegalArgumentException.class,
-              () -> Cm21PhaseAnchorBridge.requireDisabledProperty(value));
+              () -> TransactionPhaseAnchorBridge.requireDisabledProperty(value));
       assertEquals("CM21_PHASE_ANCHOR_LIVE_NO_GO", rejected.getMessage());
     }
   }
@@ -90,7 +91,7 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void defaultPhaseTimingUsesDisabledBridgeWithRealSpring() throws Throwable {
-    Framework fixture = new Framework(Cm21PhaseAnchorBridge.disabled());
+    Framework fixture = new Framework(TransactionPhaseAnchorBridge.disabled());
     Object marker = new Object();
     assertSame(marker, fixture.apply(() -> fixture.transaction.execute(status -> marker)));
     assertEquals(
@@ -104,12 +105,12 @@ class Cm21PhaseAnchorBridgeTest {
   void realSpringCommitPostCleanupAndServiceTerminalOrder() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
     FakeJdbc jdbc = new FakeJdbc();
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             clock,
             (context, side) -> {
               jdbc.calls.add(side.name());
-              if (side == Cm21PhaseAnchorBridge.Side.POST) jdbc.dirty = true;
+              if (side == TransactionPhaseAnchorBridge.Side.POST) jdbc.dirty = true;
               assertTrue(TransactionSynchronizationManager.isActualTransactionActive());
               return COMPLETE;
             });
@@ -147,7 +148,7 @@ class Cm21PhaseAnchorBridgeTest {
   void rollbackOnlyDoesNotCreateAnchorOrCommit() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
     AtomicInteger callbacks = new AtomicInteger();
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             clock,
             (context, side) -> {
@@ -175,7 +176,8 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void originalBusinessFailureSurvivesSpringAndAdvice() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
-    Cm21PhaseAnchorBridge bridge = fake(clock, (context, side) -> fail("rollback cannot anchor"));
+    TransactionPhaseAnchorBridge bridge =
+        fake(clock, (context, side) -> fail("rollback cannot anchor"));
     bridge.captureAcknowledged(100);
     Framework fixture = new Framework(bridge);
     RuntimeException original = new RuntimeException("original-business");
@@ -199,7 +201,7 @@ class Cm21PhaseAnchorBridgeTest {
   void jdbcDelegateFailureIsSameObjectAndPostIsSkipped() {
     AtomicLong clock = new AtomicLong(100);
     List<String> calls = new ArrayList<>();
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             clock,
             (context, side) -> {
@@ -233,7 +235,7 @@ class Cm21PhaseAnchorBridgeTest {
   void springMayWrapCommitFailureButKeepsOriginalCauseAndCleanup() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
     List<String> observations = new ArrayList<>();
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             clock,
             (context, side) -> {
@@ -261,12 +263,12 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void preFailureNeverPreventsDelegateAndPostAttempt() throws Throwable {
     List<String> calls = new ArrayList<>();
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             new AtomicLong(100),
             (context, side) -> {
               calls.add(side.name());
-              if (side == Cm21PhaseAnchorBridge.Side.PRE) throw new Error("fake-observer");
+              if (side == TransactionPhaseAnchorBridge.Side.PRE) throw new Error("fake-observer");
               return COMPLETE;
             });
     bridge.captureAcknowledged(100);
@@ -291,11 +293,12 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void postFailureDoesNotReplaceDelegateResult() throws Throwable {
     AtomicInteger delegates = new AtomicInteger();
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             new AtomicLong(100),
             (context, side) -> {
-              if (side == Cm21PhaseAnchorBridge.Side.POST) throw new RuntimeException("post");
+              if (side == TransactionPhaseAnchorBridge.Side.POST)
+                throw new RuntimeException("post");
               return COMPLETE;
             });
     bridge.captureAcknowledged(100);
@@ -319,7 +322,7 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void firstEightMixedOutcomesAreNeverReplacedByNinth() throws Throwable {
-    Cm21PhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
     bridge.captureAcknowledged(100);
     for (int index = 1; index <= 9; index++) {
       bridge.serviceEntered(index, 0, "apply");
@@ -337,7 +340,7 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void excludedCallsAndCaptureBeforeActiveAreCounted() {
     AtomicLong clock = new AtomicLong(100);
-    Cm21PhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
     bridge.serviceEntered(1, 0, "apply");
     bridge.captureAcknowledged(100);
     bridge.serviceTerminal(1, null);
@@ -354,8 +357,8 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void missingIdentityKeepsOriginalPlaceAndTerminalUnknown() throws Throwable {
-    Cm21PhaseAnchorBridge bridge =
-        Cm21PhaseAnchorBridge.fakeOnly(
+    TransactionPhaseAnchorBridge bridge =
+        TransactionPhaseAnchorBridge.fakeOnly(
             () -> 100, (context, side) -> fail("missing identity cannot anchor"), Map.of());
     bridge.captureAcknowledged(100);
     for (int index = 1; index <= 8; index++) {
@@ -371,7 +374,7 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void sharedDeadlineDoesNotResetAndUnresolvedCallsCannotFreeze() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
-    Cm21PhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
     bridge.captureAcknowledged(100);
     for (int index = 1; index <= 8; index++) bridge.serviceEntered(index, 0, "apply");
     for (int index = 1; index <= 7; index++) {
@@ -387,10 +390,10 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void incompleteResponsesCannotBeConvertedIntoFreezeReadiness() throws Throwable {
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             new AtomicLong(100),
-            (context, side) -> new Cm21PhaseAnchorBridge.AnchorOutcome(false, false, false));
+            (context, side) -> new TransactionPhaseAnchorBridge.AnchorOutcome(false, false, false));
     completeEight(bridge);
     assertEquals(false, bridge.snapshot().get("freezeReady"));
     assertEquals(true, bridge.snapshot().get("unknown"));
@@ -398,10 +401,10 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void invalidButDrainedClosedFakeResponseCanBeTerminalUnknown() throws Throwable {
-    Cm21PhaseAnchorBridge bridge =
+    TransactionPhaseAnchorBridge bridge =
         fake(
             new AtomicLong(100),
-            (context, side) -> new Cm21PhaseAnchorBridge.AnchorOutcome(false, true, true));
+            (context, side) -> new TransactionPhaseAnchorBridge.AnchorOutcome(false, true, true));
     completeEight(bridge);
     assertEquals(true, bridge.snapshot().get("freezeReady"));
     assertEquals(true, bridge.snapshot().get("unknown"));
@@ -409,7 +412,7 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void repeatedCommitAndBorrowNeverBecomeValidSamples() throws Throwable {
-    Cm21PhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
     bridge.captureAcknowledged(100);
     bridge.serviceEntered(1, 0, "apply");
     bridge.commit(1, 1, 31, null, () -> null);
@@ -425,8 +428,8 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void clockFailureNeverPreventsOriginalCommit() throws Throwable {
     AtomicInteger reads = new AtomicInteger();
-    Cm21PhaseAnchorBridge bridge =
-        Cm21PhaseAnchorBridge.fakeOnly(
+    TransactionPhaseAnchorBridge bridge =
+        TransactionPhaseAnchorBridge.fakeOnly(
             () -> {
               if (reads.incrementAndGet() > 1) throw new Error("clock");
               return 100;
@@ -452,7 +455,7 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void duplicateAckClockReversalAndSnapshotAreFailClosed() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
-    Cm21PhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
     completeEight(bridge);
     assertEquals(true, bridge.snapshot().get("freezeReady"));
     assertThrows(UnsupportedOperationException.class, () -> selected(bridge).get(0).put("call", 9));
@@ -465,7 +468,7 @@ class Cm21PhaseAnchorBridgeTest {
   @Test
   void allCompletedThenLateSnapshotCannotRequestFreeze() throws Throwable {
     AtomicLong clock = new AtomicLong(100);
-    Cm21PhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(clock, (context, side) -> COMPLETE);
     completeEight(bridge);
     clock.set(5_000_000_100L);
     assertEquals(true, bridge.snapshot().get("freezeReady"));
@@ -476,7 +479,7 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void excludedCallIdentityCannotBeReusedToEnterCohort() {
-    Cm21PhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
     bridge.serviceEntered(1, 0, "apply");
     bridge.captureAcknowledged(100);
     bridge.serviceEntered(1, 0, "apply");
@@ -491,11 +494,11 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void fullEntryIdentityMemoryIsBoundedAndOverflowIsUnknown() throws Exception {
-    Cm21PhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
     for (int index = 1; index <= 32768; index++) bridge.serviceEntered(index, 0, "dispatch");
     bridge.captureAcknowledged(100);
     bridge.serviceEntered(32769, 0, "apply");
-    Field field = Cm21PhaseAnchorBridge.class.getDeclaredField("seenCalls");
+    Field field = TransactionPhaseAnchorBridge.class.getDeclaredField("seenCalls");
     field.setAccessible(true);
     assertEquals(32768, ((java.util.Set<?>) field.get(bridge)).size());
     assertTrue(selected(bridge).isEmpty());
@@ -506,7 +509,7 @@ class Cm21PhaseAnchorBridgeTest {
 
   @Test
   void nestedAdviceRestoresParentAndNeverStealsApplyCohort() throws Throwable {
-    Cm21PhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
+    TransactionPhaseAnchorBridge bridge = fake(new AtomicLong(100), (context, side) -> COMPLETE);
     bridge.captureAcknowledged(100);
     Framework fixture = new Framework(bridge);
     fixture.apply(
@@ -525,17 +528,17 @@ class Cm21PhaseAnchorBridgeTest {
     fixture.assertReleased();
   }
 
-  private static Cm21PhaseAnchorBridge fake(
-      AtomicLong clock, Cm21PhaseAnchorBridge.AnchorCallback callback) {
-    return Cm21PhaseAnchorBridge.fakeOnly(clock::get, callback, Map.of(31L, IDENTITY));
+  private static TransactionPhaseAnchorBridge fake(
+      AtomicLong clock, TransactionPhaseAnchorBridge.AnchorCallback callback) {
+    return TransactionPhaseAnchorBridge.fakeOnly(clock::get, callback, Map.of(31L, IDENTITY));
   }
 
   @SuppressWarnings("unchecked")
-  private static List<Map<String, Object>> selected(Cm21PhaseAnchorBridge bridge) {
+  private static List<Map<String, Object>> selected(TransactionPhaseAnchorBridge bridge) {
     return (List<Map<String, Object>>) bridge.snapshot().get("selected");
   }
 
-  private static void completeEight(Cm21PhaseAnchorBridge bridge) throws Throwable {
+  private static void completeEight(TransactionPhaseAnchorBridge bridge) throws Throwable {
     bridge.captureAcknowledged(100);
     for (int index = 1; index <= 8; index++) {
       bridge.serviceEntered(index, 0, "apply");
@@ -569,16 +572,16 @@ class Cm21PhaseAnchorBridgeTest {
     /** Timeout is framework configuration, not a claim about a real driver query timeout. */
     final TransactionTemplate transaction;
 
-    private Framework(Cm21PhaseAnchorBridge bridge) throws Exception {
+    private Framework(TransactionPhaseAnchorBridge bridge) throws Exception {
       this(bridge, new FakeJdbc());
     }
 
-    private Framework(Cm21PhaseAnchorBridge bridge, FakeJdbc jdbc) throws Exception {
+    private Framework(TransactionPhaseAnchorBridge bridge, FakeJdbc jdbc) throws Exception {
       this.jdbc = jdbc;
       Class<?> type =
           Class.forName(ProductOnlineMetricsPipelineIT.class.getName() + "$PhaseTiming");
       Constructor<?> constructor =
-          type.getDeclaredConstructor(Cm21PhaseAnchorBridge.class, boolean.class);
+          type.getDeclaredConstructor(TransactionPhaseAnchorBridge.class, boolean.class);
       constructor.setAccessible(true);
       phase = constructor.newInstance(bridge, false);
       Method adviceMethod = type.getDeclaredMethod("serviceAdvice");
@@ -602,8 +605,8 @@ class Cm21PhaseAnchorBridgeTest {
       transaction.setTimeout(3);
     }
 
-    private Object apply(Cm21PhaseAnchorBridge.ThrowingDelegate body) throws Throwable {
-      Method method = Cm21PhaseAnchorBridgeTest.class.getDeclaredMethod("apply");
+    private Object apply(TransactionPhaseAnchorBridge.ThrowingDelegate body) throws Throwable {
+      Method method = TransactionPhaseAnchorBridgeTest.class.getDeclaredMethod("apply");
       return advice.invoke(
           new MethodInvocation() {
             /** Supplies the exact apply name for the original observer's existing frame logic. */

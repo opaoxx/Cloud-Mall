@@ -1,28 +1,37 @@
-package com.cloudmall.product.service;
+package com.cloudmall.product.service.impl.index;
 
 import com.cloudmall.product.config.ProductMessagingConfiguration;
 import com.cloudmall.product.domain.po.ProductIndexOutbox;
 import com.cloudmall.product.mapper.ProductIndexOutboxMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.beans.factory.annotation.Value;
 
 /** 以稳定 eventId 投递商品索引 outbox，并在 confirm 未知时退避重试。 */
 @Component
 public class ProductIndexOutboxDispatcher {
+  /** 认领和更新待投递事件的Mapper。 */
   private final ProductIndexOutboxMapper mapper;
+
+  /** 提供publisher confirm及returned结果的消息客户端。 */
   private final RabbitTemplate rabbitTemplate;
+
+  /** 将持久化原事件内容读取为投递载荷的映射器。 */
   private final ObjectMapper objectMapper;
+
+  /** 当前派发实例领取租约的唯一标识。 */
   private final String owner = "product-index-" + UUID.randomUUID();
+
+  /** 注入原事件存储、消息投递与JSON依赖。 */
   /** 是否允许投递索引 outbox，缺省保持现有自动投递。 */
   @Value("${cloudmall.product.index.dispatch-enabled:true}")
   private boolean dispatchEnabled;
@@ -59,16 +68,19 @@ public class ProductIndexOutboxDispatcher {
           continue;
         }
         if (correlationData.getReturnedMessage() != null) {
-          mapper.markRetry(event.id(), owner, "RabbitMQ returned message", nextAttempt(event.attempts()));
+          mapper.markRetry(
+              event.id(), owner, "RabbitMQ returned message", nextAttempt(event.attempts()));
           continue;
         }
-        mapper.markPublished(event.id(), owner, now, now.plusSeconds(60), nextAttempt(event.attempts()));
+        mapper.markPublished(
+            event.id(), owner, now, now.plusSeconds(60), nextAttempt(event.attempts()));
       } catch (Exception exception) {
         mapper.markRetry(event.id(), owner, exception.getMessage(), nextAttempt(event.attempts()));
       }
     }
   }
 
+  /** 按原重试次数计算有界退避时间。 */
   private OffsetDateTime nextAttempt(int attempts) {
     long seconds = Math.min(300, 1L << Math.min(8, attempts));
     return OffsetDateTime.now().plus(Duration.ofSeconds(seconds));

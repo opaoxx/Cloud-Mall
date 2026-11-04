@@ -3,7 +3,7 @@ package com.cloudmall.product;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.cloudmall.product.domain.dto.ProductMetricEventDTO;
-import com.cloudmall.product.service.ProductMetricService;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
 import com.cloudmall.product.util.ProductMetricEvents;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;

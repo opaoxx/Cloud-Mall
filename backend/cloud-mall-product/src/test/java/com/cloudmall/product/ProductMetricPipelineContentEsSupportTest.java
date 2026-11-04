@@ -4,9 +4,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-import com.cloudmall.product.service.ProductMetricConsumer;
-import com.cloudmall.product.service.ProductMetricOutboxDispatcher;
-import com.cloudmall.product.service.ProductMetricService;
+import com.cloudmall.product.service.impl.metrics.ProductMetricConsumer;
+import com.cloudmall.product.service.impl.metrics.ProductMetricOutboxDispatcher;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
 import com.cloudmall.product.util.ProductMetricBatchChannelRegistry;
 import com.cloudmall.product.util.ProductMetricEvents;
 import com.rabbitmq.client.impl.AMQConnection;
@@ -43,7 +43,7 @@ class ProductMetricPipelineContentEsSupportTest {
         () -> ProductMetricPipelineBatchSupport.admit(true, "dual-version", 1, "true"));
     assertThrows(
         IllegalArgumentException.class,
-        () -> Cm21PhaseAnchorBridge.requireDisabledProperty("true"));
+        () -> TransactionPhaseAnchorBridge.requireDisabledProperty("true"));
     assertEquals(
         64,
         ReflectionTestUtils.getField(ProductMetricPipelineBatchSupport.class, "MAX_OBSERVATIONS"));

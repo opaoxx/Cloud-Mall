@@ -4,12 +4,12 @@ import static org.mockito.Mockito.mock;
 
 import com.cloudmall.product.controller.ProductController;
 import com.cloudmall.product.mapper.ProductSqlMapper;
-import com.cloudmall.product.service.ProductIndexOutboxService;
 import com.cloudmall.product.service.impl.CategoryServiceImpl;
 import com.cloudmall.product.service.impl.ProductCatalogReader;
 import com.cloudmall.product.service.impl.ProductManagementServiceImpl;
 import com.cloudmall.product.service.impl.ProductQueryServiceImpl;
 import com.cloudmall.product.service.impl.SeckillActivityServiceImpl;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxService;
 import com.cloudmall.product.util.ProductValueCodec;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.redis.core.StringRedisTemplate;

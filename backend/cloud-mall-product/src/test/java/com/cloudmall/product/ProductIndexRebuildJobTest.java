@@ -1,8 +1,8 @@
 package com.cloudmall.product;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -15,9 +15,9 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.domain.po.ProductIndexRebuildJobPO;
 import com.cloudmall.product.mapper.ProductIndexRebuildMapper;
-import com.cloudmall.product.service.ProductIndexDocumentLoader;
-import com.cloudmall.product.service.ProductIndexRebuildJob;
 import com.cloudmall.product.service.ProductIndexWriter;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
+import com.cloudmall.product.service.impl.index.ProductIndexRebuildJob;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -34,23 +34,37 @@ class ProductIndexRebuildJobTest {
     ProductIndexRebuildJobPO job = job("PENDING", 0L);
     when(mapper.findJob("cloudmall-product-index")).thenReturn(job);
     when(mapper.claim(eq("cloudmall-product-index"), anyString(), any(), any(), any()))
-        .thenAnswer(invocation -> {
-          job.leaseOwner = invocation.getArgument(1);
-          return 1;
-        });
+        .thenAnswer(
+            invocation -> {
+              job.leaseOwner = invocation.getArgument(1);
+              return 1;
+            });
     when(loader.loadBatch(0L, 2)).thenReturn(List.of(document(1L), document(2L)));
-    when(mapper.finishBatch(eq("cloudmall-product-index"), anyString(), eq(0L),
-            eq(2L), eq(2), eq("RUNNING"), any(LocalDateTime.class)))
+    when(mapper.finishBatch(
+            eq("cloudmall-product-index"),
+            anyString(),
+            eq(0L),
+            eq(2L),
+            eq(2),
+            eq("RUNNING"),
+            any(LocalDateTime.class)))
         .thenReturn(1);
     ProductIndexRebuildJob rebuild = rebuild(mapper, loader, writer);
 
     rebuild.runNextBatch();
 
     verify(writer).upsertBatch(anyList());
-    verify(mapper).finishBatch(eq("cloudmall-product-index"), anyString(),
-        eq(0L), eq(2L), eq(2), eq("RUNNING"), any(LocalDateTime.class));
-    verify(mapper, never()).markFailed(anyString(), anyString(), anyString(),
-        any(LocalDateTime.class));
+    verify(mapper)
+        .finishBatch(
+            eq("cloudmall-product-index"),
+            anyString(),
+            eq(0L),
+            eq(2L),
+            eq(2),
+            eq("RUNNING"),
+            any(LocalDateTime.class));
+    verify(mapper, never())
+        .markFailed(anyString(), anyString(), anyString(), any(LocalDateTime.class));
   }
 
   @Test
@@ -61,20 +75,28 @@ class ProductIndexRebuildJobTest {
     ProductIndexRebuildJobPO job = job("PENDING", 0L);
     when(mapper.findJob("cloudmall-product-index")).thenReturn(job);
     when(mapper.claim(eq("cloudmall-product-index"), anyString(), any(), any(), any()))
-        .thenAnswer(invocation -> {
-          job.leaseOwner = invocation.getArgument(1);
-          return 1;
-        });
+        .thenAnswer(
+            invocation -> {
+              job.leaseOwner = invocation.getArgument(1);
+              return 1;
+            });
     when(loader.loadBatch(0L, 2)).thenReturn(List.of(document(1L), document(2L)));
-    doThrow(new IllegalStateException("ES partial failure"))
-        .when(writer).upsertBatch(anyList());
+    doThrow(new IllegalStateException("ES partial failure")).when(writer).upsertBatch(anyList());
 
     rebuild(mapper, loader, writer).runNextBatch();
 
-    verify(mapper).markFailed(eq("cloudmall-product-index"), anyString(),
-        anyString(), any(LocalDateTime.class));
-    verify(mapper, never()).finishBatch(anyString(), anyString(), anyLong(),
-        anyLong(), anyInt(), anyString(), any(LocalDateTime.class));
+    verify(mapper)
+        .markFailed(
+            eq("cloudmall-product-index"), anyString(), anyString(), any(LocalDateTime.class));
+    verify(mapper, never())
+        .finishBatch(
+            anyString(),
+            anyString(),
+            anyLong(),
+            anyLong(),
+            anyInt(),
+            anyString(),
+            any(LocalDateTime.class));
   }
 
   @Test
@@ -85,10 +107,11 @@ class ProductIndexRebuildJobTest {
     ProductIndexRebuildJobPO job = job("RUNNING", 100L);
     when(mapper.findJob("cloudmall-product-index")).thenReturn(job);
     when(mapper.claim(eq("cloudmall-product-index"), anyString(), any(), any(), any()))
-        .thenAnswer(invocation -> {
-          job.leaseOwner = invocation.getArgument(1);
-          return 1;
-        });
+        .thenAnswer(
+            invocation -> {
+              job.leaseOwner = invocation.getArgument(1);
+              return 1;
+            });
     when(writer.indexExists()).thenReturn(false);
     when(mapper.restartClaimedAfterIndexLoss(
             eq("cloudmall-product-index"), anyString(), any(LocalDateTime.class)))
@@ -96,8 +119,9 @@ class ProductIndexRebuildJobTest {
 
     rebuild(mapper, loader, writer).runNextBatch();
 
-    verify(mapper).restartClaimedAfterIndexLoss(
-        eq("cloudmall-product-index"), anyString(), any(LocalDateTime.class));
+    verify(mapper)
+        .restartClaimedAfterIndexLoss(
+            eq("cloudmall-product-index"), anyString(), any(LocalDateTime.class));
     verify(loader, never()).loadBatch(anyLong(), anyInt());
   }
 
@@ -109,14 +133,12 @@ class ProductIndexRebuildJobTest {
     when(mapper.findJob("cloudmall-product-index")).thenReturn(job("COMPLETED", 200L));
     when(writer.indexExists()).thenReturn(false);
     when(loader.countSources()).thenReturn(88476L);
-    when(mapper.restartCompleted(
-            eq("cloudmall-product-index"), any(LocalDateTime.class)))
+    when(mapper.restartCompleted(eq("cloudmall-product-index"), any(LocalDateTime.class)))
         .thenReturn(1);
 
     rebuild(mapper, loader, writer).auditCompletedIndex();
 
-    verify(mapper).restartCompleted(
-        eq("cloudmall-product-index"), any(LocalDateTime.class));
+    verify(mapper).restartCompleted(eq("cloudmall-product-index"), any(LocalDateTime.class));
     verify(writer, never()).countDocuments();
   }
 
@@ -125,7 +147,9 @@ class ProductIndexRebuildJobTest {
       ProductIndexDocumentLoader loader,
       ProductIndexWriter writer) {
     return new ProductIndexRebuildJob(
-        mapper, loader, writer,
+        mapper,
+        loader,
+        writer,
         new MockEnvironment()
             .withProperty("cloudmall.product.elasticsearch.index", "cloudmall_product")
             .withProperty("cloudmall.product.index.rebuild-batch-size", "2")

@@ -1,4 +1,4 @@
-package com.cloudmall.product.service;
+package com.cloudmall.product.service.impl.metrics;
 
 import com.rabbitmq.client.Channel;
 import java.io.IOException;

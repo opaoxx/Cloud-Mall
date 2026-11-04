@@ -1,9 +1,9 @@
 package com.cloudmall.product.config;
 
 import com.cloudmall.product.mapper.ProductMetricMapper;
-import com.cloudmall.product.service.ProductMetricBatchListener;
-import com.cloudmall.product.service.ProductMetricConsumer;
-import com.cloudmall.product.service.ProductMetricSingleListener;
+import com.cloudmall.product.service.impl.metrics.ProductMetricBatchListener;
+import com.cloudmall.product.service.impl.metrics.ProductMetricConsumer;
+import com.cloudmall.product.service.impl.metrics.ProductMetricSingleListener;
 import com.cloudmall.product.util.ProductMetricBatchChannelRegistry;
 import com.cloudmall.product.util.ProductMetricRawBatchingStrategy;
 import java.util.Map;

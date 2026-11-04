@@ -1,4 +1,4 @@
-package com.cloudmall.product.service;
+package com.cloudmall.product.service.impl.index;
 
 import com.cloudmall.product.config.ProductMessagingConfiguration;
 import com.cloudmall.product.mapper.ProductIndexDeadLetterMapper;
@@ -14,25 +14,40 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.beans.factory.annotation.Value;
 
 /** 核对原事务事件后，以数据库租约和 publisher confirm 重放 JSON 死信。 */
 @Component
 public class ProductIndexDlqReplayer {
+  /** 记录死信核验和重放失败。 */
   private static final Logger log = LoggerFactory.getLogger(ProductIndexDlqReplayer.class);
+
+  /** 原始死信证据与重放状态的Mapper。 */
   private final ProductIndexDeadLetterMapper mapper;
+
+  /** 查询原商品事务事件以核对死信来源。 */
   private final ProductIndexOutboxMapper outboxMapper;
+
+  /** 重放原消息并观察投递确认的客户端。 */
   private final RabbitTemplate rabbitTemplate;
+
+  /** 精确解析和比较原事件JSON的映射器。 */
   private final ObjectMapper objectMapper;
+
+  /** 当前重放实例的租约身份。 */
   private final String owner = "product-dlq-" + UUID.randomUUID();
+
   /** 是否允许自动重放索引死信，缺省保持现有行为。 */
   @Value("${cloudmall.product.index.dlq-replay-enabled:true}")
   private boolean replayEnabled;
 
-  public ProductIndexDlqReplayer(ProductIndexDeadLetterMapper mapper,
-      ProductIndexOutboxMapper outboxMapper, RabbitTemplate rabbitTemplate,
+  /** 注入证据、原事件核验及重放依赖。 */
+  public ProductIndexDlqReplayer(
+      ProductIndexDeadLetterMapper mapper,
+      ProductIndexOutboxMapper outboxMapper,
+      RabbitTemplate rabbitTemplate,
       ObjectMapper objectMapper) {
     this.mapper = mapper;
     this.outboxMapper = outboxMapper;
@@ -49,7 +64,9 @@ public class ProductIndexDlqReplayer {
         mapper.claimRetryPayloads(owner, 20, now, now.plusSeconds(30))) {
       try {
         JsonNode event = objectMapper.readTree(payload.body());
-        if (event == null || !event.isObject() || !event.path("productId").canConvertToLong()
+        if (event == null
+            || !event.isObject()
+            || !event.path("productId").canConvertToLong()
             || event.path("productId").asLong() <= 0
             || !event.path("productVersion").canConvertToLong()
             || event.path("eventId").asText().isBlank()) {
@@ -66,9 +83,11 @@ public class ProductIndexDlqReplayer {
         MessageProperties properties = new MessageProperties();
         properties.setContentType("application/json");
         properties.setMessageId(eventId);
-        rabbitTemplate.send(ProductMessagingConfiguration.PRODUCT_EXCHANGE,
+        rabbitTemplate.send(
+            ProductMessagingConfiguration.PRODUCT_EXCHANGE,
             ProductMessagingConfiguration.PRODUCT_ROUTING_KEY,
-            new Message(payload.body(), properties), correlationData);
+            new Message(payload.body(), properties),
+            correlationData);
         if (!correlationData.getFuture().get(5, TimeUnit.SECONDS).isAck()
             || correlationData.getReturnedMessage() != null) {
           retry(payload);
@@ -83,9 +102,10 @@ public class ProductIndexDlqReplayer {
     }
   }
 
+  /** 按原有界退避规则更新当前死信的下次重试时间。 */
   private void retry(ProductIndexDeadLetterMapper.DeadLetterPayload payload) {
     long backoffSeconds = Math.min(300, 1L << Math.min(8, payload.attempts()));
-    mapper.markRetry(payload.quarantineId(), owner,
-        OffsetDateTime.now().plusSeconds(backoffSeconds));
+    mapper.markRetry(
+        payload.quarantineId(), owner, OffsetDateTime.now().plusSeconds(backoffSeconds));
   }
 }

@@ -3,7 +3,7 @@ package com.cloudmall.product;
 import com.cloudmall.product.domain.dto.ProductMetricBatchApplyResultDTO;
 import com.cloudmall.product.domain.dto.ProductMetricBatchEventResultDTO;
 import com.cloudmall.product.domain.dto.ProductMetricEventDTO;
-import com.cloudmall.product.service.ProductMetricConsumer;
+import com.cloudmall.product.service.impl.metrics.ProductMetricConsumer;
 import com.cloudmall.product.util.ProductMetricBatchChannelRegistry;
 import com.cloudmall.product.util.ProductMetricEvents;
 import com.rabbitmq.client.Channel;

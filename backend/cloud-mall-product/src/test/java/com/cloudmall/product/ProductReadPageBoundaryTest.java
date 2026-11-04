@@ -10,7 +10,7 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.product.controller.ProductController;
 import com.cloudmall.product.mapper.ProductSqlMapper;
-import com.cloudmall.product.service.ProductIndexOutboxService;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;

@@ -13,7 +13,18 @@ import com.cloudmall.product.domain.po.*;
 import com.cloudmall.product.domain.vo.ProductMetricPageVO;
 import com.cloudmall.product.mapper.*;
 import com.cloudmall.product.service.*;
+import com.cloudmall.product.service.ProductIndexWriter;
 import com.cloudmall.product.service.impl.*;
+import com.cloudmall.product.service.impl.index.ElasticsearchProductIndexWriter;
+import com.cloudmall.product.service.impl.index.ProductIndexConsumer;
+import com.cloudmall.product.service.impl.index.ProductIndexConsumptionService;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxService;
+import com.cloudmall.product.service.impl.index.ProductIndexRebuildJob;
+import com.cloudmall.product.service.impl.metrics.ProductMetricConsumer;
+import com.cloudmall.product.service.impl.metrics.ProductMetricOutboxDispatcher;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
+import com.cloudmall.product.service.impl.search.ElasticsearchProductKeywordSearch;
 import com.cloudmall.product.util.ProductMetricEvents;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -56,7 +67,7 @@ class ProductOnlineMetricsTest {
     verify(metrics, times(2)).registerViews(anyString(), eq(41L), isNull());
     assertThrows(BizException.class, () -> service.product(99L));
     verifyNoMoreInteractions(metrics);
-    ProductKeywordSearch search = mock(ProductKeywordSearch.class);
+    ElasticsearchProductKeywordSearch search = mock(ElasticsearchProductKeywordSearch.class);
     ReflectionTestUtils.setField(ProductTestServices.queries(service), "searchEnabled", true);
     ReflectionTestUtils.setField(
         ProductTestServices.queries(service), "productKeywordSearch", search);
@@ -658,7 +669,7 @@ class ProductOnlineMetricsTest {
   void onlineSortAdmissionUsesStableProjectionCut() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
     ProductMetricService metrics = mock(ProductMetricService.class);
-    ProductKeywordSearch search = mock(ProductKeywordSearch.class);
+    ElasticsearchProductKeywordSearch search = mock(ElasticsearchProductKeywordSearch.class);
     ProductController service = service(mapper, metrics, search);
     ReflectionTestUtils.setField(ProductTestServices.queries(service), "metricSortMode", "ONLINE");
     ReflectionTestUtils.setField(ProductTestServices.queries(service), "searchEnabled", true);
@@ -1124,7 +1135,9 @@ class ProductOnlineMetricsTest {
   }
 
   private static ProductController service(
-      ProductSqlMapper mapper, ProductMetricService metrics, ProductKeywordSearch search) {
+      ProductSqlMapper mapper,
+      ProductMetricService metrics,
+      ElasticsearchProductKeywordSearch search) {
     ProductController service =
         ProductTestServices.controller(
             mapper,

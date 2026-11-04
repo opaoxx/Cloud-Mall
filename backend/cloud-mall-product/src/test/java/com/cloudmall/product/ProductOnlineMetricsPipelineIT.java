@@ -6,7 +6,18 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.product.domain.po.*;
 import com.cloudmall.product.mapper.ProductSqlMapper;
 import com.cloudmall.product.service.*;
-import com.cloudmall.product.service.impl.ElasticsearchProductIndexWriter;
+import com.cloudmall.product.service.impl.index.ElasticsearchProductIndexWriter;
+import com.cloudmall.product.service.impl.index.ProductIndexConsumer;
+import com.cloudmall.product.service.impl.index.ProductIndexConsumptionService;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxDispatcher;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxService;
+import com.cloudmall.product.service.impl.index.ProductIndexRebuildJob;
+import com.cloudmall.product.service.impl.metrics.ProductMetricConsumer;
+import com.cloudmall.product.service.impl.metrics.ProductMetricOutboxDispatcher;
+import com.cloudmall.product.service.impl.metrics.ProductMetricProjectionDispatcher;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
+import com.cloudmall.product.service.impl.search.ElasticsearchProductKeywordSearch;
 import com.cloudmall.product.util.ProductMetricBatchChannelRegistry;
 import com.cloudmall.product.util.ProductMetricEvents;
 import com.fasterxml.jackson.databind.*;
@@ -4563,7 +4574,7 @@ class ProductOnlineMetricsPipelineIT {
   /** Test-only bounded client observations; never performs business SQL or changes outcomes. */
   private static final class PhaseTiming {
     /** Default-off bridge; only an explicit test injection can provide fake observations. */
-    private final Cm21PhaseAnchorBridge anchorBridge;
+    private final TransactionPhaseAnchorBridge anchorBridge;
 
     /** Service and JDBC bounds are independent and never silently overwrite earlier records. */
     private final int callLimit = 32768, phaseLimit = 200000;
@@ -4622,11 +4633,11 @@ class ProductOnlineMetricsPipelineIT {
 
     /** Pure validation creates no middleware, pool, connection, or framework context. */
     private PhaseTiming(boolean validate) {
-      this(Cm21PhaseAnchorBridge.disabled(), validate);
+      this(TransactionPhaseAnchorBridge.disabled(), validate);
     }
 
     /** Explicit fake injection does not create a SQL-capable or live-enabled path. */
-    private PhaseTiming(Cm21PhaseAnchorBridge anchorBridge, boolean validate) {
+    private PhaseTiming(TransactionPhaseAnchorBridge anchorBridge, boolean validate) {
       this.anchorBridge = Objects.requireNonNull(anchorBridge);
       if (validate) selfCheck();
     }
@@ -5366,7 +5377,7 @@ class ProductOnlineMetricsPipelineIT {
     ProductIndexConsumptionService.class,
     ProductIndexConsumer.class,
     ProductIndexRebuildJob.class,
-    ProductKeywordSearch.class,
+    ElasticsearchProductKeywordSearch.class,
     ElasticsearchProductIndexWriter.class,
     com.cloudmall.product.config.ProductMessagingConfiguration.class,
     com.cloudmall.product.config.ProductMetricMessagingConfiguration.class,

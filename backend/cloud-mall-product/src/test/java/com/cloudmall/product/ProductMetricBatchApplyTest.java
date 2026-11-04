@@ -12,7 +12,7 @@ import com.cloudmall.product.domain.dto.ProductMetricInitialApplySnapshotDTO;
 import com.cloudmall.product.domain.po.ProductMetricControlPO;
 import com.cloudmall.product.domain.po.ProductOnlineStatPO;
 import com.cloudmall.product.mapper.ProductMetricMapper;
-import com.cloudmall.product.service.ProductMetricService;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
 import com.cloudmall.product.util.ProductMetricEvents;
 import java.sql.SQLException;
 import java.time.LocalDateTime;

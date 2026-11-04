@@ -17,8 +17,8 @@ import com.cloudmall.product.controller.ProductController;
 import com.cloudmall.product.domain.po.ProductSearchHit;
 import com.cloudmall.product.domain.po.ProductSearchPage;
 import com.cloudmall.product.mapper.ProductSqlMapper;
-import com.cloudmall.product.service.ProductIndexOutboxService;
-import com.cloudmall.product.service.ProductKeywordSearch;
+import com.cloudmall.product.service.impl.index.ProductIndexOutboxService;
+import com.cloudmall.product.service.impl.search.ElasticsearchProductKeywordSearch;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -36,7 +36,7 @@ class ProductKeywordSearchRoutingTest {
   @Test
   void esFailureDoesNotCallLegacyLike() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
-    ProductKeywordSearch search = mock(ProductKeywordSearch.class);
+    ElasticsearchProductKeywordSearch search = mock(ElasticsearchProductKeywordSearch.class);
     ProductController service = service(mapper, search);
     when(search.search(eq("旅行箱"), eq(null), eq(1), eq(0), eq(20), eq(null)))
         .thenThrow(new IllegalStateException("ES unavailable"));
@@ -54,7 +54,7 @@ class ProductKeywordSearchRoutingTest {
   @Test
   void matchingPageUsesMysqlFactsWithoutLike() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
-    ProductKeywordSearch search = mock(ProductKeywordSearch.class);
+    ElasticsearchProductKeywordSearch search = mock(ElasticsearchProductKeywordSearch.class);
     ProductController service = service(mapper, search);
     LocalDateTime updatedAt = LocalDateTime.of(2026, 10, 4, 8, 30);
     long epochMillis = updatedAt.atZone(ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
@@ -101,7 +101,7 @@ class ProductKeywordSearchRoutingTest {
   @Test
   void staleIndexPageIsRejectedAfterBoundedRetry() throws Exception {
     ProductSqlMapper mapper = mock(ProductSqlMapper.class);
-    ProductKeywordSearch search = mock(ProductKeywordSearch.class);
+    ElasticsearchProductKeywordSearch search = mock(ElasticsearchProductKeywordSearch.class);
     ProductController service = service(mapper, search);
     when(search.search("旅行箱", null, 1, 0, 20, null))
         .thenReturn(
@@ -120,7 +120,8 @@ class ProductKeywordSearchRoutingTest {
   }
 
   /** 构造搜索开关开启的服务实例。 */
-  private static ProductController service(ProductSqlMapper mapper, ProductKeywordSearch search) {
+  private static ProductController service(
+      ProductSqlMapper mapper, ElasticsearchProductKeywordSearch search) {
     ProductController service =
         ProductTestServices.controller(
             mapper,

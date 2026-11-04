@@ -27,7 +27,7 @@ import javax.sql.DataSource;
 /**
  * Standalone bounded driver qualification. It never starts containers, Spring, or workload clients.
  */
-public final class Cm21JdbcAnchorQualificationIT {
+public final class JdbcTransactionAnchorQualificationIT {
   /** Serialization is local only; the disabled entry point never creates a JDBC connection. */
   private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -57,7 +57,7 @@ public final class Cm21JdbcAnchorQualificationIT {
   private static final String MYSQL_IMAGE =
       "sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b";
 
-  private Cm21JdbcAnchorQualificationIT() {}
+  private JdbcTransactionAnchorQualificationIT() {}
 
   /**
    * Runs no JDBC action by default; only a checked, root-produced admission permits qualification.
@@ -231,10 +231,10 @@ public final class Cm21JdbcAnchorQualificationIT {
       record.put("afterDml", state(connection));
       record.put(
           "visibleBeforePre", visible(observer, ledger, table, marker, scenario + ".beforePre"));
-      List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
-      Cm21JdbcAnchorObserver.Context context = context(connection, admission, scenario);
+      List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
+      JdbcTransactionAnchorObserver.Context context = context(connection, admission, scenario);
       // The sink runs after the pre statement closes, and before the original commit.
-      Cm21JdbcAnchorObserver.ObservationSink sink =
+      JdbcTransactionAnchorObserver.ObservationSink sink =
           observation -> {
             observations.add(observation);
             if (observation.kind().equals("PRE")) {
@@ -249,7 +249,7 @@ public final class Cm21JdbcAnchorQualificationIT {
             }
           };
       ledger.reserve(scenario + ".commit", "COMMIT_API_AND_OPTIONAL_TWO_ANCHORS", enabled ? 3 : 1);
-      Cm21JdbcAnchorObserver.commit(connection, context, enabled, sink);
+      JdbcTransactionAnchorObserver.commit(connection, context, enabled, sink);
       record.put("observations", observations(observations));
       if (enabled && (!record.containsKey("visibleAfterPre") || !record.containsKey("afterPost"))) {
         throw new IllegalStateException("Required sink observation was not retained");
@@ -287,10 +287,10 @@ public final class Cm21JdbcAnchorQualificationIT {
       ledger.reserve(scenario + ".pre", "ANCHOR_SQL", 1);
       record.put(
           "pre",
-          Cm21JdbcAnchorObserver.readAnchor(
+          JdbcTransactionAnchorObserver.readAnchor(
               connection,
               context(connection, admission, scenario),
-              Cm21JdbcAnchorObserver.Side.PRE));
+              JdbcTransactionAnchorObserver.Side.PRE));
       record.put("afterPre", state(connection));
       record.put("visibleAfterPre", visible(observer, ledger, table, 3, scenario + ".afterPre"));
       tx(ledger, scenario + ".rollback", connection::rollback);
@@ -317,9 +317,9 @@ public final class Cm21JdbcAnchorQualificationIT {
     try (Connection connection = pool.getConnection()) {
       tx(ledger, scenario + ".setAutoCommitFalse", () -> connection.setAutoCommit(false));
       sql(connection, ledger, scenario + ".insert", "INSERT INTO " + table + " VALUES (4)");
-      List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
+      List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
       ledger.reserve(scenario + ".commit", "COMMIT_API_AND_TWO_ANCHORS", 3);
-      Cm21JdbcAnchorObserver.commit(
+      JdbcTransactionAnchorObserver.commit(
           connection,
           context(connection, admission, scenario),
           true,
@@ -348,9 +348,9 @@ public final class Cm21JdbcAnchorQualificationIT {
     try (Connection connection = pool.getConnection()) {
       tx(ledger, scenario + ".setAutoCommitFalse", () -> connection.setAutoCommit(false));
       record.put("beforePre", state(connection));
-      List<Cm21JdbcAnchorObserver.Observation> observations = new ArrayList<>();
+      List<JdbcTransactionAnchorObserver.Observation> observations = new ArrayList<>();
       ledger.reserve(scenario + ".commit", "COMMIT_API_AND_TWO_ANCHORS", 3);
-      Cm21JdbcAnchorObserver.commit(
+      JdbcTransactionAnchorObserver.commit(
           connection, context(connection, admission, scenario), true, observations::add);
       record.put("observations", observations(observations));
       record.put("afterPost", state(connection));
@@ -380,7 +380,7 @@ public final class Cm21JdbcAnchorQualificationIT {
       } else if (scenario.equals("PRE_ROLLBACK")) {
         requireCount(record.get("visibleAfterPre"), 0);
         requireCount(record.get("visibleAfterRollback"), 0);
-        if (!(record.get("pre") instanceof Cm21JdbcAnchorObserver.AnchorResult anchor)
+        if (!(record.get("pre") instanceof JdbcTransactionAnchorObserver.AnchorResult anchor)
             || !anchor.status().equals("VALID")) {
           throw new IllegalStateException("Rollback pre anchor UNKNOWN");
         }
@@ -415,14 +415,14 @@ public final class Cm21JdbcAnchorQualificationIT {
   }
 
   private static List<Map<String, Object>> observations(
-      List<Cm21JdbcAnchorObserver.Observation> observations) {
+      List<JdbcTransactionAnchorObserver.Observation> observations) {
     List<Map<String, Object>> output = new ArrayList<>();
-    for (Cm21JdbcAnchorObserver.Observation observation : observations) {
+    for (JdbcTransactionAnchorObserver.Observation observation : observations) {
       Map<String, Object> row = new LinkedHashMap<>();
       row.put("kind", observation.kind());
       row.put("context", observation.context());
       if (observation.anchor() != null) {
-        Cm21JdbcAnchorObserver.AnchorResult anchor = observation.anchor();
+        JdbcTransactionAnchorObserver.AnchorResult anchor = observation.anchor();
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("side", anchor.side());
         value.put("status", anchor.status());
@@ -443,14 +443,14 @@ public final class Cm21JdbcAnchorQualificationIT {
     return output;
   }
 
-  private static Cm21JdbcAnchorObserver.Context context(
+  private static JdbcTransactionAnchorObserver.Context context(
       Connection connection, Admission admission, String scenario) throws Exception {
     JdbcConnection driver = connection.unwrap(JdbcConnection.class);
     if (driver.getId() != admission.poolConnection) {
       throw new IllegalStateException("Target physical connection changed");
     }
     // The mapping was established by the earlier pool identity query, not guessed from driver ID.
-    return new Cm21JdbcAnchorObserver.Context(
+    return new JdbcTransactionAnchorObserver.Context(
         admission.owner(),
         scenario,
         "borrow-" + scenario,

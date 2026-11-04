@@ -1,8 +1,9 @@
-package com.cloudmall.product.service;
+package com.cloudmall.product.service.impl.metrics;
 
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.domain.po.ProductMetricProjectionOutboxPO;
-import com.cloudmall.product.service.impl.ElasticsearchProductIndexWriter;
+import com.cloudmall.product.service.impl.index.ElasticsearchProductIndexWriter;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;

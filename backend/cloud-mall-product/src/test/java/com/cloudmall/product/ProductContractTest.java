@@ -1,5 +1,6 @@
 package com.cloudmall.product;
 
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -139,8 +140,8 @@ class ProductContractTest {
 
   @Test
   void outboxWriteFailureIsPropagatedToTheTransactionalCaller() {
-    com.cloudmall.product.service.ProductIndexOutboxService outbox =
-        mock(com.cloudmall.product.service.ProductIndexOutboxService.class);
+    com.cloudmall.product.service.impl.index.ProductIndexOutboxService outbox =
+        mock(com.cloudmall.product.service.impl.index.ProductIndexOutboxService.class);
     IllegalStateException originalFailure = new IllegalStateException("database unavailable");
     org.mockito.Mockito.doThrow(originalFailure)
         .when(outbox)

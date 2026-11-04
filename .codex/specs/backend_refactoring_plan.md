@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart 和 Gateway 重构，最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart、Gateway 和 Product 重构，最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -442,8 +442,9 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Common | 契约与引用盘点完成，25 项回归通过 | 随依赖方实际需求推进 |
 | Cart | 三个切片验收通过 | 已具备逐模块重构样板 |
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
-| Product | 待开始 | 下一模块，先细化分类、商品、活动、索引与热度职责 |
-| User / Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
+| Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
+| User | 待开始 | 下一模块，先细化认证、资料、地址与资金职责 |
+| Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -512,7 +513,7 @@ ProductController 继承约900行的 ProductServiceImpl，空 ProductService 及
 | 商品行与附属数据装配 | service.impl.ProductCatalogReader、util.ProductValueCodec | 原Map查询投影、金额格式、SKU JSON、原SQL调用次序 |
 | 响应与内部上下文 | 独立CategoryVO/ProductVO/SkuVO/ProductParameterVO/SkuSummaryVO、ProductReadResultDTO、ProductOperatorDTO | VO与请求DTO分离，ID字符串注解与默认值逐字段复制，内部读结果携带可空指标requestId供Controller装配 |
 | 原静态辅助与活动快照 | util.ProductEventEnvelope、util.ProductIdentifiers、util.SeckillActivityStock，复用SeckillActivityPO和ProductDateTimes | 原追踪ID、事件字段、ID算法、活动原时间转换和剩余库存算法 |
-| 已有索引与指标实现 | service.impl.index、service.impl.metrics | 类名、Bean默认名、事务和消息注解、算法与指标契约，保留service中的检索/索引写入接口 |
+| 已有索引与指标实现 | service.impl.index、service.impl.metrics | 类名、Bean默认名、事务和消息注解、算法与指标契约，保留service中的业务契约与ProductIndexWriter接口 |
 | 测试辅助命名 | JdbcTransactionAnchorObserver、TransactionPhaseAnchorBridge及对应测试 | 替换当前Java引用和测试选择器，历史冻结runner与归档按原版本保存 |
 
 管理员上下文在Controller读取为ProductOperatorDTO，Service在原方法位置校验身份。分类与商品管理的Transactional入口仍在业务方法开始时建立代理事务。商品查询生成原指标requestId，ProductReadResultDTO只在Controller转换为统一ApiResponse，启用指标时响应ID与登记ID保持同一值。查询的可选指标/搜索依赖与开关在第一切片保持原注入/启动校验语义，避免改变LEGACY与ONLINE装配条件。
@@ -547,3 +548,32 @@ ProductController已改为组合调用四项Service契约，空ProductService与
 全量回归另暴露既有线程关闭夹具的时序竞争，原用例的任务可能已结束而不进入可中断等待。新增本例latch保持一个任务活动，在finally释放并确认退出，确保验证原中断等待分支。资源关闭实现未修改，该类3项回归通过，作为独立测试修正提交。
 
 批次关闭夹具的stopped信号曾早于真实模拟停止完成，并在并发回调中重新stub共享channel。修正为原子状态、完成回调后通知，同时补finally释放与有界join；原3秒完成断言保留。该类27项回归通过，测试逻辑独立于包导入变更提交，生产关闭逻辑保持原样。
+
+
+### Product 最终验收与回退点
+
+本模块已完成两项实现切片。核心职责提交为 `02464c3769f36b0d31b0aa4ac398e419606b38c1`，包归组与语义命名提交使用最终标签定位。原集中类拆为商品查询438行、商品管理165行、分类105行、活动184行以及独立事实装配/字段编解码能力，按职责定位调用链。
+
+17个生产实现及5个测试辅助类完成包移动或命名整理。索引实现位于service.impl.index，指标实现位于service.impl.metrics，ES检索实现位于service.impl.search。ProductKeywordSearch具体实现命名为ElasticsearchProductKeywordSearch并保留原Bean名。Cm21JdbcAnchorObserver、Cm21PhaseAnchorBridge、Cm21JdbcAnchorQualificationIT及对应单测已使用语义名称，当前源码引用同步完成。
+
+22个迁移类在应用已声明的包名、类名与引用替换后，执行词法序列逐一相同，注释和格式差异单独处理。该检查结合编译及正常入口回归确认迁移，不替代真实中间件验收。明细位于 grouping/moves.json 与 grouping/lexical-parity.json。
+
+扩大回归发现的三项历史测试问题已独立修正并提交，分别为 `10fd543c687b43a6e0f0c6686949104ff504df62` 的阶段拒绝码断言、`ec3f5e1cf4659679743ea6c2eb7255ab24ccfe0c` 的中断等待夹具、`8819f73f79cf4c5fa9ccfe3755b3a0ded4273ee1` 的批次停止通知时序。原运行门和生产关闭算法保持既有实现，原失败日志保留。
+
+最终执行60个测试类447项，Product全部单测361项及真实MySQL/MVC五项、Common25项、Gateway21项、Cart35项全部通过，失败、错误和跳过为零。覆盖十七个HTTP入口、DTO/VO JSON一致性、指标requestId关联、SQL/ES路由与窗口、商品事实和outbox事务回滚、活动状态/Redis边界，以及现有索引、指标、生命周期与观察辅助回归。
+
+Product打包通过，八个后端模块的生产和测试源码编译通过。JAR核验新实现存在，旧ProductService/集中实现和被移动的旧全限定名均缺失。50个旧class文件按已核查的精确类名清理，四个旧命名单测报告在校验归档后移出当前报告目录，历史cm21目录保留。Google Java Format 1.22.0已用于本次Java改动，大型既有测试仅格式化修改区和import，diff检查通过。
+
+本轮证据根为 `F:/Cloud-Mall/target/backend-refactor-20261104/product`，verification.json汇总447项结果，final/verified-regression.log为最终执行日志，final/package.log与final/all-modules-test-compile.log记录打包和八模块编译。真实ES/RabbitMQ端到端、原在线指标实库专用验收及历史性能runner未在本轮执行，相关结果不由单测替代。
+
+独立MySQL实验结束前核对已无本轮UUID数据库，容器inspect与日志已归档。项目cloud-mall-refactor-product-20261104的容器和网络已移除，命名卷cloud-mall-refactor-product-20261104_mysql_data按约定保留。
+
+模块通过点为 `refactor/product-complete-20261104`。原业务源码基线为 `refactor/product-baseline-20261104`。回退整个Product实现时，按最新包结构提交、核心拆分提交的倒序执行，独立测试修正可保留。源码回退后，先核对当前已删除/改名Java类型并只清理其对应target/classes与target/test-classes内的class和嵌套class，再编译与执行对应基线回归。Product的target包含历史实验证据，清理范围需精确到生成类，源码回退不代表中间件数据回退。文档冲突按最新回退记录与历史验证事实处理。
+
+```powershell
+$productGroupingCommit = git rev-parse 'refactor/product-complete-20261104^{commit}'
+git show --stat $productGroupingCommit 02464c3769f36b0d31b0aa4ac398e419606b38c1
+git revert --no-edit $productGroupingCommit 02464c3769f36b0d31b0aa4ac398e419606b38c1
+```
+
+核心调用链已逐行复盘。ProductController → 分类/查询/管理/活动Service → ProductSqlMapper及事实装配。商品写Service事务 → 同资源事实、SKU、参数、索引outbox。查询Service → 原SQL/ES验证与指标登记 → ProductReadResultDTO → Controller统一响应。活动Service → 原数据库状态写入 → Redis配额及元数据。索引和指标处理按原消费、投影与恢复契约在各自包中组织。下一模块为User。

@@ -12,7 +12,7 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.product.domain.vo.HotStatVO;
 import com.cloudmall.product.mapper.ProductHotStatMapper;
 import com.cloudmall.product.mapper.ProductIndexMapper;
-import com.cloudmall.product.service.ProductHotStatFreshnessAudit;
+import com.cloudmall.product.service.impl.metrics.ProductHotStatFreshnessAudit;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -29,8 +29,9 @@ class ProductHotStatSourceTest {
   /** 旧响应字段保留，并增加明确的历史目录来源。 */
   @Test
   void hotStatResponseExposesLegacySource() throws Exception {
-    JsonNode json = new ObjectMapper().valueToTree(
-        new HotStatVO(42L, 12L, 3L, "12.000000", "LEGACY_IMPORT", "hm-item.item"));
+    JsonNode json =
+        new ObjectMapper()
+            .valueToTree(new HotStatVO(42L, 12L, 3L, "12.000000", "LEGACY_IMPORT", "hm-item.item"));
 
     assertEquals(12L, json.path("viewCount").asLong());
     assertEquals("LEGACY_IMPORT", json.path("sourceType").asText());
@@ -52,23 +53,32 @@ class ProductHotStatSourceTest {
     when(elasticsearch.count(any(CountRequest.class), eq(RequestOptions.DEFAULT)))
         .thenReturn(allDocuments, markedDocuments, matchingLegacy);
     when(indexMapper.countIndexSources()).thenReturn(2L);
-    when(hotStatMapper.summarizeSources()).thenReturn(Map.of(
-        "total_count", 2L, "legacy_count", 2L, "unknown_count", 0L,
-        "latest_legacy_update", LocalDateTime.now().minusDays(2)));
+    when(hotStatMapper.summarizeSources())
+        .thenReturn(
+            Map.of(
+                "total_count",
+                2L,
+                "legacy_count",
+                2L,
+                "unknown_count",
+                0L,
+                "latest_legacy_update",
+                LocalDateTime.now().minusDays(2)));
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
-    ProductHotStatFreshnessAudit audit = new ProductHotStatFreshnessAudit(
-        hotStatMapper, indexMapper, elasticsearch, registry, "cloudmall_product");
+    ProductHotStatFreshnessAudit audit =
+        new ProductHotStatFreshnessAudit(
+            hotStatMapper, indexMapper, elasticsearch, registry, "cloudmall_product");
 
     audit.audit();
 
-    assertEquals(1.0, registry.get("cloudmall.product.hot_stat.index_missing_sources")
-        .gauge().value());
-    assertEquals(1.0, registry.get("cloudmall.product.hot_stat.inconsistent_legacy_sources")
-        .gauge().value());
-    assertEquals(1.0, registry.get("cloudmall.product.hot_stat.audit_healthy")
-        .gauge().value());
-    assertTrue(registry.get("cloudmall.product.hot_stat.latest_age_seconds")
-        .gauge().value() > 24 * 3600);
+    assertEquals(
+        1.0, registry.get("cloudmall.product.hot_stat.index_missing_sources").gauge().value());
+    assertEquals(
+        1.0,
+        registry.get("cloudmall.product.hot_stat.inconsistent_legacy_sources").gauge().value());
+    assertEquals(1.0, registry.get("cloudmall.product.hot_stat.audit_healthy").gauge().value());
+    assertTrue(
+        registry.get("cloudmall.product.hot_stat.latest_age_seconds").gauge().value() > 24 * 3600);
     verify(hotStatMapper).summarizeSources();
     verify(indexMapper).countIndexSources();
     verifyNoMoreInteractions(hotStatMapper, indexMapper);

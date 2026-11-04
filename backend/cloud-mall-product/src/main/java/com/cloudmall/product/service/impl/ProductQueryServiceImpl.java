@@ -10,9 +10,9 @@ import com.cloudmall.product.domain.vo.HotStatVO;
 import com.cloudmall.product.domain.vo.ProductVO;
 import com.cloudmall.product.domain.vo.SkuSummaryVO;
 import com.cloudmall.product.mapper.ProductSqlMapper;
-import com.cloudmall.product.service.ProductKeywordSearch;
-import com.cloudmall.product.service.ProductMetricService;
 import com.cloudmall.product.service.ProductQueryService;
+import com.cloudmall.product.service.impl.metrics.ProductMetricService;
+import com.cloudmall.product.service.impl.search.ElasticsearchProductKeywordSearch;
 import com.cloudmall.product.util.ProductDateTimes;
 import com.cloudmall.product.util.ProductValueCodec;
 import java.math.BigDecimal;
@@ -73,7 +73,7 @@ public class ProductQueryServiceImpl implements ProductQueryService {
 
   /** 可选的远端关键词查询入口。 */
   @Autowired(required = false)
-  private ProductKeywordSearch productKeywordSearch;
+  private ElasticsearchProductKeywordSearch productKeywordSearch;
 
   /** 可选的短事务管理器，ONLINE模式在启动时校验必需。 */
   @Autowired(required = false)
@@ -199,7 +199,7 @@ public class ProductQueryServiceImpl implements ProductQueryService {
     long metricDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
     boolean online = onlineRank(sort);
     for (int attempt = 0; attempt < 2; attempt++) {
-      com.cloudmall.product.service.ProductMetricService.Cut cut = null;
+      com.cloudmall.product.service.impl.metrics.ProductMetricService.Cut cut = null;
       if (online) {
         if (System.nanoTime() >= metricDeadline) break;
         try {
@@ -247,7 +247,7 @@ public class ProductQueryServiceImpl implements ProductQueryService {
         continue;
       }
       if (System.nanoTime() >= metricDeadline || !cut.indexUuid().equals(actualUuid)) continue;
-      final com.cloudmall.product.service.ProductMetricService.Cut acceptedCut = cut;
+      final com.cloudmall.product.service.impl.metrics.ProductMetricService.Cut acceptedCut = cut;
       PageResult<ProductVO> admitted;
       try {
         admitted =

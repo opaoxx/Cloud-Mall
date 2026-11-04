@@ -1,4 +1,4 @@
-package com.cloudmall.product.service;
+package com.cloudmall.product.service.impl.metrics;
 
 import com.cloudmall.product.domain.dto.ProductMetricApplySnapshotDTO;
 import com.cloudmall.product.domain.dto.ProductMetricBatchApplyResultDTO;
@@ -8,6 +8,7 @@ import com.cloudmall.product.domain.dto.ProductMetricInitialApplySnapshotDTO;
 import com.cloudmall.product.domain.po.*;
 import com.cloudmall.product.domain.vo.OnlineMetricVO;
 import com.cloudmall.product.mapper.ProductMetricMapper;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
 import com.cloudmall.product.util.ProductMetricEvents;
 import com.cloudmall.product.util.ProductMetricEvents.InvalidEvent;
 import java.math.BigDecimal;

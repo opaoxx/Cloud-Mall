@@ -11,7 +11,7 @@ import java.util.Set;
 import java.util.function.LongSupplier;
 
 /** Default-off test bridge; fake readiness never authorizes database observation or freezing. */
-final class Cm21PhaseAnchorBridge {
+final class TransactionPhaseAnchorBridge {
   /** Fixed admission count, interval and shared deadline inherited from the offline contract. */
   private static final int COHORT_SIZE = 8;
 
@@ -77,7 +77,7 @@ final class Cm21PhaseAnchorBridge {
     Object invoke() throws Throwable;
   }
 
-  private Cm21PhaseAnchorBridge(
+  private TransactionPhaseAnchorBridge(
       LongSupplier clock, AnchorCallback callback, Map<Long, Identity> identities) {
     this.clock = clock;
     this.callback = callback;
@@ -85,8 +85,8 @@ final class Cm21PhaseAnchorBridge {
   }
 
   /** Disabled construction does not read environment, clock, identity or callback state. */
-  static Cm21PhaseAnchorBridge disabled() {
-    return new Cm21PhaseAnchorBridge(null, null, null);
+  static TransactionPhaseAnchorBridge disabled() {
+    return new TransactionPhaseAnchorBridge(null, null, null);
   }
 
   /** Rejects any attempted live enablement before the Pipeline constructor creates resources. */
@@ -97,12 +97,12 @@ final class Cm21PhaseAnchorBridge {
   }
 
   /** Explicit same-package fake seam; no production-style constructor invokes this factory. */
-  static Cm21PhaseAnchorBridge fakeOnly(
+  static TransactionPhaseAnchorBridge fakeOnly(
       LongSupplier clock, AnchorCallback callback, Map<Long, Identity> identities) {
     if (clock == null || callback == null || identities == null) {
       throw new IllegalArgumentException("CM21_FAKE_DEPENDENCIES_REQUIRED");
     }
-    return new Cm21PhaseAnchorBridge(clock, callback, Map.copyOf(identities));
+    return new TransactionPhaseAnchorBridge(clock, callback, Map.copyOf(identities));
   }
 
   /** Distinguishes explicit fake tests without inspecting dependencies on the disabled path. */

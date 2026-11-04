@@ -4,10 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.product.domain.po.ProductIndexDocument;
-import com.cloudmall.product.service.ProductIndexConsumer;
-import com.cloudmall.product.service.ProductIndexDocumentLoader;
 import com.cloudmall.product.service.ProductIndexWriter;
-import com.cloudmall.product.service.ProductIndexConsumptionService;
+import com.cloudmall.product.service.impl.index.ProductIndexConsumer;
+import com.cloudmall.product.service.impl.index.ProductIndexConsumptionService;
+import com.cloudmall.product.service.impl.index.ProductIndexDocumentLoader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.Map;
@@ -24,10 +24,12 @@ class ProductIndexConsumerTest {
   /** 执行 mock 相关操作。 */
   private final ProductIndexWriter writer = mock(ProductIndexWriter.class);
 
-  private final ProductIndexConsumptionService consumptionService = mock(ProductIndexConsumptionService.class);
+  private final ProductIndexConsumptionService consumptionService =
+      mock(ProductIndexConsumptionService.class);
 
   /** 执行 ProductIndexConsumer 相关操作。 */
-  private final ProductIndexConsumer consumer = new ProductIndexConsumer(mapper, loader, writer, consumptionService);
+  private final ProductIndexConsumer consumer =
+      new ProductIndexConsumer(mapper, loader, writer, consumptionService);
 
   @Test
   void changedEventReadsMySqlAndUpsertsDeterministicDocument() throws Exception {
