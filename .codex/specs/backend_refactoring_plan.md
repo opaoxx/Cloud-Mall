@@ -930,3 +930,36 @@ git revert refactor/stock-seata-complete-20261104
 ```
 
 回退同时恢复原类型名、原切面排除和原测试名。逆补丁使用临时index验证能够恢复父提交，真实工作树和index不回退；实际演练时先按精确清单移除当前新类型及新增测试夹具对应的class再编译，避免旧Maven产物产生同名Bean。不得清空带历史实验数据的target，不使用reset --hard。该标签只撤销本Stock切片，不撤销已完成的User等模块，不回退运行数据；后续若提交依赖此切片，需要按依赖顺序逆序撤销。
+
+## 20. Stock 第二切片：主业务职责与HTTP继承解耦
+
+### 20.1 范围与方法归属
+
+基线为 `f50c6734`，原Common25/Stock191单测已通过。主Agent单独评审实施。本切片删除空StockService及混合StockServiceImpl，将StockController改为构造器注入三个实际业务接口，原六个HTTP路径、绑定required属性不变。为控制Java调用方与JSON同时迁移的范围，本切片暂保留原ApiResponse返回契约和Map字段形状；后续单独完成响应VO/包装移回Controller，这不是最终分层例外。
+
+| 新职责 | 原方法与依赖 |
+| --- | --- |
+| StockQueryService / StockQueryServiceImpl | get/quantity及reservation入口；Redis数量投影、StockSqlMapper、共享StockReservationReader |
+| StockReservationService / StockReservationServiceImpl | reserve、confirm/rollback双重载、validateActionKey、requireNoUnsettledSeckillFact、settleNormalLine、stockSnapshot、clearLegacyReservationAfterCommit、flow、merge、validate、validateSalesMetrics；保留claim、结算与销售outbox真实代理 |
+| SeckillReservationService / SeckillReservationServiceImpl | seckill、seckillAfterSentinel、redisOperation、checkedSeckillLua、checkedOrderMarker、payloadMatchesOrder、redisUnavailable、markSeckillRejected、accepted、acceptedOrRecovering、recoveryRequired、acceptAfterLua、toSeckillPayload、epoch；Clock和Lua仅此职责持有 |
+| StockReservationReader | reservationResult、normalReservationProof、requestSnapshotMatches、exactReservationNumber、unknownReservationProof、itemsFromSnapshot、alreadyReserved、reservationProofUnavailable；不新增事务或独立读切面 |
+| StockReservationSnapshotCodec | 原toJson和sha256，writer与reader共享同一ObjectMapper序列化与hash规则 |
+
+原now在写/秒杀实现内保持同一+08:00表达式；仅删除无调用的number/id/recordSeckillPending/markSeckillAccepted及未使用RabbitTemplate依赖。短变量、占位注释按真实含义修正，算法与SQL不改。新增实现使用构造器与final依赖，允许历史直构造测试显式传入null的可选settlement/sales依赖；Spring生产装配仍要求原必需依赖。
+
+### 20.2 冻结的执行次序与代理
+
+- Controller仅秒杀入口先调用AuthContext.requireUserId，再将明确long身份传入Service。与原方法首行鉴权相同；其他五入口不新增身份限制，Spring请求绑定仍先执行。
+- reserve保留noRollbackFor(StockReservationRejectedException)，独立REQUIRES_NEW claim与整笔升序锁定、条件扣减、流水、cache-repair、状态更新次序不变。confirm/rollback两重载保留@Transactional；幂等动作键验证、秒杀优先路由和普通fallback顺序不变。
+- StockDependencyAspect事务入口继续包住真实Service代理的begin/commit/rollback；只读切面从旧StockServiceImpl.reservation移至StockQueryServiceImpl.reservation。共享Reader本身没有新切面，reserve内部读继续处于原事务与保护Entry中。
+- GET仍非RR且不写库；数量缓存命中不受MySQL读熔断阻断，缓存失败沿原Mapper回退。原快照严格解析使用ObjectMapper副本，重放缺证503、UNKNOWN和null候选语义不变。
+- 秒杀入口不新增外层事务：鉴权→参数/归属→Sentinel→指纹→单次时钟→持久claim→Redis Lua→独立accept/outbox提交。固定订单号、eventId、requestHash、Redis Key、Lua文本、失败后marker保留与未知受理恢复均不变。
+- 原sales-metrics.enabled与PostConstruct实际代理校验保留在普通写实现；普通/秒杀结算与销售outbox的同连接提交或回滚必须实库验证。旧StockController不会继续承载事务或注入Mapper。
+
+### 20.3 验证与提交
+
+先提交本节并打 `refactor/stock-core-baseline-20261104`，再按方法清单迁移。现有单测保留业务断言，只迁移被测对象/装配；真实MySQL/MVC、Pay读取Stock的反射夹具随新构造器同步，冻结历史runner不改。新增组合Controller绑定/鉴权优先级及真实Spring代理测试，并验证普通写事务、库存不足持久REJECTED、销售outbox原子性、提交后Redis清理与共享读取同连接。
+
+独立Compose项目 `cloud-mall-refactor-stock-core-20261104`，MySQL19933/Redis19934，新卷，候选网段10.254.246.0/24；启动前检查冲突，root/root。按原schema/迁移准备空源表，各IT只写自己的UUID schema。显式运行Stock全部单测及适用MySqlIT、PayTccStockEvidenceMySqlIT；新增真实Redis检查不借用默认DB。归档后down本次容器/网络，保留卷。完整商城、TC/RM恢复和性能实验不在本轮。
+
+门槛为业务回归、路由/Feign契约、执行词法对照、Stock打包、八模块test-compile、Google Java Format与git diff --check。只清理精确旧class，保留target历史工件。证据写入 `target/backend-refactor-20261104/stock-core/`；源码按可回退阶段提交，并以临时index验证逆补丁。第一切片Seata命名保留，本轮结束仍须继续响应VO及缓存/恢复归组。
