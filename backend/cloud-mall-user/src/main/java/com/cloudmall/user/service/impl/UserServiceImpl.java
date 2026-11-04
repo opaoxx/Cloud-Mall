@@ -1128,7 +1128,7 @@ public class UserServiceImpl implements UserService {
     // 3. 返回更新后的地址视图。
     Long userId = AuthContext.requireUserId();
     UserAddressPO address = toAddress(id, userId, request);
-    if (userAddressMapper.updateById(address) == 0) {
+    if (userAddressMapper.updateOwnedAddress(address) == 0) {
       throw new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404);
     }
     if (request.isDefault) {

@@ -83,7 +83,7 @@ class UserGeneratedIdentifierTest {
               row.id = GENERATED_ID;
               return 1;
             });
-    when(addresses.updateById(any(UserAddressPO.class)))
+    when(addresses.updateOwnedAddress(any(UserAddressPO.class)))
         .thenAnswer(
             invocation -> {
               UserAddressPO row = invocation.getArgument(0);

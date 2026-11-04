@@ -253,6 +253,39 @@ class UserGeneratedIdentifierMySqlIT {
             + " and JSON numeric PASS");
   }
 
+  /** 地址更新必须在同一SQL中核对归属，拒绝时不改他人地址或调用者默认地址。 */
+  @Test
+  void addressUpdateCannotTransferAnotherUsersAddress() throws Exception {
+    for (String line : Files.readAllLines(Path.of("..", "database", "schema.sql"))) {
+      if (line.startsWith("CREATE TABLE IF NOT EXISTS mall_user ")
+          || line.startsWith("CREATE TABLE IF NOT EXISTS user_address ")) fixture.execute(line);
+    }
+    UserServiceImpl service = service(mapperSession());
+    AddressRequestDTO request = addressRequest();
+    request.isDefault = true;
+    AuthContext.set(7L, "USER");
+    UserAddressVO original = (UserAddressVO) service.addAddress(request).data;
+    AuthContext.set(8L, "USER");
+    UserAddressVO callersDefault = (UserAddressVO) service.addAddress(request).data;
+    List<Map<String, Object>> before =
+        fixture.queryForList("SELECT * FROM user_address ORDER BY id");
+
+    BizException forbidden =
+        assertThrows(BizException.class, () -> service.updateAddress(original.id, request));
+    assertEquals(404, forbidden.getHttpStatus());
+    assertEquals(com.cloudmall.common.error.ErrorCodes.NOT_FOUND, forbidden.getCode());
+    assertEquals(before, fixture.queryForList("SELECT * FROM user_address ORDER BY id"));
+    assertTrue(((UserAddressVO) service.updateAddress(callersDefault.id, request).data).isDefault);
+
+    AuthContext.set(7L, "USER");
+    assertEquals(
+        original.id, ((UserAddressVO) service.updateAddress(original.id, request).data).id);
+    assertEquals(
+        7L,
+        fixture.queryForObject(
+            "SELECT user_id FROM user_address WHERE id=?", Long.class, original.id));
+  }
+
   /** 新库DDL直接支持生成键；无admin时自动分配，有admin时不创建第二条。 */
   @Test
   void newSchemaAndBootstrapUseGeneratedKeys() throws Exception {
