@@ -47,6 +47,7 @@ import org.springframework.aop.support.AopUtils;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -117,6 +118,7 @@ class UserAccountRefactoringIT {
     }
     context = new AnnotationConfigWebApplicationContext();
     context.setServletContext(new MockServletContext());
+    context.getEnvironment().setActiveProfiles("user-account-refactor-it");
     context.register(
         Application.class,
         UserController.class,
@@ -399,6 +401,7 @@ class UserAccountRefactoringIT {
 
   /** 使用生产初始化链、服务、Mapper、拦截器和异常映射，不启动Nacos或Seata。 */
   @Configuration
+  @Profile("user-account-refactor-it")
   @EnableWebMvc
   @EnableTransactionManagement(proxyTargetClass = true)
   @MapperScan("com.cloudmall.user.mapper")
