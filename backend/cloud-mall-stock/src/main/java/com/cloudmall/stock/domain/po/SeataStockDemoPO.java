@@ -8,7 +8,7 @@ import java.time.LocalDateTime;
 
 /** CM-18 Stock 独立演练表持久化对象。 */
 @TableName("seata_cm18_stock_demo")
-public class Cm18SeataStockDemoPO {
+public class SeataStockDemoPO {
   /** 演练请求主键。 */
   @TableId(value = "tx_id", type = IdType.INPUT)
   private String txId;

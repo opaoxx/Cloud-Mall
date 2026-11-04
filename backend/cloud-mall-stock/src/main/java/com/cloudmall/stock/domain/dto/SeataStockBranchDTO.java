@@ -1,7 +1,7 @@
 package com.cloudmall.stock.domain.dto;
 
 /** CM-18 受控 Seata 分支请求。 */
-public class Cm18SeataBranchDTO {
+public class SeataStockBranchDTO {
   /** 仅用于演练表幂等的受控事务标识。 */
   private String txId;
 

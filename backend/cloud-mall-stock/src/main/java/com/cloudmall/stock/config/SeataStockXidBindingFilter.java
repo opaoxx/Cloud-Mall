@@ -14,11 +14,11 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /** 只为 CM-18 端点安全绑定测试 XID，离开请求后始终解除本地绑定。 */
-@Component
+@Component("cm18SeataXidBindingFilter")
 @Profile("!prod")
 @ConditionalOnProperty(name = "cloudmall.seata.cm18.enabled", havingValue = "true")
 @Order(Ordered.HIGHEST_PRECEDENCE + 20)
-public class Cm18SeataXidBindingFilter extends OncePerRequestFilter {
+public class SeataStockXidBindingFilter extends OncePerRequestFilter {
   /** 仅允许演练接口绑定来自 Feign 的 Seata XID。 */
   private static final String PATH = "/api/internal/cm18/seata/demo/branch";
 

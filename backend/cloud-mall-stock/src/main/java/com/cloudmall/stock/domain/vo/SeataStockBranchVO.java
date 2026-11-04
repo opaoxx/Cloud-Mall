@@ -1,19 +1,21 @@
 package com.cloudmall.stock.domain.vo;
 
 /** CM-18 Stock 分支结果。 */
-public class Cm18SeataBranchVO {
+public class SeataStockBranchVO {
   /** 演练请求标识。 */
   private String txId;
+
   /** 不暴露原始 XID 的不可逆摘要。 */
   private String xid;
+
   /** 已写入本地分支时为 WRITTEN。 */
   private String status;
 
   /** 初始化分支响应。 */
-  public Cm18SeataBranchVO() {}
+  public SeataStockBranchVO() {}
 
   /** 初始化已写入的分支响应。 */
-  public Cm18SeataBranchVO(String txId, String xid, String status) {
+  public SeataStockBranchVO(String txId, String xid, String status) {
     this.txId = txId;
     this.xid = xid;
     this.status = status;

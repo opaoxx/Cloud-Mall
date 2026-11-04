@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，最新验证与回退信息见文末实施记录。下一模块为Stock。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，Stock演练命名首切片已完成，下一步为Stock主业务拆分；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -444,7 +444,8 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
-| Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
+| Stock | 进行中 | Seata演练命名首切片完成，主业务拆分待实施，见第19节 |
+| Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -899,3 +900,33 @@ git revert --no-edit $userTccCommit
 全Stock单测、相关Order演练测试、Stock打包与八模块test-compile为本切片门槛。Google Java Format与git diff --check通过；只清理目标目录内旧类名对应的class文件，保留历史实验数据。源码与新增测试、方案按阶段提交，建立完成标签；用临时Git index验证逆补丁回到父提交，不修改真实工作树。Git回退不覆盖数据库、Redis或忽略的证据目录。
 
 证据写入 `target/backend-refactor-20261104/stock-seata/`。本节验收只表示Stock演练命名切片完成，Stock整体及普通业务拆分仍待后续任务。
+
+### 19.5 首切片验收与调用链复盘
+
+11个生产类型及原演练测试已按清单改名；两个实现进入 `service.impl.seata`，新增包说明。六个原Bean名显式保留，其中Mapper名称由真实MyBatis扫描验证，SQL statement namespace使用新类名，表名仍为 `seata_cm18_stock_demo`。配置工厂方法改为语义名称，通过 `@Bean` 保留运行身份。演练包从普通库存事务切面明确排除，原三项Stock完整事务begin/commit/rollback保护测试继续通过。
+
+核心链：原HTTP路径 → `SeataStockXidBindingFilter`校验并按需绑定XID → `SeataStockDemoController`核对Header/事务号 → `SeataStockDemoOrchestrator` → 独立代理的 `SeataStockDemoService.writeBranch` → `SeataStockDemoMapper`写原演练表 → 本地分支提交 → 编排暂停/受控故障 → Filter清理自身绑定。已有相同XID保留，冲突XID拒绝且不改已有上下文。没有给编排添加事务，没有把Redis/MQ或真实库存表纳入演练。
+
+新增MVC夹具曾按Controller抛出的403期待HTTP403，实际公共异常处理器将ResponseStatusException归入500/COMMON_INTERNAL_ERROR；Filter的sendError仍为403/400。这是原Controller与Common处理器的既有行为，本切片保持并用精确断言记录，未修改全局异常映射。后续如统一该错误协议，应独立评审和提交，不能混入纯命名回退。
+
+最终52类227项测试全部通过，零失败、错误和跳过：
+
+- Common25；Stock191单测（原185+6项配置/HTTP/Filter/事务边界）；Stock真实MySQL2；Order演练契约9。
+- 实库验证原Bean名、namespace、主键/列/时间映射，以及实际INSERT返回后抛错的完整本地回滚。独立连接确认受控STOCK_AFTER_WRITE发生在已提交分支之后；这不表示已验证TC全局回滚。
+- 11/11生产类型排除package/import、显式Bean名及声明的标识符迁移后执行词法一致，原3项演练测试保留。
+- Stock打包和八模块生产/测试源码编译通过；Jar包含11个新类型，无旧类型或新增测试夹具。旧class精确检查无残留，没有清空target历史证据。
+- 使用Google Java Format 1.22.0并检查git diff；依赖、资源配置、SQL/DDL、Order/Pay生产文件未改。
+
+独立MySQL 8.0.46实验使用全新项目/卷，4次测试例资源均为独占UUID schema并已清理（专项2例、最终2例）。最终仅剩空源库及系统库；inspect、日志和数据库清单已归档，容器与网络已移除，保留卷 `cloud-mall-refactor-stock-seata-20261104_mysql_data`。默认中间件未变。证据索引为上述目录的 `verification.json`。
+
+本轮未启动真实TC、未重跑AT二阶段/RM崩溃恢复，也未执行商城完整链路或性能测试。Stock整体重构未完成，下一切片按19.1继续普通库存与秒杀入口职责拆分。
+
+### 19.6 Git回退点
+
+方案提交/基线为 `90087094`，标签 `refactor/stock-seata-baseline-20261104`；本切片验收点使用 `refactor/stock-seata-complete-20261104`。源码回退使用：
+
+```powershell
+git revert refactor/stock-seata-complete-20261104
+```
+
+回退同时恢复原类型名、原切面排除和原测试名。逆补丁使用临时index验证能够恢复父提交，真实工作树和index不回退；实际演练时先按精确清单移除当前新类型及新增测试夹具对应的class再编译，避免旧Maven产物产生同名Bean。不得清空带历史实验数据的target，不使用reset --hard。该标签只撤销本Stock切片，不撤销已完成的User等模块，不回退运行数据；后续若提交依赖此切片，需要按依赖顺序逆序撤销。

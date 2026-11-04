@@ -24,7 +24,7 @@ public class StockDependencyAspect {
   @Around(
       "execution(public * com.cloudmall.stock..*(..))"
           + " && @annotation(org.springframework.transaction.annotation.Transactional)"
-          + " && !within(com.cloudmall.stock.service.impl.Cm18*)")
+          + " && !within(com.cloudmall.stock.service.impl.seata..*)")
   public Object transaction(ProceedingJoinPoint invocation) throws Throwable {
     return StockDependencyGuard.execute(
         StockDependencyGuard.MYSQL_TRANSACTION, invocation::proceed);
