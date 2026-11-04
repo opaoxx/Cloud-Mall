@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
@@ -54,7 +55,7 @@ class CartQuantityMergeRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   @BeforeAll
   static void connect() {
@@ -85,7 +86,9 @@ class CartQuantityMergeRedisIT {
     ownerJson = mapper.writeValueAsString(owner);
     DefaultRedisScript<Long> claim =
         new DefaultRedisScript<>(
-            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600); return 1",
+            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end"
+                + " redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600);"
+                + " return 1",
             Long.class);
     boolean claimed = false;
     for (int attempt = 0; attempt < 10; attempt++) {
@@ -106,7 +109,7 @@ class CartQuantityMergeRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -115,7 +118,8 @@ class CartQuantityMergeRedisIT {
     if (ownedKey != null) {
       DefaultRedisScript<Long> cleanup =
           new DefaultRedisScript<>(
-              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return redis.call('DEL',KEYS[1])",
+              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return"
+                  + " redis.call('DEL',KEYS[1])",
               Long.class);
       assertEquals(1L, redis.execute(cleanup, List.of(ownedKey), OWNER_FIELD, ownerJson));
       assertFalse(Boolean.TRUE.equals(redis.hasKey(ownedKey)));
@@ -143,7 +147,7 @@ class CartQuantityMergeRedisIT {
       long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
       BizException failure = null;
       try {
-        service.add(request(values[1]));
+        controller.add(request(values[1]));
       } catch (BizException rejected) {
         failure = rejected;
       }
@@ -170,7 +174,7 @@ class CartQuantityMergeRedisIT {
       long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
       BizException failure = null;
       try {
-        service.add(request(5));
+        controller.add(request(5));
       } catch (BizException rejected) {
         failure = rejected;
       }
@@ -196,7 +200,7 @@ class CartQuantityMergeRedisIT {
             new int[] {Integer.MAX_VALUE - 1, 1},
             new int[] {1, Integer.MAX_VALUE - 1})) {
       seed(values[0]);
-      CartItemVO result = (CartItemVO) service.add(request(values[1])).data;
+      CartItemVO result = (CartItemVO) controller.add(request(values[1])).data;
       CartItemPO saved =
           mapper.readValue(String.valueOf(redis.opsForHash().get(ownedKey, "7")), CartItemPO.class);
       assertEquals((long) values[0] + values[1], result.quantity);
@@ -215,16 +219,17 @@ class CartQuantityMergeRedisIT {
   @Test
   void firstAddAndDirectPutStillAcceptTheExistingPositiveIntRange() {
     redis.opsForHash().delete(ownedKey, "7");
-    CartItemVO first = (CartItemVO) service.add(request(Integer.MAX_VALUE)).data;
+    CartItemVO first = (CartItemVO) controller.add(request(Integer.MAX_VALUE)).data;
     assertEquals(Integer.MAX_VALUE, first.quantity);
     assertTrue(first.checked);
     assertEquals(ZoneOffset.ofHours(8), OffsetDateTime.parse(first.addedAt).getOffset());
-    assertEquals(1, ((CartItemVO) service.update(7L, request(1)).data).quantity);
+    assertEquals(1, ((CartItemVO) controller.update(7L, request(1)).data).quantity);
     assertEquals(
         Integer.MAX_VALUE,
-        ((CartItemVO) service.update(7L, request(Integer.MAX_VALUE)).data).quantity);
+        ((CartItemVO) controller.update(7L, request(Integer.MAX_VALUE)).data).quantity);
     Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
-    BizException failure = assertThrows(BizException.class, () -> service.update(7L, request(0)));
+    BizException failure =
+        assertThrows(BizException.class, () -> controller.update(7L, request(0)));
     assertEquals(400, failure.getHttpStatus());
     assertEquals(before, redis.opsForHash().entries(ownedKey));
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));

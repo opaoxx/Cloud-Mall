@@ -3,9 +3,11 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
+import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.api.ApiResponse;
@@ -52,7 +54,7 @@ class CartProductIdentityRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -86,7 +88,9 @@ class CartProductIdentityRedisIT {
     ownerJson = mapper.writeValueAsString(owner);
     DefaultRedisScript<Long> claim =
         new DefaultRedisScript<>(
-            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600); return 1",
+            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end"
+                + " redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600);"
+                + " return 1",
             Long.class);
     boolean claimed = false;
     for (int attempt = 0; attempt < 10; attempt++) {
@@ -107,7 +111,7 @@ class CartProductIdentityRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -116,7 +120,8 @@ class CartProductIdentityRedisIT {
     if (ownedKey != null) {
       DefaultRedisScript<Long> cleanup =
           new DefaultRedisScript<>(
-              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return redis.call('DEL',KEYS[1])",
+              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return"
+                  + " redis.call('DEL',KEYS[1])",
               Long.class);
       assertEquals(1L, redis.execute(cleanup, List.of(ownedKey), OWNER_FIELD, ownerJson));
       assertFalse(Boolean.TRUE.equals(redis.hasKey(ownedKey)));
@@ -163,14 +168,14 @@ class CartProductIdentityRedisIT {
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())))
         .when(products)
         .getSku(7L);
-    CartItemVO added = (CartItemVO) service.add(request(1)).data;
+    CartItemVO added = (CartItemVO) controller.add(request(1)).data;
     assertEquals(3, added.quantity);
     assertEquals(99L, added.productId);
     assertEquals("current product", added.productName);
     assertEquals("12.30", added.unitPrice);
     assertFalse(added.checked);
     assertEquals("2026-10-08T12:00:00+08:00", added.addedAt);
-    List<?> listed = (List<?>) service.all().data;
+    List<?> listed = (List<?>) controller.all().data;
     CartItemVO refreshed =
         (CartItemVO)
             listed.stream()
@@ -179,10 +184,11 @@ class CartProductIdentityRedisIT {
                 .orElseThrow();
     assertEquals(3, refreshed.quantity);
     assertEquals("12.30", refreshed.unitPrice);
-    Map<?, ?> preview = (Map<?, ?>) service.preview(Map.of("skuIds", List.of(7L))).data;
-    assertEquals("36.90", preview.get("totalAmount"));
-    assertEquals("36.90", preview.get("payAmount"));
-    assertTrue(((List<?>) preview.get("invalidItems")).isEmpty());
+    CartSettlementPreviewVO preview =
+        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+    assertEquals("36.90", preview.totalAmount());
+    assertEquals("36.90", preview.payAmount());
+    assertTrue(((List<?>) preview.invalidItems()).isEmpty());
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
   }
 
@@ -196,7 +202,7 @@ class CartProductIdentityRedisIT {
       seed(2);
       Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
       doReturn(response).when(products).getSku(7L);
-      BizException failure = assertThrows(BizException.class, () -> service.add(request(1)));
+      BizException failure = assertThrows(BizException.class, () -> controller.add(request(1)));
       assertEquals(404, failure.getHttpStatus());
       assertEquals(ErrorCodes.NOT_FOUND, failure.getCode());
       assertEquals(before, redis.opsForHash().entries(ownedKey));
@@ -211,9 +217,9 @@ class CartProductIdentityRedisIT {
     BizException failure = null;
     try {
       switch (operation) {
-        case "new", "add" -> service.add(request(1));
-        case "all" -> service.all();
-        case "preview" -> service.preview(Map.of("skuIds", List.of(7L)));
+        case "new", "add" -> controller.add(request(1));
+        case "all" -> controller.all();
+        case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
         default -> throw new AssertionError(operation);
       }
     } catch (BizException rejected) {

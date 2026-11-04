@@ -10,6 +10,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
@@ -60,7 +61,10 @@ class CartItemCreationTest {
     request.unitPrice = "0.01";
 
     CartItemVO response =
-        (CartItemVO) new CartServiceImpl(redis, objectMapper, products).add(request).data;
+        (CartItemVO)
+            new CartController(new CartServiceImpl(redis, objectMapper, products))
+                .add(request)
+                .data;
 
     assertEquals(11L, response.productId);
     assertEquals("商品服务名称", response.productName);

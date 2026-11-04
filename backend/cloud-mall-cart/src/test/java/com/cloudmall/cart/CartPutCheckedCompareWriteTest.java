@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -117,7 +118,8 @@ class CartPutCheckedCompareWriteTest {
     final ProductClient products = mock(ProductClient.class);
 
     /** 实际业务更新编排。 */
-    final CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+    final CartController controller =
+        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");
@@ -127,11 +129,11 @@ class CartPutCheckedCompareWriteTest {
     }
 
     private com.cloudmall.common.api.ApiResponse<?> mutate(String operation) {
-      if ("checked".equals(operation)) return service.checked(7L, Map.of("checked", true));
+      if ("checked".equals(operation)) return controller.checked(7L, Map.of("checked", true));
       CartItemDTO request = new CartItemDTO();
       request.quantity = 7;
       request.checked = null;
-      return service.update(7L, request);
+      return controller.update(7L, request);
     }
   }
 }

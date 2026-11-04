@@ -3,9 +3,11 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
+import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.api.ApiResponse;
@@ -52,7 +54,7 @@ class CartPreviewQuantityRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -86,7 +88,9 @@ class CartPreviewQuantityRedisIT {
     ownerJson = mapper.writeValueAsString(owner);
     DefaultRedisScript<Long> claim =
         new DefaultRedisScript<>(
-            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600); return 1",
+            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end"
+                + " redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600);"
+                + " return 1",
             Long.class);
     boolean claimed = false;
     for (int attempt = 0; attempt < 10; attempt++) {
@@ -107,7 +111,7 @@ class CartPreviewQuantityRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -116,7 +120,8 @@ class CartPreviewQuantityRedisIT {
     if (ownedKey != null) {
       DefaultRedisScript<Long> cleanup =
           new DefaultRedisScript<>(
-              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return redis.call('DEL',KEYS[1])",
+              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return"
+                  + " redis.call('DEL',KEYS[1])",
               Long.class);
       assertEquals(1L, redis.execute(cleanup, List.of(ownedKey), OWNER_FIELD, ownerJson));
       assertFalse(Boolean.TRUE.equals(redis.hasKey(ownedKey)));
@@ -141,7 +146,8 @@ class CartPreviewQuantityRedisIT {
         long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
         BizException failure = null;
         try {
-          service.preview("explicit".equals(selection) ? Map.of("skuIds", List.of(7L)) : Map.of());
+          controller.preview(
+              "explicit".equals(selection) ? Map.of("skuIds", List.of(7L)) : Map.of());
         } catch (BizException rejected) {
           failure = rejected;
         }
@@ -177,7 +183,7 @@ class CartPreviewQuantityRedisIT {
     clearInvocations(products);
     BizException failure = null;
     try {
-      service.preview(Map.of("skuIds", List.of(7L, 8L)));
+      controller.preview(Map.of("skuIds", List.of(7L, 8L)));
     } catch (BizException rejected) {
       failure = rejected;
     }
@@ -201,36 +207,40 @@ class CartPreviewQuantityRedisIT {
     unselected.checked = false;
     redis.opsForHash().put(ownedKey, "8", mapper.writeValueAsString(unselected));
     Object originalBadRow = redis.opsForHash().get(ownedKey, "8");
-    Map<?, ?> explicit = (Map<?, ?>) service.preview(Map.of("skuIds", List.of(7L))).data;
-    assertEquals("24.60", explicit.get("totalAmount"));
-    Map<?, ?> defaultChecked = (Map<?, ?>) service.preview(Map.of()).data;
-    assertEquals("24.60", defaultChecked.get("payAmount"));
+    CartSettlementPreviewVO explicit =
+        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+    assertEquals("24.60", explicit.totalAmount());
+    CartSettlementPreviewVO defaultChecked =
+        (CartSettlementPreviewVO) controller.preview(Map.of()).data;
+    assertEquals("24.60", defaultChecked.payAmount());
     assertEquals(originalBadRow, redis.opsForHash().get(ownedKey, "8"));
     verify(products, never()).getSku(8L);
     CartItemDTO repair = request(3);
     repair.skuId = 8L;
-    assertEquals(3, ((CartItemVO) service.update(8L, repair).data).quantity);
+    assertEquals(3, ((CartItemVO) controller.update(8L, repair).data).quantity);
     doReturn(ApiResponse.ok(new ProductClient.SkuView(8L, 88L, "product8", "5.00", Map.of())))
         .when(products)
         .getSku(8L);
-    Map<?, ?> repaired = (Map<?, ?>) service.preview(Map.of("skuIds", List.of(8L))).data;
-    assertEquals("15.00", repaired.get("totalAmount"));
+    CartSettlementPreviewVO repaired =
+        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(8L))).data;
+    assertEquals("15.00", repaired.totalAmount());
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
   }
 
   @Test
   void maximumPositiveQuantityAndEmptyCheckedSetKeepExistingAmountStrings() throws Exception {
     prepare(Integer.MAX_VALUE, true);
-    Map<?, ?> maximum = (Map<?, ?>) service.preview(Map.of("skuIds", List.of(7L))).data;
-    assertEquals("26414048858.10", maximum.get("totalAmount"));
-    assertEquals("26414048858.10", maximum.get("payAmount"));
+    CartSettlementPreviewVO maximum =
+        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+    assertEquals("26414048858.10", maximum.totalAmount());
+    assertEquals("26414048858.10", maximum.payAmount());
     prepare(0, false);
     clearInvocations(products);
     Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
-    Map<?, ?> empty = (Map<?, ?>) service.preview(Map.of()).data;
-    assertEquals("0", empty.get("totalAmount"));
-    assertEquals("0", empty.get("payAmount"));
-    assertTrue(((List<?>) empty.get("items")).isEmpty());
+    CartSettlementPreviewVO empty = (CartSettlementPreviewVO) controller.preview(Map.of()).data;
+    assertEquals("0", empty.totalAmount());
+    assertEquals("0", empty.payAmount());
+    assertTrue(((List<?>) empty.items()).isEmpty());
     assertEquals(before, redis.opsForHash().entries(ownedKey));
     verifyNoInteractions(products);
   }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -59,7 +60,9 @@ class CartQuantityMergeTest {
       BizException failure =
           assertThrows(
               BizException.class,
-              () -> new CartServiceImpl(redis, new ObjectMapper(), products).add(request));
+              () ->
+                  new CartController(new CartServiceImpl(redis, new ObjectMapper(), products))
+                      .add(request));
       assertEquals(values[0] < 1 ? 500 : 400, failure.getHttpStatus());
       assertEquals(values[0] < 1 ? ErrorCodes.INTERNAL : ErrorCodes.INVALID, failure.getCode());
       verify(hashes).entries("cart:33");

@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -55,7 +56,7 @@ class CartCheckedCompareDeleteRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -112,7 +113,7 @@ class CartCheckedCompareDeleteRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -147,19 +148,20 @@ class CartCheckedCompareDeleteRedisIT {
           afterSnapshot(
               () -> {
                 switch (operation) {
-                  case "unchecked" -> service.checked(7L, Map.of("checked", false));
-                  case "update" -> service.update(7L, request(9));
-                  case "add" -> service.add(request(3));
+                  case "unchecked" -> controller.checked(7L, Map.of("checked", false));
+                  case "update" -> controller.update(7L, request(9));
+                  case "add" -> controller.add(request(3));
                   case "readd" -> {
-                    service.delete(7L);
-                    service.add(request(4));
+                    controller.delete(7L);
+                    controller.add(request(4));
                   }
                   default -> throw new AssertionError(operation);
                 }
                 latestJson.set(String.valueOf(redis.opsForHash().get(ownedKey, "7")));
                 latestTtl.set(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS));
               });
-      ApiResponse<?> response = new CartServiceImpl(observed, mapper, products).clearChecked();
+      ApiResponse<?> response =
+          new CartController(new CartServiceImpl(observed, mapper, products)).clearChecked();
       Object after = redis.opsForHash().get(ownedKey, "7");
       long afterTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
       checks.add(() -> assertEquals("0", response.code, operation));
@@ -185,11 +187,11 @@ class CartCheckedCompareDeleteRedisIT {
     redis.opsForHash().put(ownedKey, "8", unchecked);
     redis.expire(ownedKey, Duration.ofSeconds(120));
     long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
-    assertEquals("0", service.clearChecked().code);
+    assertEquals("0", controller.clearChecked().code);
     assertNull(redis.opsForHash().get(ownedKey, "7"));
     assertEquals(unchecked, redis.opsForHash().get(ownedKey, "8"));
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
-    assertNull(service.clearChecked().data);
+    assertNull(controller.clearChecked().data);
     assertEquals(unchecked, redis.opsForHash().get(ownedKey, "8"));
     assertTrue(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS) <= beforeTtl);
     verifyNoInteractions(products);
@@ -198,9 +200,10 @@ class CartCheckedCompareDeleteRedisIT {
   @Test
   void anAlreadyDeletedTargetIsANoOpWithoutRenewingTtl() throws Exception {
     seedChecked();
-    StringRedisTemplate observed = afterSnapshot(() -> service.delete(7L));
+    StringRedisTemplate observed = afterSnapshot(() -> controller.delete(7L));
     long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
-    assertNull(new CartServiceImpl(observed, mapper, products).clearChecked().data);
+    assertNull(
+        new CartController(new CartServiceImpl(observed, mapper, products)).clearChecked().data);
     assertNull(redis.opsForHash().get(ownedKey, "7"));
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
     assertTrue(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS) <= beforeTtl);
@@ -224,7 +227,8 @@ class CartCheckedCompareDeleteRedisIT {
     BizException failure =
         assertThrows(
             BizException.class,
-            () -> new CartServiceImpl(observed, mapper, products).clearChecked());
+            () ->
+                new CartController(new CartServiceImpl(observed, mapper, products)).clearChecked());
     assertEquals(500, failure.getHttpStatus());
     assertEquals(1, scripts.get());
     assertNull(redis.opsForHash().get(ownedKey, "7"));

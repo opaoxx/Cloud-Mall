@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -59,7 +60,8 @@ class CartHashIdentityTest {
         when(products.getSku(7L))
             .thenReturn(
                 ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "product", "12.30", Map.of())));
-        CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+        CartController controller =
+            new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
         CartItemDTO request = new CartItemDTO();
         request.skuId = 7L;
         request.quantity = 1;
@@ -68,12 +70,12 @@ class CartHashIdentityTest {
                 BizException.class,
                 () -> {
                   switch (operation) {
-                    case "add" -> service.add(request);
-                    case "update" -> service.update(7L, request);
-                    case "checked" -> service.checked(7L, Map.of("checked", false));
-                    case "all" -> service.all();
-                    case "preview" -> service.preview(Map.of("skuIds", List.of(7L, 8L)));
-                    case "clear" -> service.clearChecked();
+                    case "add" -> controller.add(request);
+                    case "update" -> controller.update(7L, request);
+                    case "checked" -> controller.checked(7L, Map.of("checked", false));
+                    case "all" -> controller.all();
+                    case "preview" -> controller.preview(Map.of("skuIds", List.of(7L, 8L)));
+                    case "clear" -> controller.clearChecked();
                     default -> throw new AssertionError(operation);
                   }
                 });

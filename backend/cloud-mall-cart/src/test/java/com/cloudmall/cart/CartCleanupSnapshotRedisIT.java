@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
@@ -52,7 +53,7 @@ class CartCleanupSnapshotRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -109,7 +110,7 @@ class CartCleanupSnapshotRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -142,17 +143,17 @@ class CartCleanupSnapshotRedisIT {
             + " \"addedAt\":\"2026-10-08T12:00:00+08:00\" } ";
     redis.opsForHash().put(ownedKey, "7", raw);
     long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
-    CartCleanupSnapshotDTO snapshot = service.cleanupSnapshot(7L).data;
+    CartCleanupSnapshotDTO snapshot = controller.cleanupSnapshot(7L).data;
     assertEquals(7L, snapshot.skuId());
     assertEquals(raw, snapshot.expectedJson());
     assertEquals(raw, redis.opsForHash().get(ownedKey, "7"));
-    assertNull(service.cleanupSnapshot(8L).data);
+    assertNull(controller.cleanupSnapshot(8L).data);
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
     assertTrue(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS) <= beforeTtl);
-    assertTrue(service.cleanupItem(7L, snapshot).data);
+    assertTrue(controller.cleanupItem(7L, snapshot).data);
     assertNull(redis.opsForHash().get(ownedKey, "7"));
-    assertFalse(service.cleanupItem(7L, snapshot).data);
-    assertNull(service.cleanupSnapshot(7L).data);
+    assertFalse(controller.cleanupItem(7L, snapshot).data);
+    assertNull(controller.cleanupSnapshot(7L).data);
     assertTrue(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS) <= beforeTtl);
     verifyNoInteractions(products);
   }
@@ -161,22 +162,22 @@ class CartCleanupSnapshotRedisIT {
   void changesAfterCaptureSurviveCleanupWithoutReconstructingTheProof() throws Exception {
     for (String change : List.of("unchecked", "quantity", "add", "metadata", "readd")) {
       seedChecked();
-      CartCleanupSnapshotDTO snapshot = service.cleanupSnapshot(7L).data;
+      CartCleanupSnapshotDTO snapshot = controller.cleanupSnapshot(7L).data;
       switch (change) {
-        case "unchecked" -> service.checked(7L, Map.of("checked", false));
-        case "quantity" -> service.update(7L, request(9));
-        case "add" -> service.add(request(3));
-        case "metadata" -> service.all();
+        case "unchecked" -> controller.checked(7L, Map.of("checked", false));
+        case "quantity" -> controller.update(7L, request(9));
+        case "add" -> controller.add(request(3));
+        case "metadata" -> controller.all();
         case "readd" -> {
-          service.delete(7L);
-          service.add(request(4));
+          controller.delete(7L);
+          controller.add(request(4));
         }
         default -> throw new AssertionError(change);
       }
       Object latest = redis.opsForHash().get(ownedKey, "7");
       assertNotEquals(snapshot.expectedJson(), latest, change);
       long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
-      assertFalse(service.cleanupItem(7L, snapshot).data, change);
+      assertFalse(controller.cleanupItem(7L, snapshot).data, change);
       assertEquals(latest, redis.opsForHash().get(ownedKey, "7"), change);
       assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
       assertTrue(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS) <= beforeTtl, change);
@@ -190,7 +191,7 @@ class CartCleanupSnapshotRedisIT {
     redis.opsForHash().put(ownedKey, "8", wrong);
     Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
     long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
-    BizException failure = assertThrows(BizException.class, () -> service.cleanupSnapshot(7L));
+    BizException failure = assertThrows(BizException.class, () -> controller.cleanupSnapshot(7L));
     assertEquals(500, failure.getHttpStatus());
     assertEquals(before, redis.opsForHash().entries(ownedKey));
     assertTrue(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS) <= beforeTtl);
@@ -200,7 +201,7 @@ class CartCleanupSnapshotRedisIT {
   @Test
   void anAppliedDeleteWithLostReplyIsNotRepeatedOrTurnedIntoASuccess() throws Exception {
     seedChecked();
-    CartCleanupSnapshotDTO snapshot = service.cleanupSnapshot(7L).data;
+    CartCleanupSnapshotDTO snapshot = controller.cleanupSnapshot(7L).data;
     StringRedisTemplate observed = spy(redis);
     AtomicInteger scripts = new AtomicInteger();
     doAnswer(
@@ -215,7 +216,9 @@ class CartCleanupSnapshotRedisIT {
     BizException failure =
         assertThrows(
             BizException.class,
-            () -> new CartServiceImpl(observed, mapper, products).cleanupItem(7L, snapshot));
+            () ->
+                new CartController(new CartServiceImpl(observed, mapper, products))
+                    .cleanupItem(7L, snapshot));
     assertEquals(500, failure.getHttpStatus());
     assertEquals(1, scripts.get());
     assertNull(redis.opsForHash().get(ownedKey, "7"));

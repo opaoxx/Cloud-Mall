@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.api.ApiResponse;
@@ -45,10 +46,11 @@ class CartPreviewQuantityTest {
       when(products.getSku(8L))
           .thenReturn(
               ApiResponse.ok(new ProductClient.SkuView(8L, 88L, "product8", "88.00", Map.of())));
-      CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+      CartController controller =
+          new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
       BizException failure =
           assertThrows(
-              BizException.class, () -> service.preview(Map.of("skuIds", List.of(7L, 8L))));
+              BizException.class, () -> controller.preview(Map.of("skuIds", List.of(7L, 8L))));
       assertEquals(500, failure.getHttpStatus());
       assertEquals(ErrorCodes.INTERNAL, failure.getCode());
       verifyNoInteractions(products);

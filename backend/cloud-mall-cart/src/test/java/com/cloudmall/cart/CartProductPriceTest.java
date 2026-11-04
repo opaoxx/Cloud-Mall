@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -43,7 +44,8 @@ class CartProductPriceTest {
         when(products.getSku(7L))
             .thenReturn(
                 ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "product", price, Map.of())));
-        CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+        CartController controller =
+            new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
         CartItemDTO request = new CartItemDTO();
         request.skuId = 7L;
         request.quantity = 1;
@@ -52,9 +54,9 @@ class CartProductPriceTest {
                 BizException.class,
                 () -> {
                   switch (operation) {
-                    case "add" -> service.add(request);
-                    case "all" -> service.all();
-                    case "preview" -> service.preview(Map.of("skuIds", List.of(7L)));
+                    case "add" -> controller.add(request);
+                    case "all" -> controller.all();
+                    case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
                     default -> throw new AssertionError(operation);
                   }
                 });

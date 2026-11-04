@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
@@ -59,7 +60,7 @@ class CartPutCheckedConcurrencyRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -116,7 +117,7 @@ class CartPutCheckedConcurrencyRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -190,7 +191,7 @@ class CartPutCheckedConcurrencyRedisIT {
       long beforeTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
       BizException failure = null;
       try {
-        CartServiceImpl target = new CartServiceImpl(observed, mapper, products);
+        CartController target = new CartController(new CartServiceImpl(observed, mapper, products));
         if ("update".equals(operation)) target.update(7L, request(4));
         else target.checked(7L, Map.of("checked", true));
       } catch (BizException rejected) {
@@ -219,11 +220,11 @@ class CartPutCheckedConcurrencyRedisIT {
     redis.opsForHash().put(ownedKey, "7", raw);
     CartItemDTO change = request(7);
     change.checked = null;
-    assertFalse(((CartItemVO) service.update(7L, change).data).checked);
-    assertTrue(((CartItemVO) service.checked(7L, Map.of("checked", true)).data).checked);
+    assertFalse(((CartItemVO) controller.update(7L, change).data).checked);
+    assertTrue(((CartItemVO) controller.checked(7L, Map.of("checked", true)).data).checked);
     change.quantity = 4;
     change.checked = false;
-    assertFalse(((CartItemVO) service.update(7L, change).data).checked);
+    assertFalse(((CartItemVO) controller.update(7L, change).data).checked);
     assertEquals(4, saved().quantity);
     assertEquals(Long.MAX_VALUE, saved().productId);
     assertEquals("0012.30", saved().unitPrice);
@@ -283,7 +284,8 @@ class CartPutCheckedConcurrencyRedisIT {
                 AuthContext.set(userId, "USER");
                 addWorker.set(withAdd);
                 try {
-                  CartServiceImpl target = new CartServiceImpl(observed, mapper, products);
+                  CartController target =
+                      new CartController(new CartServiceImpl(observed, mapper, products));
                   CartItemDTO requested = request(withAdd ? 3 : 7);
                   requested.checked = null;
                   return withAdd ? target.add(requested).data : target.update(7L, requested).data;
@@ -298,7 +300,7 @@ class CartPutCheckedConcurrencyRedisIT {
                 AuthContext.set(userId, "USER");
                 addWorker.set(false);
                 try {
-                  return new CartServiceImpl(observed, mapper, products)
+                  return new CartController(new CartServiceImpl(observed, mapper, products))
                       .checked(7L, Map.of("checked", true))
                       .data;
                 } finally {

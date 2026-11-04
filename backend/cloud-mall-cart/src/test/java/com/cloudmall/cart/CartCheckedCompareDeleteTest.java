@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.auth.AuthContext;
@@ -38,7 +39,7 @@ class CartCheckedCompareDeleteTest {
       when(fixture.hashes.entries("cart:33")).thenReturn(Map.of("7", raw));
       when(fixture.redis.execute(any(RedisScript.class), eq(List.of("cart:33")), eq("7"), eq(raw)))
           .thenReturn(outcome);
-      var response = fixture.service.clearChecked();
+      var response = fixture.controller.clearChecked();
       assertEquals("0", response.code);
       assertNull(response.data);
       verify(fixture.redis).opsForHash();
@@ -65,9 +66,9 @@ class CartCheckedCompareDeleteTest {
         when(fixture.redis.execute(any(RedisScript.class), anyList(), any(), any()))
             .thenReturn("null".equals(fault) ? null : Long.valueOf(9L));
       if ("error".equals(fault))
-        assertSame(fatal, assertThrows(AssertionError.class, fixture.service::clearChecked));
+        assertSame(fatal, assertThrows(AssertionError.class, fixture.controller::clearChecked));
       else {
-        BizException failure = assertThrows(BizException.class, fixture.service::clearChecked);
+        BizException failure = assertThrows(BizException.class, fixture.controller::clearChecked);
         assertEquals("redis".equals(fault) ? 503 : 500, failure.getHttpStatus());
         assertEquals(
             "redis".equals(fault) ? ErrorCodes.REDIS_UNAVAILABLE : ErrorCodes.INTERNAL,
@@ -90,7 +91,7 @@ class CartCheckedCompareDeleteTest {
             Map.of("7", "{\"skuId\":7,\"checked\":null}"))) {
       Fixture fixture = new Fixture();
       when(fixture.hashes.entries("cart:33")).thenReturn(snapshot);
-      assertNull(fixture.service.clearChecked().data);
+      assertNull(fixture.controller.clearChecked().data);
       verify(fixture.redis).opsForHash();
       verify(fixture.hashes).entries("cart:33");
       verifyNoMoreInteractions(fixture.redis, fixture.hashes);
@@ -107,7 +108,7 @@ class CartCheckedCompareDeleteTest {
     when(fixture.hashes.entries("cart:33")).thenReturn(snapshot);
     when(fixture.redis.execute(any(RedisScript.class), anyList(), any(), any()))
         .thenReturn(1L, null);
-    BizException failure = assertThrows(BizException.class, fixture.service::clearChecked);
+    BizException failure = assertThrows(BizException.class, fixture.controller::clearChecked);
     assertEquals(500, failure.getHttpStatus());
     var ordered = inOrder(fixture.redis, fixture.hashes);
     ordered.verify(fixture.redis).opsForHash();
@@ -134,7 +135,8 @@ class CartCheckedCompareDeleteTest {
     final ProductClient products = mock(ProductClient.class);
 
     /** 实际购物车业务实现。 */
-    final CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+    final CartController controller =
+        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");

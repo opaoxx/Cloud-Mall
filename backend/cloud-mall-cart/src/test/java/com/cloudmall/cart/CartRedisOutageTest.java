@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.api.ApiResponse;
@@ -24,7 +25,8 @@ class CartRedisOutageTest {
   private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
   private final HashOperations<String, Object, Object> hashes = mock(HashOperations.class);
   private final ProductClient products = mock(ProductClient.class);
-  private final CartServiceImpl cart = new CartServiceImpl(redis, new ObjectMapper(), products);
+  private final CartController cart =
+      new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
 
   @AfterEach
   void clearAuth() {
@@ -35,8 +37,7 @@ class CartRedisOutageTest {
   void redisReadFailureDoesNotLookLikeAnEmptyCart() {
     AuthContext.set(33L, "USER");
     when(redis.opsForHash()).thenReturn(hashes);
-    when(hashes.entries("cart:33"))
-        .thenThrow(new RedisConnectionFailureException("redis down"));
+    when(hashes.entries("cart:33")).thenThrow(new RedisConnectionFailureException("redis down"));
 
     BizException failure = assertThrows(BizException.class, cart::all);
 

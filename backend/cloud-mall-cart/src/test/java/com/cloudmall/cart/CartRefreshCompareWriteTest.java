@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.vo.CartItemVO;
+import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.api.ApiResponse;
@@ -146,14 +148,14 @@ class CartRefreshCompareWriteTest {
       var response = fixture.refresh(operation);
       List<?> items;
       if ("preview".equals(operation)) {
-        Map<?, ?> preview = (Map<?, ?>) response.data;
-        assertEquals("24.60", preview.get("totalAmount"));
-        assertEquals("24.60", preview.get("payAmount"));
-        List<?> invalid = (List<?>) preview.get("invalidItems");
+        CartSettlementPreviewVO preview = (CartSettlementPreviewVO) response.data;
+        assertEquals("24.60", preview.totalAmount());
+        assertEquals("24.60", preview.payAmount());
+        List<?> invalid = (List<?>) preview.invalidItems();
         assertEquals(1, invalid.size());
-        assertEquals(8L, ((Map<?, ?>) invalid.get(0)).get("skuId"));
-        assertEquals(ErrorCodes.NOT_FOUND, ((Map<?, ?>) invalid.get(0)).get("code"));
-        items = (List<?>) preview.get("items");
+        assertEquals(8L, preview.invalidItems().get(0).skuId());
+        assertEquals(ErrorCodes.NOT_FOUND, preview.invalidItems().get(0).code());
+        items = (List<?>) preview.items();
         assertEquals(2, items.size());
         verify(fixture.products, never()).getSku(9L);
       } else {
@@ -205,7 +207,8 @@ class CartRefreshCompareWriteTest {
     final ProductClient products = mock(ProductClient.class);
 
     /** 实际被测购物车实现。 */
-    final CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+    final CartController controller =
+        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");
@@ -215,7 +218,9 @@ class CartRefreshCompareWriteTest {
     }
 
     private ApiResponse<?> refresh(String operation) {
-      return "all".equals(operation) ? service.all() : service.preview(Map.of("skuIds", List.of()));
+      return "all".equals(operation)
+          ? controller.all()
+          : controller.preview(Map.of("skuIds", List.of()));
     }
 
     /** 单次失败最多一读、一查询、一CAS，不能使用旧Hash put/expire或继续调用。 */

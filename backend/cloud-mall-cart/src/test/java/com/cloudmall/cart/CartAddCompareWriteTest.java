@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -37,7 +38,8 @@ class CartAddCompareWriteTest {
     when(fixture.redis.execute(
             any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
         .thenReturn(0L);
-    BizException failure = assertThrows(BizException.class, () -> fixture.service.add(request()));
+    BizException failure =
+        assertThrows(BizException.class, () -> fixture.controller.add(request()));
     assertEquals(409, failure.getHttpStatus());
     assertEquals(ErrorCodes.CONFLICT, failure.getCode());
     verify(fixture.hashes, times(3)).entries("cart:33");
@@ -63,7 +65,7 @@ class CartAddCompareWriteTest {
               assertEquals(call == 1 ? original : latest, invocation.getArgument(4));
               return call == 1 ? 0L : 1L;
             });
-    assertEquals(7, ((CartItemVO) fixture.service.add(request()).data).quantity);
+    assertEquals(7, ((CartItemVO) fixture.controller.add(request()).data).quantity);
     assertEquals(2, calls.get());
     verify(fixture.hashes, times(2)).entries("cart:33");
     verifyNoMoreInteractions(fixture.hashes);
@@ -82,7 +84,8 @@ class CartAddCompareWriteTest {
         when(fixture.redis.execute(
                 any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
             .thenReturn("null".equals(result) ? null : Long.valueOf(9));
-      BizException failure = assertThrows(BizException.class, () -> fixture.service.add(request()));
+      BizException failure =
+          assertThrows(BizException.class, () -> fixture.controller.add(request()));
       assertEquals("redis-error".equals(result) ? 503 : 500, failure.getHttpStatus());
       verify(fixture.hashes).entries("cart:33");
       verifyNoMoreInteractions(fixture.hashes);
@@ -104,7 +107,8 @@ class CartAddCompareWriteTest {
     final ProductClient products = mock(ProductClient.class);
 
     /** 实际被测追加编排。 */
-    final CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+    final CartController controller =
+        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");

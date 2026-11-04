@@ -374,7 +374,7 @@ Git 保存源码历史。数据库数据、Redis 内容、消息积压、Seata �
 
 实际工具为 `C:/Users/cyf34/.m2/wrapper/dists/apache-maven-3.9.16-bin/5grr65jo27hi51sujmtcldfovl/apache-maven-3.9.16/bin/mvn.cmd`，Maven 3.9.16 实测使用 `C:/Users/cyf34/.jdks/ms-17.0.20` 的 Java 17.0.20。格式化工具为 `C:/Users/cyf34/.codex/tools/google-java-format-1.22.0-all-deps.jar`，实测版本 1.22.0。
 
-Common 先完成契约与引用盘点。Cart 沿用现有 ApiResponse、BizException、AuthContext 与全局异常处理，Common 的生产类型本阶段无需调整。Cart 基线已执行 `-o -pl backend/cloud-mall-cart -am test -Dtest=Cart*Test,CommonRulesTest,BackendP1RulesTest,GlobalExceptionHandlerCacheControlTest,SeckillRequestFingerprintTest -Dsurefire.failIfNoSpecifiedTests=false`，构建通过，Cart 12 类 27 项全部通过，Common 用例数从本次报告汇总。运行日志位于 `F:/Cloud-Mall/target/backend-refactor-20261104/cart-baseline/maven.log`。
+Common 先完成契约与引用盘点。Cart 沿用现有 ApiResponse、BizException、AuthContext 与全局异常处理，Common 的生产类型本阶段无需调整。Cart 基线已执行 `-o -pl backend/cloud-mall-cart -am test -Dtest=Cart*Test,CommonRulesTest,BackendP1RulesTest,GlobalExceptionHandlerCacheControlTest,SeckillRequestFingerprintTest -Dsurefire.failIfNoSpecifiedTests=false`，构建通过，Cart 12 类 27 项全部通过，Common 4 类 25 项全部通过。运行日志位于 `F:/Cloud-Mall/target/backend-refactor-20261104/cart-baseline/maven.log`。
 
 ### Cart 第一切片
 
@@ -396,3 +396,13 @@ Common 先完成契约与引用盘点。Cart 沿用现有 ApiResponse、BizExcep
 新增辅助实现直接使用具体类注入，业务对外契约仍为 CartService。CartItemVO 与持久化对象的继承关系、DTO 的字段绑定收敛另按具体兼容验证结果决定迁移顺序。
 
 Redis 专项使用 `deploy/experiments/compose.yml` 的新独立 Compose 项目和新卷，仅启动 Redis 服务。执行前读取十个 Redis IT 的连接和清理约定，按显式端口运行，归档结果后停止并移除本次实验容器，数据卷保留。此环境用于验证 Lua、并发和条件清理。
+
+### Cart 第一切片验收
+
+Controller 已组合注入真实 CartService，九个 HTTP 入口与 Service 业务方法分离，Service 显式接收 userId，结算预览与失效项使用独立 VO。所有原 Cart 业务断言保留，经 Controller 调用真实 Service 执行，HTTP 映射反射检查移动到 Controller。新增 CartHttpContractTest 六项通过真实 MVC、公共鉴权拦截器与真实业务 Bean 检查九个路由、金额/null/缺省值、原 JSON、异常响应与身份隔离。
+
+验证通过 Common 25 项、Cart 33 项单测/MVC 与 42 项 Redis IT，以及 Order 的 CartCleanupContractTest 和 OrderCartCommitBoundaryTest 共 14 项。全部零失败、零错误、零跳过。日志目录为 `F:/Cloud-Mall/target/backend-refactor-20261104/cart-http`，初次测试发现的失效项 Map 强转遗漏已在原 bugfix_log 条目记录并修正，最终回归通过。Google Java Format 1.22.0 已处理本次 Java 文件，提交前执行 diff 检查。
+
+Redis 实验默认地址池耗尽的启动问题通过本次局部 Compose 覆盖解决，新增 lab 子网为已核查未占用的 `10.254.240.0/24`，Redis 宿主端口为 `19923`，项目为 `cloud-mall-refactor-cart-20261104`。覆盖文件仅包含 `networks.lab.ipam.config`，位于本次 target 证据目录，后续复现前重新检查网段和端口。基线十类 Redis IT 共 42 项已通过。
+
+核心调用链为 CartController → CartServiceImpl → 原 ProductClient 与 Redis 脚本。HTTP 成功响应在 Controller 装配，业务异常交原 GlobalExceptionHandler。原 JSON 字符串比较、脚本参数、未知结果处理及条件重读次数已逐段对照。

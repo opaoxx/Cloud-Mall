@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -47,15 +48,16 @@ class CartProductIdentityTest {
                 new ProductClient.SkuView(responseSku, 999L, "wrong product", "999.00", Map.of()));
         if ("error-code".equals(variant)) response.code = "COMMON_INTERNAL_ERROR";
         when(products.getSku(7L)).thenReturn(response);
-        CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+        CartController controller =
+            new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
         BizException failure =
             assertThrows(
                 BizException.class,
                 () -> {
                   switch (operation) {
-                    case "add" -> service.add(request());
-                    case "all" -> service.all();
-                    case "preview" -> service.preview(Map.of("skuIds", List.of(7L)));
+                    case "add" -> controller.add(request());
+                    case "all" -> controller.all();
+                    case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
                     default -> throw new AssertionError(operation);
                   }
                 });
@@ -79,8 +81,10 @@ class CartProductIdentityTest {
     ProductClient products = mock(ProductClient.class);
     IllegalStateException original = new IllegalStateException("product unavailable");
     when(products.getSku(7L)).thenThrow(original);
-    CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
-    assertSame(original, assertThrows(IllegalStateException.class, () -> service.add(request())));
+    CartController controller =
+        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
+    assertSame(
+        original, assertThrows(IllegalStateException.class, () -> controller.add(request())));
     verifyNoInteractions(redis);
     verify(products).getSku(7L);
   }

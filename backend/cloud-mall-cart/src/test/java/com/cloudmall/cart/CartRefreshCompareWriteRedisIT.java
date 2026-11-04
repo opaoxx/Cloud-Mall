@@ -3,8 +3,10 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
+import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.common.api.ApiResponse;
@@ -56,7 +58,7 @@ class CartRefreshCompareWriteRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -113,7 +115,7 @@ class CartRefreshCompareWriteRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -148,15 +150,15 @@ class CartRefreshCompareWriteRedisIT {
         duringProductRead(
             () -> {
               switch (change) {
-                case "quantity" -> service.update(7L, request(9));
-                case "unchecked" -> service.checked(7L, Map.of("checked", false));
-                case "add" -> service.add(request(3));
+                case "quantity" -> controller.update(7L, request(9));
+                case "unchecked" -> controller.checked(7L, Map.of("checked", false));
+                case "add" -> controller.add(request(3));
                 default -> throw new AssertionError(change);
               }
               latest.set(redis.opsForHash().get(ownedKey, "7"));
               latestTtl.set(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS));
             });
-        BizException failure = refreshFailure(operation, service);
+        BizException failure = refreshFailure(operation, controller);
         Object saved = redis.opsForHash().get(ownedKey, "7");
         long afterTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
         String label = operation + "/" + change;
@@ -183,12 +185,12 @@ class CartRefreshCompareWriteRedisIT {
         AtomicLong latestTtl = new AtomicLong();
         duringProductRead(
             () -> {
-              service.delete(7L);
-              if ("readd".equals(change)) service.add(request(4));
+              controller.delete(7L);
+              if ("readd".equals(change)) controller.add(request(4));
               latest.set(redis.opsForHash().get(ownedKey, "7"));
               latestTtl.set(redis.getExpire(ownedKey, TimeUnit.MILLISECONDS));
             });
-        BizException failure = refreshFailure(operation, service);
+        BizException failure = refreshFailure(operation, controller);
         Object saved = redis.opsForHash().get(ownedKey, "7");
         long afterTtl = redis.getExpire(ownedKey, TimeUnit.MILLISECONDS);
         String label = operation + "/" + change;
@@ -217,13 +219,13 @@ class CartRefreshCompareWriteRedisIT {
                       7L, Long.MAX_VALUE, "current product", "0012.30", Map.of())))
           .when(products)
           .getSku(7L);
-      var response = invokeRefresh(operation, service);
+      var response = invokeRefresh(operation, controller);
       if ("preview".equals(operation)) {
-        Map<?, ?> preview = (Map<?, ?>) response.data;
-        assertEquals("24.60", preview.get("totalAmount"));
-        assertEquals("24.60", preview.get("payAmount"));
-        assertEquals(1, ((List<?>) preview.get("items")).size());
-        assertTrue(((List<?>) preview.get("invalidItems")).isEmpty());
+        CartSettlementPreviewVO preview = (CartSettlementPreviewVO) response.data;
+        assertEquals("24.60", preview.totalAmount());
+        assertEquals("24.60", preview.payAmount());
+        assertEquals(1, ((List<?>) preview.items()).size());
+        assertTrue(((List<?>) preview.invalidItems()).isEmpty());
       } else {
         assertEquals(2, ((List<?>) response.data).size());
       }
@@ -256,7 +258,8 @@ class CartRefreshCompareWriteRedisIT {
           .when(observed)
           .execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any());
       BizException failure =
-          refreshFailure(operation, new CartServiceImpl(observed, mapper, products));
+          refreshFailure(
+              operation, new CartController(new CartServiceImpl(observed, mapper, products)));
       assertNotNull(failure);
       assertEquals(500, failure.getHttpStatus());
       assertEquals(1, scripts.get());
@@ -287,12 +290,12 @@ class CartRefreshCompareWriteRedisIT {
   }
 
   /** 保持两个公共入口真实执行，不通过购物车GET再次改变观察结果。 */
-  private ApiResponse<?> invokeRefresh(String operation, CartServiceImpl target) {
+  private ApiResponse<?> invokeRefresh(String operation, CartController target) {
     return "all".equals(operation) ? target.all() : target.preview(Map.of("skuIds", List.of(7L)));
   }
 
   /** 只捕获业务失败，底层异常/测试错误不能冒充预期的409。 */
-  private BizException refreshFailure(String operation, CartServiceImpl target) {
+  private BizException refreshFailure(String operation, CartController target) {
     try {
       invokeRefresh(operation, target);
       return null;

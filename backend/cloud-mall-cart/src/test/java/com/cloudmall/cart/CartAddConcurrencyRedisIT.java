@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
@@ -61,7 +62,7 @@ class CartAddConcurrencyRedisIT {
   private static final String OWNER_FIELD = String.valueOf(Long.MAX_VALUE);
 
   /** 实际被测Cart编排。 */
-  private CartServiceImpl service;
+  private CartController controller;
 
   /** 商品查询响应替身，库存/商品数据库不在本例验证范围。 */
   private ProductClient products;
@@ -95,7 +96,9 @@ class CartAddConcurrencyRedisIT {
     ownerJson = mapper.writeValueAsString(owner);
     DefaultRedisScript<Long> claim =
         new DefaultRedisScript<>(
-            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600); return 1",
+            "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end"
+                + " redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('EXPIRE',KEYS[1],600);"
+                + " return 1",
             Long.class);
     boolean claimed = false;
     for (int attempt = 0; attempt < 10; attempt++) {
@@ -116,7 +119,7 @@ class CartAddConcurrencyRedisIT {
         .thenReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
-    service = new CartServiceImpl(redis, mapper, products);
+    controller = new CartController(new CartServiceImpl(redis, mapper, products));
   }
 
   @AfterEach
@@ -125,7 +128,8 @@ class CartAddConcurrencyRedisIT {
     if (ownedKey != null) {
       DefaultRedisScript<Long> cleanup =
           new DefaultRedisScript<>(
-              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return redis.call('DEL',KEYS[1])",
+              "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end return"
+                  + " redis.call('DEL',KEYS[1])",
               Long.class);
       assertEquals(1L, redis.execute(cleanup, List.of(ownedKey), OWNER_FIELD, ownerJson));
       assertFalse(Boolean.TRUE.equals(redis.hasKey(ownedKey)));
@@ -177,14 +181,16 @@ class CartAddConcurrencyRedisIT {
   @Test
   void rawFormattingLongIdentityAndMoneyStringsAreNotParsedInLua() throws Exception {
     String raw =
-        " { \"quantity\":2, \"skuId\":7, \"productId\":9223372036854775807, \"checked\":false, \"addedAt\":\"2026-10-08T12:00:00+08:00\", \"unitPrice\":\"0012.30\", \"productName\":\"original\" } ";
+        " { \"quantity\":2, \"skuId\":7, \"productId\":9223372036854775807, \"checked\":false,"
+            + " \"addedAt\":\"2026-10-08T12:00:00+08:00\", \"unitPrice\":\"0012.30\","
+            + " \"productName\":\"original\" } ";
     redis.opsForHash().put(ownedKey, "7", raw);
     doReturn(
             ApiResponse.ok(
                 new ProductClient.SkuView(7L, Long.MAX_VALUE, "current", "0012.30", Map.of())))
         .when(products)
         .getSku(7L);
-    CartItemVO result = (CartItemVO) service.add(request(1)).data;
+    CartItemVO result = (CartItemVO) controller.add(request(1)).data;
     assertEquals(3, result.quantity);
     assertEquals(Long.MAX_VALUE, result.productId);
     assertEquals("0012.30", result.unitPrice);
@@ -219,7 +225,9 @@ class CartAddConcurrencyRedisIT {
     BizException failure =
         assertThrows(
             BizException.class,
-            () -> new CartServiceImpl(observed, mapper, products).add(request(1)));
+            () ->
+                new CartController(new CartServiceImpl(observed, mapper, products))
+                    .add(request(1)));
     assertEquals(409, failure.getHttpStatus());
     assertEquals(3, attempts.get());
     assertEquals(103, saved().quantity);
@@ -241,7 +249,9 @@ class CartAddConcurrencyRedisIT {
     BizException failure =
         assertThrows(
             BizException.class,
-            () -> new CartServiceImpl(observed, mapper, products).add(request(1)));
+            () ->
+                new CartController(new CartServiceImpl(observed, mapper, products))
+                    .add(request(1)));
     assertEquals(500, failure.getHttpStatus());
     assertEquals(1, calls.get());
     assertEquals(3, saved().quantity);
@@ -284,7 +294,9 @@ class CartAddConcurrencyRedisIT {
                 () -> {
                   AuthContext.set(userId, "USER");
                   try {
-                    return new CartServiceImpl(observed, mapper, products).add(request(delta)).data;
+                    return new CartController(new CartServiceImpl(observed, mapper, products))
+                        .add(request(delta))
+                        .data;
                   } catch (BizException rejected) {
                     return rejected;
                   } finally {

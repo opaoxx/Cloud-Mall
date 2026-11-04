@@ -3,6 +3,7 @@ package com.cloudmall.cart;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -50,7 +51,7 @@ class CartCleanupSnapshotTest {
     for (CartCleanupSnapshotDTO snapshot : snapshots) {
       Fixture fixture = new Fixture();
       BizException failure =
-          assertThrows(BizException.class, () -> fixture.service.cleanupItem(7L, snapshot));
+          assertThrows(BizException.class, () -> fixture.controller.cleanupItem(7L, snapshot));
       assertEquals(400, failure.getHttpStatus());
       verifyNoInteractions(fixture.redis, fixture.products);
     }
@@ -79,14 +80,14 @@ class CartCleanupSnapshotTest {
                   default -> 9L;
                 });
       if ("zero".equals(outcome) || "one".equals(outcome))
-        assertEquals("one".equals(outcome), fixture.service.cleanupItem(7L, snapshot).data);
+        assertEquals("one".equals(outcome), fixture.controller.cleanupItem(7L, snapshot).data);
       else if ("error".equals(outcome))
         assertSame(
             fatal,
-            assertThrows(AssertionError.class, () -> fixture.service.cleanupItem(7L, snapshot)));
+            assertThrows(AssertionError.class, () -> fixture.controller.cleanupItem(7L, snapshot)));
       else {
         BizException failure =
-            assertThrows(BizException.class, () -> fixture.service.cleanupItem(7L, snapshot));
+            assertThrows(BizException.class, () -> fixture.controller.cleanupItem(7L, snapshot));
         assertEquals("redis".equals(outcome) ? 503 : 500, failure.getHttpStatus());
       }
       verify(fixture.redis)
@@ -106,9 +107,9 @@ class CartCleanupSnapshotTest {
     assertEquals(2, mapper.readTree(json).size());
     assertTrue(mapper.readTree(json).path("skuId").isIntegralNumber());
     assertEquals(snapshot.expectedJson(), mapper.readTree(json).path("expectedJson").textValue());
-    var read = CartServiceImpl.class.getMethod("cleanupSnapshot", Long.class);
+    var read = CartController.class.getMethod("cleanupSnapshot", Long.class);
     var cleanup =
-        CartServiceImpl.class.getMethod("cleanupItem", Long.class, CartCleanupSnapshotDTO.class);
+        CartController.class.getMethod("cleanupItem", Long.class, CartCleanupSnapshotDTO.class);
     assertArrayEquals(
         new String[] {"/items/{skuId}/cleanup-snapshot"},
         read.getAnnotation(GetMapping.class).value());
@@ -126,7 +127,8 @@ class CartCleanupSnapshotTest {
     final ProductClient products = mock(ProductClient.class);
 
     /** 实际被测快照和清理编排。 */
-    final CartServiceImpl service = new CartServiceImpl(redis, new ObjectMapper(), products);
+    final CartController controller =
+        new CartController(new CartServiceImpl(redis, new ObjectMapper(), products));
 
     private Fixture() {
       AuthContext.set(33L, "USER");
