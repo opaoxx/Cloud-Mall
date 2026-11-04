@@ -744,3 +744,47 @@ git revert --no-edit $userBalanceCommit
 源码反向补丁在临时Git索引中核对，应精确回到c5dd2a54；此检查不修改真实工作区/索引，也不等于运行态回滚。实际回退后依据17.2的9个新类型清单精确清理target/classes中的过期class，再编译并回归；不清空含历史证据的target，不将Git回退当作数据库或Redis回退。
 
 下一步盘点User的LocalTCC资源、Fence回调、HTTP接收状态、只读状态查询和取证报告实现，在service.impl内按真实职责归组。先冻结Bean名/条件装配、actionName、回调入口、Mapper引用和测试入口，再执行迁移；不改RM身份、状态机、取证分类或协议字段。
+
+## 18. User 第三切片：TCC/Fence与只读取证归组
+
+### 18.1 基线与范围
+
+2026-11-04从 `55f26e87b5ef78f38a32158e44c682d57d35ad4a` 继续，分支仍为codex/refactor-backend。本会话由主Agent单独执行评审、实现及验证，其他会话协作规则保持。账号、资金切片已完成；本次只归组16个已有实现并同步引用，保留已有清楚的类名，不把规格编号或协议字符串机械改名。
+
+### 18.2 全限定名迁移清单
+
+下表旧包均为 `com.cloudmall.user.service.impl`，类名保持，目标包为该包下的tcc/evidence。稳定业务接口BalanceTccDebitService与BalanceTccDebitLocalResource留在service根包；Controller、config、Mapper、DTO/VO/PO不移动。
+
+| 新子包 | 原类名 | 职责/装配 |
+| --- | --- | --- |
+| tcc | BalanceTccDebitServiceImpl | 现有本地Try/Confirm/Cancel状态机；Service Bean及事务保留 |
+| tcc | BalanceTccDebitLocalResourceImpl | 官方Fence与业务同事务适配；由原配置创建 |
+| tcc | BalanceTccDebitBusinessCallback | 官方Fence反射回调委托；公开方法名和签名保留 |
+| tcc | UserTccHttpService | 内部Try/GET鉴权与一次性派发；原配置创建 |
+| tcc | UserTccReceiveStore | CLAIMED/bindBranch独立提交；REQUIRES_NEW保留 |
+| tcc | UserTccStateQuery | 原只读RR状态证明，供HTTP Bean和取证plain delegate复用 |
+| evidence | UserTccReconciliationService / UserTccReconciliationReadService | 非事务入口门与只读基础报告 |
+| evidence | UserLinkedRefundEvidenceService / UserLinkedRefundEvidenceReadService | 关联退款候选证明 |
+| evidence | UserFrozenOwnershipEvidenceService / UserFrozenOwnershipEvidenceReadService | 当前TRYING冻结归属证明 |
+| evidence | UserTerminalFrozenOwnershipEvidenceService / UserTerminalFrozenOwnershipEvidenceReadService | 历史终态冻结归属证明 |
+| evidence | UserPaymentLedgerEvidenceService / UserPaymentLedgerEvidenceReadService | 同pay账本只读证明 |
+
+跨包的UserTccStateQuery依赖通过显式import关联；取证Reader仍自行构造原plain delegate并使用已有外层RR，不能把它替换成另一个事务代理。十个取证实现保持同一业务子包，原包内协作不扩大可见性。所有当前生产/测试Java FQN、类资源路径及Spring注册引用同步，历史冻结runner和归档保留。
+
+### 18.3 冻结契约
+
+- LocalTCC接口FQN、ACTION_NAME=cloudmallUserBalanceDebit、prepare/commit/rollback、request上下文键、useTCCFence=false全部保持。Fence反射tryBusiness/confirmBusiness/cancelBusiness/payload签名保持，统一裸DataSource/REQUIRED事务及回调false/rollbackOnly语义保持。
+- 保持balanceTccDebitServiceImpl默认Bean名，原@Bean方法名balanceTccDebitBusinessCallback/balanceTccDebitLocalResource/userTccReceiveStore/userTccStateQuery/userTccHttpService及DependsOn/init/destroy顺序。原default-off开关、callback token、caller、HTTP路由、状态/错误码、账本键、消息字段不改。
+- CLAIMED先独立提交，首次winner才登记分支；旧接收重放只读、不补发；禁用新Try仍能读取与清算历史。RootContext绑定/清理和RR快照边界保持。
+- 取证wrapper在连接/事务前验证开关、身份与上下文；ReadService的readOnly/RR、候选上限、指纹、分类、no-store及不写事实约束保持。取证不得因归组注册RM、访问TC或触发恢复。
+- 不更改SQL/表/Mapper、依赖版本或业务算法；完整16类按去除package/import与注释/格式的执行词法对照验收，日志category因简单类名保持而只随FQN变化，不新增原始载荷日志。
+
+### 18.4 验证、实验与提交
+
+先保存细化方案及user-tcc基线标签，再执行迁移。原User/Common全单测作为基线；迁移后运行全部User单测、全部8类MySqlIT及账号MySQL/Redis/MVC，覆盖取证门、接收事务和单连接快照。补充必要的组件发现/Bean名/default-off隔离校验，不能只验证import编译。
+
+真实Seata验证分两次独立Maven测试JVM：BalanceTccFenceSeataIT（6项真实TC回调/Fence场景），BalanceTccRmFailureIT（9项独立RM进程、提交窗口崩溃与连接中断恢复）。后者禁止与其他注册RM的测试共享JVM，沿用原Process句柄与未决保留规则；只终止本测试创建的子进程，不接触既有服务。若事务未收敛，保留该UUID数据库和TC会话证据，不宣告通过或覆盖现场。
+
+中间件使用deploy/experiments/compose.yml加本次独立override，项目cloud-mall-refactor-user-tcc-20261104，新建MySQL/Redis/Seata三个卷；MySQL19929、Redis19930、TC19931，子网10.254.244.0/24（启动前核对无重叠）。TC复用固定镜像seataio/seata-server:1.5.2、file模式；显式SEATA_IP=127.0.0.1、SEATA_PORT=19931且宿主/容器端口一致，使XID中的TC地址对宿主测试进程可达。不得复用默认TC会话或原中间件卷。额外TC仅在本次override声明，不改常驻部署。
+
+全部专项收敛后归档日志、源码词法/装配证据、TC/RM工件，移除本次容器与网络并保留卷。User打包、八模块test-compile、旧class精确清理、Java格式化及git diff --check通过后提交并建立完成标签。源码回退只撤销该归组提交，账号/资金及地址归属修复保留；Git不回退运行态或数据。User本轮验收结束后再转向Stock。
