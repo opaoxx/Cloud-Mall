@@ -50,16 +50,23 @@ class Cm21PhaseAnchorBridgeTest {
   void trueAndUnknownPropertiesFailClosed() {
     Cm21PhaseAnchorBridge.requireDisabledProperty("false");
     for (String value : new String[] {"true", "TRUE", "", "yes", null}) {
-      assertThrows(
-          IllegalArgumentException.class,
-          () -> Cm21PhaseAnchorBridge.requireDisabledProperty(value));
+      IllegalArgumentException rejected =
+          assertThrows(
+              IllegalArgumentException.class,
+              () -> Cm21PhaseAnchorBridge.requireDisabledProperty(value));
+      assertEquals("CM21_PHASE_ANCHOR_LIVE_NO_GO", rejected.getMessage());
     }
   }
 
   @Test
   void pipelinePropertyRejectsBeforeResources() throws Exception {
     String previous = System.getProperty("cloudmall.cm21.phase-anchor");
+    ProductMetricQueryInfoCacheSupport.ActorHook previousHook =
+        ProductMetricQueryInfoCacheSupport.ACTOR_HOOK.get();
+    AtomicInteger resourceActions = new AtomicInteger();
     try {
+      ProductMetricQueryInfoCacheSupport.ACTOR_HOOK.set(
+          (kind, admission) -> resourceActions.incrementAndGet());
       System.setProperty("cloudmall.cm21.phase-anchor", "true");
       Class<?> pipeline =
           Class.forName(ProductOnlineMetricsPipelineIT.class.getName() + "$Pipeline");
@@ -71,8 +78,11 @@ class Cm21PhaseAnchorBridgeTest {
                   () -> constructor.newInstance("load", 1))
               .getCause();
       assertInstanceOf(IllegalArgumentException.class, thrown);
-      assertEquals("CM21_PHASE_ANCHOR_LIVE_NO_GO", thrown.getMessage());
+      assertEquals("CM21_QUERYINFO_PHASE_ANCHOR_DISABLED_REQUIRED", thrown.getMessage());
+      assertEquals(0, resourceActions.get());
     } finally {
+      if (previousHook == null) ProductMetricQueryInfoCacheSupport.ACTOR_HOOK.remove();
+      else ProductMetricQueryInfoCacheSupport.ACTOR_HOOK.set(previousHook);
       if (previous == null) System.clearProperty("cloudmall.cm21.phase-anchor");
       else System.setProperty("cloudmall.cm21.phase-anchor", previous);
     }
