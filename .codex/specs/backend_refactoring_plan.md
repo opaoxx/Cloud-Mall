@@ -577,3 +577,41 @@ git revert --no-edit $productGroupingCommit 02464c3769f36b0d31b0aa4ac398e419606b
 ```
 
 核心调用链已逐行复盘。ProductController → 分类/查询/管理/活动Service → ProductSqlMapper及事实装配。商品写Service事务 → 同资源事实、SKU、参数、索引outbox。查询Service → 原SQL/ES验证与指标登记 → ProductReadResultDTO → Controller统一响应。活动Service → 原数据库状态写入 → Redis配额及元数据。索引和指标处理按原消费、投影与恢复契约在各自包中组织。下一模块为User。
+
+## 16. User 第一切片：账号、资料、地址与 HTTP 委托
+
+### 16.1 范围与基线
+
+本切片于2026-11-04从 `e345bb4d3cf371637c91fd49dec651312398792b` 开始，分支仍为 `codex/refactor-backend`。本会话继续按用户要求由主Agent独立完成规格细化、实现和验证；不改变其他会话的协作规则。User整体尚未完成，本切片之后继续资金职责拆分，再整理TCC与只读证据。
+
+现有UserController继承UserServiceImpl，后者承载13个HTTP映射、管理员初始化和约850行资金证明/编排。已运行原User全部279项单测与Common25项，全部通过。证据为 `target/backend-refactor-20261104/user/baseline/unit.log`。
+
+### 16.2 实际迁移清单与边界
+
+| 原职责 | 本切片目标 | 兼容要求 |
+| --- | --- | --- |
+| register/login/logout | service.AuthenticationService、impl.AuthenticationServiceImpl | BCrypt、重复用户名409、禁用账号401、auth:token前缀、2小时TTL、Redis故障503、Bearer大小写与trim |
+| me/update/currentUser | service.UserProfileService、impl.UserProfileServiceImpl | Controller读取用户身份；null更新与空字符串响应、金额原toPlainString、更新后重读 |
+| addresses/add/update/delete及两个私有helper | service.UserAddressService、impl.UserAddressServiceImpl | 默认标志顺序、数据库生成ID、数字JSON、原默认地址清理顺序；归属缺陷另行修复 |
+| ensureLocalAdmin与身份结构/范围检查 | config.UserAccountInitializer | 保留原两个DependsOn初始化器、先只读schema检查后管理员写入、旧默认密码迁移；Controller依赖此初始化器 |
+| debit/debitInternal/refundInternal/balanceOperation及全部资金helper | service.BalanceLedgerService、impl.BalanceLedgerServiceImpl | 原事务注解、noRollbackFor、RR快照、执行顺序和全部方法体保持；本次只隔离为独立Bean |
+| HTTP绑定、校验、响应 | controller.UserController构造器委托上述4个接口 | 保留全部13个路由和形参注解；账户接口响应由Controller封装 |
+| 注册与登录Map响应 | domain.vo.UserRegistrationVO、UserLoginVO | 原字段名、数字ID、嵌套UserVO、无新增字段 |
+
+删除空UserService和混合UserServiceImpl。资金Service暂保留ApiResponse返回作为下一切片的明确迁移项，避免在资金算法未逐项细化前同时改写其所有返回分支。新账号Service不依赖HTTP、ApiResponse或AuthContext；持久化PO、DTO、Feign、消息、Redis值及SQL保持原契约。当前资金类名变更需同步实际Java引用、Spring测试注册、反射目标与源码契约测试，不改冻结历史runner和归档。
+
+本次不新增账号/地址事务。新增默认地址仍先清默认再insert，更新仍成功后清其他默认；将其改为原子事务属于另行设计事项。资金原注解迁至真实Service代理，Controller不再持有事务。
+
+### 16.3 独立缺陷：地址更新归属
+
+检查发现原updateAddress调用BaseMapper.updateById，把当前userId作为SET值，并未限定WHERE归属。先在真实MySQL复现跨用户更新，再独立修复：UserAddressMapper提供updateOwnedAddress，在同一UPDATE中以id与user_id为条件，保持既有字段/时间写入；影响0行沿原NOT_FOUND/404，不进入默认地址清理。合法更新及默认标志顺序保持。该修复以独立提交保留，结构回退时可继续保留安全修复。
+
+### 16.4 验证与提交计划
+
+1. 保存本切片细化基线，建立 `refactor/user-account-baseline-20261104`。
+2. 真实MySQL复现地址归属缺陷，独立提交修复及回归。
+3. 完成账号/资料/地址/启动职责和Controller委托，补充实际MVC行为及Spring装配测试；资金方法体以逐方法词法比较核对，保持注解与逻辑。
+4. User/Common全单测、生成ID真实MySQL专项、实际MySQL/Redis账号MVC与资金代理专项；User打包及八模块test-compile。所有专项先检查隔离/清理逻辑，再执行。
+5. 归档证据、逐行复盘、格式化与git diff --check，提交并建立本切片通过标签。独立中间件使用deploy/experiments/compose.yml的新项目与新卷，完成后归档并移除容器/网络，卷保留。
+
+源码回退按结构提交倒序revert；保留独立地址缺陷修复。Git不回退数据库、Redis及忽略的本地证据。回退后精确清理过期生成class，再重新编译验证。下一步为BalanceLedgerService的扣款/退款/操作查询职责和响应解耦，随后TCC/证据归组。
