@@ -14,7 +14,8 @@ import com.alibaba.csp.sentinel.slots.block.flow.FlowException;
 import com.alibaba.nacos.api.config.ConfigService;
 import com.alibaba.nacos.api.config.listener.Listener;
 import com.alibaba.nacos.api.exception.NacosException;
-import com.cloudmall.gateway.config.SeckillSentinelGatewayConfig;
+import com.cloudmall.gateway.config.SeckillSentinelGatewayConfiguration;
+import com.cloudmall.gateway.util.GatewayFlowRuleParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.HashSet;
@@ -33,7 +34,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.reactive.result.view.ViewResolver;
 
 /** Sentinel Gateway 规则兜底和统一拦截响应测试。 */
-class SeckillSentinelGatewayConfigTest {
+class SeckillSentinelGatewayConfigurationTest {
   /** 测试开始前的全局规则快照。 */
   private final Set<GatewayFlowRule> originalRules = new HashSet<>(GatewayRuleManager.getRules());
 
@@ -41,8 +42,9 @@ class SeckillSentinelGatewayConfigTest {
   private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
   /** 实际规则与订阅管理入口。 */
-  private final SeckillSentinelGatewayConfig config =
-      new SeckillSentinelGatewayConfig(meterRegistry, new ObjectMapper());
+  private final SeckillSentinelGatewayConfiguration config =
+      new SeckillSentinelGatewayConfiguration(
+          meterRegistry, new GatewayFlowRuleParser(new ObjectMapper()));
 
   /** Nacos 网络边界替身。 */
   private final ConfigService configService = mock(ConfigService.class);

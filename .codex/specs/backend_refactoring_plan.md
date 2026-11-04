@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点和 Cart 三个重构切片，最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点、Cart 和 Gateway 重构，最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -441,8 +441,9 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | --- | --- | --- |
 | Common | 契约与引用盘点完成，25 项回归通过 | 随依赖方实际需求推进 |
 | Cart | 三个切片验收通过 | 已具备逐模块重构样板 |
-| Gateway | 待开始 | 细化鉴权过滤、配置及命名清单 |
-| Product / User / Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
+| Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
+| Product | 待开始 | 下一模块，先细化分类、商品、活动、索引与热度职责 |
+| User / Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -469,3 +470,27 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 当前 POM 实际解析出的 spring-cloud-gateway-server 为 3.1.4，来自本次 Surefire classpath，项目规格表记录为 3.1.5。此为既有依赖现状差异，本阶段按现有 POM 验证结构迁移，版本对齐作为独立核对项记录。网络路由与 Sentinel 的真实 Nacos 推送在本阶段的替身测试范围之外。
 
 Gateway 扩展基线通过。新增七项认证契约检查和三项 Sentinel 检查在原生产实现上通过，Gateway 四类20项与 Common四类25项全部零失败/错误/跳过。WebTestClient 经真实 FilteringWebHandler 验证401 JSON与已认证转发，Nacos监听、重试和关闭通过ConfigService替身验证。原始日志为 gateway/baseline/expanded-regression.log，基线标签使用 refactor/gateway-baseline-20261104。
+
+
+### Gateway 验收结果与回退点
+
+扩展基线提交为 `2b79691734d70bddfa09b3132f006a2601054a83`。实现已提取 GatewayAccessPolicy 与 GatewayFlowRuleParser，SeckillSentinelGatewayConfiguration 显式保留原 Bean 名。所有原配置键、定时注解参数和 seckill-order 资源名已逐项比对一致。AuthenticationFilter 使用清晰变量名与实际流程注释，保留原认证与异常链路。
+
+最终运行 Gateway 五类21项、Common四类25项、Cart十三类35项，共22类81项，失败、错误、跳过均为零。Gateway 的21项包含实际 FilteringWebHandler HTTP 契约、路径与编码矩阵、Redis延迟订阅/故障、身份头覆盖、下游异常传播、Nacos监听与重试、整批规则拒绝、429指标以及 Spring真实组件扫描与定时注册。ConfigService、Redis和调度执行使用替身。
+
+新增装配测试夹具中的 Micrometer AutoCloseable、Spring registerBean 重载及 TaskScheduler Clock 问题已修正并回归，原失败记录保留在本轮日志与 bugfix_log 条目中。当前生产实现的新增行为回归均通过。
+
+Gateway 已完成本模块 clean 后编译与测试，并成功 package。旧配置类和旧测试类在 target 中均已清除，打包 JAR 内只有新配置类及两个新职责类，保留 Spring Bean 名的组件扫描测试通过。八个后端模块再次完成生产与测试源码编译。Google Java Format 1.22.0 和 git diff 检查通过。
+
+本轮证据根为 `F:/Cloud-Mall/target/backend-refactor-20261104/gateway`，verification.json 汇总实际结果，final/combined-regression.log 保存81项回归，final/package.log 保存Gateway打包，final/all-modules-test-compile.log 保存全模块编译。Nacos 实际推送、Redis 实联和真实跨服务代理未在本轮执行。第14节记录的实际Gateway依赖3.1.4与规格3.1.5差异继续作为独立核对项。
+
+模块通过点标记为 `refactor/gateway-complete-20261104`。需要撤销本次结构迁移时，撤销通过标签指向的实现提交即可回到扩展测试基线，随后执行 Gateway 的 clean test 和 Common 定向回归。清理旧编译产物是配置类改名后重建或回退验证的一部分。
+
+```powershell
+$gatewayRefactorCommit = git rev-parse 'refactor/gateway-complete-20261104^{commit}'
+git show --stat $gatewayRefactorCommit
+git revert --no-edit $gatewayRefactorCommit
+& $mavenExecutable -o -pl backend/cloud-mall-gateway clean test
+```
+
+核心调用链已逐行复盘。Gateway FilteringWebHandler → AuthenticationFilter → GatewayAccessPolicy / Redis会话查找 → 下游过滤链。应用就绪与定时任务 → SeckillSentinelGatewayConfiguration → Nacos监听 → GatewayFlowRuleParser → GatewayRuleManager发布。限流回调沿原指标与429 JSON处理。后续重构进入 Product 模块细化。
