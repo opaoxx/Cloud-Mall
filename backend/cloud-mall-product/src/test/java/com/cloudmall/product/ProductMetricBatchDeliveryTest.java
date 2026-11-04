@@ -607,11 +607,14 @@ class ProductMetricBatchDeliveryTest {
         .apply(any());
     AtomicReference<Throwable> closeFailure = new AtomicReference<>();
     CountDownLatch stopped = new CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicBoolean channelOpen =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    when(fixture.channel.isOpen()).thenAnswer(call -> channelOpen.get());
     doAnswer(
             call -> {
-              stopped.countDown();
-              when(fixture.channel.isOpen()).thenReturn(false);
+              channelOpen.set(false);
               ((Runnable) call.getArgument(0)).run();
+              stopped.countDown();
               return null;
             })
         .when(fixture.container)
@@ -626,20 +629,28 @@ class ProductMetricBatchDeliveryTest {
                 closeFailure.set(failure);
               }
             });
-    delivery.start();
-    assertTrue(entered.await(3, TimeUnit.SECONDS));
-    closing.start();
-    assertTrue(stopped.await(3, TimeUnit.SECONDS));
-    assertTrue(closing.isAlive());
-    release.countDown();
-    delivery.join(3000);
-    closing.join(3000);
-    assertFalse(delivery.isAlive());
-    assertFalse(closing.isAlive());
-    verify(fixture.service).apply(any());
-    verify(fixture.service, never()).quarantine(anyString(), any(), any(), anyString());
-    assertNotNull(fixture.failure());
-    assertNotNull(closeFailure.get());
+    try {
+      delivery.start();
+      assertTrue(entered.await(3, TimeUnit.SECONDS));
+      closing.start();
+      assertTrue(stopped.await(3, TimeUnit.SECONDS));
+      assertTrue(closing.isAlive());
+      release.countDown();
+      delivery.join(3000);
+      closing.join(3000);
+      assertFalse(delivery.isAlive());
+      assertFalse(closing.isAlive());
+      verify(fixture.service).apply(any());
+      verify(fixture.service, never()).quarantine(anyString(), any(), any(), anyString());
+      assertNotNull(fixture.failure());
+      assertNotNull(closeFailure.get());
+    } finally {
+      release.countDown();
+      delivery.join(3000);
+      closing.join(16000);
+      assertFalse(delivery.isAlive());
+      assertFalse(closing.isAlive());
+    }
   }
 
   private static ProductMetricBatchApplyResultDTO success(List<ProductMetricEventDTO> events) {
