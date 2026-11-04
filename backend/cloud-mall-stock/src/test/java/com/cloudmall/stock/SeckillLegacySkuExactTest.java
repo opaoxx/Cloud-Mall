@@ -7,7 +7,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.math.BigInteger;

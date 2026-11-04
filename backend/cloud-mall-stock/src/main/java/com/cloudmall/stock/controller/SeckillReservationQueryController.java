@@ -3,6 +3,7 @@ package com.cloudmall.stock.controller;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
+import com.cloudmall.stock.domain.vo.SeckillReservationFactVO;
 import com.cloudmall.stock.service.SeckillReservationQueryService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/internal/stock")
 public class SeckillReservationQueryController {
+  /** 内部受理事实的只读业务契约。 */
   private final SeckillReservationQueryService queryService;
 
   /** 创建内部秒杀受理查询控制器。 */
@@ -23,7 +25,7 @@ public class SeckillReservationQueryController {
 
   /** 只允许订单服务读取库存侧不可变受理事实。 */
   @GetMapping("/seckill/reservations/{orderNo}")
-  public ApiResponse<?> find(
+  public ApiResponse<SeckillReservationFactVO> find(
       @PathVariable("orderNo") String orderNo,
       @RequestHeader(value = "X-Internal-Service", required = false) String internalService) {
     if (!"cloud-mall-order".equals(internalService)) {

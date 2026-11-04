@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service;
+package com.cloudmall.stock.service.impl.metrics;
 
 import com.cloudmall.stock.domain.po.StockSalesOutboxPO;
 import java.nio.charset.StandardCharsets;

@@ -9,7 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockCacheReconciler;
+import com.cloudmall.stock.service.impl.cache.StockCacheReconciler;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;

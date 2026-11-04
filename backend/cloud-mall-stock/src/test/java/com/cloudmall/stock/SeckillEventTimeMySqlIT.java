@@ -1,5 +1,6 @@
 package com.cloudmall.stock;
 
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -7,9 +8,9 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillOrderOutboxDispatcher;
-import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
-import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
+import com.cloudmall.stock.service.impl.seckill.SeckillOrderOutboxDispatcher;
+import com.cloudmall.stock.service.impl.seckill.SeckillRequestClaimService;
+import com.cloudmall.stock.service.impl.seckill.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.OffsetDateTime;
@@ -427,7 +428,7 @@ class SeckillEventTimeMySqlIT {
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     when(redis.opsForValue())
         .thenReturn(mock(org.springframework.data.redis.core.ValueOperations.class));
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     List<Map<String, Object>> sent = new ArrayList<>();
     var dispatcher =
         new SeckillOrderOutboxDispatcher(
@@ -469,7 +470,8 @@ class SeckillEventTimeMySqlIT {
               })
           .when(values)
           .get(markerKey(1));
-      var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+      var acceptance =
+          mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
       var dispatcher =
           new SeckillOrderOutboxDispatcher(
               mapper,
@@ -563,7 +565,7 @@ class SeckillEventTimeMySqlIT {
     var dispatcher =
         new SeckillOrderOutboxDispatcher(
             mapper,
-            mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class),
+            mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class),
             redis,
             mock(RabbitTemplate.class),
             new ObjectMapper(),
@@ -667,7 +669,7 @@ class SeckillEventTimeMySqlIT {
         mock(org.springframework.data.redis.core.ValueOperations.class);
     when(redis.opsForValue()).thenReturn(values);
     when(values.get(markerKey(2))).thenReturn("202610-marker-2");
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     List<Map<String, Object>> sent = new ArrayList<>();
     var dispatcher =
         new SeckillOrderOutboxDispatcher(
@@ -726,7 +728,7 @@ class SeckillEventTimeMySqlIT {
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     when(redis.opsForValue())
         .thenReturn(mock(org.springframework.data.redis.core.ValueOperations.class));
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     List<Map<String, Object>> sent = new ArrayList<>();
     var dispatcher =
         new SeckillOrderOutboxDispatcher(
@@ -1319,7 +1321,7 @@ class SeckillEventTimeMySqlIT {
         fixture.queryForMap("SELECT * FROM seckill_reservation WHERE id=1");
     List<Map<String, Object>> sent = new ArrayList<>();
     RabbitTemplate rabbit = sender(sent, false);
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     org.springframework.data.redis.core.ValueOperations<String, String> values =
         mock(org.springframework.data.redis.core.ValueOperations.class);
@@ -1381,7 +1383,7 @@ class SeckillEventTimeMySqlIT {
         .thenThrow(
             new org.springframework.data.redis.RedisConnectionFailureException(
                 "fixture total marker outage"));
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     var dispatcher =
         new SeckillOrderOutboxDispatcher(
             mapper,
@@ -1409,7 +1411,7 @@ class SeckillEventTimeMySqlIT {
     List<String> visited = new ArrayList<>();
     Map<String, String> markers = new java.util.HashMap<>();
     markers.put(markerKey(3), "202610-marker-3");
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     var dispatcher = markerDispatcher(visited, markers, acceptance, 2);
     dispatcher.dispatch();
     assertEquals(List.of(markerKey(1), markerKey(2)), visited);
@@ -1447,7 +1449,7 @@ class SeckillEventTimeMySqlIT {
     seedMarkerCandidate(20, "UNKNOWN");
     seedMarkerCandidate(30, "UNKNOWN");
     List<String> visited = new ArrayList<>();
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     var dispatcher = markerDispatcher(visited, new java.util.HashMap<>(), acceptance, 2);
     dispatcher.dispatch();
     assertEquals(List.of(markerKey(10), markerKey(20)), visited);
@@ -1488,7 +1490,7 @@ class SeckillEventTimeMySqlIT {
   private SeckillOrderOutboxDispatcher markerDispatcher(
       List<String> visited,
       Map<String, String> markers,
-      com.cloudmall.stock.service.impl.SeckillAcceptanceService acceptance,
+      com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService acceptance,
       int batchLimit) {
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     org.springframework.data.redis.core.ValueOperations<String, String> values =
@@ -1519,7 +1521,7 @@ class SeckillEventTimeMySqlIT {
     seedMarkerCandidate(30, "PENDING");
     List<String> visited = new ArrayList<>();
     var markers = Map.of(markerKey(30), "202610-marker-30");
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     doThrow(new IllegalStateException("fixture acceptance unavailable"))
         .when(acceptance)
         .accept(anyLong(), anyString(), anyString(), anyString(), anyString(), anyString(), any());
@@ -1565,7 +1567,7 @@ class SeckillEventTimeMySqlIT {
     var values = mock(org.springframework.data.redis.core.ValueOperations.class);
     when(redis.opsForValue()).thenReturn(values);
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
-    var acceptance = mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    var acceptance = mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     var dispatcher =
         new SeckillOrderOutboxDispatcher(
             mapper, acceptance, redis, rabbit, new ObjectMapper(), new MockEnvironment());
@@ -1824,7 +1826,7 @@ class SeckillEventTimeMySqlIT {
   private SeckillOrderOutboxDispatcher dispatcher(RabbitTemplate rabbit) {
     return new SeckillOrderOutboxDispatcher(
         mapper,
-        mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class),
+        mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class),
         mock(StringRedisTemplate.class),
         rabbit,
         new ObjectMapper(),

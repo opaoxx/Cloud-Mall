@@ -8,7 +8,7 @@ import static org.mockito.Mockito.when;
 
 import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockConsistencyReconciler;
+import com.cloudmall.stock.service.impl.cache.StockConsistencyReconciler;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.HashOperations;

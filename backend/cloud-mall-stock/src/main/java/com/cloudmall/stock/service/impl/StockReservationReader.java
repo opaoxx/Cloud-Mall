@@ -7,6 +7,7 @@ import com.cloudmall.stock.domain.dto.StockLineDTO;
 import com.cloudmall.stock.domain.vo.StockReservationItemVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
 import com.cloudmall.stock.util.SeckillAcceptanceDimensions;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;

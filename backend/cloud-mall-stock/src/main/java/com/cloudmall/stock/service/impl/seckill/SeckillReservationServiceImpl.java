@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service.impl;
+package com.cloudmall.stock.service.impl.seckill;
 
 import com.alibaba.csp.sentinel.Entry;
 import com.alibaba.csp.sentinel.slots.block.BlockException;

@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service.impl;
+package com.cloudmall.stock.service.impl.seckill;
 
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;

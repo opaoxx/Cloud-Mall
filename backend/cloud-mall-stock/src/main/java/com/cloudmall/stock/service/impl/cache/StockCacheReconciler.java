@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service.impl;
+package com.cloudmall.stock.service.impl.cache;
 
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.util.StockDependencyGuard;
@@ -53,18 +53,19 @@ public class StockCacheReconciler {
           + " redis.call('HSET',KEYS[1],'quantity',ARGV[1],'version',ARGV[2]); return 1";
 
   /** 每批只读返回固定的 type/quantity/version 三元组；异常长字段只返回无效标记。 */
-  private static final byte[] READ_PROJECTION = (
-      "local out={}; for i=1,#KEYS do local kind=redis.call('TYPE',KEYS[i]).ok;"
-          + " out[#out+1]=kind; if kind=='hash' then"
-          + " if redis.call('HSTRLEN',KEYS[i],'quantity')>64 then out[#out+1]='!'"
-          + " else out[#out+1]=redis.call('HGET',KEYS[i],'quantity') or '' end;"
-          + " if redis.call('HSTRLEN',KEYS[i],'version')>64 then out[#out+1]='!'"
-          + " else out[#out+1]=redis.call('HGET',KEYS[i],'version') or '' end;"
-          + " else out[#out+1]=''; out[#out+1]=''; end end; return out")
-      .getBytes(StandardCharsets.UTF_8);
+  private static final byte[] READ_PROJECTION =
+      ("local out={}; for i=1,#KEYS do local kind=redis.call('TYPE',KEYS[i]).ok;"
+              + " out[#out+1]=kind; if kind=='hash' then"
+              + " if redis.call('HSTRLEN',KEYS[i],'quantity')>64 then out[#out+1]='!'"
+              + " else out[#out+1]=redis.call('HGET',KEYS[i],'quantity') or '' end;"
+              + " if redis.call('HSTRLEN',KEYS[i],'version')>64 then out[#out+1]='!'"
+              + " else out[#out+1]=redis.call('HGET',KEYS[i],'version') or '' end;"
+              + " else out[#out+1]=''; out[#out+1]=''; end end; return out")
+          .getBytes(StandardCharsets.UTF_8);
 
   /** Redis 游标扫描的每次提示数量和单轮匹配上限。 */
   private static final int SCAN_COUNT = 1000;
+
   private static final int SCAN_MAX_MATCHES = 10000;
 
   /** 每轮修复的最大行数，避免单次任务长期占用调度线程。 */
@@ -136,8 +137,10 @@ public class StockCacheReconciler {
       long fallbackStartedAt = System.nanoTime();
       stockSqlMapper.enqueueCurrentCacheRepairs(now());
       rescanRequired = true;
-      log.warn("Redis 启动校准未完成，保留已完成记录并排队可重试修复；恢复后重新逐批核对，fallbackMs={}",
-          elapsedMillis(fallbackStartedAt, System.nanoTime()), unavailableRedis);
+      log.warn(
+          "Redis 启动校准未完成，保留已完成记录并排队可重试修复；恢复后重新逐批核对，fallbackMs={}",
+          elapsedMillis(fallbackStartedAt, System.nanoTime()),
+          unavailableRedis);
     }
   }
 
@@ -194,10 +197,11 @@ public class StockCacheReconciler {
       for (Map<String, Object> row : batch) {
         long skuId = ((Number) row.get("sku_id")).longValue();
         if (activeLegacySkus.contains(skuId)) {
-          redisRead(() -> {
-            redis.opsForValue().set(BLOCKED_PREFIX + skuId, "LEGACY_RESERVATION");
-            return null;
-          });
+          redisRead(
+              () -> {
+                redis.opsForValue().set(BLOCKED_PREFIX + skuId, "LEGACY_RESERVATION");
+                return null;
+              });
           blocked++;
         } else {
           eligible.add(row);
@@ -214,20 +218,36 @@ public class StockCacheReconciler {
       differences += comparison.differenceSkuIds.size();
       if (!comparison.differenceSkuIds.isEmpty()) {
         long enqueueStartedAt = System.nanoTime();
-        intentsAffected += stockSqlMapper.enqueueCacheRepairsForSkuIds(
-            comparison.differenceSkuIds, now());
+        intentsAffected +=
+            stockSqlMapper.enqueueCacheRepairsForSkuIds(comparison.differenceSkuIds, now());
         enqueueMillis += elapsedMillis(enqueueStartedAt, System.nanoTime());
       }
-      peakBatchHeapMiB = Math.max(peakBatchHeapMiB,
-          java.lang.management.ManagementFactory.getMemoryMXBean()
-              .getHeapMemoryUsage().getUsed() / (1024L * 1024L));
+      peakBatchHeapMiB =
+          Math.max(
+              peakBatchHeapMiB,
+              java.lang.management.ManagementFactory.getMemoryMXBean()
+                      .getHeapMemoryUsage()
+                      .getUsed()
+                  / (1024L * 1024L));
       if (batch.size() < batchSize) break;
     }
     Collections.sort(redisCallMicros);
-    return new CalibrationStats(rowsChecked, matching, newer, blocked, differences,
-        intentsAffected, readMillis, redisMillis, enqueueMillis, peakBatchHeapMiB,
-        redisCallMicros.size(), percentile(redisCallMicros, 50), percentile(redisCallMicros, 95),
-        percentile(redisCallMicros, 99), maxReplyBytes);
+    return new CalibrationStats(
+        rowsChecked,
+        matching,
+        newer,
+        blocked,
+        differences,
+        intentsAffected,
+        readMillis,
+        redisMillis,
+        enqueueMillis,
+        peakBatchHeapMiB,
+        redisCallMicros.size(),
+        percentile(redisCallMicros, 50),
+        percentile(redisCallMicros, 95),
+        percentile(redisCallMicros, 99),
+        maxReplyBytes);
   }
 
   /** 有界批次耗时分位数，单位微秒。 */
@@ -240,12 +260,17 @@ public class StockCacheReconciler {
   /** 一次有界只读 Lua 返回每个 SKU 的类型、数量和版本。 */
   private BatchComparison compareRedis(List<Map<String, Object>> rows) {
     if (rows.isEmpty()) return new BatchComparison(List.of(), 0, 0, 0, -1L, 0L);
-    byte[][] keys = rows.stream().map(StockCacheReconciler::stockKeyBytes)
-        .toArray(byte[][]::new);
+    byte[][] keys = rows.stream().map(StockCacheReconciler::stockKeyBytes).toArray(byte[][]::new);
     long readStartedAt = System.nanoTime();
-    List<?> values = redisRead(() -> redis.execute(
-        (RedisCallback<List<?>>) connection ->
-            (List<?>) connection.eval(READ_PROJECTION, ReturnType.MULTI, rows.size(), keys)));
+    List<?> values =
+        redisRead(
+            () ->
+                redis.execute(
+                    (RedisCallback<List<?>>)
+                        connection ->
+                            (List<?>)
+                                connection.eval(
+                                    READ_PROJECTION, ReturnType.MULTI, rows.size(), keys)));
     long redisCallMicros = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - readStartedAt);
     if (elapsedMillis(readStartedAt, System.nanoTime()) > Math.max(100L, redisBatchMaxMillis))
       throw new RedisCalibrationException("库存 Redis 只读批次超过耗时上限");
@@ -274,8 +299,10 @@ public class StockCacheReconciler {
         long mysqlQuantity = ((Number) row.get("available_quantity")).longValue();
         if (redisVersion != null && redisVersion > mysqlVersion) {
           newer++;
-        } else if (redisVersion != null && redisVersion == mysqlVersion
-            && redisQuantity != null && redisQuantity == mysqlQuantity) {
+        } else if (redisVersion != null
+            && redisVersion == mysqlVersion
+            && redisQuantity != null
+            && redisQuantity == mysqlQuantity) {
           matching++;
         } else {
           differences.add(((Number) row.get("sku_id")).longValue());
@@ -284,23 +311,24 @@ public class StockCacheReconciler {
         throw new RedisCalibrationException("库存 Redis 只读批次类型未知");
       } else {
         long skuId = ((Number) row.get("sku_id")).longValue();
-        redisRead(() -> {
-          redis.opsForValue().set(BLOCKED_PREFIX + skuId, "LEGACY_STRING");
-          return null;
-        });
+        redisRead(
+            () -> {
+              redis.opsForValue().set(BLOCKED_PREFIX + skuId, "LEGACY_STRING");
+              return null;
+            });
         blocked++;
         log.warn("库存投影 Key 类型不符，保持旧协议阻断，skuId={}，type={}", skuId, type);
       }
     }
-    return new BatchComparison(differences, matching, newer, blocked, redisCallMicros,
-        replyBytes);
+    return new BatchComparison(differences, matching, newer, blocked, redisCallMicros, replyBytes);
   }
 
   /** StringRedisTemplate RedisCallback 可返回 String 或 byte[]。 */
   private static String decoded(Object value) {
     if (value == null) return "";
     return value instanceof byte[] bytes
-        ? new String(bytes, StandardCharsets.UTF_8) : String.valueOf(value);
+        ? new String(bytes, StandardCharsets.UTF_8)
+        : String.valueOf(value);
   }
 
   private static long byteSize(Object value) {
@@ -334,28 +362,63 @@ public class StockCacheReconciler {
   }
 
   /** 日志区分“修复意图已落库”和“Redis 投影已完成”，避免误报闭环。 */
-  private void logCalibration(String phase, long startedAt, long legacyScannedAt,
-      CalibrationStats stats) {
-    log.info("库存缓存差异校准，phase={}，sku={}，matched={}，newer={}，diff={}，intentsAffected={}，projectionWrites=0，blocked={}，legacyMs={}，readMs={}，redisReadMs={}，enqueueMs={}，totalMs={}，peakBatchHeapMiB={}，redisCalls={}，redisP50Us={}，redisP95Us={}，redisP99Us={}，maxReplyBytes={}",
-        phase, stats.rowsChecked, stats.matching, stats.newer, stats.differences,
-        stats.intentsAffected, stats.blocked, elapsedMillis(startedAt, legacyScannedAt),
-        stats.readMillis, stats.redisMillis, stats.enqueueMillis,
-        elapsedMillis(startedAt, System.nanoTime()), stats.peakBatchHeapMiB,
-        stats.redisCalls, stats.redisP50Us, stats.redisP95Us, stats.redisP99Us,
+  private void logCalibration(
+      String phase, long startedAt, long legacyScannedAt, CalibrationStats stats) {
+    log.info(
+        "库存缓存差异校准，phase={}，sku={}，matched={}，newer={}，diff={}，intentsAffected={}，projectionWrites=0，blocked={}，legacyMs={}，readMs={}，redisReadMs={}，enqueueMs={}，totalMs={}，peakBatchHeapMiB={}，redisCalls={}，redisP50Us={}，redisP95Us={}，redisP99Us={}，maxReplyBytes={}",
+        phase,
+        stats.rowsChecked,
+        stats.matching,
+        stats.newer,
+        stats.differences,
+        stats.intentsAffected,
+        stats.blocked,
+        elapsedMillis(startedAt, legacyScannedAt),
+        stats.readMillis,
+        stats.redisMillis,
+        stats.enqueueMillis,
+        elapsedMillis(startedAt, System.nanoTime()),
+        stats.peakBatchHeapMiB,
+        stats.redisCalls,
+        stats.redisP50Us,
+        stats.redisP95Us,
+        stats.redisP99Us,
         stats.maxReplyBytes);
   }
 
-  private record BatchComparison(List<Long> differenceSkuIds, int matching, int newer, int blocked,
-      long redisCallMicros, long replyBytes) {}
+  private record BatchComparison(
+      List<Long> differenceSkuIds,
+      int matching,
+      int newer,
+      int blocked,
+      long redisCallMicros,
+      long replyBytes) {}
 
-  private record CalibrationStats(long rowsChecked, long matching, long newer, long blocked,
-      long differences, long intentsAffected, long readMillis, long redisMillis,
-      long enqueueMillis, long peakBatchHeapMiB, long redisCalls, long redisP50Us,
-      long redisP95Us, long redisP99Us, long maxReplyBytes) {}
+  private record CalibrationStats(
+      long rowsChecked,
+      long matching,
+      long newer,
+      long blocked,
+      long differences,
+      long intentsAffected,
+      long readMillis,
+      long redisMillis,
+      long enqueueMillis,
+      long peakBatchHeapMiB,
+      long redisCalls,
+      long redisP50Us,
+      long redisP95Us,
+      long redisP99Us,
+      long maxReplyBytes) {}
 
   private static final class RedisCalibrationException extends RuntimeException {
-    private RedisCalibrationException(String message) { super(message); }
-    private RedisCalibrationException(String message, Throwable cause) { super(message, cause); }
+    private RedisCalibrationException(String message) {
+      super(message);
+    }
+
+    private RedisCalibrationException(String message, Throwable cause) {
+      super(message, cause);
+    }
   }
 
   /** 定时把已提交的库存版本投影到 Redis。 */
@@ -377,8 +440,7 @@ public class StockCacheReconciler {
         return;
       }
       long repairId = ((Number) repair.get("id")).longValue();
-      if (stockSqlMapper.claimCacheRepair(
-              repairId, owner, currentTime.plusSeconds(30), currentTime)
+      if (stockSqlMapper.claimCacheRepair(repairId, owner, currentTime.plusSeconds(30), currentTime)
           != 1) continue;
       try {
         Long outcome =
@@ -400,8 +462,11 @@ public class StockCacheReconciler {
       } catch (RuntimeException projectionFailure) {
         rescanRequired = true;
         finish(repairId, "PENDING", projectionFailure.toString(), currentTime.plusSeconds(5));
-        log.warn("库存投影失败，skuId={}，sourceVersion={}",
-            skuId, repair.get("source_version"), projectionFailure);
+        log.warn(
+            "库存投影失败，skuId={}，sourceVersion={}",
+            skuId,
+            repair.get("source_version"),
+            projectionFailure);
       }
     }
   }
@@ -460,19 +525,20 @@ public class StockCacheReconciler {
 
   /** 以游标替代阻塞式 KEYS；未完整扫描时不能认定没有旧协议预扣。 */
   private Set<String> scanKeys(String pattern) {
-    return redisRead(() -> {
-      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-      Set<String> matches = new HashSet<>();
-      ScanOptions options = ScanOptions.scanOptions().match(pattern).count(SCAN_COUNT).build();
-      try (Cursor<String> cursor = redis.scan(options)) {
-        while (cursor.hasNext()) {
-          if (System.nanoTime() > deadline || matches.size() >= SCAN_MAX_MATCHES)
-            throw new RedisCalibrationException("库存旧协议 Redis SCAN 未在资源边界内完成");
-          matches.add(cursor.next());
-        }
-      }
-      return matches;
-    });
+    return redisRead(
+        () -> {
+          long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+          Set<String> matches = new HashSet<>();
+          ScanOptions options = ScanOptions.scanOptions().match(pattern).count(SCAN_COUNT).build();
+          try (Cursor<String> cursor = redis.scan(options)) {
+            while (cursor.hasNext()) {
+              if (System.nanoTime() > deadline || matches.size() >= SCAN_MAX_MATCHES)
+                throw new RedisCalibrationException("库存旧协议 Redis SCAN 未在资源边界内完成");
+              matches.add(cursor.next());
+            }
+          }
+          return matches;
+        });
   }
 
   /** 用租约持有者条件更新持久化修复结果。 */

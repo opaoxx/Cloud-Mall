@@ -16,7 +16,7 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.stock.domain.po.StockConsistencyAuditStatePO;
 import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockConsistencyReconciler;
+import com.cloudmall.stock.service.impl.cache.StockConsistencyReconciler;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;

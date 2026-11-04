@@ -318,7 +318,8 @@ class PayTccStockEvidenceMySqlIT {
             .newInstance(new JdbcTemplate(stockTracked));
     var sqlType = stockClasses.loadClass("com.cloudmall.stock.mapper.StockSqlMapper");
     var settlementType =
-        stockClasses.loadClass("com.cloudmall.stock.service.impl.SeckillQuotaSettlementService");
+        stockClasses.loadClass(
+            "com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService");
     var codecType =
         stockClasses.loadClass("com.cloudmall.stock.service.impl.StockReservationSnapshotCodec");
     var readerType =

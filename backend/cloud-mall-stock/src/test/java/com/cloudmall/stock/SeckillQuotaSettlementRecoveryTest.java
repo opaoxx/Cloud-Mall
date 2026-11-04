@@ -15,7 +15,7 @@ import static org.mockito.Mockito.when;
 
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementRecovery;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;

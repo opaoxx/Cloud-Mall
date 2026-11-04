@@ -11,7 +11,7 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
 import org.junit.jupiter.api.Test;
 
 /** 验证秒杀结算事实的状态机和普通库存分流边界。 */

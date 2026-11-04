@@ -13,9 +13,9 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillOrderOutboxDispatcher;
-import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
-import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
+import com.cloudmall.stock.service.impl.seckill.SeckillOrderOutboxDispatcher;
+import com.cloudmall.stock.service.impl.seckill.SeckillRequestClaimService;
+import com.cloudmall.stock.service.impl.seckill.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.Method;
 import java.time.OffsetDateTime;
@@ -81,7 +81,7 @@ class SeckillReliabilityTest {
     SeckillOrderOutboxDispatcher dispatcher =
         new SeckillOrderOutboxDispatcher(
             mapper,
-            mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class),
+            mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class),
             mock(StringRedisTemplate.class),
             rabbit,
             new ObjectMapper(),
@@ -168,8 +168,8 @@ class SeckillReliabilityTest {
     StockSqlMapper mapper = mock(StockSqlMapper.class);
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
-    com.cloudmall.stock.service.impl.SeckillAcceptanceService acceptance =
-        mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
+    com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService acceptance =
+        mock(com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService.class);
     SeckillReservationServiceImpl service =
         StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillAcceptanceService", acceptance);

@@ -8,7 +8,7 @@ import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
+import com.cloudmall.stock.service.impl.seckill.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;

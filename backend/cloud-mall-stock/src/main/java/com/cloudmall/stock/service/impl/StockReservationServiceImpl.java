@@ -11,6 +11,7 @@ import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.StockReservationService;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -56,7 +57,7 @@ public class StockReservationServiceImpl implements StockReservationService {
   private final StockReservationSnapshotCodec snapshotCodec;
 
   /** 启用时与库存确认同事务写入销量事件。 */
-  private final com.cloudmall.stock.service.StockSalesOutboxService salesMetrics;
+  private final com.cloudmall.stock.service.impl.metrics.StockSalesOutboxService salesMetrics;
 
   /** 启动时必须核验销量事务代理的配置开关。 */
   private final boolean salesMetricsEnabled;
@@ -70,7 +71,7 @@ public class StockReservationServiceImpl implements StockReservationService {
       StockReservationReader reservationReader,
       StockReservationSnapshotCodec snapshotCodec,
       @org.springframework.lang.Nullable
-          com.cloudmall.stock.service.StockSalesOutboxService salesMetrics,
+          com.cloudmall.stock.service.impl.metrics.StockSalesOutboxService salesMetrics,
       @org.springframework.beans.factory.annotation.Value(
               "${cloudmall.stock.sales-metrics.enabled:false}")
           boolean salesMetricsEnabled) {
@@ -269,7 +270,7 @@ public class StockReservationServiceImpl implements StockReservationService {
     if (salesMetrics != null && "CONFIRM".equals(flowType)) {
       Object productId = stockRow.get("product_id");
       if (!(productId instanceof Number) || ((Number) productId).longValue() <= 0)
-        throw com.cloudmall.stock.service.StockSalesOutboxService.unavailable(null);
+        throw com.cloudmall.stock.service.impl.metrics.StockSalesOutboxService.unavailable(null);
       salesMetrics.normal(
           orderNo,
           skuId,

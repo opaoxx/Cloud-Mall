@@ -1,5 +1,6 @@
 package com.cloudmall.stock;
 
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -18,10 +19,10 @@ import com.cloudmall.stock.controller.StockController;
 import com.cloudmall.stock.domain.vo.StockActionResultVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillAcceptanceService;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
 import com.cloudmall.stock.service.impl.StockReservationRequestService;
+import com.cloudmall.stock.service.impl.seckill.SeckillAcceptanceService;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
+import com.cloudmall.stock.service.impl.seckill.SeckillRequestClaimService;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -195,7 +196,7 @@ class StockDependencyTransactionTest {
     com.cloudmall.stock.service.impl.StockQueryServiceImpl.class,
     com.cloudmall.stock.service.impl.StockReservationReader.class,
     com.cloudmall.stock.service.impl.StockReservationSnapshotCodec.class,
-    com.cloudmall.stock.service.impl.SeckillReservationServiceImpl.class
+    com.cloudmall.stock.service.impl.seckill.SeckillReservationServiceImpl.class
   })
   static class Beans {
     @Bean

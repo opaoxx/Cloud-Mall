@@ -3,7 +3,7 @@ package com.cloudmall.stock;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
-import com.cloudmall.stock.service.impl.SeckillEventTimeResolver;
+import com.cloudmall.stock.service.impl.seckill.SeckillEventTimeResolver;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;

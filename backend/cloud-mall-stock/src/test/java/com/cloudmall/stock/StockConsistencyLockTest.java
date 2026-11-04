@@ -1,7 +1,7 @@
 package com.cloudmall.stock;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -10,10 +10,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
 import com.cloudmall.stock.domain.po.StockConsistencyAuditStatePO;
-import com.cloudmall.stock.service.impl.StockConsistencyReconciler;
+import com.cloudmall.stock.mapper.StockConsistencyAuditStateMapper;
+import com.cloudmall.stock.mapper.StockSqlMapper;
+import com.cloudmall.stock.service.impl.cache.StockConsistencyReconciler;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;

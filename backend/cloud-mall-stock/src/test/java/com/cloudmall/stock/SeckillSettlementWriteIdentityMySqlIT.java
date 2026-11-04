@@ -12,7 +12,7 @@ import com.cloudmall.common.web.GlobalExceptionHandler;
 import com.cloudmall.stock.controller.StockController;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;

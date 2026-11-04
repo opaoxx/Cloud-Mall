@@ -21,7 +21,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.config.SeckillSentinelConfiguration;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
+import com.cloudmall.stock.service.impl.seckill.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;

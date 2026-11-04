@@ -1,4 +1,5 @@
-package com.cloudmall.stock.service.impl;
+package com.cloudmall.stock.service.impl.seckill;
+
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
@@ -22,13 +23,23 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class SeckillQuotaSettlementService {
   /** Enabled-only sale outbox uses the settlement transaction and actual post-CAS revision. */
-  @Autowired(required = false) private com.cloudmall.stock.service.StockSalesOutboxService salesMetrics;
+  @Autowired(required = false)
+  private com.cloudmall.stock.service.impl.metrics.StockSalesOutboxService salesMetrics;
+
   /** Enablement may not silently fall back to an unwired legacy confirmation. */
-  @org.springframework.beans.factory.annotation.Value("${cloudmall.stock.sales-metrics.enabled:false}") private boolean salesMetricsEnabled;
+  @org.springframework.beans.factory.annotation.Value(
+      "${cloudmall.stock.sales-metrics.enabled:false}")
+  private boolean salesMetricsEnabled;
 
   /** Require the actual transaction proxy whenever first-confirm metrics are enabled. */
   @javax.annotation.PostConstruct
-  public void validateSalesMetrics(){if(salesMetricsEnabled&&(salesMetrics==null||!org.springframework.aop.support.AopUtils.isAopProxy(salesMetrics)))throw new IllegalStateException("SALES_TRANSACTION_PROXY_REQUIRED");}
+  public void validateSalesMetrics() {
+    if (salesMetricsEnabled
+        && (salesMetrics == null
+            || !org.springframework.aop.support.AopUtils.isAopProxy(salesMetrics)))
+      throw new IllegalStateException("SALES_TRANSACTION_PROXY_REQUIRED");
+  }
+
   /** 秒杀结算事实 Mapper。 */
   private final SeckillQuotaSettlementMapper settlementMapper;
 
@@ -147,13 +158,21 @@ public class SeckillQuotaSettlementService {
         if (salesMetrics != null) {
           SeckillQuotaSettlementPO persisted = settlementMapper.findSettlementForUpdate(orderNo);
           Map<String, Object> sku = stockSqlMapper.findStockForUpdate(settlement.skuId);
-          if (persisted == null || !orderNo.equals(persisted.orderNo)
-              || !"CONFIRMED".equals(persisted.status) || persisted.revision == null
-              || sku == null || !(sku.get("product_id") instanceof Number)
+          if (persisted == null
+              || !orderNo.equals(persisted.orderNo)
+              || !"CONFIRMED".equals(persisted.status)
+              || persisted.revision == null
+              || sku == null
+              || !(sku.get("product_id") instanceof Number)
               || ((Number) sku.get("product_id")).longValue() <= 0)
-            throw com.cloudmall.stock.service.StockSalesOutboxService.unavailable(null);
-          salesMetrics.seckill(orderNo, settlement.skuId,
-              ((Number) sku.get("product_id")).longValue(), persisted.revision, org.slf4j.MDC.get("traceId"));
+            throw com.cloudmall.stock.service.impl.metrics.StockSalesOutboxService.unavailable(
+                null);
+          salesMetrics.seckill(
+              orderNo,
+              settlement.skuId,
+              ((Number) sku.get("product_id")).longValue(),
+              persisted.revision,
+              org.slf4j.MDC.get("traceId"));
         }
         return StockActionResultVO.confirmed(false);
       }

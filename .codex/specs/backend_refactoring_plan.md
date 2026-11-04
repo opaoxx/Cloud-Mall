@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，Stock演练命名、主业务拆分及主接口响应VO已完成，下一步为Stock内部查询VO与缓存/恢复职责整理；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，下一模块为Order；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -444,7 +444,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
-| Stock | 进行中 | Seata命名、主业务拆分、主接口VO完成；内部查询VO及缓存/恢复归组待实施，见第19至21节 |
+| Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1128,3 +1128,51 @@ StockDependencyAspect的只读查询切面指向新内部查询实现；缓存�
 新增真实MySQL内部GET检查，以及Order实际StockClient通过Feign/HTTP消费Stock VO序列化结果的契约检查；不增加模块依赖。Stock全部单测/MySqlIT、Common、既有Order专项、Pay→Stock实际HTTP/Feign、Stock打包和八模块test-compile均须通过。11个移动类执行词法与原生命周期/调度元数据对照；Mapper、资源、Lua、SQL、表、消息不改。大型历史测试仅整理改动行/导入。
 
 实验用全新Compose项目 `cloud-mall-refactor-stock-grouping-20261104`，MySQL19937/Redis19938，候选网段10.254.248.0/24，先检查冲突，root/root；空源DDL与UUID库隔离沿用已验证方式。证据写入 `target/backend-refactor-20261104/stock-grouping/`，归档后移除本次容器/网络并保留卷。Git提交只纳入本切片，验证临时index逆补丁后打完成标签；不以Git回滚运行数据。真实TC/RM、商城全链及性能实验不在本切片，Stock模块本轮结构验收只覆盖上述已实施范围。
+
+### 22.4 实际实现与调用链核对
+
+内部查询已形成根service接口、seckill包实现及三个顶层VO。Controller沿用原内部Header、路径、错误及ApiResponse包装。已观察到的原字段通过Object保留JDBC值而不做强制类型转换；NOT_FOUND为2字段、无outbox为8字段、有outbox为9字段。显式null、缺省eventId、REJECTED优先及原字符串"null"均保持。字段在第二次查询前捕获，状态仍在第二次查询后重新读取，未引入RR或修复写入。
+
+11个已有类按22.2完整归入cache/seckill/metrics，原类名和Bean短名保留。内部新实现显式使用原Bean名 `seckillReservationQueryService`。缓存启动和周期核对、秒杀claim/accept/settle/recovery/outbox、销量事务及发布生命周期未改；明显占位注释已替换为实际含义。11类全文执行词法与47个引用文件的声明迁移对照通过，12个Mapper/资源文件保持。旧全限定类及其嵌套class精确检查无残留，没有清空历史target。
+
+关键链路：
+
+- 内部事实GET：Header校验 → 新查询实现的原MYSQL_READ切面 → 受理SELECT → 捕获原字段 → outbox SELECT → VO → HTTP包装；缺失时只执行第一个SELECT，数据库故障仍503。
+- 缓存/周期任务：按原短Bean名扫描新包 → 原初始化流程 → 原6个定时任务注册 → 新包匹配的MYSQL_RECOVERY切面 → 原批次/租约/版本算法。测试调度器仅记录任务，不自动触发资源动作。
+- 销量开启时：额外注册原metrics Service/Dispatcher，MANDATORY及REQUIRES_NEW代理保持，调度任务总数为7；网络发布仍在短事务外。组件扫描测试不宣称已连接真实RabbitMQ。
+- Order实际StockClient保持原GET/Header/返回Map契约，通过受控HTTP服务器消费实际Stock VO序列化结果；Stock侧实际Controller/切面/Mapper另由真实MySQL GET测试核对。该组合不冒充整套服务启动与Nacos/MQ全链路。
+
+新增夹具首轮一项失败源于Mockito再次when时执行旧Answer，准备阶段没有Guard；已改为doThrow，并回归全部6项。Feign夹具在执行前源审修正了Long经JSON解码为Integer的比较方式，改比较实际线上JSON树，未要求跨HTTP保留Java数值包装类。生产逻辑未因夹具问题修改。
+
+### 22.5 Stock模块本轮验收
+
+最终69类442项全部通过，零失败、错误和跳过：
+
+| 范围 | 项数 | 验证内容 |
+| --- | ---: | --- |
+| Common | 25 | 公共契约 |
+| Stock单测/MVC/AOP | 209 | 原201项，新增事实矩阵6、扫描/调度/切面2 |
+| Stock真实MySQL/Redis | 173 | 原171项，新增只读内部GET2；原库存并发、Lua、销量及恢复证明继续通过 |
+| Order既有契约 | 28 | 库存动作、Feign默认动作、秒杀地址及限流映射 |
+| Order新增Feign/HTTP | 1 | StockSeckillFactFeignIT，实际VO序列化后的2/8/9字段/null语义 |
+| Pay→Stock | 6 | 实际HTTP/Feign只读证据与上下文恢复 |
+
+新增Order测试命名为IT，只有显式指定才运行，避免默认根Maven构建中Order先于Stock时依赖尚未生成的兄弟模块产物；标准执行顺序为先打包Stock，再执行该IT。未添加模块/POM依赖。
+
+Stock打包和八模块生产/测试源码编译通过。Jar包含11个新路径实现、新内部查询实现及3个VO，不含旧移动类型或新增测试夹具；Java格式化和git diff --check通过。新增/修改的测试配置使用专属Profile，未改变真实应用默认开关。
+
+全部UUID库已清理，12张源表精确空、Redis DB0/15均为0键；69类报告、日志、inspect、迁移对照和20份本轮销量原子性工件已归档。两个实验容器和网络已移除，新建mysql_data/redis_data卷保留；默认环境和历史工件未变。证据索引为 `target/backend-refactor-20261104/stock-grouping/verification.json`。
+
+Stock已按本轮方案完成演练语义命名、主业务拆分、HTTP/Service分离、主/内部响应VO及职责归组。此结论限定于结构重构，不宣称历史CM18/CM21全部完成；真实RabbitMQ投递故障链、TC/RM恢复、商城全链及性能没有在本切片重跑。下一模块为Order。
+
+### 22.6 回退与后续任务
+
+方案提交/基线为 `151638e1`，标签 `refactor/stock-grouping-baseline-20261104`。本切片完成标签为 `refactor/stock-grouping-complete-20261104`；模块验收标签为 `refactor/stock-complete-20261104`，两者指向同一验收提交。
+
+```powershell
+git revert refactor/stock-grouping-complete-20261104
+```
+
+逆补丁以临时index核对可恢复父提交 `151638e1` 的完整树，真实工作树/index不回退。此操作只撤销内部VO与包归组，保留前三个Stock切片。模块验收标签不是一键撤销整个Stock重构：若需整体回退，应按依赖逆序处理本切片、`7444e58d`、`c16419e4`、`f50c6734`，历史夹具修正 `7153ad65` 保留；有后续依赖提交时先评审冲突。实际回退只清理准确的新类/嵌套class构建残留，保留target证据，不使用reset --hard。Git不回退数据库、Redis或忽略工件。
+
+Order下一步先盘点创建/查询/状态流转、秒杀接收、超时消息、库存动作恢复、分片与演练职责，结合现有规格明确首切片及事务/Feign/分片兼容清单后再改。继续主Agent单独执行本会话任务，不恢复历史性能队列。

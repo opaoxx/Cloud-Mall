@@ -8,7 +8,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementService;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;

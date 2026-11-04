@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service.impl;
+package com.cloudmall.stock.service.impl.seckill;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
@@ -32,16 +32,34 @@ import org.springframework.stereotype.Component;
 /** 恢复秒杀受理窗口并可靠投递已提交的订单 outbox。 */
 @Component
 public class SeckillOrderOutboxDispatcher {
+  /** 记录受理恢复、原事件投递和租约失败。 */
   private static final Logger log = LoggerFactory.getLogger(SeckillOrderOutboxDispatcher.class);
+
+  /** 原秒杀订单事件交换机。 */
   private static final String EXCHANGE = "cloudmall.seckill.order.exchange";
+
+  /** PENDING受理等待Redis marker的最短宽限秒数。 */
   private static final long PENDING_MARKER_GRACE_SECONDS = 30L;
 
+  /** 受理和outbox扫描及租约CAS的持久层。 */
   private final StockSqlMapper stockSqlMapper;
+
+  /** 通过真实事务代理补齐受理与outbox。 */
   private final SeckillAcceptanceService acceptanceService;
+
+  /** 读取原受理marker的Redis客户端。 */
   private final StringRedisTemplate redis;
+
+  /** 使用mandatory发布和原确认回执的消息模板。 */
   private final RabbitTemplate rabbitTemplate;
+
+  /** 解析原事件载荷的JSON映射器。 */
   private final ObjectMapper objectMapper;
+
+  /** 单轮marker及outbox扫描的配置上限。 */
   private final int batchSize;
+
+  /** 单次发布确认等待的毫秒上限。 */
   private final long confirmTimeoutMillis;
 
   /** marker宽限期使用瞬时时钟；测试可固定边界，不依赖JVM默认时区。 */
@@ -53,6 +71,7 @@ public class SeckillOrderOutboxDispatcher {
   /** 单实例定时扫描的非持久主键游标；null表示初次扫描，进程重启后从头检查。 */
   private Long markerScanAfterId;
 
+  /** 创建原受理恢复与可靠投递组件，沿用批量和确认超时配置。 */
   public SeckillOrderOutboxDispatcher(
       StockSqlMapper stockSqlMapper,
       SeckillAcceptanceService acceptanceService,
@@ -65,8 +84,11 @@ public class SeckillOrderOutboxDispatcher {
     this.redis = redis;
     this.rabbitTemplate = rabbitTemplate;
     this.objectMapper = objectMapper;
-    this.batchSize = environment.getProperty("cloudmall.stock.seckill.outbox.batch-size", Integer.class, 50);
-    this.confirmTimeoutMillis = environment.getProperty("cloudmall.stock.seckill.outbox.confirm-timeout-ms", Long.class, 5000L);
+    this.batchSize =
+        environment.getProperty("cloudmall.stock.seckill.outbox.batch-size", Integer.class, 50);
+    this.confirmTimeoutMillis =
+        environment.getProperty(
+            "cloudmall.stock.seckill.outbox.confirm-timeout-ms", Long.class, 5000L);
     this.rabbitTemplate.setMandatory(true);
   }
 
@@ -149,8 +171,7 @@ public class SeckillOrderOutboxDispatcher {
               if (!alreadyCommitted(row, orderNo))
                 log.warn("秒杀缺少 marker 且 UNKNOWN 转换未命中，保留原记录继续核验，orderNo={}", orderNo);
             } catch (RuntimeException verificationFailure) {
-              log.warn("秒杀缺少 marker 后的持久事实核验失败，orderNo={}", orderNo,
-                  verificationFailure);
+              log.warn("秒杀缺少 marker 后的持久事实核验失败，orderNo={}", orderNo, verificationFailure);
             }
           }
         }

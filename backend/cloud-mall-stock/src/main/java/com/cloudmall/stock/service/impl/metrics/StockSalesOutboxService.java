@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service;
+package com.cloudmall.stock.service.impl.metrics;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.dto.StockSalesEventDTO;

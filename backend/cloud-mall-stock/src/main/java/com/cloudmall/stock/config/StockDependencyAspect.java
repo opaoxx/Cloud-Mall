@@ -1,5 +1,6 @@
 package com.cloudmall.stock.config;
 
+
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import org.aspectj.lang.ProceedingJoinPoint;
@@ -34,26 +35,26 @@ public class StockDependencyAspect {
   @Around(
       "execution(public * com.cloudmall.stock.service.impl.StockQueryServiceImpl.reservation(..)) ||"
           + " execution(public *"
-          + " com.cloudmall.stock.service.SeckillReservationQueryService.find(..))")
+          + " com.cloudmall.stock.service.impl.seckill.SeckillReservationQueryServiceImpl.find(..))")
   public Object read(ProceedingJoinPoint invocation) throws Throwable {
     return StockDependencyGuard.execute(StockDependencyGuard.MYSQL_READ, invocation::proceed);
   }
 
   /** 在调度整批恢复之前保护数据库边界，内部嵌套事务沿用本批 Entry。 */
   @Around(
-      "execution(public * com.cloudmall.stock.service.impl.StockCacheReconciler.repairPending(..))"
+      "execution(public * com.cloudmall.stock.service.impl.cache.StockCacheReconciler.repairPending(..))"
           + " || execution(public *"
-          + " com.cloudmall.stock.service.impl.StockCacheReconciler.retryIncompleteCalibration(..))"
+          + " com.cloudmall.stock.service.impl.cache.StockCacheReconciler.retryIncompleteCalibration(..))"
           + " || execution(public *"
-          + " com.cloudmall.stock.service.impl.StockCacheReconciler.unblockResolvedLegacyStocks(..))"
+          + " com.cloudmall.stock.service.impl.cache.StockCacheReconciler.unblockResolvedLegacyStocks(..))"
           + " || execution(public *"
-          + " com.cloudmall.stock.service.impl.StockConsistencyReconciler.scheduledAudit(..)) ||"
+          + " com.cloudmall.stock.service.impl.cache.StockConsistencyReconciler.scheduledAudit(..)) ||"
           + " execution(public *"
-          + " com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery.recoverDue(..)) ||"
+          + " com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementRecovery.recoverDue(..)) ||"
           + " execution(public *"
-          + " com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery.scheduledRecover(..))"
+          + " com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementRecovery.scheduledRecover(..))"
           + " || execution(public *"
-          + " com.cloudmall.stock.service.impl.SeckillOrderOutboxDispatcher.dispatch(..))")
+          + " com.cloudmall.stock.service.impl.seckill.SeckillOrderOutboxDispatcher.dispatch(..))")
   public Object recovery(ProceedingJoinPoint invocation) throws Throwable {
     try {
       return StockDependencyGuard.execute(StockDependencyGuard.MYSQL_RECOVERY, invocation::proceed);

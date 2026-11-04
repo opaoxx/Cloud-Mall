@@ -8,7 +8,7 @@ import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
-import com.cloudmall.stock.service.impl.SeckillQuotaSettlementRecovery;
+import com.cloudmall.stock.service.impl.seckill.SeckillQuotaSettlementRecovery;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;

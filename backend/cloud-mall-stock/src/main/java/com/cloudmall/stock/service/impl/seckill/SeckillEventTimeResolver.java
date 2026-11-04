@@ -1,4 +1,4 @@
-package com.cloudmall.stock.service.impl;
+package com.cloudmall.stock.service.impl.seckill;
 
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import java.sql.Timestamp;
