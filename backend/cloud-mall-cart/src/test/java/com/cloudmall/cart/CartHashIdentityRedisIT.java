@@ -4,7 +4,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartCheckedDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
@@ -110,8 +113,7 @@ class CartHashIdentityRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -179,9 +181,12 @@ class CartHashIdentityRedisIT {
     CartItemVO added = (CartItemVO) controller.add(request(1)).data;
     assertEquals(3, added.quantity);
     assertEquals(4, ((CartItemVO) controller.update(7L, request(4)).data).quantity);
-    assertTrue(((CartItemVO) controller.checked(7L, Map.of("checked", true)).data).checked);
+    assertTrue(
+        ((CartItemVO) controller.checked(7L, new CartCheckedDTO(Map.of("checked", true))).data)
+            .checked);
     CartSettlementPreviewVO preview =
-        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+        (CartSettlementPreviewVO)
+            controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L)))).data;
     assertEquals("49.20", preview.totalAmount());
     assertEquals(
         7L,
@@ -215,9 +220,7 @@ class CartHashIdentityRedisIT {
     healthy.checked = false;
     redis.opsForHash().put(ownedKey, "8", mapper.writeValueAsString(healthy));
     redis.expire(ownedKey, Duration.ofSeconds(120));
-    doReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(8L, 88L, "independent product", "88.00", Map.of())))
+    doReturn(ApiResponse.ok(new ProductSkuDTO(8L, 88L, "independent product", "88.00", Map.of())))
         .when(products)
         .getSku(8L);
   }
@@ -232,9 +235,10 @@ class CartHashIdentityRedisIT {
       switch (operation) {
         case "add" -> controller.add(request(1));
         case "update" -> controller.update(7L, request(4));
-        case "checked" -> controller.checked(7L, Map.of("checked", false));
+        case "checked" -> controller.checked(7L, new CartCheckedDTO(Map.of("checked", false)));
         case "all" -> controller.all();
-        case "preview" -> controller.preview(Map.of("skuIds", List.of(7L, 8L)));
+        case "preview" ->
+            controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L, 8L))));
         case "clear" -> controller.clearChecked();
         default -> throw new AssertionError(operation);
       }

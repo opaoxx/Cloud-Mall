@@ -4,7 +4,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartCheckedDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -114,8 +117,7 @@ class CartRefreshCompareWriteRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -152,7 +154,8 @@ class CartRefreshCompareWriteRedisIT {
             () -> {
               switch (change) {
                 case "quantity" -> controller.update(7L, request(9));
-                case "unchecked" -> controller.checked(7L, Map.of("checked", false));
+                case "unchecked" ->
+                    controller.checked(7L, new CartCheckedDTO(Map.of("checked", false)));
                 case "add" -> controller.add(request(3));
                 default -> throw new AssertionError(change);
               }
@@ -216,8 +219,7 @@ class CartRefreshCompareWriteRedisIT {
       redis.expire(ownedKey, Duration.ofSeconds(120));
       doReturn(
               ApiResponse.ok(
-                  new ProductClient.SkuView(
-                      7L, Long.MAX_VALUE, "current product", "0012.30", Map.of())))
+                  new ProductSkuDTO(7L, Long.MAX_VALUE, "current product", "0012.30", Map.of())))
           .when(products)
           .getSku(7L);
       var response = invokeRefresh(operation, controller);
@@ -287,13 +289,15 @@ class CartRefreshCompareWriteRedisIT {
   }
 
   /** 合法当前商品摘要，真实Product数据库/HTTP不在本验证范围。 */
-  private static ApiResponse<ProductClient.SkuView> currentSku() {
-    return ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of()));
+  private static ApiResponse<ProductSkuDTO> currentSku() {
+    return ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of()));
   }
 
   /** 保持两个公共入口真实执行，不通过购物车GET再次改变观察结果。 */
   private ApiResponse<?> invokeRefresh(String operation, CartController target) {
-    return "all".equals(operation) ? target.all() : target.preview(Map.of("skuIds", List.of(7L)));
+    return "all".equals(operation)
+        ? target.all()
+        : target.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L))));
   }
 
   /** 只捕获业务失败，底层异常/测试错误不能冒充预期的409。 */

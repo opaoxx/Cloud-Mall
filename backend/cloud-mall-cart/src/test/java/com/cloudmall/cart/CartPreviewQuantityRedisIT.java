@@ -5,6 +5,8 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
@@ -110,8 +112,7 @@ class CartPreviewQuantityRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -148,7 +149,8 @@ class CartPreviewQuantityRedisIT {
         BizException failure = null;
         try {
           controller.preview(
-              "explicit".equals(selection) ? Map.of("skuIds", List.of(7L)) : Map.of());
+              new CartSelectionDTO(
+                  "explicit".equals(selection) ? Map.of("skuIds", List.of(7L)) : Map.of()));
         } catch (BizException rejected) {
           failure = rejected;
         }
@@ -176,7 +178,7 @@ class CartPreviewQuantityRedisIT {
     corrupt.skuId = 8L;
     corrupt.checked = true;
     redis.opsForHash().put(ownedKey, "8", mapper.writeValueAsString(corrupt));
-    doReturn(ApiResponse.ok(new ProductClient.SkuView(8L, 88L, "product8", "88.00", Map.of())))
+    doReturn(ApiResponse.ok(new ProductSkuDTO(8L, 88L, "product8", "88.00", Map.of())))
         .when(products)
         .getSku(8L);
     Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
@@ -184,7 +186,7 @@ class CartPreviewQuantityRedisIT {
     clearInvocations(products);
     BizException failure = null;
     try {
-      controller.preview(Map.of("skuIds", List.of(7L, 8L)));
+      controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L, 8L))));
     } catch (BizException rejected) {
       failure = rejected;
     }
@@ -209,21 +211,23 @@ class CartPreviewQuantityRedisIT {
     redis.opsForHash().put(ownedKey, "8", mapper.writeValueAsString(unselected));
     Object originalBadRow = redis.opsForHash().get(ownedKey, "8");
     CartSettlementPreviewVO explicit =
-        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+        (CartSettlementPreviewVO)
+            controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L)))).data;
     assertEquals("24.60", explicit.totalAmount());
     CartSettlementPreviewVO defaultChecked =
-        (CartSettlementPreviewVO) controller.preview(Map.of()).data;
+        (CartSettlementPreviewVO) controller.preview(new CartSelectionDTO(Map.of())).data;
     assertEquals("24.60", defaultChecked.payAmount());
     assertEquals(originalBadRow, redis.opsForHash().get(ownedKey, "8"));
     verify(products, never()).getSku(8L);
     CartItemDTO repair = request(3);
     repair.skuId = 8L;
     assertEquals(3, ((CartItemVO) controller.update(8L, repair).data).quantity);
-    doReturn(ApiResponse.ok(new ProductClient.SkuView(8L, 88L, "product8", "5.00", Map.of())))
+    doReturn(ApiResponse.ok(new ProductSkuDTO(8L, 88L, "product8", "5.00", Map.of())))
         .when(products)
         .getSku(8L);
     CartSettlementPreviewVO repaired =
-        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(8L))).data;
+        (CartSettlementPreviewVO)
+            controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(8L)))).data;
     assertEquals("15.00", repaired.totalAmount());
     assertEquals(ownerJson, redis.opsForHash().get(ownedKey, OWNER_FIELD));
   }
@@ -232,13 +236,15 @@ class CartPreviewQuantityRedisIT {
   void maximumPositiveQuantityAndEmptyCheckedSetKeepExistingAmountStrings() throws Exception {
     prepare(Integer.MAX_VALUE, true);
     CartSettlementPreviewVO maximum =
-        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+        (CartSettlementPreviewVO)
+            controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L)))).data;
     assertEquals("26414048858.10", maximum.totalAmount());
     assertEquals("26414048858.10", maximum.payAmount());
     prepare(0, false);
     clearInvocations(products);
     Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
-    CartSettlementPreviewVO empty = (CartSettlementPreviewVO) controller.preview(Map.of()).data;
+    CartSettlementPreviewVO empty =
+        (CartSettlementPreviewVO) controller.preview(new CartSelectionDTO(Map.of())).data;
     assertEquals("0", empty.totalAmount());
     assertEquals("0", empty.payAmount());
     assertTrue(((List<?>) empty.items()).isEmpty());

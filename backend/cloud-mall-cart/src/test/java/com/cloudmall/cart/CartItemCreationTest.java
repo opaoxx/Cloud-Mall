@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -51,8 +52,7 @@ class CartItemCreationTest {
     when(redis.opsForHash()).thenReturn(hashes);
     when(hashes.entries("cart:33")).thenReturn(Map.of());
     when(products.getSku(22L))
-        .thenReturn(
-            ApiResponse.ok(new ProductClient.SkuView(22L, 11L, "商品服务名称", "289.00", Map.of())));
+        .thenReturn(ApiResponse.ok(new ProductSkuDTO(22L, 11L, "商品服务名称", "289.00", Map.of())));
     when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
         .thenReturn(1L);
     CartItemDTO request = new CartItemDTO();

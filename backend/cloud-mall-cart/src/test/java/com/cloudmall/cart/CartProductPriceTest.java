@@ -5,6 +5,8 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.cart.service.impl.CartStorage;
@@ -43,8 +45,7 @@ class CartProductPriceTest {
                     "7", "{\"skuId\":7,\"quantity\":2,\"checked\":true,\"unitPrice\":\"1.00\"}"));
         ProductClient products = mock(ProductClient.class);
         when(products.getSku(7L))
-            .thenReturn(
-                ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "product", price, Map.of())));
+            .thenReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "product", price, Map.of())));
         CartController controller =
             new CartController(
                 new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
@@ -58,7 +59,8 @@ class CartProductPriceTest {
                   switch (operation) {
                     case "add" -> controller.add(request);
                     case "all" -> controller.all();
-                    case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
+                    case "preview" ->
+                        controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L))));
                     default -> throw new AssertionError(operation);
                   }
                 });

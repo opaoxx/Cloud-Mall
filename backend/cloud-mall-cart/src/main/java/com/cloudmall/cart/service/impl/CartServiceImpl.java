@@ -2,6 +2,7 @@ package com.cloudmall.cart.service.impl;
 
 import com.cloudmall.cart.domain.dto.CartCleanupSnapshotDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartInvalidItemVO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
@@ -70,7 +71,7 @@ public class CartServiceImpl implements CartService {
     // 1. 保留请求正数校验并读取当前商品事实。
     if (request.skuId == null || request.quantity < 1)
       throw new BizException(ErrorCodes.INVALID, "购物车数量必须为正数", 400);
-    ProductClient.SkuView current = currentSku(request.skuId);
+    ProductSkuDTO current = currentSku(request.skuId);
     // 2. 每轮取得同次原始JSON/合法PO，确认未写的竞争才重读并重算。
     String skuField = String.valueOf(request.skuId);
     for (int attempt = 0; attempt < CART_COMPARE_ATTEMPTS; attempt++) {
@@ -242,7 +243,7 @@ public class CartServiceImpl implements CartService {
     List<CartInvalidItemVO> invalidItems = new ArrayList<>();
     BigDecimal total = BigDecimal.ZERO;
     for (CartItemPO item : items) {
-      ProductClient.SkuView current;
+      ProductSkuDTO current;
       try {
         current = currentSku(item.skuId);
       } catch (BizException invalidSku) {
@@ -273,7 +274,7 @@ public class CartServiceImpl implements CartService {
         new ArrayList<>(cartStorage.readItems(userId, originalValues).values());
     // 2. 仅商品读取保留原失效语义，条件写异常直接传播。
     for (CartItemPO item : items) {
-      ProductClient.SkuView current;
+      ProductSkuDTO current;
       try {
         current = currentSku(item.skuId);
       } catch (BizException invalidSku) {
@@ -288,7 +289,7 @@ public class CartServiceImpl implements CartService {
 
   /** 只更新当前商品摘要，保留快照数量/勾选/时间。每项仅一次原JSON条件写，0冲突抛409； 未知结果或依赖异常原样传播，不重读、不补偿前序刷新。 */
   private void refreshItem(
-      Long userId, String expectedJson, CartItemPO item, ProductClient.SkuView current) {
+      Long userId, String expectedJson, CartItemPO item, ProductSkuDTO current) {
     item.productId = current.productId();
     item.productName = current.productName();
     item.unitPrice = current.unitPrice();
@@ -311,9 +312,9 @@ public class CartServiceImpl implements CartService {
   }
 
   /** 核成功状态、原SKU及价格语法后返回原事实，坏证明抛500阻止当前项回写/结算。 */
-  private ProductClient.SkuView currentSku(Long skuId) {
+  private ProductSkuDTO currentSku(Long skuId) {
     // 1. 保持原查询和缺失响应/数据的404语义。
-    ApiResponse<ProductClient.SkuView> response = productClient.getSku(skuId);
+    ApiResponse<ProductSkuDTO> response = productClient.getSku(skuId);
     if (response == null || response.data == null)
       throw new BizException(ErrorCodes.NOT_FOUND, "商品或SKU不存在", 404);
     // 2. 可反序列化不代表可信，错误码或别SKU不得提供当前购物车价格。

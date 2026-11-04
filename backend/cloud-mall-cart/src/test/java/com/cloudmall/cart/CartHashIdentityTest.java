@@ -4,7 +4,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartCheckedDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.cart.service.impl.CartStorage;
@@ -59,8 +62,7 @@ class CartHashIdentityTest {
         when(hashes.entries("cart:33")).thenReturn(Map.of(field, json));
         ProductClient products = mock(ProductClient.class);
         when(products.getSku(7L))
-            .thenReturn(
-                ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "product", "12.30", Map.of())));
+            .thenReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "product", "12.30", Map.of())));
         CartController controller =
             new CartController(
                 new CartServiceImpl(new CartStorage(redis, new ObjectMapper()), products));
@@ -74,9 +76,11 @@ class CartHashIdentityTest {
                   switch (operation) {
                     case "add" -> controller.add(request);
                     case "update" -> controller.update(7L, request);
-                    case "checked" -> controller.checked(7L, Map.of("checked", false));
+                    case "checked" ->
+                        controller.checked(7L, new CartCheckedDTO(Map.of("checked", false)));
                     case "all" -> controller.all();
-                    case "preview" -> controller.preview(Map.of("skuIds", List.of(7L, 8L)));
+                    case "preview" ->
+                        controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L, 8L))));
                     case "clear" -> controller.clearChecked();
                     default -> throw new AssertionError(operation);
                   }

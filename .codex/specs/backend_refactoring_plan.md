@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已进入实施准备，最新进展见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点和 Cart 三个重构切片，最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -362,7 +362,7 @@ Git 保存源码历史。数据库数据、Redis 内容、消息积压、Seata �
 
 2026-11-04 `pm_arch` 对本方案完成结构与可实施性评审。中等深度、逐模块推进、分层职责、兼容矩阵和 Git 回退流程可作为后续模块准备依据。Cart 已核对真实入口、Redis 原子操作及现有测试文件，其他模块为总体职责规划，详细类/方法归属在相应模块启动前补齐并评审。
 
-当前交付为方案书，运行验证为 `NOT_RUN`，源码改造进度为待启动。首个实际动作是重新检查工作区与工具路径，填写基线验证记录，完成 Cart 的精确迁移清单和验证选择，再进入实施。
+方案初稿交付时运行验证为 `NOT_RUN`，源码改造待启动。此段记录当时的评审状态，最新实施结果以第 13 节及其后续记录为准。
 
 新对话先读取本文、项目 AGENTS.md、README、bugfix_log.md 及当前模块相关规格，核对实际分支、HEAD 和最近通过点。恢复任务以最新实施记录和真实 Git 状态为依据。
 
@@ -410,3 +410,38 @@ Redis 实验默认地址池耗尽的启动问题通过本次局部 Compose 覆�
 Cart 第二切片开始。第一切片提交为 `c1e34c4cf48cb23ccf56dda0aadda4b75645a680`，其验证范围为 Common25、Cart75、Order14。存储提取同时将 CartItemVO 改为独立响应类，逐字段保持原名称、默认值、金额与时间字符串，原继承依赖断言迁移为 VO。CartStorage 的写入/读取方法限本包调用，构造器用于 Spring 装配，业务服务仅依赖存储与商品客户端。
 
 Cart 第二切片验收通过。CartStorage 承担完整 Hash 与原 JSON 读取、条件写删、TTL、证明解析和 Redis 故障映射，Service 保留商品事实、数量/勾选及结算编排。两个 Lua 初始化文本与第一切片逐字比对一致，CartItemVO 已独立于 PO 且字段和默认值完整保留。Common25、Cart33 单测/MVC与42 Redis IT 全部通过，零失败、零错误、零跳过。初次编译发现的测试持久化对象强转误改已修复并回归。记录位于 `F:/Cloud-Mall/target/backend-refactor-20261104/cart-storage`。调用链为 HTTP → CartService → CartStorage / ProductClient，包内存储方法通过真实业务入口验证。
+
+### Cart 第三切片的请求与 Feign 对象细化
+
+第二切片提交为 `a5d1020e622bd01fd599095c629a35bb9046b0dd`。继续按标准 DTO 分层收敛 checked、preview 的请求绑定，并将 ProductClient.SkuView 迁移为 `domain.dto.ProductSkuDTO`。SKU 五个字段、服务名、请求路径及返回 envelope 按原契约处理。
+
+新增 `CartCheckedDTO` 与 `CartSelectionDTO`。使用 Jackson 委托创建器接收原相同泛型 Map 后只提取业务字段，以保留已有 checked/skuIds 缺省值、显式 null、数值转换及额外字段的解析规则。Controller 直接绑定 DTO，Service 参数仍为明确的 Boolean 或 List<Long>。测试通过旧泛型 Map 解析与新 DTO 解析对照合法/非法载荷，并经真实 MVC 验证。具体 DTO 与 Feign 改名由当前主 Agent 对照契约审阅，格式化、原 Cart 全回归与八模块 test-compile 作为最终验收。
+
+第三切片补充兼容校正。真实 MVC 反例确认首次拆分的提前鉴权把匿名非法数量从原400变为401。Controller 改为读取 AuthContext.userId 并显式传递，CartStorage 在原取 Key 的位置按缺失身份抛原401。原商品查询/参数校验/清理证明校验优先顺序恢复，Service 继续独立于线程上下文。该差异由新增反例暴露，前两切片的测试通过范围未包含此情况，最终以本切片回归结果为准。
+
+### Cart 最终验收与后续状态
+
+第三切片已完成 CartCheckedDTO、CartSelectionDTO 和 ProductSkuDTO 的收敛，Controller 使用 DTO 绑定，Feign 传输对象归入 domain.dto。Jackson 的原泛型 Map 绑定与新 DTO 在十四组合法/非法输入上对照，覆盖缺失/null、额外字段、重复 SKU、字符串与数值转换。匿名请求的原校验优先级已通过先失败后修复的 MVC 反例确认。
+
+最终执行 29 个测试类共 116 项，Common 25 项、Cart 35 项单测/MVC 和 42 项真实 Redis IT、Order 14 项契约与提交边界检查全部通过，失败、错误与跳过均为零。真实 Redis IT 覆盖正常写入、条件竞争、清理快照、金额/身份校验、TTL 与故障边界。完整记录位于 `F:/Cloud-Mall/target/backend-refactor-20261104/verification.json`，本次测试原日志位于该目录的 cart-dto/final-regression.log。
+
+八个后端模块已通过根工程 `-o test-compile -DskipTests`，日志为 `F:/Cloud-Mall/target/backend-refactor-20261104/all-modules-test-compile.log`。该项覆盖全部生产与测试源码编译，其他模块的完整运行测试及真实跨服务交易留待对应模块验收。Google Java Format 1.22.0 与 git diff 检查完成。
+
+Redis 实验数据所在 DB15 在结束时为零键。容器与网络的 inspect、日志已归档，随后以同一 Compose 项目和 `--profile cm21 down --timeout 10` 清理本次容器与网络，清理后按项目标签查询均为空。命名卷 `cloud-mall-refactor-cart-20261104_redis_data` 按项目规则保留。现有 Compose 基础配置、应用端口与历史实验记录沿原规格使用。
+
+本模块三个提交分别对应 HTTP 与 Service 解耦、Redis 存储与 VO 分离、DTO 与兼容顺序收敛。模块通过点标记为 `refactor/cart-complete-20261104`。前两切片的验证未覆盖缺失身份时的错误优先级，最终切片已修正该差异。需要完整恢复原 Cart 实现时，按下列顺序撤销整个模块，并执行原基线验证。执行前按照第 10 节检查和保存当前任务修改。
+
+```powershell
+$cartFinalCommit = git rev-parse 'refactor/cart-complete-20261104^{commit}'
+git show --stat $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c1e34c4cf48cb23ccf56dda0aadda4b75645a680
+git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c1e34c4cf48cb23ccf56dda0aadda4b75645a680
+```
+
+| 模块 | 当前阶段 | 后续动作 |
+| --- | --- | --- |
+| Common | 契约与引用盘点完成，25 项回归通过 | 随依赖方实际需求推进 |
+| Cart | 三个切片验收通过 | 已具备逐模块重构样板 |
+| Gateway | 待开始 | 细化鉴权过滤、配置及命名清单 |
+| Product / User / Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
+
+本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。

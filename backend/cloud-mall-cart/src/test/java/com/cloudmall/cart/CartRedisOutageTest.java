@@ -7,6 +7,8 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.cart.service.impl.CartStorage;
@@ -55,8 +57,7 @@ class CartRedisOutageTest {
         .thenReturn(
             Map.of("22", "{\"skuId\":22,\"productId\":11,\"quantity\":1,\"checked\":true}"));
     when(products.getSku(22L))
-        .thenReturn(
-            ApiResponse.ok(new ProductClient.SkuView(22L, 11L, "keyboard", "1.00", Map.of())));
+        .thenReturn(ApiResponse.ok(new ProductSkuDTO(22L, 11L, "keyboard", "1.00", Map.of())));
     when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
         .thenThrow(new RedisConnectionFailureException("redis down"));
 
@@ -74,14 +75,14 @@ class CartRedisOutageTest {
         .thenReturn(
             Map.of("22", "{\"skuId\":22,\"productId\":11,\"quantity\":1,\"checked\":true}"));
     when(products.getSku(22L))
-        .thenReturn(
-            ApiResponse.ok(new ProductClient.SkuView(22L, 11L, "keyboard", "1.00", Map.of())));
+        .thenReturn(ApiResponse.ok(new ProductSkuDTO(22L, 11L, "keyboard", "1.00", Map.of())));
     when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
         .thenThrow(new RedisConnectionFailureException("redis down"));
 
     BizException failure =
         assertThrows(
-            BizException.class, () -> cart.preview(Map.of("skuIds", java.util.List.of(22L))));
+            BizException.class,
+            () -> cart.preview(new CartSelectionDTO(Map.of("skuIds", java.util.List.of(22L)))));
 
     assertEquals(503, failure.getHttpStatus());
   }

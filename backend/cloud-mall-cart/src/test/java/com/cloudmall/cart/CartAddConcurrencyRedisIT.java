@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -118,8 +119,7 @@ class CartAddConcurrencyRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -186,9 +186,7 @@ class CartAddConcurrencyRedisIT {
             + " \"addedAt\":\"2026-10-08T12:00:00+08:00\", \"unitPrice\":\"0012.30\","
             + " \"productName\":\"original\" } ";
     redis.opsForHash().put(ownedKey, "7", raw);
-    doReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, Long.MAX_VALUE, "current", "0012.30", Map.of())))
+    doReturn(ApiResponse.ok(new ProductSkuDTO(7L, Long.MAX_VALUE, "current", "0012.30", Map.of())))
         .when(products)
         .getSku(7L);
     CartItemVO result = (CartItemVO) controller.add(request(1)).data;

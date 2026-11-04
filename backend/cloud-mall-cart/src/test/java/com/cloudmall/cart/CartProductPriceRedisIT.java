@@ -5,6 +5,8 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
@@ -110,8 +112,7 @@ class CartProductPriceRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -142,9 +143,7 @@ class CartProductPriceRedisIT {
     for (String price : badPrices()) {
       redis.opsForHash().delete(ownedKey, "7");
       redis.expire(ownedKey, Duration.ofSeconds(120));
-      doReturn(
-              ApiResponse.ok(
-                  new ProductClient.SkuView(7L, 99L, "current product", price, Map.of())))
+      doReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", price, Map.of())))
           .when(products)
           .getSku(7L);
       collectRejected("new", checks);
@@ -158,9 +157,7 @@ class CartProductPriceRedisIT {
     for (String operation : List.of("add", "all", "preview")) {
       for (String price : badPrices()) {
         seed(2);
-        doReturn(
-                ApiResponse.ok(
-                    new ProductClient.SkuView(7L, 99L, "current product", price, Map.of())))
+        doReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", price, Map.of())))
             .when(products)
             .getSku(7L);
         collectRejected(operation, checks);
@@ -178,16 +175,15 @@ class CartProductPriceRedisIT {
             new String[] {"1E+1", "20"},
             new String[] {"0012.30", "24.60"})) {
       seed(1);
-      doReturn(
-              ApiResponse.ok(
-                  new ProductClient.SkuView(7L, 99L, "current product", example[0], Map.of())))
+      doReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", example[0], Map.of())))
           .when(products)
           .getSku(7L);
       CartItemVO added = (CartItemVO) controller.add(request(1)).data;
       assertEquals(example[0], added.unitPrice);
       assertEquals(2, added.quantity);
       CartSettlementPreviewVO preview =
-          (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+          (CartSettlementPreviewVO)
+              controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L)))).data;
       assertEquals(example[1], preview.totalAmount());
       assertEquals(example[1], preview.payAmount());
       CartItemPO saved =
@@ -206,7 +202,7 @@ class CartProductPriceRedisIT {
     doReturn(ApiResponse.ok(null)).when(products).getSku(7L);
     BizException missing = assertThrows(BizException.class, () -> controller.add(request(1)));
     assertEquals(404, missing.getHttpStatus());
-    doReturn(ApiResponse.ok(new ProductClient.SkuView(8L, 99L, "wrong product", "NaN", Map.of())))
+    doReturn(ApiResponse.ok(new ProductSkuDTO(8L, 99L, "wrong product", "NaN", Map.of())))
         .when(products)
         .getSku(7L);
     BizException wrongId = assertThrows(BizException.class, () -> controller.add(request(1)));
@@ -225,7 +221,7 @@ class CartProductPriceRedisIT {
       switch (operation) {
         case "new", "add" -> controller.add(request(1));
         case "all" -> controller.all();
-        case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
+        case "preview" -> controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L))));
         default -> throw new AssertionError(operation);
       }
     } catch (RuntimeException rejected) {

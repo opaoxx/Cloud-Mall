@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartCheckedDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -112,8 +114,7 @@ class CartCheckedCompareDeleteRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -149,7 +150,8 @@ class CartCheckedCompareDeleteRedisIT {
           afterSnapshot(
               () -> {
                 switch (operation) {
-                  case "unchecked" -> controller.checked(7L, Map.of("checked", false));
+                  case "unchecked" ->
+                      controller.checked(7L, new CartCheckedDTO(Map.of("checked", false)));
                   case "update" -> controller.update(7L, request(9));
                   case "add" -> controller.add(request(3));
                   case "readd" -> {

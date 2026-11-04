@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartCheckedDTO;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -131,7 +132,8 @@ class CartPutCheckedCompareWriteTest {
     }
 
     private com.cloudmall.common.api.ApiResponse<?> mutate(String operation) {
-      if ("checked".equals(operation)) return controller.checked(7L, Map.of("checked", true));
+      if ("checked".equals(operation))
+        return controller.checked(7L, new CartCheckedDTO(Map.of("checked", true)));
       CartItemDTO request = new CartItemDTO();
       request.quantity = 7;
       request.checked = null;

@@ -1,7 +1,9 @@
 package com.cloudmall.cart;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
@@ -19,7 +21,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartCheckedDTO;
 import com.cloudmall.cart.domain.dto.CartCleanupSnapshotDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.CartService;
@@ -29,7 +34,10 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.config.CommonWebConfiguration;
 import com.cloudmall.common.web.GlobalExceptionHandler;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -99,7 +107,7 @@ class CartHttpContractTest {
     originalJson = objectMapper.writeValueAsString(item);
     when(hashes.entries("cart:33")).thenReturn(Map.of("7", originalJson));
     when(productClient.getSku(7L))
-        .thenReturn(ApiResponse.ok(new ProductClient.SkuView(7L, 70L, "当前商品", "12.30", Map.of())));
+        .thenReturn(ApiResponse.ok(new ProductSkuDTO(7L, 70L, "当前商品", "12.30", Map.of())));
     when(redis.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
         .thenReturn(1L);
     when(redis.execute(any(RedisScript.class), anyList(), any(), any())).thenReturn(1L);
@@ -231,12 +239,88 @@ class CartHttpContractTest {
   }
 
   @Test
+  void missingIdentityKeepsOriginalValidationAndProductFailurePrecedence() throws Exception {
+    mvc.perform(
+            post("/api/cart/items")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"skuId\":7,\"quantity\":0}"))
+        .andExpect(status().isBadRequest());
+    verifyNoInteractions(redis, productClient);
+    mvc.perform(
+            post("/api/cart/items")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"skuId\":7}"))
+        .andExpect(status().isUnauthorized());
+    verify(productClient).getSku(7L);
+    verifyNoInteractions(redis);
+    when(productClient.getSku(7L)).thenReturn(ApiResponse.ok(null));
+    mvc.perform(
+            post("/api/cart/items")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"skuId\":7}"))
+        .andExpect(status().isNotFound());
+    mvc.perform(
+            post("/api/cart/items/7/cleanup")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"skuId\":8,\"expectedJson\":\"{}\"}"))
+        .andExpect(status().isBadRequest());
+    verifyNoInteractions(redis);
+  }
+
+  @Test
   void serviceUsesExplicitOwnerInsteadOfThreadIdentity() {
     AuthContext.set(33L, "USER");
     when(hashes.entries("cart:44")).thenReturn(Map.of());
     cartService.listItems(44L);
     verify(hashes).entries("cart:44");
     verify(hashes, never()).entries("cart:33");
+  }
+
+  @Test
+  void typedRequestsPreserveLegacyMapDecodingForExtraFieldsAndCoercions() throws Exception {
+    for (String json :
+        List.of(
+            "{}",
+            "{\"checked\":null}",
+            "{\"checked\":\"true\"}",
+            "{\"checked\":1}",
+            "{\"checked\":true,\"extra\":false}",
+            "{\"checked\":true,\"extra\":\"bad\"}",
+            "{\"checked\":[true]}")) {
+      Map<String, Boolean> original;
+      try {
+        original = objectMapper.readValue(json, new TypeReference<Map<String, Boolean>>() {});
+      } catch (JsonProcessingException rejected) {
+        assertThrows(
+            JsonProcessingException.class,
+            () -> objectMapper.readValue(json, CartCheckedDTO.class));
+        continue;
+      }
+      assertEquals(
+          original.get("checked"), objectMapper.readValue(json, CartCheckedDTO.class).checked);
+    }
+    for (String json :
+        List.of(
+            "{}",
+            "{\"skuIds\":null}",
+            "{\"skuIds\":[7,7]}",
+            "{\"skuIds\":[\"7\",7.5,null]}",
+            "{\"extra\":[8]}",
+            "{\"skuIds\":7}",
+            "{\"extra\":\"bad\"}")) {
+      Map<String, List<Long>> original;
+      try {
+        original = objectMapper.readValue(json, new TypeReference<Map<String, List<Long>>>() {});
+      } catch (JsonProcessingException rejected) {
+        assertThrows(
+            JsonProcessingException.class,
+            () -> objectMapper.readValue(json, CartSelectionDTO.class));
+        continue;
+      }
+      assertEquals(
+          original.getOrDefault("skuIds", List.of()),
+          objectMapper.readValue(json, CartSelectionDTO.class).skuIds);
+    }
   }
 
   /** 仅替换远端边界，HTTP 绑定和业务 Bean 使用真实实现。 */

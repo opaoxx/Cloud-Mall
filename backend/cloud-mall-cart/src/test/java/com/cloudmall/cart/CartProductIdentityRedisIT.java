@@ -5,6 +5,8 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.po.CartItemPO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
@@ -110,8 +112,7 @@ class CartProductIdentityRedisIT {
     products = mock(ProductClient.class);
     when(products.getSku(7L))
         .thenReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())));
+            ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())));
     controller = new CartController(new CartServiceImpl(new CartStorage(redis, mapper), products));
   }
 
@@ -139,7 +140,7 @@ class CartProductIdentityRedisIT {
   @Test
   void wrongIdentityOrErrorEnvelopeCannotCreateNewCartFacts() throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
-    for (ApiResponse<ProductClient.SkuView> response : badResponses()) {
+    for (ApiResponse<ProductSkuDTO> response : badResponses()) {
       redis.opsForHash().delete(ownedKey, "7");
       redis.expire(ownedKey, Duration.ofSeconds(120));
       doReturn(response).when(products).getSku(7L);
@@ -152,7 +153,7 @@ class CartProductIdentityRedisIT {
   void untrustedProductCannotRewriteExistingAddRefreshOrSettlementPrice() throws Exception {
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
     for (String operation : List.of("add", "all", "preview")) {
-      for (ApiResponse<ProductClient.SkuView> response : badResponses()) {
+      for (ApiResponse<ProductSkuDTO> response : badResponses()) {
         seed(2);
         doReturn(response).when(products).getSku(7L);
         collectRejected(operation, checks);
@@ -164,9 +165,7 @@ class CartProductIdentityRedisIT {
   @Test
   void exactSuccessKeepsCurrentFactsQuantitiesAndSettlementAmount() throws Exception {
     seed(2);
-    doReturn(
-            ApiResponse.ok(
-                new ProductClient.SkuView(7L, 99L, "current product", "12.30", Map.of())))
+    doReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "current product", "12.30", Map.of())))
         .when(products)
         .getSku(7L);
     CartItemVO added = (CartItemVO) controller.add(request(1)).data;
@@ -186,7 +185,8 @@ class CartProductIdentityRedisIT {
     assertEquals(3, refreshed.quantity);
     assertEquals("12.30", refreshed.unitPrice);
     CartSettlementPreviewVO preview =
-        (CartSettlementPreviewVO) controller.preview(Map.of("skuIds", List.of(7L))).data;
+        (CartSettlementPreviewVO)
+            controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L)))).data;
     assertEquals("36.90", preview.totalAmount());
     assertEquals("36.90", preview.payAmount());
     assertTrue(((List<?>) preview.invalidItems()).isEmpty());
@@ -195,11 +195,11 @@ class CartProductIdentityRedisIT {
 
   @Test
   void oldMissingEnvelopeOrDataIsStill404WithoutAnyWrite() throws Exception {
-    List<ApiResponse<ProductClient.SkuView>> missing = new ArrayList<>();
+    List<ApiResponse<ProductSkuDTO>> missing = new ArrayList<>();
     missing.add(null);
     missing.add(ApiResponse.ok(null));
     missing.add(ApiResponse.error(ErrorCodes.NOT_FOUND, "not found"));
-    for (ApiResponse<ProductClient.SkuView> response : missing) {
+    for (ApiResponse<ProductSkuDTO> response : missing) {
       seed(2);
       Map<Object, Object> before = redis.opsForHash().entries(ownedKey);
       doReturn(response).when(products).getSku(7L);
@@ -220,7 +220,7 @@ class CartProductIdentityRedisIT {
       switch (operation) {
         case "new", "add" -> controller.add(request(1));
         case "all" -> controller.all();
-        case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
+        case "preview" -> controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L))));
         default -> throw new AssertionError(operation);
       }
     } catch (BizException rejected) {
@@ -239,16 +239,15 @@ class CartProductIdentityRedisIT {
   }
 
   /** 数据可反序列化不等于合法商品证明：错ID/nullID/坏envelope均不得提供价格。 */
-  private static List<ApiResponse<ProductClient.SkuView>> badResponses() {
-    List<ApiResponse<ProductClient.SkuView>> responses = new ArrayList<>();
+  private static List<ApiResponse<ProductSkuDTO>> badResponses() {
+    List<ApiResponse<ProductSkuDTO>> responses = new ArrayList<>();
+    responses.add(ApiResponse.ok(new ProductSkuDTO(8L, 999L, "wrong product", "999.00", Map.of())));
     responses.add(
-        ApiResponse.ok(new ProductClient.SkuView(8L, 999L, "wrong product", "999.00", Map.of())));
-    responses.add(
-        ApiResponse.ok(new ProductClient.SkuView(null, 999L, "wrong product", "999.00", Map.of())));
+        ApiResponse.ok(new ProductSkuDTO(null, 999L, "wrong product", "999.00", Map.of())));
     for (String code :
         java.util.Arrays.asList(null, "", " ", "COMMON_INTERNAL_ERROR", "COMMON_NOT_FOUND", "00")) {
-      ApiResponse<ProductClient.SkuView> response =
-          ApiResponse.ok(new ProductClient.SkuView(7L, 999L, "wrong product", "999.00", Map.of()));
+      ApiResponse<ProductSkuDTO> response =
+          ApiResponse.ok(new ProductSkuDTO(7L, 999L, "wrong product", "999.00", Map.of()));
       response.code = code;
       responses.add(response);
     }

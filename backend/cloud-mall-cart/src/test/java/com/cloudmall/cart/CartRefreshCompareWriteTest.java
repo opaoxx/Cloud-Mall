@@ -5,6 +5,8 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.domain.vo.CartSettlementPreviewVO;
 import com.cloudmall.cart.feign.ProductClient;
@@ -191,9 +193,8 @@ class CartRefreshCompareWriteTest {
   }
 
   /** 当前商品事实替身，价格按原字符串表示。 */
-  private static ApiResponse<ProductClient.SkuView> product(long skuId) {
-    return ApiResponse.ok(
-        new ProductClient.SkuView(skuId, 99L, "current product", "12.30", Map.of()));
+  private static ApiResponse<ProductSkuDTO> product(long skuId) {
+    return ApiResponse.ok(new ProductSkuDTO(skuId, 99L, "current product", "12.30", Map.of()));
   }
 
   /** 独立依赖替身与实际业务编排。 */
@@ -222,7 +223,7 @@ class CartRefreshCompareWriteTest {
     private ApiResponse<?> refresh(String operation) {
       return "all".equals(operation)
           ? controller.all()
-          : controller.preview(Map.of("skuIds", List.of()));
+          : controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of())));
     }
 
     /** 单次失败最多一读、一查询、一CAS，不能使用旧Hash put/expire或继续调用。 */

@@ -6,6 +6,8 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.CartSelectionDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
 import com.cloudmall.cart.service.impl.CartStorage;
@@ -44,9 +46,9 @@ class CartProductIdentityTest {
         Long responseSku = 7L;
         if ("wrong-id".equals(variant)) responseSku = 8L;
         else if ("missing-id".equals(variant)) responseSku = null;
-        ApiResponse<ProductClient.SkuView> response =
+        ApiResponse<ProductSkuDTO> response =
             ApiResponse.ok(
-                new ProductClient.SkuView(responseSku, 999L, "wrong product", "999.00", Map.of()));
+                new ProductSkuDTO(responseSku, 999L, "wrong product", "999.00", Map.of()));
         if ("error-code".equals(variant)) response.code = "COMMON_INTERNAL_ERROR";
         when(products.getSku(7L)).thenReturn(response);
         CartController controller =
@@ -59,7 +61,8 @@ class CartProductIdentityTest {
                   switch (operation) {
                     case "add" -> controller.add(request());
                     case "all" -> controller.all();
-                    case "preview" -> controller.preview(Map.of("skuIds", List.of(7L)));
+                    case "preview" ->
+                        controller.preview(new CartSelectionDTO(Map.of("skuIds", List.of(7L))));
                     default -> throw new AssertionError(operation);
                   }
                 });

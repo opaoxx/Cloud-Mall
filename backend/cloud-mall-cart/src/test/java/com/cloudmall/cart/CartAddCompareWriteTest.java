@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.cart.controller.CartController;
 import com.cloudmall.cart.domain.dto.CartItemDTO;
+import com.cloudmall.cart.domain.dto.ProductSkuDTO;
 import com.cloudmall.cart.domain.vo.CartItemVO;
 import com.cloudmall.cart.feign.ProductClient;
 import com.cloudmall.cart.service.impl.CartServiceImpl;
@@ -118,8 +119,7 @@ class CartAddCompareWriteTest {
       when(hashes.entries("cart:33"))
           .thenReturn(Map.of("7", "{\"skuId\":7,\"quantity\":2,\"checked\":false}"));
       when(products.getSku(7L))
-          .thenReturn(
-              ApiResponse.ok(new ProductClient.SkuView(7L, 99L, "product", "12.30", Map.of())));
+          .thenReturn(ApiResponse.ok(new ProductSkuDTO(7L, 99L, "product", "12.30", Map.of())));
     }
   }
 

@@ -59,9 +59,12 @@ public class CartStorage {
     redisOperation(() -> redisTemplate.opsForHash().delete(cartKey(userId), String.valueOf(skuId)));
   }
 
-  /** 根据显式用户身份构造购物车键。 */
+  /** 在原持久化入口核验显式用户身份，保留请求校验与401的先后顺序。 */
   private String cartKey(Long userId) {
-    return "cart:" + Objects.requireNonNull(userId, "userId");
+    if (userId == null) {
+      throw new BizException(ErrorCodes.UNAUTHORIZED, "请先登录", 401);
+    }
+    return "cart:" + userId;
   }
 
   /** 同次HGETALL保留原始JSON快照供条件写/删，所有读仍沿原完整身份门。 */
