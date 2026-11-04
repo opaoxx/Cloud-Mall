@@ -131,8 +131,17 @@ public class ProductMetricAdminConnectionLifecycleTest {
     OwnedProductMetricAdminConnection interrupted =
         new OwnedProductMetricAdminConnection(
             interruptedFactory, interruptedExecutor, "cm21-no-network");
+    CountDownLatch workerEntered = new CountDownLatch(1);
+    CountDownLatch releaseWorker = new CountDownLatch(1);
     try {
       startTwoRealTasks(deferred(interruptedFactory));
+      interruptedExecutor.submit(
+          () -> {
+            workerEntered.countDown();
+            releaseWorker.await();
+            return null;
+          });
+      assertTrue(workerEntered.await(2, TimeUnit.SECONDS));
       Thread.currentThread().interrupt();
       IllegalStateException failure = assertThrows(IllegalStateException.class, interrupted::close);
       assertEquals("CM21_ADMIN_EXECUTOR_CLOSE_INTERRUPTED", failure.getMessage());
@@ -141,6 +150,7 @@ public class ProductMetricAdminConnectionLifecycleTest {
       assertTrue(interruptedExecutor.isShutdown());
     } finally {
       Thread.interrupted();
+      releaseWorker.countDown();
       interruptedExecutor.shutdown();
       assertTrue(interruptedExecutor.awaitTermination(2, TimeUnit.SECONDS));
     }
