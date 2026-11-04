@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，Stock演练命名首切片已完成，下一步为Stock主业务拆分；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User 结构重构，Stock演练命名和主业务拆分已完成，下一步为Stock响应VO与缓存/恢复职责整理；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -444,7 +444,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Gateway | 结构迁移验收通过 | 结果与通过点见第 14 节 |
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
-| Stock | 进行中 | Seata演练命名首切片完成，主业务拆分待实施，见第19节 |
+| Stock | 进行中 | Seata命名、主业务拆分完成；响应VO及缓存/恢复归组待实施，见第19、20节 |
 | Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -963,3 +963,49 @@ git revert refactor/stock-seata-complete-20261104
 独立Compose项目 `cloud-mall-refactor-stock-core-20261104`，MySQL19933/Redis19934，新卷，候选网段10.254.246.0/24；启动前检查冲突，root/root。按原schema/迁移准备空源表，各IT只写自己的UUID schema。显式运行Stock全部单测及适用MySqlIT、PayTccStockEvidenceMySqlIT；新增真实Redis检查不借用默认DB。归档后down本次容器/网络，保留卷。完整商城、TC/RM恢复和性能实验不在本轮。
 
 门槛为业务回归、路由/Feign契约、执行词法对照、Stock打包、八模块test-compile、Google Java Format与git diff --check。只清理精确旧class，保留target历史工件。证据写入 `target/backend-refactor-20261104/stock-core/`；源码按可回退阶段提交，并以临时index验证逆补丁。第一切片Seata命名保留，本轮结束仍须继续响应VO及缓存/恢复归组。
+
+### 20.4 实际迁移与调用链复盘
+
+已删除空StockService及混合StockServiceImpl。StockController仅持有三个业务接口，保留原六条路由；秒杀在原首个业务检查点读取身份，其余五入口不新增身份要求。实现规模分别为查询69行、普通预扣357行、秒杀受理465行、共享证明Reader257行、规范快照Codec44行。原未使用RabbitTemplate字段和四个无调用私有方法已删除，所有原测试方法仍保留。
+
+主要调用链逐项对照如下：
+
+1. 普通预扣：Controller → StockReservationService真实事务代理 → 原请求校验/旧流水重放 → 独立REQUIRES_NEW claim → 升序锁定SKU → 数量/流水/cache-repair/request同事务更新 → Reader证明。真实连接ID确认claim独立连接，写入和Reader使用同一事务连接；库存不足持久REJECTED，触发器SQL失败回滚数量/流水但保留已提交INIT。
+2. 确认/回滚：Controller → 受Sentinel保护的写代理 → 原动作键 → 秒杀结算优先 → 普通状态/流水条件更新及销量outbox → afterCommit清理旧Redis标记。外层回滚不清标记，成功提交才清理；销量开启后的同事务成功/失败由既有StockSalesMetricsMySqlIT覆盖。
+3. 查询：Controller → StockQueryServiceImpl → Reader。状态查询进入原MySQL读保护，不新增RR；数量查询缓存命中不进入MySQL保护，缺值/故障才沿原Mapper回退。Reader不另开事务或Entry，避免改变预扣重放的事务边界。
+4. 秒杀：Controller身份 → SeckillReservationServiceImpl的原校验/Sentinel → 指纹与单次时钟 → 原claim代理 → 原Redis Lua → 原accept代理提交ACCEPTED、结算行和outbox。真实HTTP重放验证同一订单/eventId及一次扣配额，结果未知与marker保留逻辑不变。
+
+43个方法/重载位置在声明的接收者与变量替换、身份参数迁移后执行词法一致；12个Mapper/资源文件与基线一致，包含Lua。测试装配从Controller事务代理迁至实际写Service代理，查询/写入职责分别构造；新增配置均使用专属Profile，已有依赖事务夹具也限定为显式激活，避免真实启动扫描到测试配置。Pay只更新反射组装，Redis参数类型从原Stock子ClassLoader读取，不新增Pay依赖。
+
+### 20.5 历史夹具修正与验证结果
+
+独立提交 `7153ad65` 修正五类Stock实库夹具的六处INSERT：显式填写schema要求的request_hash/request_payload，未改DDL、sql_mode或生产证明。这两个字段在该组身份/状态证明测试中不被核验，使用明确的64位占位摘要/空JSON，不将其作为完整指纹证明。OrderIdentity综合测试的legacy PENDING期望按已有T57规格改为UNKNOWN/items=[]，ACCEPTED/REJECTED仍精确为1项。五类103项全部通过，所有原库checksum、只读、事实与恢复CAS断言保留。
+
+迁移过程另修正了测试工厂误加身份参数、过期普通claim字段注入、Mockito空Map与真实无记录null差异、SQL触发器45000的原异常分类期望，以及Pay缺少Redis编译依赖时的反射类型读取。这些是测试装配/期望修正，生产业务拒绝与依赖错误分类保持。失败日志均保留。
+
+最终60类396项测试通过，零失败、错误和跳过，按每类最后一次结果计数：
+
+| 范围 | 项数 | 说明 |
+| --- | ---: | --- |
+| Common | 25 | 公共契约回归 |
+| Stock单测/MVC/AOP | 194 | 原191项及新增Controller2、查询保护1 |
+| Stock真实MySQL/Redis | 171 | 全部MySqlIT，包含新增核心4、销量原子性及44项恢复器/31项操作键测试 |
+| Pay→Stock | 6 | 真实HTTP/Feign、只读SQL、上下文与原库事实核验 |
+
+新增核心4项验证六个并发订单争抢最后1件库存只有1个成功、5个持久REJECTED；独立claim/共享证明连接；SQL故障回滚与原号重放；事务提交/回滚对应的Redis清理；原Lua与outbox的一次受理。完整Stock回归发现的最后一项T57旧期望已定向回归，依赖事务夹具新增Profile后的4项也重新通过，证据明确记录这两类的最新结果替换，不累加重复执行次数。
+
+Stock打包和八模块生产/测试源码编译通过。Jar包含八个新业务/共享类型，无旧StockService/StockServiceImpl或测试夹具；旧class精确检查无残留。Google Java Format 1.22.0已用于全部改动Java文件，大型历史测试只格式化改动范围；git diff --check通过。
+
+全部UUID库已清理，源Stock10表及Pay2表精确COUNT均为0，Redis DB0/15均为0键；日志、inspect、源码/方法对照和60类报告已归档，另复制校验40份本次销量原子性工件。实验容器/网络已移除，保留新建的mysql_data/redis_data卷，默认环境和历史target工件未变。总证据为 `target/backend-refactor-20261104/stock-core/verification.json`。
+
+### 20.6 回退与后续
+
+方案提交/基线为 `430ebd28`，标签 `refactor/stock-core-baseline-20261104`；验收标签为 `refactor/stock-core-complete-20261104`。撤销本切片：
+
+```powershell
+git revert refactor/stock-core-complete-20261104
+```
+
+逆补丁以临时index核对可恢复父提交 `7153ad65` 的完整树，真实工作树/index未执行回退。因此回退结构拆分仍保留五类历史夹具修正，以及上一切片Seata命名。实际回退后仅按新类型与新增夹具的准确class清单清理构建残留，再编译；保留target中的历史证据，不使用reset --hard。Git不回退数据库/Redis或忽略的工件。
+
+本切片未启用真实TC/RM恢复，也未跑完整商城链路或性能实验。Stock整体仍在进行中：下一步先逐端点登记Map的可选字段与null语义，把响应装配移回Controller并形成VO，再细化缓存核对、outbox和恢复实现的归组清单；不得顺带改Lua、CAS、租约或公平扫描算法。

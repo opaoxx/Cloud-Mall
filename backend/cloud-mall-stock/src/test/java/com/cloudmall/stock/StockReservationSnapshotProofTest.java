@@ -5,7 +5,6 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -117,7 +116,7 @@ class StockReservationSnapshotProofTest {
                         "rolled_back_quantity",
                         BigDecimal.ZERO)));
       var claims = mock(com.cloudmall.stock.service.impl.StockReservationRequestService.class);
-      var service = new StockServiceImpl(null, mapper, null, new ObjectMapper());
+      var service = StockTestServices.normal(null, mapper, new ObjectMapper());
       org.springframework.test.util.ReflectionTestUtils.setField(
           service, "reservationRequestService", claims);
       var input = new com.cloudmall.stock.domain.dto.StockReservationDTO();
@@ -144,7 +143,7 @@ class StockReservationSnapshotProofTest {
     when(mapper.findSeckillByOrderNo("order-proof")).thenReturn(null);
     when(mapper.findReservationRequest("order-proof")).thenReturn(request(SNAPSHOT));
     when(mapper.findReservationFlows("order-proof")).thenReturn(flows());
-    var service = new StockServiceImpl(null, mapper, null, json);
+    var service = StockTestServices.reader(mapper, json);
     assertEquals(
         "CONFIRMED", ((StockReservationVO) service.reservation("order-proof").data).status);
     assertEquals(
@@ -216,9 +215,7 @@ class StockReservationSnapshotProofTest {
     Map<String, Object> before = request == null ? null : new HashMap<>(request);
     var result =
         (StockReservationVO)
-            new StockServiceImpl(null, mapper, null, new ObjectMapper())
-                .reservation("order-proof")
-                .data;
+            StockTestServices.reader(mapper, new ObjectMapper()).reservation("order-proof").data;
     assertEquals(before, request);
     verify(mapper).findSeckillByOrderNo("order-proof");
     verify(mapper).findReservationRequest("order-proof");

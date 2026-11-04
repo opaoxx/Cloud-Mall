@@ -8,7 +8,6 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -61,7 +60,7 @@ class SeckillLegacyContextDimensionsTest {
               when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(candidate);
               var result =
                   (StockReservationVO)
-                      new StockServiceImpl(null, stocks, null, new ObjectMapper())
+                      StockTestServices.reader(stocks, new ObjectMapper())
                           .reservation(ORDER_NO)
                           .data;
               assertEquals("UNKNOWN", result.status);
@@ -103,9 +102,7 @@ class SeckillLegacyContextDimensionsTest {
                   : "REJECTED".equals(state) ? "REJECTED" : "UNKNOWN";
           var bare =
               (StockReservationVO)
-                  new StockServiceImpl(null, stocks, null, new ObjectMapper())
-                      .reservation(ORDER_NO)
-                      .data;
+                  StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO).data;
           assertEquals(expected, bare.status);
           if ("PENDING".equals(state)) {
             assertTrue(bare.items.isEmpty());
@@ -142,7 +139,7 @@ class SeckillLegacyContextDimensionsTest {
         assertThrows(BizException.class, () -> primary.reservation(ORDER_NO)).getMessage());
     var bare =
         (StockReservationVO)
-            new StockServiceImpl(null, stocks, null, new ObjectMapper()).reservation(ORDER_NO).data;
+            StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO).data;
     assertEquals("UNKNOWN", bare.status);
     assertTrue(bare.items.isEmpty());
     original.put("status", "REJECTED");

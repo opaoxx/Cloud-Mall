@@ -32,7 +32,7 @@ public class StockDependencyAspect {
 
   /** 数据库状态查询保持只读；普通库存缓存命中不在此处阻断。 */
   @Around(
-      "execution(public * com.cloudmall.stock.service.impl.StockServiceImpl+.reservation(..)) ||"
+      "execution(public * com.cloudmall.stock.service.impl.StockQueryServiceImpl.reservation(..)) ||"
           + " execution(public *"
           + " com.cloudmall.stock.service.SeckillReservationQueryService.find(..))")
   public Object read(ProceedingJoinPoint invocation) throws Throwable {

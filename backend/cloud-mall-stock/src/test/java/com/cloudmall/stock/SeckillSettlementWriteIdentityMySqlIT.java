@@ -34,7 +34,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
@@ -250,13 +249,11 @@ class SeckillSettlementWriteIdentityMySqlIT {
       reset();
       seedAccepted("202610PROOF1");
       var before = facts();
-      StockController controller = new StockController();
-      ReflectionTestUtils.setField(controller, "stockSqlMapper", stocks);
-      ReflectionTestUtils.setField(controller, "seckillSettlementService", service);
-      ReflectionTestUtils.setField(controller, "redis", redis);
-      ReflectionTestUtils.setField(controller, "rabbit", rabbit);
-      ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-      StockController outer = transactional(controller);
+      StockController outer =
+          new StockController(
+              StockTestServices.query(redis, stocks, new ObjectMapper(), service),
+              transactional(StockTestServices.normal(redis, stocks, new ObjectMapper(), service)),
+              null);
       var mvc =
           MockMvcBuilders.standaloneSetup(outer)
               .setControllerAdvice(new GlobalExceptionHandler())

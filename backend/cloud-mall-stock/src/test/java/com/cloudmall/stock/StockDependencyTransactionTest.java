@@ -40,7 +40,7 @@ import org.springframework.transaction.support.AbstractPlatformTransactionManage
 import org.springframework.transaction.support.DefaultTransactionStatus;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-/** 使用真实继承 Controller、Spring AOP 和 transaction advisor 验证事务边界。 */
+/** 使用组合 Controller、Spring AOP 和 transaction advisor 验证事务边界。 */
 class StockDependencyTransactionTest {
   @AfterEach
   void clearRules() {
@@ -49,14 +49,18 @@ class StockDependencyTransactionTest {
   }
 
   @Test
-  void inheritedControllerAndCompatibilityCallKeepGuardThroughCommit() {
-    try (AnnotationConfigApplicationContext context =
-        new AnnotationConfigApplicationContext(Beans.class)) {
+  void composedControllerAndCompatibilityCallKeepGuardThroughCommit() {
+    try (AnnotationConfigApplicationContext context = context()) {
       StockController controller = context.getBean(StockController.class);
       TransactionProbe transactions = context.getBean(TransactionProbe.class);
-      assertTrue(AopUtils.isAopProxy(controller));
+      assertFalse(AopUtils.isAopProxy(controller));
+      assertTrue(
+          AopUtils.isAopProxy(
+              context.getBean(com.cloudmall.stock.service.StockReservationService.class)));
 
-      controller.confirm("order-test");
+      context
+          .getBean(com.cloudmall.stock.service.StockReservationService.class)
+          .confirm("order-test");
 
       assertEquals(1, transactions.begins);
       assertEquals(1, transactions.commits);
@@ -67,10 +71,41 @@ class StockDependencyTransactionTest {
   }
 
   @Test
+  void queryGuardWrapsOnlyPersistentStatusAndLeavesCacheHitOutsideMysql() {
+    try (AnnotationConfigApplicationContext context = context()) {
+      var query = context.getBean(com.cloudmall.stock.service.StockQueryService.class);
+      var stocks = context.getBean(StockSqlMapper.class);
+      when(stocks.findReservationRequest("read-order")).thenReturn(null);
+      when(stocks.findSeckillByOrderNo("read-order"))
+          .thenAnswer(
+              invocation -> {
+                assertTrue(StockDependencyGuard.mysqlActive());
+                assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+                return null;
+              });
+      assertEquals("NOT_FOUND", query.reservation("read-order").data.status);
+      assertFalse(StockDependencyGuard.mysqlActive());
+      var redis = context.getBean(StringRedisTemplate.class);
+      org.springframework.data.redis.core.HashOperations<String, Object, Object> hash =
+          mock(org.springframework.data.redis.core.HashOperations.class);
+      when(redis.type("stock:available:7"))
+          .thenReturn(org.springframework.data.redis.connection.DataType.HASH);
+      when(redis.opsForHash()).thenReturn(hash);
+      when(hash.get("stock:available:7", "quantity"))
+          .thenAnswer(
+              invocation -> {
+                assertFalse(StockDependencyGuard.mysqlActive());
+                return "12";
+              });
+      assertEquals(12, query.get(7L).data.availableQuantity);
+      org.mockito.Mockito.verify(stocks, org.mockito.Mockito.never()).findStock(7L);
+    }
+  }
+
+  @Test
   void commitFailuresOpenCircuitBeforeAnyThirdTransactionBegins() {
     ClusterBuilderSlot.resetClusterNodes();
-    try (AnnotationConfigApplicationContext context =
-        new AnnotationConfigApplicationContext(Beans.class)) {
+    try (AnnotationConfigApplicationContext context = context()) {
       StockController controller = context.getBean(StockController.class);
       TransactionProbe transactions = context.getBean(TransactionProbe.class);
       transactions.failCommit = true;
@@ -98,8 +133,7 @@ class StockDependencyTransactionTest {
 
   @Test
   void businessConflictRollsBackInsideGuardWithoutOpeningDatabaseCircuit() {
-    try (AnnotationConfigApplicationContext context =
-        new AnnotationConfigApplicationContext(Beans.class)) {
+    try (AnnotationConfigApplicationContext context = context()) {
       when(context.getBean(SeckillQuotaSettlementService.class).settle(anyString(), anyString()))
           .thenThrow(new BizException("SECKILL_SETTLEMENT_CONFLICT", "conflict", 409));
       StockController controller = context.getBean(StockController.class);
@@ -113,9 +147,31 @@ class StockDependencyTransactionTest {
     }
   }
 
+  /** 测试配置只在当前显式上下文激活，避免真实Stock启动时自动扫描到夹具。 */
+  private static AnnotationConfigApplicationContext context() {
+    var context = new AnnotationConfigApplicationContext();
+    context.getEnvironment().setActiveProfiles("stock-dependency-test");
+    context.register(Beans.class);
+    try {
+      context.refresh();
+      return context;
+    } catch (RuntimeException failure) {
+      context.close();
+      throw failure;
+    }
+  }
+
   @Configuration
+  @org.springframework.context.annotation.Profile("stock-dependency-test")
   @EnableAspectJAutoProxy(proxyTargetClass = true)
   @EnableTransactionManagement
+  @org.springframework.context.annotation.Import({
+    com.cloudmall.stock.service.impl.StockReservationServiceImpl.class,
+    com.cloudmall.stock.service.impl.StockQueryServiceImpl.class,
+    com.cloudmall.stock.service.impl.StockReservationReader.class,
+    com.cloudmall.stock.service.impl.StockReservationSnapshotCodec.class,
+    com.cloudmall.stock.service.impl.SeckillReservationServiceImpl.class
+  })
   static class Beans {
     @Bean
     StockDependencyAspect aspect() {
@@ -123,8 +179,11 @@ class StockDependencyTransactionTest {
     }
 
     @Bean
-    StockController controller() {
-      return new StockController();
+    StockController controller(
+        com.cloudmall.stock.service.StockQueryService query,
+        com.cloudmall.stock.service.StockReservationService reservations,
+        com.cloudmall.stock.service.SeckillReservationService seckill) {
+      return new StockController(query, reservations, seckill);
     }
 
     @Bean

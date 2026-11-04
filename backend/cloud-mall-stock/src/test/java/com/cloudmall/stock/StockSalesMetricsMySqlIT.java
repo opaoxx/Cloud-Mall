@@ -46,7 +46,7 @@ class StockSalesMetricsMySqlIT {
       seedNormal(db, "202610normal-failure", 72, 42, 2);
       try (ConfigurableApplicationContext context = start(db)) {
         context.getBean(StockSalesOutboxMapper.class).verifySchema();
-        StockServiceImpl service = context.getBean(StockServiceImpl.class);
+        StockReservationServiceImpl service = context.getBean(StockReservationServiceImpl.class);
         assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(service));
         assertTrue(
             org.springframework.aop.support.AopUtils.isAopProxy(
@@ -109,7 +109,7 @@ class StockSalesMetricsMySqlIT {
       seedSeckill(db, "202610seckill-success", 71, 41, 9);
       seedSeckill(db, "202610seckill-failure", 72, 42, 10);
       try (ConfigurableApplicationContext context = start(db)) {
-        StockServiceImpl service = context.getBean(StockServiceImpl.class);
+        StockReservationServiceImpl service = context.getBean(StockReservationServiceImpl.class);
         assertTrue(
             org.springframework.aop.support.AopUtils.isAopProxy(
                 context.getBean(SeckillQuotaSettlementService.class)));
@@ -269,7 +269,9 @@ class StockSalesMetricsMySqlIT {
   @Profile("cm21-stock-mysql-it")
   @MapperScan("com.cloudmall.stock.mapper")
   @Import({
-    StockServiceImpl.class,
+    StockReservationServiceImpl.class,
+    StockReservationReader.class,
+    StockReservationSnapshotCodec.class,
     StockSqlMapper.class,
     StockSalesOutboxMapper.class,
     StockSalesOutboxService.class,

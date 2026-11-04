@@ -16,7 +16,7 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -67,7 +67,7 @@ class SeckillTerminalOperationKeyMySqlIT {
   private static StockSqlMapper mapper;
 
   /** 无Redis/Rabbit资源的实际Stock实现，只经本fixture验证GET路径。 */
-  private static StockServiceImpl service;
+  private static StockReservationReader service;
 
   /** 实际MyBatis秒杀结算读取Mapper。 */
   private static SeckillQuotaSettlementMapper settlementMapper;
@@ -137,7 +137,7 @@ class SeckillTerminalOperationKeyMySqlIT {
     settlementProxy.addAdvice(
         new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
     settlementService = (SeckillQuotaSettlementService) settlementProxy.getProxy();
-    service = new StockServiceImpl(null, mapper, null, new ObjectMapper());
+    service = StockTestServices.reader(mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillSettlementService", settlementService);
     Path classes = Path.of("../cloud-mall-order/target/classes").toAbsolutePath().normalize();
     if (!java.nio.file.Files.isDirectory(classes))
@@ -328,16 +328,19 @@ class SeckillTerminalOperationKeyMySqlIT {
       reset();
       seedSettlement(state, "private-other:CONFIRM");
       var before = facts();
-      StockController controller = new StockController();
-      ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-      ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-      ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-      var proxy = new ProxyFactory(controller);
+      var proxy =
+          new ProxyFactory(
+              StockTestServices.normal(null, mapper, new ObjectMapper(), settlementService));
       proxy.setProxyTargetClass(true);
       proxy.addAdvice(
           new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+      StockController controller =
+          new StockController(
+              StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+              (com.cloudmall.stock.service.StockReservationService) proxy.getProxy(),
+              null);
       var mvc =
-          MockMvcBuilders.standaloneSetup(proxy.getProxy())
+          MockMvcBuilders.standaloneSetup(controller)
               .setControllerAdvice(new GlobalExceptionHandler())
               .build();
       tracked.checking = true;
@@ -541,16 +544,19 @@ class SeckillTerminalOperationKeyMySqlIT {
     reset();
     seedIdempotencySettlement("CONFIRMED", "null");
     var before = facts();
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-    var proxy = new ProxyFactory(controller);
+    var proxy =
+        new ProxyFactory(
+            StockTestServices.normal(null, mapper, new ObjectMapper(), settlementService));
     proxy.setProxyTargetClass(true);
     proxy.addAdvice(
         new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            (com.cloudmall.stock.service.StockReservationService) proxy.getProxy(),
+            null);
     var mvc =
-        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+        MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     tracked.checking = true;
@@ -733,16 +739,19 @@ class SeckillTerminalOperationKeyMySqlIT {
     reset();
     seedReleasedReceipt(null);
     var before = facts();
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-    var proxy = new ProxyFactory(controller);
+    var proxy =
+        new ProxyFactory(
+            StockTestServices.normal(null, mapper, new ObjectMapper(), settlementService));
     proxy.setProxyTargetClass(true);
     proxy.addAdvice(
         new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            (com.cloudmall.stock.service.StockReservationService) proxy.getProxy(),
+            null);
     var mvc =
-        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+        MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     tracked.checking = true;
@@ -862,16 +871,19 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   @Test
   void actualControllerCannotAcknowledgeOrClearMissingSourceTransitions() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-    var proxy = new ProxyFactory(controller);
+    var proxy =
+        new ProxyFactory(
+            StockTestServices.normal(null, mapper, new ObjectMapper(), settlementService));
     proxy.setProxyTargetClass(true);
     proxy.addAdvice(
         new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            (com.cloudmall.stock.service.StockReservationService) proxy.getProxy(),
+            null);
     var mvc =
-        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+        MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
@@ -1072,10 +1084,11 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   @Test
   void actualControllerReturnsUnknownEmptyForMissingTerminalSource() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -1167,16 +1180,19 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   @Test
   void actualControllerCannotReturnSuccessForMissingTerminalReplaySource() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-    var proxy = new ProxyFactory(controller);
+    var proxy =
+        new ProxyFactory(
+            StockTestServices.normal(null, mapper, new ObjectMapper(), settlementService));
     proxy.setProxyTargetClass(true);
     proxy.addAdvice(
         new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            (com.cloudmall.stock.service.StockReservationService) proxy.getProxy(),
+            null);
     var mvc =
-        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+        MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();
@@ -1268,10 +1284,11 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   @Test
   void actualControllerReturnsUnknownEmptyForUnprovenNonterminalSource() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -1357,10 +1374,11 @@ class SeckillTerminalOperationKeyMySqlIT {
   @Test
   void actualControllerKeepsUnknownEmptyForUnsupportedStatusesWithoutSourceQueries()
       throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -1445,16 +1463,19 @@ class SeckillTerminalOperationKeyMySqlIT {
 
   @Test
   void actualControllerRejectsMissingSourcePendingReplays() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
-    var proxy = new ProxyFactory(controller);
+    var proxy =
+        new ProxyFactory(
+            StockTestServices.normal(null, mapper, new ObjectMapper(), settlementService));
     proxy.setProxyTargetClass(true);
     proxy.addAdvice(
         new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            (com.cloudmall.stock.service.StockReservationService) proxy.getProxy(),
+            null);
     var mvc =
-        MockMvcBuilders.standaloneSetup(proxy.getProxy())
+        MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     List<org.junit.jupiter.api.function.Executable> assertions = new ArrayList<>();

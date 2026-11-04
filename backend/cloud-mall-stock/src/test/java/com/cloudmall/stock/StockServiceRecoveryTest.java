@@ -17,13 +17,12 @@ import com.cloudmall.stock.domain.dto.StockReservationDTO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.StockReservationRequestService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -55,7 +54,7 @@ class StockServiceRecoveryTest {
                     0L,
                     "rolled_back_quantity",
                     0L)));
-    StockServiceImpl stockService = service(redis, stockSqlMapper);
+    StockReservationServiceImpl stockService = service(redis, stockSqlMapper);
 
     ApiResponse<?> response = stockService.reserve(request("old-order-1", 7L, 2));
 
@@ -70,7 +69,8 @@ class StockServiceRecoveryTest {
     when(stockSqlMapper.findReservationRequest("old-order-2")).thenReturn(null);
     when(stockSqlMapper.findReservationSnapshot("old-order-2"))
         .thenReturn(List.of(Map.of("sku_id", 7L, "reserved_quantity", 2L, "settled_quantity", 2L)));
-    StockServiceImpl stockService = service(mock(StringRedisTemplate.class), stockSqlMapper);
+    StockReservationServiceImpl stockService =
+        service(mock(StringRedisTemplate.class), stockSqlMapper);
 
     assertThrows(BizException.class, () -> stockService.reserve(request("old-order-2", 7L, 2)));
 
@@ -82,7 +82,8 @@ class StockServiceRecoveryTest {
     StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
     when(stockSqlMapper.findReservationRequestForUpdate("order-3"))
         .thenReturn(Map.of("status", "ROLLED_BACK"));
-    StockServiceImpl stockService = service(mock(StringRedisTemplate.class), stockSqlMapper);
+    StockReservationServiceImpl stockService =
+        service(mock(StringRedisTemplate.class), stockSqlMapper);
 
     assertThrows(BizException.class, () -> stockService.confirm("order-3"));
 
@@ -105,7 +106,7 @@ class StockServiceRecoveryTest {
     when(stockSqlMapper.updateReservationRequestStatus(
             eq("order-4"), eq("RESERVED"), eq("ROLLED_BACK"), eq(null), any()))
         .thenReturn(1);
-    StockServiceImpl stockService = service(redis, stockSqlMapper);
+    StockReservationServiceImpl stockService = service(redis, stockSqlMapper);
 
     ApiResponse<?> response = stockService.rollback("order-4");
 
@@ -122,9 +123,10 @@ class StockServiceRecoveryTest {
     return request;
   }
 
-  private static StockServiceImpl service(StringRedisTemplate redis, StockSqlMapper stockSqlMapper) {
-    StockServiceImpl stockService =
-        new StockServiceImpl(redis, stockSqlMapper, mock(RabbitTemplate.class), new ObjectMapper());
+  private static StockReservationServiceImpl service(
+      StringRedisTemplate redis, StockSqlMapper stockSqlMapper) {
+    StockReservationServiceImpl stockService =
+        StockTestServices.normal(redis, stockSqlMapper, new ObjectMapper());
     ReflectionTestUtils.setField(
         stockService,
         "reservationRequestService",

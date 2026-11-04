@@ -8,14 +8,13 @@ import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -37,12 +36,9 @@ class StockRedisDependencyTest {
                 .setMinRequestAmount(2)
                 .setStatIntervalMs(1000)
                 .setTimeWindow(10)));
-    StockServiceImpl service =
-        new StockServiceImpl(
-            mock(StringRedisTemplate.class),
-            mock(StockSqlMapper.class),
-            mock(RabbitTemplate.class),
-            new ObjectMapper());
+    SeckillReservationServiceImpl service =
+        StockTestServices.seckillService(
+            mock(StringRedisTemplate.class), mock(StockSqlMapper.class), new ObjectMapper());
     AtomicInteger calls = new AtomicInteger();
     Supplier<Object> unavailable =
         () -> {

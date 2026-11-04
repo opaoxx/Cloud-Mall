@@ -5,7 +5,6 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.HashMap;
@@ -95,9 +94,7 @@ class StockReservationFlowIdentityProofTest {
     var before = new HashMap<>(row);
     var result =
         (StockReservationVO)
-            new StockServiceImpl(null, mapper, null, new ObjectMapper())
-                .reservation("order-proof")
-                .data;
+            StockTestServices.reader(mapper, new ObjectMapper()).reservation("order-proof").data;
     assertEquals(before, row);
     verify(mapper).findSeckillByOrderNo("order-proof");
     verify(mapper).findReservationRequest("order-proof");

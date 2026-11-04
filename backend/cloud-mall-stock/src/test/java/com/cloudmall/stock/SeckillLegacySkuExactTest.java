@@ -8,7 +8,6 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -58,7 +57,7 @@ class SeckillLegacySkuExactTest {
             () -> {
               var stock = mock(StockSqlMapper.class);
               when(stock.findSeckillByOrderNo(ORDER_NO)).thenReturn(legacy(ORDER_NO, state, value));
-              var service = new StockServiceImpl(null, stock, null, new ObjectMapper());
+              var service = StockTestServices.reader(stock, new ObjectMapper());
               StockReservationVO result = (StockReservationVO) service.reservation(ORDER_NO).data;
               assertEquals("UNKNOWN", result.status, value + ":" + state);
               assertTrue(result.items.isEmpty());
@@ -94,9 +93,7 @@ class SeckillLegacySkuExactTest {
         when(stock.findSeckillByOrderNo(ORDER_NO)).thenReturn(legacy(ORDER_NO, state, value));
         var result =
             (StockReservationVO)
-                new StockServiceImpl(null, stock, null, new ObjectMapper())
-                    .reservation(ORDER_NO)
-                    .data;
+                StockTestServices.reader(stock, new ObjectMapper()).reservation(ORDER_NO).data;
         assertEquals(
             "ACCEPTED".equals(state)
                 ? "RESERVED"
@@ -123,7 +120,7 @@ class SeckillLegacySkuExactTest {
     assertTrue(primary.items.isEmpty());
     var fallback =
         (StockReservationVO)
-            new StockServiceImpl(null, stock, null, new ObjectMapper()).reservation(ORDER_NO).data;
+            StockTestServices.reader(stock, new ObjectMapper()).reservation(ORDER_NO).data;
     assertEquals("UNKNOWN", fallback.status);
     assertTrue(fallback.items.isEmpty());
   }

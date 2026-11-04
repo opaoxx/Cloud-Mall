@@ -10,7 +10,7 @@ import com.cloudmall.common.web.GlobalExceptionHandler;
 import com.cloudmall.stock.controller.StockController;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -54,7 +54,7 @@ class StockReservationTerminalProofMySqlIT {
   private static StockSqlMapper mapper;
 
   /** 无Redis/Rabbit/写资源的实际Stock GET实现。 */
-  private static StockServiceImpl service;
+  private static StockReservationReader service;
 
   /** 复用标准Maven输出加载实际Order fallback，仅用于测试。 */
   private static URLClassLoader orderClasses;
@@ -95,7 +95,7 @@ class StockReservationTerminalProofMySqlIT {
       fixture.execute("CREATE TABLE " + table + " LIKE cloudmall_stock." + table);
     tracked = new SelectOnlyDataSource(dataSource);
     mapper = new StockSqlMapper(new JdbcTemplate(tracked));
-    service = new StockServiceImpl(null, mapper, null, new ObjectMapper());
+    service = StockTestServices.reader(mapper, new ObjectMapper());
     Path classes = Path.of("../cloud-mall-order/target/classes").toAbsolutePath().normalize();
     if (!java.nio.file.Files.isDirectory(classes))
       throw new IllegalStateException("先通过Maven构建Order标准classes");
@@ -561,9 +561,9 @@ class StockReservationTerminalProofMySqlIT {
     flow(7, "CONFIRM", 2);
     var before = facts();
     tracked.checking = true;
-    var controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), null), null, null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())

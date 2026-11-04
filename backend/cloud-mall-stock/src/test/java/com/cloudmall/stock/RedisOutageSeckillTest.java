@@ -14,14 +14,13 @@ import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillAcceptanceService;
 import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -34,8 +33,8 @@ class RedisOutageSeckillTest {
   private final StockSqlMapper mapper = mock(StockSqlMapper.class);
   private final SeckillRequestClaimService claims = mock(SeckillRequestClaimService.class);
   private final SeckillAcceptanceService acceptance = mock(SeckillAcceptanceService.class);
-  private final StockServiceImpl service =
-      new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+  private final SeckillReservationServiceImpl service =
+      StockTestServices.seckillService(redis, mapper, new ObjectMapper());
 
   @AfterEach
   void clearAuth() {
@@ -49,7 +48,11 @@ class RedisOutageSeckillTest {
     when(redis.opsForHash()).thenReturn(hashes);
     when(hashes.entries(any())).thenThrow(new RedisConnectionFailureException("redis down"));
 
-    BizException failure = assertThrows(BizException.class, () -> service.seckill(request()));
+    BizException failure =
+        assertThrows(
+            BizException.class,
+            () ->
+                service.seckill(request(), com.cloudmall.common.auth.AuthContext.requireUserId()));
 
     assertEquals(503, failure.getHttpStatus());
     assertEquals("REDIS_SERVICE_UNAVAILABLE", failure.getCode());
@@ -63,7 +66,11 @@ class RedisOutageSeckillTest {
     when(redis.opsForHash()).thenReturn(hashes);
     when(hashes.entries(any())).thenReturn(Map.of());
 
-    BizException failure = assertThrows(BizException.class, () -> service.seckill(request()));
+    BizException failure =
+        assertThrows(
+            BizException.class,
+            () ->
+                service.seckill(request(), com.cloudmall.common.auth.AuthContext.requireUserId()));
 
     assertEquals(503, failure.getHttpStatus());
     verifyNoInteractions(acceptance);
@@ -89,7 +96,7 @@ class RedisOutageSeckillTest {
         .thenReturn(3L);
     when(values.get(any())).thenReturn(originalOrderNo);
 
-    service.seckill(request());
+    service.seckill(request(), com.cloudmall.common.auth.AuthContext.requireUserId());
 
     verify(acceptance).accept(eq(33L), eq("retry-key"), eq(originalOrderNo), any(),
         eq(originalPayload), any(), any());
@@ -107,7 +114,11 @@ class RedisOutageSeckillTest {
     meta.put("stockLimit", "5");
     when(hashes.entries(any())).thenReturn(meta);
 
-    BizException failure = assertThrows(BizException.class, () -> service.seckill(request()));
+    BizException failure =
+        assertThrows(
+            BizException.class,
+            () ->
+                service.seckill(request(), com.cloudmall.common.auth.AuthContext.requireUserId()));
 
     assertEquals(503, failure.getHttpStatus());
     verifyNoInteractions(acceptance);
@@ -128,7 +139,11 @@ class RedisOutageSeckillTest {
             any(RedisScript.class), anyList(), any(), any(), any(), any(), any(), any(), any()))
         .thenReturn(2L);
 
-    BizException limited = assertThrows(BizException.class, () -> service.seckill(request()));
+    BizException limited =
+        assertThrows(
+            BizException.class,
+            () ->
+                service.seckill(request(), com.cloudmall.common.auth.AuthContext.requireUserId()));
 
     assertEquals(429, limited.getHttpStatus());
     assertEquals("SECKILL_LIMIT_REACHED", limited.getCode());

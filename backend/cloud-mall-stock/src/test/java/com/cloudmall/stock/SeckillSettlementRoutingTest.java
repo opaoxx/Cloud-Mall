@@ -15,11 +15,11 @@ import com.cloudmall.stock.domain.dto.StockActionDTO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationReader;
+import com.cloudmall.stock.service.impl.StockReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -44,12 +44,7 @@ class SeckillSettlementRoutingTest {
                 8L,
                 "idempotency_key",
                 "private-idem"));
-    StockServiceImpl service =
-        new StockServiceImpl(
-            mock(StringRedisTemplate.class),
-            stockMapper,
-            mock(RabbitTemplate.class),
-            new ObjectMapper());
+    StockReservationReader service = StockTestServices.reader(stockMapper, new ObjectMapper());
 
     StockReservationVO fact = (StockReservationVO) service.reservation("cm24-order").data;
 
@@ -63,12 +58,8 @@ class SeckillSettlementRoutingTest {
     doReturn(ApiResponse.ok(Map.of("rolledBack", false, "pending", true)))
         .when(settlement)
         .settle("cm24-order", "ROLLBACK");
-    StockServiceImpl service =
-        new StockServiceImpl(
-            mock(StringRedisTemplate.class),
-            stockMapper,
-            mock(RabbitTemplate.class),
-            new ObjectMapper());
+    StockReservationServiceImpl service =
+        StockTestServices.normal(mock(StringRedisTemplate.class), stockMapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillSettlementService", settlement);
 
     Map<?, ?> response = (Map<?, ?>) service.rollback("cm24-order").data;
@@ -95,12 +86,8 @@ class SeckillSettlementRoutingTest {
                 8L,
                 "idempotency_key",
                 "private-idem"));
-    StockServiceImpl service =
-        new StockServiceImpl(
-            mock(StringRedisTemplate.class),
-            stockMapper,
-            mock(RabbitTemplate.class),
-            new ObjectMapper());
+    StockReservationServiceImpl service =
+        StockTestServices.normal(mock(StringRedisTemplate.class), stockMapper, new ObjectMapper());
     ReflectionTestUtils.setField(
         service, "seckillSettlementService", mock(SeckillQuotaSettlementService.class));
 
@@ -113,12 +100,9 @@ class SeckillSettlementRoutingTest {
   @Test
   void forgedActionKeyNeverReachesSeckillSettlement() {
     SeckillQuotaSettlementService settlement = mock(SeckillQuotaSettlementService.class);
-    StockServiceImpl service =
-        new StockServiceImpl(
-            mock(StringRedisTemplate.class),
-            mock(StockSqlMapper.class),
-            mock(RabbitTemplate.class),
-            new ObjectMapper());
+    StockReservationServiceImpl service =
+        StockTestServices.normal(
+            mock(StringRedisTemplate.class), mock(StockSqlMapper.class), new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillSettlementService", settlement);
     StockActionDTO action = new StockActionDTO();
     action.operationKey = "another-order:ROLLBACK";

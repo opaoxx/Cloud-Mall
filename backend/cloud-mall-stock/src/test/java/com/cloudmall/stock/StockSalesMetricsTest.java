@@ -31,7 +31,7 @@ class StockSalesMetricsTest {
     StockSalesOutboxMapper outbox = mock(StockSalesOutboxMapper.class);
     StockSalesOutboxService events = new StockSalesOutboxService(outbox);
     when(outbox.flowProof("202610normal", 71)).thenReturn(proof("202610normal", 3));
-    StockServiceImpl service = stock(stock, events);
+    StockReservationServiceImpl service = stock(stock, events);
     TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       service.confirm("202610normal");
@@ -130,7 +130,7 @@ class StockSalesMetricsTest {
     StockSqlMapper stock = normalMapper("202610failure", 2);
     StockSalesOutboxMapper mapper = mock(StockSalesOutboxMapper.class);
     StockSalesOutboxService events = new StockSalesOutboxService(mapper);
-    StockServiceImpl service = stock(stock, events);
+    StockReservationServiceImpl service = stock(stock, events);
     when(mapper.flowProof("202610failure", 71)).thenReturn(proof("202610failure", 2));
     var databaseFailure = new org.springframework.dao.DataAccessResourceFailureException("fixed");
     doThrow(databaseFailure).when(mapper).insert(any(), anyString(), anyString(), any());
@@ -198,13 +198,10 @@ class StockSalesMetricsTest {
     assertFalse(TransactionSynchronizationManager.isSynchronizationActive());
   }
 
-  private static StockServiceImpl stock(StockSqlMapper mapper, StockSalesOutboxService events) {
-    StockServiceImpl service =
-        new StockServiceImpl(
-            mock(StringRedisTemplate.class),
-            mapper,
-            mock(RabbitTemplate.class),
-            new ObjectMapper());
+  private static StockReservationServiceImpl stock(
+      StockSqlMapper mapper, StockSalesOutboxService events) {
+    StockReservationServiceImpl service =
+        StockTestServices.normal(mock(StringRedisTemplate.class), mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "salesMetrics", events);
     return service;
   }

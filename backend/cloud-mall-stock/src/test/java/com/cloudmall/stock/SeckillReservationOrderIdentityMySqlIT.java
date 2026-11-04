@@ -14,7 +14,7 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -60,7 +60,7 @@ class SeckillReservationOrderIdentityMySqlIT {
   private static StockSqlMapper mapper;
 
   /** 无Redis/Rabbit/写资源的实际Stock GET实现。 */
-  private static StockServiceImpl service;
+  private static StockReservationReader service;
 
   /** 实际MyBatis秒杀结算读取Mapper。 */
   private static SeckillQuotaSettlementMapper settlementMapper;
@@ -121,7 +121,7 @@ class SeckillReservationOrderIdentityMySqlIT {
     settlementMapper = sqlSession.getMapper(SeckillQuotaSettlementMapper.class);
     settlementMapper.ensureTable();
     settlementService = new SeckillQuotaSettlementService(settlementMapper, mapper);
-    service = new StockServiceImpl(null, mapper, null, new ObjectMapper());
+    service = StockTestServices.reader(mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillSettlementService", settlementService);
     Path classes = Path.of("../cloud-mall-order/target/classes").toAbsolutePath().normalize();
     if (!java.nio.file.Files.isDirectory(classes))
@@ -257,7 +257,7 @@ class SeckillReservationOrderIdentityMySqlIT {
               assertEquals("ACCEPTED".equals(state) ? 2 : 3, tracked.sql.size());
               assertOnlySelects();
               tracked.sql.clear();
-              var bare = new StockServiceImpl(null, mapper, null, new ObjectMapper());
+              var bare = StockTestServices.reader(mapper, new ObjectMapper());
               var fallback = (StockReservationVO) bare.reservation(ORDER_NO).data;
               assertEquals("UNKNOWN", fallback.status);
               assertTrue(fallback.items.isEmpty());
@@ -324,10 +324,11 @@ class SeckillReservationOrderIdentityMySqlIT {
   void actualHttpGetUsesOriginalIdentityAndNeverEchoesAliasOrWrites() throws Exception {
     seedSettlement("202610próof1", "CONFIRMED");
     var before = facts();
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())

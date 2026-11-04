@@ -9,11 +9,9 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -28,10 +26,7 @@ class StockDependencyFallbackTest {
     when(database.findStock(7L)).thenReturn(Map.of("available_quantity", 15));
 
     StockQuantityVO result =
-        (StockQuantityVO)
-            new StockServiceImpl(redis, database, mock(RabbitTemplate.class), new ObjectMapper())
-                .get(7L)
-                .data;
+        (StockQuantityVO) StockTestServices.query(redis, database, new ObjectMapper()).get(7L).data;
 
     assertEquals(15, result.availableQuantity);
   }
@@ -46,10 +41,7 @@ class StockDependencyFallbackTest {
     BizException failure =
         assertThrows(
             BizException.class,
-            () ->
-                new StockServiceImpl(
-                        redis, database, mock(RabbitTemplate.class), new ObjectMapper())
-                    .get(7L));
+            () -> StockTestServices.query(redis, database, new ObjectMapper()).get(7L));
 
     assertEquals("STOCK_SERVICE_UNAVAILABLE", failure.getCode());
     assertEquals(503, failure.getHttpStatus());

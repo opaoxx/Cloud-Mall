@@ -8,7 +8,6 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -35,7 +34,7 @@ class SeckillReservationOrderIdentityTest {
               var stocks = mock(StockSqlMapper.class);
               when(settlements.findSettlement(ORDER_NO)).thenReturn(row(original, state));
               var primary = new SeckillQuotaSettlementService(settlements, stocks);
-              var outer = new StockServiceImpl(null, stocks, null, new ObjectMapper());
+              var outer = StockTestServices.reader(stocks, new ObjectMapper());
               ReflectionTestUtils.setField(outer, "seckillSettlementService", primary);
               assertUnknown((StockReservationVO) outer.reservation(ORDER_NO).data);
               verifyNoInteractions(stocks);
@@ -72,7 +71,7 @@ class SeckillReservationOrderIdentityTest {
           () -> {
             var stocks = mock(StockSqlMapper.class);
             when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(legacy("202610PROOF1", state));
-            var outer = new StockServiceImpl(null, stocks, null, new ObjectMapper());
+            var outer = StockTestServices.reader(stocks, new ObjectMapper());
             assertUnknown((StockReservationVO) outer.reservation(ORDER_NO).data);
             verify(stocks).findSeckillByOrderNo(ORDER_NO);
             verifyNoMoreInteractions(stocks);
@@ -107,7 +106,7 @@ class SeckillReservationOrderIdentityTest {
     assertNull(primary.reservation(ORDER_NO));
     when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(legacy(ORDER_NO, "ACCEPTED"));
     assertEquals("RESERVED", primary.reservation(ORDER_NO).status);
-    var outer = new StockServiceImpl(null, stocks, null, new ObjectMapper());
+    var outer = StockTestServices.reader(stocks, new ObjectMapper());
     assertEquals("RESERVED", ((StockReservationVO) outer.reservation(ORDER_NO).data).status);
   }
 

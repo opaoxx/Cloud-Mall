@@ -1,9 +1,9 @@
 package com.cloudmall.stock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -21,13 +21,12 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.config.SeckillSentinelConfiguration;
 import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
 class StockSeckillSentinelConfigurationTest {
@@ -60,8 +59,8 @@ class StockSeckillSentinelConfigurationTest {
     FlowRuleManager.loadRules(List.of(blockingRule));
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     StockSqlMapper stockSqlMapper = mock(StockSqlMapper.class);
-    StockServiceImpl stockService = new StockServiceImpl(
-        redis, stockSqlMapper, mock(RabbitTemplate.class), new ObjectMapper());
+    SeckillReservationServiceImpl stockService =
+        StockTestServices.seckillService(redis, stockSqlMapper, new ObjectMapper());
     SeckillReservationDTO request = new SeckillReservationDTO();
     request.activityId = 11L;
     request.skuId = 22L;
@@ -73,7 +72,7 @@ class StockSeckillSentinelConfigurationTest {
     boolean blocked = false;
     for (int attempt = 0; attempt < 20 && !blocked; attempt++) {
       try {
-        stockService.seckill(request);
+        stockService.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId());
       } catch (BizException result) {
         blocked = "GATEWAY_RATE_LIMITED".equals(result.getCode());
       }

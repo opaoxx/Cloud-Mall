@@ -9,7 +9,6 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -31,9 +30,7 @@ class SeckillLegacyUnknownStatusReadTest {
       when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(original);
       var result =
           (StockReservationVO)
-              new StockServiceImpl(null, stocks, null, new ObjectMapper())
-                  .reservation(ORDER_NO)
-                  .data;
+              StockTestServices.reader(stocks, new ObjectMapper()).reservation(ORDER_NO).data;
       assertNotNull(result);
       assertEquals(ORDER_NO, result.orderNo);
       assertEquals("UNKNOWN", result.status);
@@ -51,7 +48,7 @@ class SeckillLegacyUnknownStatusReadTest {
       var settlements = mock(SeckillQuotaSettlementMapper.class);
       when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(row(state));
       var primary = new SeckillQuotaSettlementService(settlements, stocks);
-      var outer = new StockServiceImpl(null, stocks, null, new ObjectMapper());
+      var outer = StockTestServices.reader(stocks, new ObjectMapper());
       ReflectionTestUtils.setField(outer, "seckillSettlementService", primary);
       var result = (StockReservationVO) outer.reservation(ORDER_NO).data;
       assertEquals("UNKNOWN", result.status);
@@ -68,7 +65,7 @@ class SeckillLegacyUnknownStatusReadTest {
       var stocks = mock(StockSqlMapper.class);
       var settlements = mock(SeckillQuotaSettlementMapper.class);
       when(stocks.findSeckillByOrderNo(ORDER_NO)).thenReturn(row(state));
-      var bare = new StockServiceImpl(null, stocks, null, new ObjectMapper());
+      var bare = StockTestServices.reader(stocks, new ObjectMapper());
       var result = (StockReservationVO) bare.reservation(ORDER_NO).data;
       assertEquals("ACCEPTED".equals(state) ? "RESERVED" : "REJECTED", result.status);
       assertEquals(1, result.items.size());
@@ -107,7 +104,7 @@ class SeckillLegacyUnknownStatusReadTest {
         assertThrows(BizException.class, () -> primary.reservation(ORDER_NO)).getMessage());
     original.put("user_id", 8L);
     original.remove("status");
-    var bare = new StockServiceImpl(null, stocks, null, new ObjectMapper());
+    var bare = StockTestServices.reader(stocks, new ObjectMapper());
     assertTrue(((StockReservationVO) bare.reservation(ORDER_NO).data).items.isEmpty());
     var failure =
         new org.springframework.dao.DataAccessResourceFailureException(

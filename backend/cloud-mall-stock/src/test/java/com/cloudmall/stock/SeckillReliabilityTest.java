@@ -14,8 +14,7 @@ import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillOrderOutboxDispatcher;
 import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
-import com.cloudmall.stock.service.impl.StockReservationRequestService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.Method;
 import java.time.OffsetDateTime;
@@ -41,10 +40,8 @@ class SeckillReliabilityTest {
     StockSqlMapper mapper = mock(StockSqlMapper.class);
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     SeckillRequestClaimService claimService = mock(SeckillRequestClaimService.class);
-    StockServiceImpl service =
-        new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
-    ReflectionTestUtils.setField(
-        service, "reservationRequestService", mock(StockReservationRequestService.class));
+    SeckillReservationServiceImpl service =
+        StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillRequestClaimService", claimService);
 
     SeckillReservationDTO request = request(11L, 22L, 33L, "legacy-key");
@@ -62,7 +59,9 @@ class SeckillReliabilityTest {
         .thenReturn(acceptedRow);
     when(mapper.findSeckillOutboxByOrderNo(orderNo)).thenReturn(null);
 
-    Map<?, ?> data = (Map<?, ?>) service.seckill(request).data;
+    Map<?, ?> data =
+        (Map<?, ?>)
+            service.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId()).data;
 
     assertEquals(Boolean.FALSE, data.get("accepted"));
     assertEquals("RECOVERY_REQUIRED", data.get("reservationStatus"));
@@ -172,9 +171,8 @@ class SeckillReliabilityTest {
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
     com.cloudmall.stock.service.impl.SeckillAcceptanceService acceptance =
         mock(com.cloudmall.stock.service.impl.SeckillAcceptanceService.class);
-    StockServiceImpl service = new StockServiceImpl(redis, mapper, rabbit, new ObjectMapper());
-    ReflectionTestUtils.setField(
-        service, "reservationRequestService", mock(StockReservationRequestService.class));
+    SeckillReservationServiceImpl service =
+        StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillAcceptanceService", acceptance);
 
     String hash = "race-hash";
@@ -209,7 +207,7 @@ class SeckillReliabilityTest {
         .thenReturn(Map.of("event_id", eventId, "request_hash", hash));
 
     Method acceptAfterLua =
-        StockServiceImpl.class.getDeclaredMethod(
+        SeckillReservationServiceImpl.class.getDeclaredMethod(
             "acceptAfterLua", long.class, String.class, String.class, String.class, String.class);
     acceptAfterLua.setAccessible(true);
     com.cloudmall.common.api.ApiResponse<?> response =

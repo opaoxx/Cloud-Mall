@@ -15,7 +15,7 @@ import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.SeckillQuotaSettlementMapper;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillQuotaSettlementService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -61,7 +61,7 @@ class SeckillLegacySkuExactMySqlIT {
   private static StockSqlMapper mapper;
 
   /** 无Redis/Rabbit/写资源的实际Stock GET实现。 */
-  private static StockServiceImpl service;
+  private static StockReservationReader service;
 
   /** 实际MyBatis秒杀结算读取Mapper。 */
   private static SeckillQuotaSettlementMapper settlementMapper;
@@ -122,7 +122,7 @@ class SeckillLegacySkuExactMySqlIT {
     settlementMapper = sqlSession.getMapper(SeckillQuotaSettlementMapper.class);
     settlementMapper.ensureTable();
     settlementService = new SeckillQuotaSettlementService(settlementMapper, mapper);
-    service = new StockServiceImpl(null, mapper, null, new ObjectMapper());
+    service = StockTestServices.reader(mapper, new ObjectMapper());
     ReflectionTestUtils.setField(service, "seckillSettlementService", settlementService);
     Path classes = Path.of("../cloud-mall-order/target/classes").toAbsolutePath().normalize();
     if (!java.nio.file.Files.isDirectory(classes))
@@ -310,10 +310,11 @@ class SeckillLegacySkuExactMySqlIT {
     tracked.checking = true;
     assertEquals("UNKNOWN", orderFallback("PAID"));
     assertEquals("UNKNOWN", orderFallback("CANCELLED"));
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -336,7 +337,7 @@ class SeckillLegacySkuExactMySqlIT {
   /** 未注入主settlement服务的既有兼容fallback，仍必须保持原字段身份精确。 */
   private static StockReservationVO bareRead() {
     return (StockReservationVO)
-        new StockServiceImpl(null, mapper, null, new ObjectMapper()).reservation(ORDER_NO).data;
+        StockTestServices.reader(mapper, new ObjectMapper()).reservation(ORDER_NO).data;
   }
 
   @Test
@@ -401,10 +402,11 @@ class SeckillLegacySkuExactMySqlIT {
 
   @Test
   void actualControllerKeepsPrimaryCorruptionAndOuterUnknownWithoutWrites() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -511,10 +513,11 @@ class SeckillLegacySkuExactMySqlIT {
 
   @Test
   void actualControllerReturnsUnknownEmptyForUnsupportedLegacyStates() throws Exception {
-    StockController controller = new StockController();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", mapper);
-    ReflectionTestUtils.setField(controller, "seckillSettlementService", settlementService);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+    StockController controller =
+        new StockController(
+            StockTestServices.query(null, mapper, new ObjectMapper(), settlementService),
+            null,
+            null);
     var mvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())

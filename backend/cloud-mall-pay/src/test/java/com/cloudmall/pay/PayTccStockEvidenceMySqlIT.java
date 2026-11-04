@@ -57,7 +57,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
@@ -317,13 +316,36 @@ class PayTccStockEvidenceMySqlIT {
             .loadClass("com.cloudmall.stock.mapper.StockSqlMapper")
             .getConstructor(JdbcTemplate.class)
             .newInstance(new JdbcTemplate(stockTracked));
+    var sqlType = stockClasses.loadClass("com.cloudmall.stock.mapper.StockSqlMapper");
+    var settlementType =
+        stockClasses.loadClass("com.cloudmall.stock.service.impl.SeckillQuotaSettlementService");
+    var codecType =
+        stockClasses.loadClass("com.cloudmall.stock.service.impl.StockReservationSnapshotCodec");
+    var readerType =
+        stockClasses.loadClass("com.cloudmall.stock.service.impl.StockReservationReader");
+    var queryType =
+        stockClasses.loadClass("com.cloudmall.stock.service.impl.StockQueryServiceImpl");
+    var stockJson = new ObjectMapper();
+    Object codec = codecType.getConstructor(ObjectMapper.class).newInstance(stockJson);
+    Object stockReader =
+        readerType
+            .getConstructor(sqlType, ObjectMapper.class, settlementType, codecType)
+            .newInstance(sqlMapper, stockJson, null, codec);
+    Object query =
+        queryType
+            .getConstructor(
+                stockClasses.loadClass("org.springframework.data.redis.core.StringRedisTemplate"),
+                sqlType,
+                readerType)
+            .newInstance(null, sqlMapper, stockReader);
     Object controller =
         stockClasses
             .loadClass("com.cloudmall.stock.controller.StockController")
-            .getConstructor()
-            .newInstance();
-    ReflectionTestUtils.setField(controller, "stockSqlMapper", sqlMapper);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+            .getConstructor(
+                stockClasses.loadClass("com.cloudmall.stock.service.StockQueryService"),
+                stockClasses.loadClass("com.cloudmall.stock.service.StockReservationService"),
+                stockClasses.loadClass("com.cloudmall.stock.service.SeckillReservationService"))
+            .newInstance(query, null, null);
     stockMvc =
         MockMvcBuilders.standaloneSetup(controller)
             .setControllerAdvice(new GlobalExceptionHandler())

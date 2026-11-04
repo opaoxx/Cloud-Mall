@@ -9,7 +9,7 @@ import com.cloudmall.stock.domain.dto.SeckillReservationDTO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.SeckillOrderOutboxDispatcher;
 import com.cloudmall.stock.service.impl.SeckillRequestClaimService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.SeckillReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.OffsetDateTime;
@@ -163,7 +163,7 @@ class SeckillEventTimeMySqlIT {
     HashOperations<String, Object, Object> operations = mock(HashOperations.class);
     when(redis.opsForHash()).thenReturn(operations);
     when(operations.entries(anyString())).thenReturn(Map.of());
-    var stock = new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+    var stock = StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(
         stock,
         "seckillRequestClaimService",
@@ -173,7 +173,10 @@ class SeckillEventTimeMySqlIT {
       clearInvocations(redis, operations);
       var failure =
           assertThrows(
-              com.cloudmall.common.error.BizException.class, () -> stock.seckill(request(key)));
+              com.cloudmall.common.error.BizException.class,
+              () ->
+                  stock.seckill(
+                      request(key), com.cloudmall.common.auth.AuthContext.requireUserId()));
       assertEquals(400, failure.getHttpStatus());
       verifyNoInteractions(redis, operations);
       assertEquals(
@@ -183,7 +186,10 @@ class SeckillEventTimeMySqlIT {
     assertEquals(
         503,
         assertThrows(
-                com.cloudmall.common.error.BizException.class, () -> stock.seckill(request(key)))
+                com.cloudmall.common.error.BizException.class,
+                () ->
+                    stock.seckill(
+                        request(key), com.cloudmall.common.auth.AuthContext.requireUserId()))
             .getHttpStatus());
     assertEquals(
         key,
@@ -305,7 +311,7 @@ class SeckillEventTimeMySqlIT {
     HashOperations<String, Object, Object> operations = mock(HashOperations.class);
     when(redis.opsForHash()).thenReturn(operations);
     when(operations.entries(anyString())).thenReturn(Map.of());
-    var stock = new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+    var stock = StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(
         stock,
         "seckillRequestClaimService",
@@ -314,14 +320,20 @@ class SeckillEventTimeMySqlIT {
     SeckillReservationDTO original = request("Key-Case");
     assertEquals(
         503,
-        assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(original))
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () ->
+                    stock.seckill(original, com.cloudmall.common.auth.AuthContext.requireUserId()))
             .getHttpStatus());
     Map<String, Object> before = fixture.queryForMap("SELECT * FROM seckill_reservation");
     for (String alias : List.of("KEY-CASE", "Kéy-Case", "Key-Case ")) {
       clearInvocations(redis, operations);
       var failure =
           assertThrows(
-              com.cloudmall.common.error.BizException.class, () -> stock.seckill(request(alias)));
+              com.cloudmall.common.error.BizException.class,
+              () ->
+                  stock.seckill(
+                      request(alias), com.cloudmall.common.auth.AuthContext.requireUserId()));
       assertEquals(409, failure.getHttpStatus());
       assertEquals("SECKILL_IDEMPOTENCY_CONFLICT", failure.getCode());
       verifyNoInteractions(redis, operations);
@@ -329,7 +341,10 @@ class SeckillEventTimeMySqlIT {
     }
     assertEquals(
         503,
-        assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(original))
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () ->
+                    stock.seckill(original, com.cloudmall.common.auth.AuthContext.requireUserId()))
             .getHttpStatus());
     assertEquals(before, fixture.queryForMap("SELECT * FROM seckill_reservation"));
   }
@@ -1581,7 +1596,8 @@ class SeckillEventTimeMySqlIT {
   void ambiguousAddressIsRejectedBeforeClaimRedisOrOutboxWrites() {
     StringRedisTemplate redis = mock(StringRedisTemplate.class);
     RabbitTemplate rabbit = mock(RabbitTemplate.class);
-    StockServiceImpl stock = new StockServiceImpl(redis, mapper, rabbit, new ObjectMapper());
+    SeckillReservationServiceImpl stock =
+        StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(
         stock,
         "seckillRequestClaimService",
@@ -1599,7 +1615,9 @@ class SeckillEventTimeMySqlIT {
       SeckillReservationDTO request = request("invalid-address");
       request.addressSnapshot = address;
       var failure =
-          assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(request));
+          assertThrows(
+              com.cloudmall.common.error.BizException.class,
+              () -> stock.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId()));
       assertEquals(400, failure.getHttpStatus());
       assertEquals(
           0, fixture.queryForObject("SELECT COUNT(*) FROM seckill_reservation", Integer.class));
@@ -1615,8 +1633,8 @@ class SeckillEventTimeMySqlIT {
     HashOperations<String, Object, Object> operations = mock(HashOperations.class);
     when(redis.opsForHash()).thenReturn(operations);
     when(operations.entries(anyString())).thenReturn(Map.of());
-    StockServiceImpl stock =
-        new StockServiceImpl(redis, mapper, mock(RabbitTemplate.class), new ObjectMapper());
+    SeckillReservationServiceImpl stock =
+        StockTestServices.seckillService(redis, mapper, new ObjectMapper());
     ReflectionTestUtils.setField(
         stock,
         "seckillRequestClaimService",
@@ -1627,7 +1645,9 @@ class SeckillEventTimeMySqlIT {
     SeckillReservationDTO request = request("same-key");
     assertEquals(
         503,
-        assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(request))
+        assertThrows(
+                com.cloudmall.common.error.BizException.class,
+                () -> stock.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId()))
             .getHttpStatus());
     Map<String, Object> first =
         fixture.queryForMap(
@@ -1643,7 +1663,9 @@ class SeckillEventTimeMySqlIT {
         stock,
         "seckillClaimClock",
         Clock.fixed(OffsetDateTime.parse("2027-01-01T00:00:00+08:00").toInstant(), ZoneOffset.UTC));
-    assertThrows(com.cloudmall.common.error.BizException.class, () -> stock.seckill(request));
+    assertThrows(
+        com.cloudmall.common.error.BizException.class,
+        () -> stock.seckill(request, com.cloudmall.common.auth.AuthContext.requireUserId()));
     Map<String, Object> second =
         fixture.queryForMap(
             "SELECT * FROM seckill_reservation WHERE user_id=7 AND idempotency_key='same-key'");

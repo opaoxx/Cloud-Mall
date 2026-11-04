@@ -17,9 +17,10 @@ import com.cloudmall.stock.domain.dto.StockReservationDTO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;
 import com.cloudmall.stock.service.impl.StockCacheReconciler;
+import com.cloudmall.stock.service.impl.StockReservationReader;
 import com.cloudmall.stock.service.impl.StockReservationRejectedException;
 import com.cloudmall.stock.service.impl.StockReservationRequestService;
-import com.cloudmall.stock.service.impl.StockServiceImpl;
+import com.cloudmall.stock.service.impl.StockReservationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -27,7 +28,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -99,7 +99,7 @@ class StockBatch3ProjectionTest {
                     0L,
                     "rolled_back_quantity",
                     0L)));
-    StockServiceImpl stockService = service(redis, stockSqlMapper, requestService);
+    StockReservationServiceImpl stockService = service(redis, stockSqlMapper, requestService);
 
     ApiResponse<?> first = stockService.reserve(request("order-1"));
     ApiResponse<?> replay = stockService.reserve(request("order-1"));
@@ -133,8 +133,8 @@ class StockBatch3ProjectionTest {
                     2L,
                     "rolled_back_quantity",
                     0L)));
-    StockServiceImpl stockService =
-        service(mock(StringRedisTemplate.class), stockSqlMapper, mock(StockReservationRequestService.class));
+    StockReservationReader stockService =
+        StockTestServices.reader(stockSqlMapper, new ObjectMapper());
 
     ApiResponse<?> response = stockService.reservation("old-order-2");
 
@@ -163,7 +163,7 @@ class StockBatch3ProjectionTest {
     when(stockSqlMapper.updateReservationRequestStatus(
             eq("order-short"), eq("INIT"), eq("REJECTED"), anyString(), any()))
         .thenReturn(1);
-    StockServiceImpl stockService =
+    StockReservationServiceImpl stockService =
         service(mock(StringRedisTemplate.class), stockSqlMapper, requestService);
     StockReservationDTO request = new StockReservationDTO();
     request.orderNo = "order-short";
@@ -205,12 +205,12 @@ class StockBatch3ProjectionTest {
     return request;
   }
 
-  private static StockServiceImpl service(
+  private static StockReservationServiceImpl service(
       StringRedisTemplate redis,
       StockSqlMapper stockSqlMapper,
       StockReservationRequestService requestService) {
-    StockServiceImpl stockService =
-        new StockServiceImpl(redis, stockSqlMapper, mock(RabbitTemplate.class), new ObjectMapper());
+    StockReservationServiceImpl stockService =
+        StockTestServices.normal(redis, stockSqlMapper, new ObjectMapper());
     ReflectionTestUtils.setField(stockService, "reservationRequestService", requestService);
     return stockService;
   }
