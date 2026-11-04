@@ -1176,3 +1176,51 @@ git revert refactor/stock-grouping-complete-20261104
 逆补丁以临时index核对可恢复父提交 `151638e1` 的完整树，真实工作树/index不回退。此操作只撤销内部VO与包归组，保留前三个Stock切片。模块验收标签不是一键撤销整个Stock重构：若需整体回退，应按依赖逆序处理本切片、`7444e58d`、`c16419e4`、`f50c6734`，历史夹具修正 `7153ad65` 保留；有后续依赖提交时先评审冲突。实际回退只清理准确的新类/嵌套class构建残留，保留target证据，不使用reset --hard。Git不回退数据库、Redis或忽略工件。
 
 Order下一步先盘点创建/查询/状态流转、秒杀接收、超时消息、库存动作恢复、分片与演练职责，结合现有规格明确首切片及事务/Feign/分片兼容清单后再改。继续主Agent单独执行本会话任务，不恢复历史性能队列。
+
+## 23. Order 第一切片：Seata 演练语义命名与代理边界
+
+### 23.1 盘点与范围冻结
+
+源码基线 `ef53b37d`，主Agent按本会话约定单独评审、实施和验证。已复读项目规则、README、Bug台账、架构/API订单部分及 `batch6_seata_global_transaction_review.md`。Order主Controller仍继承约1319行的OrderServiceImpl，包含创建、查询、状态迁移和两个消息消费者；库存动作/预扣恢复、超时outbox、分片配置已有独立类。上述主业务拆分另立切片，本轮仅整理独立演练职责，避免同时迁移多种事务模型。
+
+演练现有三个独立Bean分别承担：事务外完成标记、Seata全局事务、MySQL本地分支。保留三个真实代理调用边界，新增对应Service接口；Controller只依赖演练Service接口，接口可抛异常位于service层，三个实现进入 `service.impl.seata`。不加新的事务、重试、鉴权或数据校验。
+
+### 23.2 精确迁移清单
+
+下表路径相对 `backend/cloud-mall-order/src/main/java/com/cloudmall/order/`。
+
+| 原类型/位置 | 新类型/位置 | 职责 |
+| --- | --- | --- |
+| controller.Cm18SeataDemoController | controller.SeataTransactionDemoController | HTTP绑定、演练访问限制、结果/异常响应 |
+| service.impl.Cm18SeataDemoFacade | service.impl.seata.SeataTransactionDemoServiceImpl | 全局代理成功返回后的COMMITTED确认 |
+| service.impl.Cm18SeataDemoService | service.impl.seata.SeataTransactionDemoOrchestratorImpl | 全局事务、XID、分支调用、响应证明 |
+| service.impl.Cm18SeataOrderBranchService | service.impl.seata.SeataOrderDemoBranchServiceImpl | 单表本地事务插入 |
+| service.impl.Cm18ControlledRollbackException | service.SeataDemoControlledRollbackException | 明确注入的受控回滚 |
+| service.impl.Cm18UnknownTransactionException | service.SeataDemoUnknownTransactionException | 无法确认全局结果 |
+| domain.dto.Cm18SeataDemoDTO | domain.dto.SeataTransactionDemoDTO | 原HTTP请求 |
+| domain.dto.Cm18SeataBranchDTO | domain.dto.SeataStockDemoBranchDTO | 原Feign分支请求 |
+| domain.vo.Cm18SeataDemoVO | domain.vo.SeataTransactionDemoVO | 原全局结果 |
+| domain.vo.Cm18SeataBranchVO | domain.vo.SeataStockDemoBranchVO | 原Stock分支结果投影 |
+| domain.po.Cm18SeataOrderDemoPO | domain.po.SeataOrderDemoPO | 原单表映射 |
+| mapper.Cm18SeataOrderDemoMapper | mapper.SeataOrderDemoMapper | 原演练表访问 |
+
+新增 `service.SeataTransactionDemoService.execute(request)`、`service.SeataTransactionDemoOrchestrator.execute(request)`、`service.SeataOrderDemoBranchService.write(txId,xid)` 三个单方法接口。前两者返回原三字段VO；write返回void。Facade依赖Orchestrator接口，Orchestrator依赖Branch接口。原三个测试类同步按职责改名，保留所有原测试。StockClient的Java方法 `cm18SeataBranch` 改为 `executeSeataDemoBranch`，仅更改Java调用名称和DTO/VO类型。
+
+### 23.3 兼容清单与调用顺序
+
+- 五个既有Bean身份显式保留：`cm18SeataDemoController`、`cm18SeataDemoFacade`、`cm18SeataDemoService`、`cm18SeataOrderBranchService`、`cm18SeataOrderDemoMapper`。Mapper仍由原包扫描；显式Component名不产生第二个Bean。
+- HTTP路径 `/api/internal/cm18/seata/demo`、Feign路径后缀 `/branch`、`X-Internal-Service: cloud-mall-cm18-test`、`TX_XID`、`X-CM18-Failure-Point`不变。非prod且 `cloudmall.seata.cm18.enabled=true` 才注册Controller；原三个Service仍按原规则注册，不扩大开关范围。
+- DTO字段及正则、响应txId/xid/status及null语义、200/202/503与no-store、403及错误信息全部保留。FrameworkException只有原连接故障识别才映射UNKNOWN，其他错误继续抛出。
+- 全局事务名称 `cm18-seata-demo`、rollbackFor=Exception、分支默认REQUIRED保持。先读已提交演练行；仅COMMITTED重放；否则读取RootContext、独立本地分支写入、故障点、原Feign请求/摘要证明。全局代理返回后才markCommitted，更新0行仍查原行确认；不存在新事务包围这一确认。
+- 表 `seata_cm18_order_demo`、主键tx_id、tx_xid/status/created_at、原UPDATE条件不变；MyBatis namespace随Java类改名。没有XML/反射外部调用方；冻结runner/历史规格引用保留。原业务Mapper、分片规则、资源配置、Redis、MQ和主业务状态机不改。
+- XID摘要算法、16位摘要与Stock摘要前缀比较、故障注入先后顺序保持。普通订单不新增Seata全局事务，不将本地回滚测试等同于AT二阶段验收。
+
+### 23.4 验证与提交策略
+
+先提交本节并建立 `refactor/order-seata-baseline-20261104`，然后实施。执行Order/Common现有单测基线；迁移后全量同范围单测、补充真实MVC绑定/开关/响应矩阵、Bean与事务注解/代理边界、真实Feign HTTP头/体/响应契约。使用新独立Compose项目 `cloud-mall-refactor-order-seata-20261104`，MySQL宿主端口19939及网络10.254.249.0/24；首次启动前核对项目/卷/端口不存在。实库测试只创建和删除自有UUID库，核验真实MyBatis扫描、原表映射、本地提交/异常回滚及事务外确认；不用真实TC，明确标记AT二阶段和进程故障链未测。
+
+十二个迁移类型逐项比较执行token（仅允许声明的接口/依赖/命名/Bean元数据变化），未涉及业务源码/资源做哈希对照；检查旧class构建残留后精确归档/移除，禁止全量clean删除历史证据。运行Order打包、八模块test-compile、Google Java Format及git diff --check，检查Jar旧类缺席/新类存在。通过后补充实际结果及调用链、建立 `refactor/order-seata-complete-20261104`，临时Git index验证逆补丁恢复父树。本轮仅源代码回退，不回退数据库、Redis或忽略证据；实验结束归档、移除本项目容器/网络，保留新卷。
+
+### 23.5 实施结果
+
+待实施与验证。后续Order主业务拆分将单独冻结方法归属、同步锁、事务、认证顺序、Feign及分片/消息调用边界。
