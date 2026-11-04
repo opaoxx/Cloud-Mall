@@ -659,3 +659,40 @@ git revert --no-edit $userAccountCommit
 回退后按本次新增类型清单核对并删除target/classes中的过期新类型及其嵌套class，再重新编译；禁止清空整个User target中的历史实验证据。只反向应用结构提交应回到c835b778的源码，地址WHERE归属限制仍在。临时Git索引中的反向补丁检查只证明源码回退路径，不等于运行态回滚；执行实际回退后仍需对应测试。
 
 下一任务先为BalanceLedgerService细化扣款、退款、操作查询与共享证明规则的依赖图，冻结事务外边界后拆分，并把ApiResponse封装移回Controller。TCC/Fence、证据读取与恢复类的业务归组在其后实施；保留原资金算法、错误优先级和跨协议互斥契约。
+
+## 17. User 第二切片：资金职责与响应解耦
+
+### 17.1 基线与实施范围
+
+2026-11-04，基线为 `860acf3cb5966847feda7c3bfbb57db16ceceec5`，分支 `codex/refactor-backend`。本会话继续由主Agent单独评审、实现与验证。现有BalanceLedgerServiceImpl约911行、40个业务/证明方法，三类业务共享归属和退款集合校验。重新运行User281/Common25单测全部通过，上一切片的103项资金实库及账号实库结果保留为历史基线。本切片仍需在新实验项目上重跑实库回归。
+
+### 17.2 方法归属与依赖冻结
+
+业务接口在service根包，具体实现和共享证明在service.impl.balance。共享证明不另造接口；纯规则不注册Bean；两个依赖Mapper的证明类通过构造器装配且不启动额外事务。删除旧BalanceLedgerService及BalanceLedgerServiceImpl，不保留转发壳。
+
+| 新类型 | 迁移方法/职责 | 依赖 |
+| --- | --- | --- |
+| BalanceDebitService / BalanceDebitServiceImpl | debit、debitInternal、debitFromLedger、readLegacyDebitLedgerCandidate、ensureLegacyAttemptMatches、ensureDebitMatches、cacheDebitResult | UserMapper、BalanceLedgerMapper、BalanceDebitAttemptMapper、Redis、BalanceOwnershipEvidence |
+| BalanceRefundService / BalanceRefundServiceImpl | refundInternal、ensureRefundMatches | UserMapper、BalanceLedgerMapper、BalanceOwnershipEvidence、BalanceRefundEvidence |
+| BalanceOperationQueryService / BalanceOperationQueryServiceImpl | balanceOperation、requireUniqueOperationKey、containsRefundOperationKey | BalanceLedgerMapper、BalanceOwnershipEvidence；调用退款集合纯规则 |
+| BalanceOwnershipEvidence | requireAppliedDebitOwnership、isProvenLegacyDebitOwnership、requireRejectedDebitOwnership、hasTccFreezeConflict、readConfirmableTccFreeze、readDebitOwnershipCandidate、hasTccReceiveConflict、两个confirmedTccRefund重载、requireDisabledTccRefund | BalanceDebitAttemptMapper、BalanceTccDebitMapper、UserTccReceiveMapper |
+| BalanceRefundEvidence | readRefundLedgerCandidate、requireRefundReplayCollection、requireRefundGlobalKeys、requireRefundDebitScope、matchesRefundDebitScope、requireFreshRefundCollection、provenRefundPaymentMembership、matchesRefundPaymentOriginal、requireRefundMembership、provenRefundedAmount、containsRefundSnapshot | BalanceLedgerMapper；含原100条上限及集合纯规则 |
+| BalanceLedgerRules | assertInternalCaller、validateMoney、validBalanceMoney、isProvenDebitSnapshot、isProvenBalanceOperationRow、isProvenRefundOriginalDebit、requireBalanceOperationEvidence | 无外部依赖；原DECIMAL(18,2)常量、身份/数值/单行证明 |
+
+全部40个方法各有唯一归属，不复制证明算法。跨类调用只增加明确的依赖接收者或静态import，不增加预取、缓存、锁、重试或异常转换。所有新依赖使用构造器和final字段。读写SQL与Mapper、DTO、VO、持久化表及Redis Key/value/TTL均沿用现状。
+
+### 17.3 事务与HTTP兼容
+
+- debit/debitInternal两个Service入口保留@Transactional(noRollbackFor=BizException.class)，各自在同一实例调用私有debitFromLedger，不引入Service间事务嵌套。
+- refundInternal保留同一noRollbackFor及默认传播行为。先钱包锁、来源/状态/双集合/额度证明，再credit与ledger同事务；意外写入行数失败仍抛可回滚RuntimeException。
+- balanceOperation保留readOnly=true、REPEATABLE_READ，原主行/来源/关联集合/pay集合/selector/owner/全局键唯一性顺序与查询预算不变。共享证明运行于调用方现有事务，不能脱离同一连接或开启新快照。
+- Service改为返回BalanceDebitVO、BalanceRefundVO、BalanceOperationVO；Controller按原四个路由统一ApiResponse.ok。VO构造仍在原业务分支，只有外层响应包装移到Service事务完成后。原异常、HTTP状态、JSON金额/时间/null、Feign字段保持；requestId在同一请求线程生成，不引入异步或重试。
+- Redis扣款缓存仍处于原调用位置，作为可丢弃加速值处理；本次不将其改成afterCommit或更改故障容忍边界。
+
+### 17.4 验收与提交
+
+先保存本节并建立user-balance基线标签，再实现整体可编译拆分；运行106项余额单测及相关契约，随后完整User/Common、103项资金MySQL、7项主键MySQL和4项账号MySQL/Redis/MVC。补充共享证明全部位于同一只读RR连接的原测试装配，保留原断言；事务代理、缺字段/错误优先级、退款累计、冻结/receive互斥与注入故障的零写入/回滚必须继续成立。
+
+测试只将旧混合对象调用改为三项真实业务能力，反射故障注入改到实际拥有Mapper的Service或证明Bean；不得用旧转发壳维持假边界。记录40方法迁移清单与剔除明确接收者/响应包装后的词法对照。User package、八模块test-compile、Java格式化、git diff --check通过后提交并标记完成。临时MySQL/Redis使用deploy/experiments/compose.yml全新项目和卷，归档后移除容器/网络，保留卷。
+
+本切片完成后继续User TCC/Fence及只读取证实现的命名和归组。真实Seata RM/TC进程、跨服务全链路与性能实验不由本地状态机/事务回归替代。
