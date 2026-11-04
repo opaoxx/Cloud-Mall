@@ -445,3 +445,27 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product / User / Stock / Order / Pay | 待开始 | 按既定顺序逐模块细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
+
+
+## 14. Gateway 重构实施清单
+
+2026-11-04 从 `9eab801a80fa56cb55f9ca3fdcecfa0f975c9a74` 开始，由当前会话主 Agent 单独执行。工作分支继续使用 codex/refactor-backend。已跟踪工作区与暂存区为空，原实验缓存目录按原归属保留。此前总体方案的 Gateway 范围由本节具体化。
+
+基线已执行 Gateway 原有三类十项及 Common 四类二十五项，全部通过。工具沿用已核定的 Maven 3.9.16、JDK 17.0.20 与 Google Java Format 1.22.0。原始日志为 `F:/Cloud-Mall/target/backend-refactor-20261104/gateway/baseline/maven.log`。
+
+| 当前职责 | 目标位置 | 兼容约束 |
+| --- | --- | --- |
+| AuthenticationFilter 中的公开路径与内部 TCC 路径判定 | util.GatewayAccessPolicy | 原方法与路径匹配、大小写、编码检查次数、内部接口与库存拦截先后顺序 |
+| AuthenticationFilter 的认证编排 | 原 filter.AuthenticationFilter | 最高优先级、Bearer 文本规则、auth:token: 前缀、Redis 延迟订阅、查找故障503、下游异常传播、身份头覆盖及 JSON 错误体 |
+| Sentinel 规则 JSON 解析 | util.GatewayFlowRuleParser | 每次基于原 ObjectMapper 副本严格解析，整批校验完成才允许发布，原资源/count 校验与异常语义 |
+| SeckillSentinelGatewayConfig 的配置及订阅生命周期 | config.SeckillSentinelGatewayConfiguration | 显式保留 Bean 名 seckillSentinelGatewayConfig、全部配置键、秒杀路由资源名、默认规则、定时重试、Nacos 监听和关闭顺序、429 JSON及指标 |
+
+第一个提交保存本清单和新增行为回归。测试先在原实现上运行，覆盖匿名路径矩阵、内部路径编码、Token 与身份头、响应式异常范围、实际 FilteringWebHandler 调用链、Nacos 订阅重试与规则原子发布、关闭顺序。Nacos ConfigService 使用替身，避免测试依赖外部配置中心。
+
+第二个提交提取两个具名职责并统一 Configuration 命名。GatewayAccessPolicy 为无状态路径工具，GatewayFlowRuleParser 为持有 ObjectMapper 的具体 Spring Bean，构造器注入原配置类。AuthenticationFilter 和 Sentinel 配置继续作为原入口，调用方与原测试随真实 Java 类型迁移，HTTP 路由和持久协议作为兼容基线。无需为辅助类增加接口。
+
+重命名配置类后执行 Gateway clean 构建，并核验目标产物中的旧类已消失。clean 仅针对已核查的本模块标准 target 目录，测试报告先复制到本次根 target 记录目录。增加 Spring 组件注册验证，使用不执行任务的 TaskScheduler 替身，检查 Bean 名、构造器注入和默认规则初始化。最终执行 Gateway、Common 与 Cart 无外部资源回归，以及八模块生产和测试源码编译。
+
+当前 POM 实际解析出的 spring-cloud-gateway-server 为 3.1.4，来自本次 Surefire classpath，项目规格表记录为 3.1.5。此为既有依赖现状差异，本阶段按现有 POM 验证结构迁移，版本对齐作为独立核对项记录。网络路由与 Sentinel 的真实 Nacos 推送在本阶段的替身测试范围之外。
+
+Gateway 扩展基线通过。新增七项认证契约检查和三项 Sentinel 检查在原生产实现上通过，Gateway 四类20项与 Common四类25项全部零失败/错误/跳过。WebTestClient 经真实 FilteringWebHandler 验证401 JSON与已认证转发，Nacos监听、重试和关闭通过ConfigService替身验证。原始日志为 gateway/baseline/expanded-regression.log，基线标签使用 refactor/gateway-baseline-20261104。
