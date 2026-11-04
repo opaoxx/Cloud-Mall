@@ -1086,3 +1086,45 @@ git revert refactor/stock-response-complete-20261104
 逆补丁通过临时index验证可恢复父提交 `69767b00` 的完整树，真实工作树/index未回退。此操作恢复原主Service的ApiResponse/Map返回和原测试调用，保留前两次Stock拆分及历史夹具修正。实际回退后仅清理两个新增VO、StockResponseContractTest及其嵌套class的准确构建产物，再编译；保留历史target证据。Git不回退运行数据，后续若有依赖提交应按依赖逆序撤销。
 
 本轮未运行真实TC/RM恢复、完整商城或性能测试。下一切片处理内部受理事实查询的显式null/缺省字段VO，再整理缓存核对、outbox和恢复类的包归属及切面匹配；仍需先落盘精确清单，不改变状态机、Lua、CAS、租约与公平扫描算法。
+
+## 22. Stock 第四切片：内部事实VO及缓存/秒杀/指标归组
+
+### 22.1 范围与响应冻结
+
+基线 `7444e58d`，上一切片431项验证通过。本会话主Agent独立评审执行。已核对API内部事实查询、缓存重建/周期审计、恢复证据及公平扫描规格。
+
+`SeckillReservationQueryService`改为根service层接口，新增 `service.impl.seckill.SeckillReservationQueryServiceImpl`，沿用显式Bean名 `seckillReservationQueryService`。Controller保持原路径与大小写敏感的内部Header校验，返回 `ApiResponse<SeckillReservationFactVO>`，不增加事务/身份要求或新查询。
+
+三个顶层VO均在domain.vo，使用只读字段和普通VO继承表达实际JSON形状，避免自定义序列化器或Map透传包装：
+
+| 类型/分支 | 固定字段 | 缺省及null语义 |
+| --- | --- | --- |
+| SeckillReservationFactVO / 未找到 | orderNo、status=NOT_FOUND | 仅2字段；沿原Map.of拒绝null orderNo；只查受理表一次 |
+| SeckillReservationObservedVO / 受理存在、outbox不存在 | 上述2字段及activityId、skuId、userId、idempotencyKey、requestHash、reservationStatus | 共8字段；已观察原值为null仍输出null；eventId不存在 |
+| SeckillReservationOutboxVO / outbox存在 | 上述8字段及eventId | 共9字段；outbox缺event_id或值null仍输出eventId:null |
+
+Observed继承Fact，Outbox继承Observed；不跨DTO/PO继承。六个原JDBC字段及eventId使用Object保存原观察值，不强转Long/String、不丢失小数/超长数/字符串等原语义。VO明确ALWAYS包含已声明字段；Mapper与全局Jackson策略不改。
+
+严格保留原读取顺序：先读受理→捕获六个原字段→读outbox→再次读取受理status并String.valueOf推导外部status→有outbox才读event_id。REJECTED优先，受理存在但无outbox返回UNKNOWN，outbox状态null仍是原字符串"null"；非null空Map不当成NOT_FOUND，不顺带增加身份/指纹校验。两次读仍非RR、不写库。
+
+### 22.2 精确包迁移
+
+类名、Bean默认短名、方法、字段、配置、调度、消息和状态机保持，仅新增清晰的一级职责分组：
+
+| 原包/类型 | 新包 |
+| --- | --- |
+| service.impl.StockCacheReconciler、StockConsistencyReconciler | service.impl.cache |
+| service.impl.SeckillReservationServiceImpl、SeckillRequestClaimService、SeckillAcceptanceService、SeckillQuotaSettlementService、SeckillQuotaSettlementRecovery、SeckillOrderOutboxDispatcher、SeckillEventTimeResolver | service.impl.seckill |
+| service.StockSalesOutboxService、StockSalesOutboxDispatcher | service.impl.metrics |
+
+共11个已有类迁移；内部查询实现新增在seckill。根service保留接口，普通库存实现/共享Reader/Codec继续位于service.impl，既有seata包不改。补充三个package-info与明显占位注释，不拆分恢复算法，不变更方法可见性。跨包必须显式import；更新源码、测试及已有反射夹具的全限定名，冻结历史runner不改。
+
+StockDependencyAspect的只读查询切面指向新内部查询实现；缓存三个任务、周期审计、秒杀恢复两个入口及订单outbox dispatch按新包更新，资源名与异常处理不变。事务切面仍覆盖整个stock包并排除seata；销量dispatcher不新增恢复切面，claim/finish仍是独立短事务。
+
+### 22.3 验证与提交
+
+先提交本节并建立 `refactor/stock-grouping-baseline-20261104`。新增内部查询矩阵核对2/8/9字段、显式null/字符串"null"、原JDBC值、Header与两次读取顺序、异常短路/只读保护。使用真实Spring组件扫描验证Bean名、metrics默认关闭/开启、事务代理、定时任务注册与新包切面，测试调度器不自动执行任务或访问外部RabbitMQ。
+
+新增真实MySQL内部GET检查，以及Order实际StockClient通过Feign/HTTP消费Stock VO序列化结果的契约检查；不增加模块依赖。Stock全部单测/MySqlIT、Common、既有Order专项、Pay→Stock实际HTTP/Feign、Stock打包和八模块test-compile均须通过。11个移动类执行词法与原生命周期/调度元数据对照；Mapper、资源、Lua、SQL、表、消息不改。大型历史测试仅整理改动行/导入。
+
+实验用全新Compose项目 `cloud-mall-refactor-stock-grouping-20261104`，MySQL19937/Redis19938，候选网段10.254.248.0/24，先检查冲突，root/root；空源DDL与UUID库隔离沿用已验证方式。证据写入 `target/backend-refactor-20261104/stock-grouping/`，归档后移除本次容器/网络并保留卷。Git提交只纳入本切片，验证临时index逆补丁后打完成标签；不以Git回滚运行数据。真实TC/RM、商城全链及性能实验不在本切片，Stock模块本轮结构验收只覆盖上述已实施范围。
