@@ -1266,3 +1266,45 @@ git revert refactor/order-seata-complete-20261104
 这只撤销Order首切片，保留此前Stock等模块成果。实际回退后应按本节清单精确清理新类型/测试及其嵌套class残留再编译，保留target历史证据；有后续依赖提交时先处理依赖与冲突。Git不回退运行数据或忽略工件，不使用reset --hard。
 
 下一切片继续Order主业务拆分：先明确创建、查询、状态迁移、秒杀与超时消费的方法归属，再逐项冻结现有同步锁、REQUIRED/REQUIRES_NEW/只读RR、身份读取顺序、库存动作恢复及分片调用边界。具体类名和是否分多步以实际方法清单为准，方案先落盘再改代码；本轮不宣称Order模块整体重构完成。
+
+## 24. Order 第二切片：跨月列表查询独立分层
+
+### 24.1 盘点与本轮范围
+
+基线 `b756d93a`；主Agent单独审阅当前实现、API列表契约、17D精度与17ED/17EF影子读取规格、分片启动测试及上轮345项验证。主实现的事务边界如下，逐项拆分而不一次改变整个交易链。
+
+| 现有入口 | 原事务/同步边界 | 本轮处理 |
+| --- | --- | --- |
+| create | REQUIRED + synchronized；内部意图通过独立REQUIRES_NEW服务提交 | 保持 |
+| list | readOnly + REPEATABLE_READ，未同步 | 独立查询Controller/Service |
+| get / paymentState | 无显式事务；先查订单再核对身份 | 保持，后续独立迁移 |
+| cancel / paid | REQUIRED + synchronized，与create共用原实例监视器 | 保持 |
+| confirm / seckill | 无显式事务/同步；前者状态CAS，后者限流及远程调用 | 保持 |
+| consumeSeckill / consumeTimeout(Message) | Rabbit入口 + REQUIRED | 保持 |
+| consumeTimeout(String) | REQUIRED，Message重载内部自调用沿已有事务 | 保持 |
+
+选择列表为本轮唯一业务切片：五个方法 `list/unavailableOrderMonth/requireCorrectOrderMonth/view/timestamp` 只服务列表，能够整体迁移且不增加共享业务包装。原OrderController及OrderServiceImpl暂保留其他入口，空OrderService会随后续写职责拆分移除；这是阶段状态而非最终分层目标。
+
+### 24.2 变更清单与契约
+
+- 新增 `controller.OrderQueryController`：唯一承接原 `GET /api/orders`，保留status/startTime/endTime可选、page默认1/pageSize默认20、参数名称和类型。构造器注入 `service.OrderQueryService`；读取可空AuthContext.userId并显式传入，Service代理返回后再构造ApiResponse。
+- 新增 `service.OrderQueryService.list(Long callerUserId,String status,int page,int pageSize,String startTime,String endTime)`，返回 `PageResult<OrderVO>`。不引入新的HTTP参数或前端字段。
+- 新增 `service.impl.OrderQueryServiceImpl`：构造器仅依赖OrderSqlMapper，承接上述五方法；原view改名 `toOrderSummary`、timestamp改名 `formatTimestamp`。原MONTH格式保持，时间窗口仍一次性使用上海偏移now；ts转换直接调用原Timestamp.from(...toInstant())，不引入新时钟或时区规则。
+- 列表readOnly/RR仍在Service方法上，所有月份COUNT/目标页读取属于同一次事务。传入身份在事务内原第一步判空，保持UNAUTHORIZED/401及“请先登录”，再执行原分页/窗口验证；不把认证失败提前到事务开启之前。Controller只读取身份，不提前调用requireUserId。
+- 原list从OrderServiceImpl移除，不留转发方法，原OrderController不再继承此GET。其余方法、事务、同步锁、业务依赖、Mapper、DTO/VO和资源配置不改。列表日志使用新实现类身份，其他业务日志保持原类。
+- 保持月份倒序、完整COUNT、long偏移、DATETIME(3)向上取整、同一快照、空窗口无SQL、目标页有界读取、错月/缺页/缺表503、用户隔离和status原值。保持金额BigDecimal字符串、地址String.valueOf(null)语义、时间null、items=[]；不新增明细查询。
+- ApiResponse包装由事务内移至Controller代理返回后；requestId生成时间随之移动，未用于存储或业务幂等。事务提交失败仍由现有全局异常处理器处理，不返回提前构建的成功响应。
+
+六个现有测试调用点适配：OrderMonthlyPaginationTest、OrderListFailureTest、OrderQueryWindowTest、OrderQueryPrecisionMySqlIT、OrderListShardingShadowMySqlIT、config.OrderShardingRuntimeMySqlIT。普通列表夹具通过新Controller连接真实查询实现，保留原响应断言；Runtime显式装配新增两个Bean，并核对查询Service代理和原写Controller代理均存在。影子详情与恢复路径继续使用原实现；所有旧测试方法保留，不回写冻结runner或历史证据。
+
+### 24.3 验证、实验与提交
+
+先提交本节，建立 `refactor/order-query-baseline-20261104`。运行Common/Order单测及三类相关MySQL基线：精度、物理/逻辑影子对照、实际分片Bean装配。重构后同范围回归，并补充真实MVC绑定/JSON/认证顺序、实际事务代理与并发COUNT→PAGE快照测试。运行Order打包、八模块test-compile、实际Java格式化、git diff --check；源码对照五个迁移方法及其余方法/Mapper/资源不变，检查Jar与测试源码保留。
+
+实验使用新Compose项目 `cloud-mall-refactor-order-query-20261104`、MySQL19940、10.254.250.0/24；首次启动核对项目/卷/端口不存在。来源库仅初始化schema.sql中的三张模板、order_idempotency及三张恢复表共7个空表；LIKE模板按原定义只替换CREATE目标名物化，不初始化业务数据或执行整个schema.sql。测试写入只在各自新UUID库内；失败证据按原夹具规则保留，不绕过cleanup gate。当前新实验按本节执行，不复用历史限定单method runner。结束后归档本轮新增native证据与报告，清理自有容器/网络，保留新卷。
+
+通过后建立 `refactor/order-query-complete-20261104`，临时Git index验证逆补丁恢复父树。Git仅回退源码；不得清空包含历史证据的target。真实TC、MQ服务、完整商城及压测不属于本轮验收。
+
+### 24.4 实施结果
+
+待实施验证。后续再细化单订单读取/支付状态及写业务/消息职责。
