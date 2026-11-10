@@ -1342,3 +1342,33 @@ git revert refactor/order-query-complete-20261104
 仅回退本轮查询/共享映射提取，保留Order Seata及之前模块成果。实际回退后精确移除新增四类型和两个测试类（含嵌套类）的class残留再编译，保留target历史证据；Git不回退数据库或忽略工件。有后续依赖提交时先处理依赖/冲突，不使用reset --hard。
 
 下一步先细化单订单详情和支付状态只读查询：重点保留“先查订单、再读身份”的失败顺序、原库存动作证明/Feign降级和无新增RR保证；随后再分离创建、状态迁移与消息消费，显式维持原共享同步锁及事务边界。
+
+## 25. Order 第三切片：详情与支付状态查询（2026-11-10）
+
+### 25.1 范围与精确边界
+
+基线 `6a961c62`。主Agent继续独立评审、实施和验证。已复读规则、README、Bug台账、API支付状态与取证规格、当前调用点。工作区已有README修改和两个pycache目录，记录指纹并保留，不纳入提交。本轮只拆分get/paymentState及其共享读取逻辑，不改变创建、状态迁移、消息消费的事务与同步锁。
+
+- 新增 `service.OrderDetailQueryService`、`service.impl.OrderDetailQueryServiceImpl` 和 `controller.OrderDetailQueryController`。GET `/api/orders/{orderNo}` 与 `/api/internal/orders/{orderNo}/payment-state` 从混合实现移出，保留原路径、可选X-User-Id及响应包装；列表查询类保持不变。
+- Service的 `get(orderNo,LongSupplier userId)` 返回OrderVO，`paymentState(orderNo,LongSupplier userId)` 返回新的五字段 `OrderPaymentStateVO`。Controller传递延迟身份读取：详情传AuthContext::requireUserId；支付状态显式header存在则返回该值，否则延迟读取上下文。Supplier仅是本地调用参数，不是HTTP/Feign字段。只有主表身份和明细读取成功后才调用它，保持原实际读取时点、404/数据库/明细异常优先于401，以及header优先语义。
+- 新增包内无状态 `service.impl.OrderDetailReader`，接收调用方既有OrderSqlMapper、ObjectMapper及orderNo，统一原find/viewItem/readSnapshot算法。无Bean、无新数据源、无事务/身份读取；明确使用调用方所选Mapper和当前事务连接。混合实现的private find仅委托Reader，现有默认构造、六参测试构造及运行时字段装配保持；不引入第二份依赖或复制读取逻辑。
+- 原tableFromNo抽为纯 `util.OrderTableRouting.tableFromOrderNo`，供Reader、剩余写/消费流程使用；保留原正则、yyyyMM校验、404和表名，不扩大分片范围。原明细读取顺序、只核对首个主表候选身份、映射全部候选再取首个、明细toList与坏JSON异常均保持。
+- paymentState先读完整详情，再取身份/归属，再查询动作Mapper；只有返回null才调用原legacyStockActionStatus。原状态方向、StockCircuitBreaker.STATUS资源、精确原单身份、UNKNOWN/CONFLICT/SUCCEEDED/NONE与异常降级全部保持，不读写Redis/MQ，不修复历史事实。
+- OrderPaymentStateVO为orderNo/status/payAmount/userId/stockActionStatus五个public final字段；构造器逐字段requireNonNull，保持旧Map.of拒绝null语义和JSON字段/金额字符串。Stock、Pay生产Feign签名不变；只有消费Order测试产物的反射夹具随新入口调整。
+- 两项查询不增加@Transactional，不与列表只读RR混为一体。原写流程内Reader沿同一外部事务执行；独立GET保持原多次观察。ApiResponse只在Controller装配，Service不依赖HTTP包装或AuthContext。
+
+迁移核验方法为get、paymentState、legacyStockActionStatus、find、viewItem、readSnapshot、tableFromNo。完整检索普通调用与方法引用；其余方法只允许find委托及表名工具引用变化。真实表、Mapper SQL、PO、消息、配置、普通订单鉴权与状态机不改。
+
+### 25.2 测试与运行方案
+
+先提交方案并建立 `refactor/order-detail-baseline-20261110`，运行Common/Order单测基线。修改四个Order调用方测试（FailureHandling、LegacyStockIdentity、ListShardingShadow、ShardingRuntime），增加仅测试使用的旧写夹具→新读Controller装配助手；返回值改成VO时保留原断言。四个Stock跨模块反射夹具及PayTccOrderEvidenceMySqlIT按新Controller/Service构造，保留真实Stock证明和Pay→Order HTTP/Feign校验。
+
+补充真实MVC默认/显式身份、缺失/错单/坏明细与认证失败顺序、延迟上下文读取、五字段JSON/金额/null约束和无额外事务测试。回归Common/Order全部单测，OrderLegacyStockIdentityMySqlIT、OrderListShardingShadowMySqlIT、OrderShardingRuntimeMySqlIT及必要的新实库读取测试；四个改动Stock IT与PayTccOrderEvidenceMySqlIT均须运行。适配之前已通过的工件调用，不增加生产模块依赖或改变Feign协议。
+
+实库使用全新Compose项目 `cloud-mall-refactor-order-detail-20261110`，MySQL19941、10.254.251.0/24；事前确认项目/卷/端口不存在。仅从既有schema.sql提取必要Order七表、Stock被测事实表和Pay六张取证表的空DDL，不导入业务数据，不启动真实TC/MQ。每个IT只写自身UUID库并遵守原清理/保留规则；默认中间件和历史卷不动。结束先归档本轮证据，再移除自有容器/网络，保留新卷。
+
+阶段门为测试全部通过、方法体与未改文件对照、Java实际格式化、Order打包、八模块test-compile、Jar/旧入口检查、git diff --check。建立 `refactor/order-detail-complete-20261110`，临时Git index验证源码逆补丁可恢复父树，另核对README原字节未变。Git不回退运行数据和忽略工件；不使用reset --hard或全量clean。此切片不代表Order整模块或完整商城/性能验收。
+
+### 25.3 实施结果
+
+待实施验证；后续继续拆分创建、状态迁移和消息处理。
