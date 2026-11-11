@@ -24,6 +24,7 @@ import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
+import com.cloudmall.order.service.impl.creation.OrderCartCleanupCoordinator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -464,10 +465,11 @@ class OrderCartCommitBoundaryTest {
             + ",\"checked\":true}");
   }
 
-  /** 只捕获本例原Order logger，不构造生产日志helper或影响其它测试配置。 */
+  /** 只捕获本例Cart协调器logger，不构造生产日志helper或影响其它测试配置。 */
   private static final class CapturedOrderLogs implements AutoCloseable {
-    /** 被测Service实际日志通道。 */
-    private final Logger logger = (Logger) LoggerFactory.getLogger(OrderServiceImpl.class);
+    /** 被测Cart协调器实际日志通道。 */
+    private final Logger logger =
+        (Logger) LoggerFactory.getLogger(OrderCartCleanupCoordinator.class);
 
     /** 测试前原logger级别。 */
     private final Level originalLevel = logger.getLevel();

@@ -30,9 +30,9 @@ import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
+import com.cloudmall.order.service.impl.creation.OrderCartCleanupCoordinator;
 import com.cloudmall.order.util.OrderCreationTime;
 import com.cloudmall.order.util.OrderTableRouting;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,22 +46,15 @@ import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class OrderServiceImpl implements OrderService {
-  /** 订单创建、购物车提交后清理等剩余业务流程的诊断日志。 */
-  private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
-
   /** 既有订单/明细DECIMAL(18,2)非负数值容量上界；不表示商业限额或账户可支付余额。 */
   private static final BigDecimal MAX_ORDER_AMOUNT = new BigDecimal("9999999999999999.99");
 
@@ -162,8 +155,10 @@ public class OrderServiceImpl implements OrderService {
       if (item == null || item.skuId == null || item.quantity < 1) bad("商品数量必须为正数");
       purchaseQuantities.merge(item.skuId, (long) item.quantity, Long::sum);
     }
+    OrderCartCleanupCoordinator cartCleanupCoordinator =
+        new OrderCartCleanupCoordinator(cart, mapper);
     List<CartCleanupSnapshotDTO> cleanupSnapshots =
-        captureCartCleanupSnapshots(userId, purchaseQuantities);
+        cartCleanupCoordinator.captureSnapshots(userId, purchaseQuantities);
     // 3. 按原流程校验地址/商品、预扣并持久化，成功末尾只注册原证明回调。
     Map<String, Object> address = findAddress(req.addressId);
     OffsetDateTime created = OrderCreationTime.normalize(OffsetDateTime.now(creationClock));
@@ -310,7 +305,7 @@ public class OrderServiceImpl implements OrderService {
       OrderVO createdOrder = find(orderNo);
       if (reservationIntentMapper.markCommitted(orderNo, now().toLocalDateTime()) != 1)
         throw new BizException(ErrorCodes.CONFLICT, "库存预扣意图未能提交", 409);
-      registerCartCleanup(orderNo, userId, cleanupSnapshots);
+      cartCleanupCoordinator.registerAfterCommit(orderNo, userId, cleanupSnapshots);
       return ApiResponse.ok(createdOrder);
     } catch (RuntimeException creationFailure) {
       // 3. 只有成功响应才能同步回滚并结束意图；响应丢失须保留 INIT 等待恢复。
@@ -347,104 +342,6 @@ public class OrderServiceImpl implements OrderService {
     return productSku.productId() != null
         && productSku.productName() != null
         && productSku.productName().codePointCount(0, productSku.productName().length()) <= 255;
-  }
-
-  /** 创建入口只读采样。只对购买聚合数量与原JSON正int数量一致的项提供不可变证明； long安全承载Java List中正int请求的总和，超int仅跳过清理，不改变订单流程。 */
-  private List<CartCleanupSnapshotDTO> captureCartCleanupSnapshots(
-      long userId, Map<Long, Long> purchaseQuantities) {
-    // 1. 无真实事务或同步上下文时不调用Cart，也不猜测提交事实。
-    if (!TransactionSynchronizationManager.isActualTransactionActive()
-        || !TransactionSynchronizationManager.isSynchronizationActive()) {
-      log.warn("订单购物车快照缺少实际事务上下文，保留购物车，userId={}", userId);
-      return List.of();
-    }
-    // 2. 每个SKU只读一次，坏身份/数量或普通故障只保留该项，Error原传播。
-    List<CartCleanupSnapshotDTO> captured = new ArrayList<>();
-    for (Map.Entry<Long, Long> purchase : purchaseQuantities.entrySet()) {
-      Long skuId = purchase.getKey();
-      long purchasedQuantity = purchase.getValue();
-      if (purchasedQuantity > Integer.MAX_VALUE) {
-        log.warn("订单购买聚合数量超Cart范围，保留该项，userId={}，skuId={}", userId, skuId);
-        continue;
-      }
-      try {
-        ApiResponse<CartCleanupSnapshotDTO> response = cart.cleanupSnapshot(skuId, userId);
-        // 成功空项没有可清理证明，安静跳过且不授权提交后删除。
-        if (response != null && "0".equals(response.code) && response.data == null) continue;
-        if (response == null
-            || !"0".equals(response.code)
-            || !validCartCleanupSnapshot(skuId, purchasedQuantity, response.data))
-          throw new IllegalStateException("购物车清理快照身份或购买数量未确认");
-        captured.add(response.data);
-      } catch (RuntimeException snapshotFailure) {
-        log.warn("订单购物车前置快照捕获失败，保留该项，userId={}，skuId={}", userId, skuId, snapshotFailure);
-      }
-    }
-    // 3. 保存原DTO，创建末尾与提交回调不GET重建或替换证明。
-    return List.copyOf(captured);
-  }
-
-  /** 创建成功末尾只注册原证明回调，提交后条件删除，不重读Cart或改变原用户。 */
-  private void registerCartCleanup(
-      String orderNo, long userId, List<CartCleanupSnapshotDTO> cleanupSnapshots) {
-    try {
-      // 1. 无实际事务或同步上下文时不能证明提交，禁止提前删除购物车。
-      if (!TransactionSynchronizationManager.isActualTransactionActive()
-          || !TransactionSynchronizationManager.isSynchronizationActive()) {
-        log.warn("订单购物车清理缺少实际事务上下文，保留购物车，orderNo={}", orderNo);
-        return;
-      }
-      // 2. 只注册入口捕获的不可变证明，业务失败或rollback不执行POST。
-      TransactionSynchronizationManager.registerSynchronization(
-          new TransactionSynchronization() {
-            /** 订单已提交后逐SKU清理；普通失败隔离，Error保持传播。 */
-            @Override
-            public void afterCommit() {
-              // 3. 远端清理失败不得反向回滚已提交订单或库存，继续后续SKU。
-              for (CartCleanupSnapshotDTO snapshot : cleanupSnapshots) {
-                Long skuId = snapshot.skuId();
-                try {
-                  ApiResponse<Boolean> removed = cart.cleanupItem(skuId, userId, snapshot);
-                  if (removed == null || !"0".equals(removed.code) || removed.data == null)
-                    throw new IllegalStateException("购物车清理响应未确认");
-                } catch (RuntimeException cleanupFailure) {
-                  log.warn("订单提交后购物车清理失败，orderNo={}，skuId={}", orderNo, skuId, cleanupFailure);
-                }
-              }
-            }
-          });
-    } catch (RuntimeException registrationFailure) {
-      log.warn("订单购物车清理回调注册失败，保留购物车，orderNo={}", orderNo, registrationFailure);
-    }
-  }
-
-  /** 原DTO/JSON数值SKU及原正int数量须匹配购买聚合，不从坏响应拼接或重建证明。 */
-  private boolean validCartCleanupSnapshot(
-      Long skuId, long purchasedQuantity, CartCleanupSnapshotDTO snapshot) {
-    if (snapshot == null
-        || !Objects.equals(skuId, snapshot.skuId())
-        || snapshot.expectedJson() == null
-        || snapshot.expectedJson().isBlank()) return false;
-    try {
-      JsonNode proof =
-          mapper
-              .reader()
-              .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-              .readTree(snapshot.expectedJson());
-      JsonNode proofSku = proof == null ? null : proof.path("skuId");
-      JsonNode proofQuantity = proof == null ? null : proof.path("quantity");
-      return proof != null
-          && proof.isObject()
-          && proofSku.isIntegralNumber()
-          && proofSku.canConvertToLong()
-          && proofSku.longValue() == skuId.longValue()
-          && proofQuantity.isIntegralNumber()
-          && proofQuantity.canConvertToInt()
-          && proofQuantity.intValue() > 0
-          && proofQuantity.longValue() == purchasedQuantity;
-    } catch (JsonProcessingException malformedProof) {
-      return false;
-    }
   }
 
   /** 只核JSON原始文本身份和已接受状态，坏结构不授权；转换失败保留原异常证据。 */

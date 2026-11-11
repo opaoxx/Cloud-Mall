@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，Order已完成Seata演练、列表、详情及支付状态查询切片，创建/状态迁移/消息职责待继续；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询切片及创建流程中的Cart清理提取，创建主Service/状态迁移/消息职责待继续。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、列表、详情及支付状态查询切片完成，见第23至25节；创建/状态迁移/消息职责待继续 |
+| Order | 进行中 | Seata演练、查询、创建Cart清理切片完成，见第23至26节；创建主Service/状态迁移/消息职责待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1450,4 +1450,33 @@ git revert refactor/order-detail-complete-20261110
 
 ### 26.4 实施结果
 
-待实施验证。后续创建主Service及共享写锁边界另行落盘。
+创建流程的三个Cart方法及原afterCommit回调已集中到OrderCartCleanupCoordinator，主混合实现由1070行减至967行。create在原数量预检后创建当前请求的协调对象，原位置采样证明、原成功末尾注册回调；创建/取消/支付仍使用原实例监视器，HTTP、事务和库存/订单/意图/补偿编排没有迁移。该阶段完成Cart职责提取，创建主Service仍是明确后续项。
+
+逐行复盘后的调用链为：`原create事务代理 → 原synchronized入口 → 身份/幂等/数量 → 协调器captureSnapshots → 原地址/商品/意图/库存/落单 → 协调器registerAfterCommit → 原方法返回释放锁 → 原事务提交 → 原userId及DTO逐SKU条件清理`。回滚不触发afterCommit；普通Cart失败仍逐项告警/继续，Error仍传播。日志名称归入新协调类，消息/级别/参数与时点保持。
+
+| 验证范围 | 数量 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 现有公共/源码契约 |
+| Order单测 | 317 | 全部现有单测，包含原Cart证明/回调/日志/Error矩阵 |
+| 创建实库专项 | 9 | 精确执行26.3列出的九方法，真实MySQL及原Spring事务/REQUIRES_NEW代理，远端为既有mock |
+| 合计 | 351 | 62个测试类，0失败、0错误、0跳过 |
+
+九个实库方法名与Surefire XML集合完全一致，未把整个OrderCreationPrecisionMySqlIT宣称为本轮全跑。已验证提交前零清理、提交后独立连接可见订单及COMMITTED意图、原user/DTO不被后续上下文与Cart变化替换、部分购买不授权删除、外层回滚保留独立RESERVED意图、局部失败沿原补偿，以及提交后清理失败仍保持已提交事实并继续后SKU。
+
+三个方法体（含afterCommit嵌套体）按字段/方法改名逐token一致；主混合实现除协调对象和两处委托外对照一致，原事务注解数量和三个synchronized修饰符保持。OrderCartCommitBoundaryTest执行token仅日志捕获目标变化，其余断言保持；其他187份原源码/资源哈希不变。三个变更Java文件执行Google Java Format，diff检查通过。Order打包与八模块test-compile通过；Jar协调器/回调齐全并与最终class字节一致，旧OrderServiceImpl$1缺席，旧三个Cart方法移除，原三个同步入口仍存在，没有新Bean/事务注解或测试夹具混入。
+
+新MySQL8.0.46实验使用19942与独立新卷，九个UUID库全部清理，结束仅剩空来源库及系统库、三张源表逐表精确0行。62份报告、日志、inspect、旧回调class备份、DDL与源码对照见 `target/backend-refactor-20261111/order-cart-cleanup/verification.json` 及同目录。自有容器和网络已移除，新mysql_data卷保留。README原有修改逐字节保持，两个旧pycache目录不纳入提交。
+
+本轮没有新增业务规则或修复协议行为，未运行真实Cart HTTP/Redis、TC/MQ、商城全链或性能测试；以上结果仅验收本次职责提取。
+
+### 26.5 回退与后续
+
+方案提交/基线 `e3dbae7f`，标签 `refactor/order-cart-cleanup-baseline-20261111`；阶段完成标签 `refactor/order-cart-cleanup-complete-20261111`。临时Git index验证逆补丁恢复父树，真实工作树/index与README已有修改保持。
+
+```powershell
+git revert refactor/order-cart-cleanup-complete-20261111
+```
+
+仅撤销当前Cart协调器提取，保留前面Order查询/Seata成果。实际回退后精确清理新OrderCartCleanupCoordinator及其匿名回调class残留并重新编译；保留历史target证据，不做全量clean/reset --hard。Git不回退数据库或忽略工件，后续依赖提交应先处理依赖与冲突。
+
+下一切片继续普通创建主Service：先冻结共享操作监视器身份、事务在加锁前开启/解锁后提交的原区间、REQUIRES_NEW意图、结果未知与补偿以及Cart协调器装配。届时同时处理创建HTTP委托和现有测试依赖构造，不把创建Service与剩余状态Service各自加synchronized当作等价实现。
