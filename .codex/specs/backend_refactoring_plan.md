@@ -1419,3 +1419,35 @@ git revert refactor/order-detail-complete-20261110
 仅回退本轮详情/支付状态/共享读取提取，保留先前Seata和列表切片。回退后按本节清单精确移除新增六类型及三个测试辅助/测试类（含嵌套类）的class残留，再编译；保留target历史证据，不使用全量clean或reset --hard。Git不回退数据库或忽略工件，有后续依赖时先核对依赖与冲突。
 
 下一步先细化订单创建职责：普通下单与共享监视器、REQUIRES_NEW意图、外部库存结果未知、事务提交后购物车清理之间的边界。创建/取消/支付当前共用同步锁，不能简单按类拆分成独立锁；先冻结方案和验证清单，再推进写流程与消息消费解耦。
+
+## 26. Order 创建职责预拆分：购物车清理协调（2026-11-11）
+
+### 26.1 阶段边界与锁盘点
+
+基线 `f430d37a`，由主Agent独立评审、实施、验证；README现有修改及两个旧pycache目录保留。本轮复读API购物车证明/提交后清理契约、`order_cart_transaction_mysql_followup_20261027.md`、创建实现及已有测试。
+
+当前create/cancel/paid均为同一Controller目标对象的synchronized方法。Spring事务在进入目标方法、获取监视器之前开启，目标方法退出释放监视器后才提交及执行afterCommit；这不是覆盖数据库提交全过程的互斥锁。原REQUIRES_NEW意图服务是独立代理，创建主事务和Cart回调仍依原边界运行。完整拆分创建Service前须另冻结共享锁身份及持有区间，不能把不同Service各自synchronized当作等价迁移。
+
+本轮选取创建专用的独立业务能力先行提取：前置Cart证明采样、原DTO数量/身份校验、提交后清理注册。创建HTTP入口/同步锁/事务注解/认证位置与库存/订单/补偿编排保持，后续再拆创建入口及共享写锁。本阶段不宣称普通创建已完全脱离混合实现。
+
+### 26.2 精确变更
+
+- 新增 `service.impl.creation.OrderCartCleanupCoordinator`，不可变、请求内使用的普通业务协作对象，不注册Bean、不新开事务。构造器接收当前已配置的CartClient与ObjectMapper；在普通创建数量预检后、原采样位置构造一次。它只保存原依赖引用，不产生远程/数据库行为，直接幂等重放和无效请求不进入该位置。
+- 原captureCartCleanupSnapshots迁为public captureSnapshots，原registerCartCleanup迁为public registerAfterCommit，原validCartCleanupSnapshot迁为private matchesSnapshot；原afterCommit匿名回调随之迁移。方法体只允许这些命名及字段归属变化。
+- 保留真实事务+同步上下文双门、数量超过int上界仅跳过清理、每SKU一次GET、成功null静默跳过、原JSON完整解析/整数范围/购买聚合证明、List.copyOf原DTO集合、成功末尾才注册回调。afterCommit逐SKU使用原userId及DTO，普通异常隔离并继续，Error仍传播；不重GET、不调用旧DELETE、不新增重试。
+- CartClient/JSON依赖在请求原采样位置绑定，此后同一协调对象注册并执行回调。运行期原Spring依赖在装配后保持同一实例；用户身份和请求/Cart内容后续变化继续由原捕获证明隔离。不改Feign参数、Redis键、DTO、JSON、SQL或状态机。
+- 所有Cart清理日志移入新协调类，保留消息、参数、级别和记录时点；Logger名称改为实际职责类。OrderCartCommitBoundaryTest只调整日志捕获目标及说明，其余原断言不变。原混合类删除已不再使用的logger和三个私有方法，create仅增加局部协调对象与两处委托。
+
+### 26.3 验证、资源与提交策略
+
+先提交方案并建立 `refactor/order-cart-cleanup-baseline-20261111`。运行Common/Order全部单测基线；迁移后同范围回归，现有CartCommitBoundary单测覆盖失败/原证明/回调/Error等矩阵，不新增镜像测试。
+
+真实MySQL使用OrderCreationPrecisionMySqlIT中已审的九个方法：cartCleanupWaitsForCommitAndObservesCommittedOrderAndIntent、cleanupUsesPrecommitProofAndOriginalUserWithoutReadingTheChangedCartAgain、cartChangesDuringReserveKeepTheirNewItemAfterTheOrderReallyCommits、partiallyPurchasedCartQuantityDoesNotGetDeletedAndStillCommitsTheOrder、outerRollbackNeverDeletesCartOrPretendsTheOrderCommitted、lateLocalReadFailureRollsBackWithoutRemovingCartItems、postCommitCartFailuresDoNotCompensateOrdersAndLaterSkuStillCleansUp、completedNormalOrderAliasesCannotReplayTheOriginalOrder、committedIntentAliasesCannotReplayWhenIdempotencyProjectionIsMissing。使用原真实事务代理、独立连接事实断言和REQUIRES_NEW，Cart等远端为既有mock；不冒称真实Cart HTTP/Redis全链测试。
+
+新独立Compose项目 `cloud-mall-refactor-order-cart-cleanup-20261111`，MySQL19942，网络10.254.252.0/24，事前核对项目/卷/端口不存在。只初始化新cloudmall_order的mall_order_template、mall_order_item_template、order_idempotency三个空源表；item模板由schema.sql原月表定义仅替换CREATE目标名物化。测试只写其新UUID库并负责清理。归档报告/日志/源表指纹后移除自有容器与网络，新卷保留，默认环境不变。
+
+源码核对三个方法及回调执行token、剩余混合逻辑、原锁/事务元数据与未改文件哈希；执行实际Java格式化、Order打包、八模块test-compile、Jar与git diff --check。通过后建立 `refactor/order-cart-cleanup-complete-20261111` 并以临时Git index验证逆补丁恢复父树；README不入提交，Git不回退数据库或忽略工件，不做全量clean/reset --hard。
+
+### 26.4 实施结果
+
+待实施验证。后续创建主Service及共享写锁边界另行落盘。
