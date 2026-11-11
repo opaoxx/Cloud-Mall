@@ -280,7 +280,9 @@ class OrderLegacyStockIdentityMySqlIT {
     seed("CANCELLED");
     var beforeForbidden = fixtureSnapshot();
     BizException forbidden =
-        assertThrows(BizException.class, () -> service.paymentState("202610legacy1", 9L));
+        assertThrows(
+            BizException.class,
+            () -> OrderReadTestSupport.paymentState(service, "202610legacy1", 9L));
     assertEquals(403, forbidden.getHttpStatus());
     assertEquals(beforeForbidden, fixtureSnapshot());
     verifyNoInteractions(stock);
@@ -359,7 +361,7 @@ class OrderLegacyStockIdentityMySqlIT {
         () -> mapper.statusForOrder("202610legacy1"));
     assertThrows(
         org.springframework.dao.DataAccessException.class,
-        () -> service.paymentState("202610legacy1", 8L));
+        () -> OrderReadTestSupport.paymentState(service, "202610legacy1", 8L));
     verifyNoInteractions(stock);
   }
 
@@ -386,10 +388,15 @@ class OrderLegacyStockIdentityMySqlIT {
             AuthContext.set(8L, "USER");
             assertEquals(
                 404,
-                assertThrows(BizException.class, () -> service.get(identity[1])).getHttpStatus());
+                assertThrows(
+                        BizException.class,
+                        () -> OrderReadTestSupport.controller(service).get(identity[1]))
+                    .getHttpStatus());
             assertEquals(
                 404,
-                assertThrows(BizException.class, () -> service.paymentState(identity[1], 8L))
+                assertThrows(
+                        BizException.class,
+                        () -> OrderReadTestSupport.paymentState(service, identity[1], 8L))
                     .getHttpStatus());
             assertEquals(before, fixtureSnapshot());
           });
@@ -437,14 +444,20 @@ class OrderLegacyStockIdentityMySqlIT {
     seed("PENDING_PAYMENT");
     AuthContext.set(8L, "USER");
     var before = fixtureSnapshot();
-    var order = (com.cloudmall.order.domain.vo.OrderVO) service.get("202610legacy1").data;
+    var order =
+        (com.cloudmall.order.domain.vo.OrderVO)
+            OrderReadTestSupport.controller(service).get("202610legacy1").data;
     assertEquals("202610legacy1", order.orderNo);
     assertEquals(new BigDecimal("12.30"), order.payAmount);
     assertEquals("PENDING_PAYMENT", order.status);
     assertEquals(before, fixtureSnapshot());
     AuthContext.set(9L, "USER");
     assertEquals(
-        403, assertThrows(BizException.class, () -> service.get("202610legacy1")).getHttpStatus());
+        403,
+        assertThrows(
+                BizException.class,
+                () -> OrderReadTestSupport.controller(service).get("202610legacy1"))
+            .getHttpStatus());
     assertEquals(before, fixtureSnapshot());
     AuthContext.set(8L, "USER");
     service.paid("202610legacy1");
@@ -490,14 +503,22 @@ class OrderLegacyStockIdentityMySqlIT {
             null, "", " \t", "202610légacy1", "202610legacy1 ", "202613invalid", "not-an-order")) {
       assertEquals(
           404,
-          assertThrows(BizException.class, () -> target.get(requestedOrderNo)).getHttpStatus());
+          assertThrows(
+                  BizException.class,
+                  () -> OrderReadTestSupport.controller(target).get(requestedOrderNo))
+              .getHttpStatus());
     }
     verifyNoInteractions(observedSqlMapper);
     assertEquals(
-        404, assertThrows(BizException.class, () -> target.get("202610missing")).getHttpStatus());
+        404,
+        assertThrows(
+                BizException.class,
+                () -> OrderReadTestSupport.controller(target).get("202610missing"))
+            .getHttpStatus());
     fixture.execute("DROP TABLE mall_order_202610");
     assertThrows(
-        org.springframework.dao.DataAccessException.class, () -> target.get("202610legacy1"));
+        org.springframework.dao.DataAccessException.class,
+        () -> OrderReadTestSupport.controller(target).get("202610legacy1"));
     verifyNoInteractions(stock);
   }
 
@@ -709,7 +730,8 @@ class OrderLegacyStockIdentityMySqlIT {
 
   /** 真实Service调用，只取既有payment-state字段，不发HTTP或写支付数据。 */
   private Map<?, ?> paymentState(Long callerUserId) {
-    return (Map<?, ?>) service.paymentState("202610legacy1", callerUserId).data;
+    return (Map<?, ?>)
+        OrderReadTestSupport.paymentState(service, "202610legacy1", callerUserId).data;
   }
 
   /** 所有参与查询的隔离表完整快照，验证错误或成功读都没有隐式repair。 */

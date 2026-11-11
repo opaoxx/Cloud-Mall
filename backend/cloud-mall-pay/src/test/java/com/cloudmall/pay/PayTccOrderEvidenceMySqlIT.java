@@ -61,7 +61,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
@@ -275,13 +274,22 @@ class PayTccOrderEvidenceMySqlIT {
             .loadClass("com.cloudmall.order.mapper.OrderSqlMapper")
             .getConstructor(JdbcTemplate.class)
             .newInstance(new JdbcTemplate(orderTracked));
+    Class<?> queryContract =
+        orderClasses.loadClass("com.cloudmall.order.service.OrderDetailQueryService");
+    Object queryService =
+        orderClasses
+            .loadClass("com.cloudmall.order.service.impl.OrderDetailQueryServiceImpl")
+            .getConstructor(
+                orderClasses.loadClass("com.cloudmall.order.mapper.OrderSqlMapper"),
+                ObjectMapper.class,
+                orderClasses.loadClass("com.cloudmall.order.mapper.OrderStockActionMapper"),
+                orderClasses.loadClass("com.cloudmall.order.feign.StockClient"))
+            .newInstance(sqlMapper, new ObjectMapper(), null, null);
     Object controller =
         orderClasses
-            .loadClass("com.cloudmall.order.controller.OrderController")
-            .getConstructor()
-            .newInstance();
-    ReflectionTestUtils.setField(controller, "orderSqlMapper", sqlMapper);
-    ReflectionTestUtils.setField(controller, "mapper", new ObjectMapper());
+            .loadClass("com.cloudmall.order.controller.OrderDetailQueryController")
+            .getConstructor(queryContract)
+            .newInstance(queryService);
     Jackson2ObjectMapperBuilder moneyBuilder = new Jackson2ObjectMapperBuilder();
     new CommonWebConfiguration().moneyAsString().customize(moneyBuilder);
     orderMvc =

@@ -53,7 +53,8 @@ class BackendP1RulesTest {
     assertTrue(payment.contains("Idempotency-Key"));
     assertTrue(order.contains("@PathVariable(\"orderNo\")"));
     assertTrue(order.contains("TIMEOUT_DLQ"));
-    assertTrue(order.contains("YearMonth.parse"));
+    assertTrue(order.contains("OrderTableRouting.tableFromOrderNo"));
+    assertTrue(source("cloud-mall-order", "OrderTableRouting.java").contains("YearMonth.parse"));
   }
 
   @Test

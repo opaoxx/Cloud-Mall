@@ -8,6 +8,7 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.controller.OrderController;
+import com.cloudmall.order.controller.OrderDetailQueryController;
 import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.dto.*;
 import com.cloudmall.order.domain.po.*;
@@ -666,7 +667,12 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(writes, runtime.probe.writes());
         assertEquals(
             JSON.writeValueAsString(normal),
-            JSON.writeValueAsString(controller.get(normal.orderNo).data));
+            JSON.writeValueAsString(
+                runtime
+                    .context
+                    .getBean(OrderDetailQueryController.class)
+                    .get(normal.orderNo)
+                    .data));
         PageResult<?> page =
             (PageResult<?>)
                 runtime
@@ -725,7 +731,10 @@ class OrderShardingRuntimeMySqlIT {
       assertEquals(first, rows());
       try {
         AuthContext.set(7L, "USER");
-        verifyVO((OrderVO) controller.get(seckillNo).data, "PENDING_PAYMENT", 1);
+        verifyVO(
+            (OrderVO) runtime.context.getBean(OrderDetailQueryController.class).get(seckillNo).data,
+            "PENDING_PAYMENT",
+            1);
       } finally {
         AuthContext.clear();
       }
@@ -1149,6 +1158,8 @@ class OrderShardingRuntimeMySqlIT {
           OrderStockActionRecovery.class,
           SeckillMessageRecovery.class,
           OrderController.class,
+          OrderDetailQueryController.class,
+          OrderDetailQueryServiceImpl.class,
           OrderQueryController.class,
           OrderQueryServiceImpl.class);
       if (simulatedMonth == null) context.register(OrderShardingRuntimeConfiguration.class);
@@ -1239,6 +1250,8 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(fixture.database, actual.getCatalog());
       }
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderDetailQueryController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderDetailQueryServiceImpl.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderQueryController.class)));
       assertTrue(
           AopUtils.isAopProxy(

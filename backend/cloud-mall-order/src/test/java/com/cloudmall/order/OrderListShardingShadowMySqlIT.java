@@ -1161,7 +1161,7 @@ class OrderListShardingShadowMySqlIT {
           base,
           sql,
           () -> {
-            ApiResponse<?> response = service.get(orderNo);
+            ApiResponse<?> response = OrderReadTestSupport.controller(service).get(orderNo);
             assertEquals("0", response.code);
             OrderVO order = (OrderVO) response.data;
             Item main =

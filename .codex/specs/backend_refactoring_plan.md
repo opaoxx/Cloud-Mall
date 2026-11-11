@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，Order已完成Seata演练和跨月列表查询切片，详情/支付状态与写业务拆分待继续；最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构，Order已完成Seata演练、列表、详情及支付状态查询切片，创建/状态迁移/消息职责待继续；最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、跨月列表查询切片完成，见第23至24节；详情/支付状态、写业务与消息职责待继续 |
+| Order | 进行中 | Seata演练、列表、详情及支付状态查询切片完成，见第23至25节；创建/状态迁移/消息职责待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1355,7 +1355,7 @@ git revert refactor/order-query-complete-20261104
 - 原tableFromNo抽为纯 `util.OrderTableRouting.tableFromOrderNo`，供Reader、剩余写/消费流程使用；保留原正则、yyyyMM校验、404和表名，不扩大分片范围。原明细读取顺序、只核对首个主表候选身份、映射全部候选再取首个、明细toList与坏JSON异常均保持。
 - paymentState先读完整详情，再取身份/归属，再查询动作Mapper；只有返回null才调用原legacyStockActionStatus。原状态方向、StockCircuitBreaker.STATUS资源、精确原单身份、UNKNOWN/CONFLICT/SUCCEEDED/NONE与异常降级全部保持，不读写Redis/MQ，不修复历史事实。
 - OrderPaymentStateVO为orderNo/status/payAmount/userId/stockActionStatus五个public final字段；构造器逐字段requireNonNull，保持旧Map.of拒绝null语义和JSON字段/金额字符串。Stock、Pay生产Feign签名不变；只有消费Order测试产物的反射夹具随新入口调整。
-- 两项查询不增加@Transactional，不与列表只读RR混为一体。原写流程内Reader沿同一外部事务执行；独立GET保持原多次观察。ApiResponse只在Controller装配，Service不依赖HTTP包装或AuthContext。
+- 两项查询不增加@Transactional，不与列表只读RR混为一体。原写流程内Reader沿同一外部事务执行；独立GET保持原多次观察。查询结果的ApiResponse只在Controller装配，Service不返回HTTP包装或读取AuthContext；原Stock Feign响应仍按ApiResponse消费。
 
 迁移核验方法为get、paymentState、legacyStockActionStatus、find、viewItem、readSnapshot、tableFromNo。完整检索普通调用与方法引用；其余方法只允许find委托及表名工具引用变化。真实表、Mapper SQL、PO、消息、配置、普通订单鉴权与状态机不改。
 
@@ -1371,4 +1371,51 @@ git revert refactor/order-query-complete-20261104
 
 ### 25.3 实施结果
 
-待实施验证；后续继续拆分创建、状态迁移和消息处理。
+本切片于2026-11-10实施和完成测试，2026-11-11恢复会话后核对源码、报告、进程及数据库，再完成归档、清理和提交。标签沿用切片启动日20261110。恢复时没有活动Java测试进程，剩余Stock/Pay测试及八模块编译已在前次会话中断后成功完成；未重复执行没有变化且已通过的用例。
+
+新增六个生产类型：详情查询Controller/Service/Impl、OrderPaymentStateVO、包内OrderDetailReader、OrderTableRouting。原混合实现由1188行减至1070行；详情读取与支付状态HTTP入口已经移出，剩余写流程通过原private find委托同一读取算法，原同步锁/事务/状态机保持。列表查询实现、Mapper SQL、PO、Feign生产契约、配置与消息未修改。
+
+复盘调用链为：
+
+```text
+详情GET → OrderDetailQueryController → 查询Service
+  → OrderTableRouting → 主表原身份证明 → 摘要/明细/JSON读取
+  → 延迟读取AuthContext身份 → 原归属校验 → 原OrderVO → HTTP包装
+
+支付状态GET → 原header优先的延迟身份来源 → 同一完整详情Reader
+  → 原归属校验 → 原动作方向与statusForOrder
+  → 仅无动作时走原Stock STATUS资源及持久事实证明 → 五字段VO → HTTP包装
+
+原创建/状态/消息流程 → private find → 同一Reader（沿原外层事务）
+```
+
+首轮Common静态检查仍要求YearMonth.parse位于旧混合类，已在Bug台账记录后改为同时检查新工具的解析逻辑和旧实现的调用，运行时非法月份仍有MVC404验证。源码对照工具首次把方法调用误识别为定义，修正为明确方法声明后七组方法体全部通过；没有修改业务逻辑来满足对照。OrderReadTestSupport仅复用原写夹具依赖构造真实新查询入口，并把实际VO投影为Map以保留已有大规模状态矩阵断言，真实JSON另由新MVC用例验证。
+
+| 范围 | 数量 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 既有契约和调整后的路由静态守卫 |
+| Order单测 | 317 | 原310项及新增7项MVC/字段/身份顺序测试 |
+| Order实库 | 30 | LegacyStockIdentity18、ListShardingShadow8、ShardingRuntime3、DetailRead1 |
+| Stock证明链实库 | 73 | 四个既有IT；真实Stock SQL及新Order读取判断，OrderMapper为既有替身 |
+| Pay→Order实库/HTTP/Feign | 9 | PayTccOrderEvidenceMySqlIT，真实Order Mapper/MVC经本机HTTP和Feign消费，非完整Nacos部署 |
+| 合计 | 454 | 70个测试类，0失败、0错误、0跳过 |
+
+新增MVC用例核对原路由共存、金额字符串、显式null时间、空SKU快照、原五字段结构和非空约束，以及404/坏明细优先于401、读取期间上下文变化后的身份与显式header优先。新实库用例核对独立GET无事务，原paid事务内主表/明细读取均沿同一MySQL连接，实际PAID与CONFIRM动作共同提交；未增加RR承诺。原分片装配同时核对新查询类无事务代理、原写Controller仍有事务代理。
+
+七组核心方法体在声明的依赖传入、身份来源、返回类型及工具引用变换下逐token一致，剩余混合实现对照通过。Order/Stock/Pay其他574份原源码/资源哈希保持，九个适配调用方测试保留原方法；Common只调整一项静态守卫。20个变更Java文件执行Google Java Format（既有大文件只处理变更行/import），diff检查通过。Order打包及八模块test-compile通过；Jar六个新类型齐全、与最终编译class逐字节一致，无测试夹具；旧get/paymentState及迁出的辅助方法不再存在，新Service无AuthContext/Web绑定/新增Transactional字节码依赖。
+
+实验MySQL8.0.46/19941使用本轮独立新卷；最终仅余三个空来源库及系统库，18张来源表逐表精确0行，所有UUID库已删除。两份本轮native class-finish均created=deleted、errors为空、无需保留失败库；201份native工件复制并核SHA，原件保留。70份报告、日志、inspect、数据库证明和Jar摘要归档到 `target/backend-refactor-20261110/order-detail/verification.json` 及同目录。实验容器与网络在2026-11-11移除，新mysql_data卷保留。README与本轮开始时逐字节相同，其已有修改和两个旧pycache目录不纳入提交。
+
+本轮未启动真实TC/MQ服务，未运行完整商城或性能测试；Order剩余写Controller继承关系、创建/状态迁移及消息职责继续后续处理，不宣称模块整体完成。
+
+### 25.4 回退与后续
+
+方案提交/基线 `da1beafd`，标签 `refactor/order-detail-baseline-20261110`；阶段完成标签 `refactor/order-detail-complete-20261110`。临时Git index验证逆补丁恢复父提交完整树，实际工作树/index不回退，README已有修改不变。
+
+```powershell
+git revert refactor/order-detail-complete-20261110
+```
+
+仅回退本轮详情/支付状态/共享读取提取，保留先前Seata和列表切片。回退后按本节清单精确移除新增六类型及三个测试辅助/测试类（含嵌套类）的class残留，再编译；保留target历史证据，不使用全量clean或reset --hard。Git不回退数据库或忽略工件，有后续依赖时先核对依赖与冲突。
+
+下一步先细化订单创建职责：普通下单与共享监视器、REQUIRES_NEW意图、外部库存结果未知、事务提交后购物车清理之间的边界。创建/取消/支付当前共用同步锁，不能简单按类拆分成独立锁；先冻结方案和验证清单，再推进写流程与消息消费解耦。

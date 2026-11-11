@@ -17,7 +17,6 @@ import com.cloudmall.order.domain.po.OrderItemPO;
 import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.domain.po.OrderPO;
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
-import com.cloudmall.order.domain.vo.OrderItemVO;
 import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.CartClient;
@@ -32,9 +31,8 @@ import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderService;
 import com.cloudmall.order.util.OrderCreationTime;
-import com.cloudmall.order.util.OrderSummaryAssembler;
+import com.cloudmall.order.util.OrderTableRouting;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -475,70 +473,6 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  @GetMapping("/orders/{orderNo}")
-  /** 执行 get 相关操作。 */
-  public ApiResponse<?> get(@PathVariable("orderNo") String orderNo) {
-    // 1. 接收并整理 get 的业务请求。
-    // 2. 执行 get 的核心业务校验与状态处理。
-    // 3. 返回 get 的处理结果。
-    return ApiResponse.ok(owned(orderNo));
-  }
-
-  /** 为支付恢复提供只读订单状态，不暴露支付服务持有的 payNo。 */
-  @GetMapping("/internal/orders/{orderNo}/payment-state")
-  public ApiResponse<?> paymentState(
-      @PathVariable("orderNo") String orderNo,
-      @RequestHeader(value = "X-User-Id", required = false) Long callerUserId) {
-    // 1. 读取订单事实及内部调用者用户 ID。
-    OrderVO order = find(orderNo);
-    long userId = callerUserId == null ? AuthContext.requireUserId() : callerUserId;
-    // 2. 校验订单归属，禁止跨用户探测支付状态。
-    if (!Objects.equals(order.userId, userId))
-      throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
-    // 3. 已有动作必须匹配订单终态方向；真正无动作才进入原legacy只读兜底。
-    String expectedActionType =
-        "CANCELLED".equals(order.status)
-            ? "ROLLBACK"
-            : ("PAID".equals(order.status) || "COMPLETED".equals(order.status)) ? "CONFIRM" : null;
-    String actionStatus = orderStockActionMapper.statusForOrder(orderNo, expectedActionType);
-    if (actionStatus == null) actionStatus = legacyStockActionStatus(order);
-    return ApiResponse.ok(
-        Map.of(
-            "orderNo", order.orderNo,
-            "status", order.status,
-            "payAmount", order.payAmount,
-            "userId", order.userId,
-            "stockActionStatus", actionStatus));
-  }
-
-  /** 存量终态无动作行时，必须用库存持久事实确认，不能把旧异常订单视为已结清。 */
-  private String legacyStockActionStatus(OrderVO order) {
-    // 1. 待支付订单尚未产生最终库存动作。
-    if ("PENDING_PAYMENT".equals(order.status)) return "NONE";
-    // 2. 未知订单状态不能推断库存方向，不查询或修复历史坏行。
-    if (!"PAID".equals(order.status)
-        && !"COMPLETED".equals(order.status)
-        && !"CANCELLED".equals(order.status)) return "UNKNOWN";
-    // 3. 按明确订单终态确定允许结清的库存终态及相反状态。
-    String expected = "CANCELLED".equals(order.status) ? "ROLLED_BACK" : "CONFIRMED";
-    String opposite = "CANCELLED".equals(order.status) ? "CONFIRMED" : "ROLLED_BACK";
-    try {
-      // 4. 只读取库存持久事实；旧记录缺失或服务不可用时保持未知。
-      ApiResponse<com.cloudmall.order.domain.vo.StockReservationStatusVO> response =
-          OrderStockCircuitBreaker.call(
-              OrderStockCircuitBreaker.STATUS, () -> stock.reservation(order.orderNo));
-      if (response == null || !"0".equals(response.code) || response.data == null) return "UNKNOWN";
-      // 缺失或错单响应保持未知，不能借别单终态作为结清或退款依据。
-      if (!Objects.equals(order.orderNo, response.data.orderNo)) return "UNKNOWN";
-      if (expected.equals(response.data.status)) return "SUCCEEDED";
-      if (opposite.equals(response.data.status) || "REJECTED".equals(response.data.status))
-        return "CONFLICT";
-      return "UNKNOWN";
-    } catch (RuntimeException stockQueryFailure) {
-      return "UNKNOWN";
-    }
-  }
-
   @Transactional
   @PostMapping("/orders/{orderNo}/cancel")
   /** 执行 cancel 相关操作。 */
@@ -765,7 +699,7 @@ public class OrderServiceImpl implements OrderService {
       }
       // 已提交重复消息在上方收敛；首次落单必须先核验原时间和订单月份。
       OffsetDateTime created = OrderCreationTime.forSeckill(orderNo, event.get("occurredAt"));
-      String orderTable = tableFromNo(orderNo);
+      String orderTable = OrderTableRouting.tableFromOrderNo(orderNo);
       // 3. 首次落单先确认成功商品事实与原SKU，再写订单/明细/outbox并完成本地状态。
       ApiResponse<ProductClient.SkuView> productResponse = products.sku(skuId);
       if (productResponse == null || productResponse.data == null)
@@ -910,20 +844,6 @@ public class OrderServiceImpl implements OrderService {
         .orElseThrow(() -> new BizException(ErrorCodes.NOT_FOUND, "地址不存在", 404));
   }
 
-  /** 执行 readSnapshot 相关操作。 */
-  private Map<String, String> readSnapshot(String value) {
-    // 1. 接收并整理 readSnapshot 的业务请求。
-    // 2. 执行 readSnapshot 的核心业务校验与状态处理。
-    // 3. 返回 readSnapshot 的处理结果。
-    try {
-      return value == null
-          ? Map.of()
-          : mapper.readValue(value, new TypeReference<Map<String, String>>() {});
-    } catch (Exception e) {
-      throw new BizException(ErrorCodes.INTERNAL, "SKU快照读取失败", 500);
-    }
-  }
-
   /** 执行 toJson 相关操作。 */
   private String toJson(Object v) {
     // 1. 接收并整理 toJson 的业务请求。
@@ -1024,24 +944,9 @@ public class OrderServiceImpl implements OrderService {
       orderStockActionMapper.insert(id(), orderNo, "ROLLBACK", now().toLocalDateTime());
   }
 
-  /** 在映射视图和读取明细前绑定请求号与主表原身份，错单候选沿原404拒绝。 */
+  /** 复用原详情读取步骤，沿调用方既有事务执行。 */
   private OrderVO find(String orderNo) {
-    // 1. 沿原格式/月校验查询主表原始候选，不改变数据库比较规则。
-    String orderTable = tableFromNo(orderNo);
-    List<Map<String, Object>> orderRows = orderSqlMapper.findOrder(orderTable, orderNo);
-    // 2. 无行或身份不精确时拒绝，禁止借别名继续明细、鉴权或后续状态操作。
-    if (orderRows.isEmpty() || !Objects.equals(orderNo, orderRows.get(0).get("order_no")))
-      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
-    // 3. 身份有效后保持原视图和明细顺序，调用方继续原鉴权与业务流程。
-    List<OrderVO> orders = orderRows.stream().map(OrderSummaryAssembler::fromRow).toList();
-    OrderVO order = orders.get(0);
-    order.items =
-        orderSqlMapper
-            .findOrderItems(orderTable.replace("mall_order_", "mall_order_item_"), orderNo)
-            .stream()
-            .map(this::viewItem)
-            .toList();
-    return order;
+    return OrderDetailReader.read(orderSqlMapper, mapper, orderNo);
   }
 
   /** 按旧状态执行 CAS 迁移，仅影响一行时返回成功。 */
@@ -1050,7 +955,11 @@ public class OrderServiceImpl implements OrderService {
     // 2. 执行 setStatus 的核心业务校验与状态处理。
     // 3. 返回 setStatus 的处理结果。
     return orderSqlMapper.updateStatus(
-            tableFromNo(order.orderNo), order.orderNo, targetStatus, order.status, ts(now()))
+            OrderTableRouting.tableFromOrderNo(order.orderNo),
+            order.orderNo,
+            targetStatus,
+            order.status,
+            ts(now()))
         == 1;
   }
 
@@ -1117,39 +1026,12 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 将订单明细数据库行转换为明细响应视图。 */
-  private OrderItemVO viewItem(Map<String, Object> row) {
-    return new OrderItemVO(
-        ((Number) row.get("product_id")).longValue(),
-        ((Number) row.get("sku_id")).longValue(),
-        String.valueOf(row.get("product_name_snapshot")),
-        readSnapshot((String) row.get("sku_snapshot")),
-        (BigDecimal) row.get("unit_price"),
-        ((Number) row.get("quantity")).intValue(),
-        (BigDecimal) row.get("line_amount"));
-  }
-
   /** 执行 table 相关操作。 */
   private static String table(OffsetDateTime d) {
     // 1. 接收并整理 table 的业务请求。
     // 2. 执行 table 的核心业务校验与状态处理。
     // 3. 返回 table 的处理结果。
     return "mall_order_" + d.format(MONTH);
-  }
-
-  /** 执行 tableFromNo 相关操作。 */
-  private static String tableFromNo(String orderNo) {
-    // 1. 接收并整理 tableFromNo 的业务请求。
-    // 2. 执行 tableFromNo 的核心业务校验与状态处理。
-    // 3. 返回 tableFromNo 的处理结果。
-    if (orderNo == null || !orderNo.matches("\\d{6}[A-Za-z0-9-]+"))
-      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
-    try {
-      YearMonth.parse(orderNo.substring(0, 6), DateTimeFormatter.ofPattern("yyyyMM"));
-    } catch (Exception e) {
-      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
-    }
-    return "mall_order_" + orderNo.substring(0, 6);
   }
 
   /** 执行 ts 相关操作。 */

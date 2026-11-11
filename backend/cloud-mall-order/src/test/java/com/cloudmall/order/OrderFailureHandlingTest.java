@@ -511,11 +511,12 @@ class OrderFailureHandlingTest {
             mock(UserClient.class),
             orderSqlMapper);
 
-    ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
+    ApiResponse<?> response = OrderReadTestSupport.paymentState(orderService, orderNo, 8L);
 
     assertEquals("PENDING_PAYMENT", ((Map<?, ?>) response.data).get("status"));
     assertEquals(new BigDecimal("12.30"), ((Map<?, ?>) response.data).get("payAmount"));
-    assertThrows(BizException.class, () -> orderService.paymentState(orderNo, 9L));
+    assertThrows(
+        BizException.class, () -> OrderReadTestSupport.paymentState(orderService, orderNo, 9L));
     verify(orderSqlMapper, never()).updateStatus(anyString(), anyString(), anyString(), anyString(), any());
   }
 
@@ -532,7 +533,7 @@ class OrderFailureHandlingTest {
     OrderServiceImpl orderService =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
 
-    ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
+    ApiResponse<?> response = OrderReadTestSupport.paymentState(orderService, orderNo, 8L);
 
     assertEquals("CONFLICT", ((Map<?, ?>) response.data).get("stockActionStatus"));
   }
@@ -550,7 +551,7 @@ class OrderFailureHandlingTest {
     OrderServiceImpl orderService =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
 
-    ApiResponse<?> response = orderService.paymentState(orderNo, 8L);
+    ApiResponse<?> response = OrderReadTestSupport.paymentState(orderService, orderNo, 8L);
 
     assertEquals("SUCCEEDED", ((Map<?, ?>) response.data).get("stockActionStatus"));
   }
@@ -578,7 +579,7 @@ class OrderFailureHandlingTest {
           OrderServiceImpl service =
               service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
 
-          ApiResponse<?> response = service.paymentState(orderNo, 8L);
+          ApiResponse<?> response = OrderReadTestSupport.paymentState(service, orderNo, 8L);
 
           Map<?, ?> state = (Map<?, ?>) response.data;
           assertEquals(
@@ -621,7 +622,8 @@ class OrderFailureHandlingTest {
                     : "UNKNOWN";
         assertEquals(
             actionStatus,
-            ((Map<?, ?>) service.paymentState(orderNo, 8L).data).get("stockActionStatus"));
+            ((Map<?, ?>) OrderReadTestSupport.paymentState(service, orderNo, 8L).data)
+                .get("stockActionStatus"));
         verify(stockClient).reservation(orderNo);
         verify(stockClient, never()).confirm(anyString(), any());
         verify(stockClient, never()).rollback(anyString(), any());
@@ -647,7 +649,9 @@ class OrderFailureHandlingTest {
       OrderServiceImpl service =
           service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
       assertEquals(
-          "UNKNOWN", ((Map<?, ?>) service.paymentState(orderNo, 8L).data).get("stockActionStatus"));
+          "UNKNOWN",
+          ((Map<?, ?>) OrderReadTestSupport.paymentState(service, orderNo, 8L).data)
+              .get("stockActionStatus"));
       verify(stockClient).reservation(orderNo);
       verify(stockClient, never()).confirm(anyString(), any());
       verify(stockClient, never()).rollback(anyString(), any());
@@ -685,8 +689,9 @@ class OrderFailureHandlingTest {
                 BizException.class,
                 () -> {
                   switch (endpoint) {
-                    case "GET" -> target.get(requestedOrderNo);
-                    case "PAYMENT_STATE" -> target.paymentState(requestedOrderNo, 8L);
+                    case "GET" -> OrderReadTestSupport.controller(target).get(requestedOrderNo);
+                    case "PAYMENT_STATE" ->
+                        OrderReadTestSupport.paymentState(target, requestedOrderNo, 8L);
                     case "CANCEL" -> target.cancel(requestedOrderNo, 8L);
                     case "PAID" -> target.paid(requestedOrderNo);
                     case "CONFIRM" -> target.confirm(requestedOrderNo);
@@ -712,12 +717,17 @@ class OrderFailureHandlingTest {
     OrderServiceImpl target =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
     String orderNo = "202609missing";
-    assertEquals(404, assertThrows(BizException.class, () -> target.get(orderNo)).getHttpStatus());
+    assertEquals(
+        404,
+        assertThrows(BizException.class, () -> OrderReadTestSupport.controller(target).get(orderNo))
+            .getHttpStatus());
     var unavailable = new DataAccessResourceFailureException("order database unavailable");
     when(sqlMapper.findOrder(anyString(), eq(orderNo))).thenThrow(unavailable);
     org.junit.jupiter.api.Assertions.assertSame(
         unavailable,
-        assertThrows(DataAccessResourceFailureException.class, () -> target.get(orderNo)));
+        assertThrows(
+            DataAccessResourceFailureException.class,
+            () -> OrderReadTestSupport.controller(target).get(orderNo)));
     verify(sqlMapper, never()).findOrderItems(anyString(), anyString());
     verifyNoInteractions(stockClient);
   }
@@ -762,7 +772,7 @@ class OrderFailureHandlingTest {
         when(stockClient.reservation(orderNo)).thenReturn(legacyStockFact(orderNo, stockStatus));
         OrderServiceImpl target =
             service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
-        Map<?, ?> state = (Map<?, ?>) target.paymentState(orderNo, 8L).data;
+        Map<?, ?> state = (Map<?, ?>) OrderReadTestSupport.paymentState(target, orderNo, 8L).data;
         assertEquals("UNKNOWN", state.get("stockActionStatus"));
         assertEquals(String.valueOf(orderStatus), state.get("status"));
         assertEquals(orderNo, state.get("orderNo"));

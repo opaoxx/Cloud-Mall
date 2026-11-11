@@ -1101,21 +1101,28 @@ class SeckillLegacySkuExactMySqlIT {
                           "com.cloudmall.order.domain.vo.StockReservationStatusVO"));
               return ApiResponse.ok(response);
             });
+    Class<?> queryContract =
+        orderClasses.loadClass("com.cloudmall.order.service.OrderDetailQueryService");
+    Class<?> actionMapperType =
+        orderClasses.loadClass("com.cloudmall.order.mapper.OrderStockActionMapper");
+    Object queryService =
+        orderClasses
+            .loadClass("com.cloudmall.order.service.impl.OrderDetailQueryServiceImpl")
+            .getConstructor(
+                orderClasses.loadClass("com.cloudmall.order.mapper.OrderSqlMapper"),
+                ObjectMapper.class,
+                actionMapperType,
+                orderClasses.loadClass("com.cloudmall.order.feign.StockClient"))
+            .newInstance(orderMapper, new ObjectMapper(), mock(actionMapperType), client);
     Class<?> orderType =
-        orderClasses.loadClass("com.cloudmall.order.service.impl.OrderServiceImpl");
-    Object order = orderType.getConstructor().newInstance();
-    ReflectionTestUtils.setField(order, "stock", client);
-    ReflectionTestUtils.setField(order, "orderSqlMapper", orderMapper);
-    ReflectionTestUtils.setField(
-        order,
-        "orderStockActionMapper",
-        mock(orderClasses.loadClass("com.cloudmall.order.mapper.OrderStockActionMapper")));
+        orderClasses.loadClass("com.cloudmall.order.controller.OrderDetailQueryController");
+    Object order = orderType.getConstructor(queryContract).newInstance(queryService);
     var result =
         (ApiResponse<?>)
             orderType
                 .getMethod("paymentState", String.class, Long.class)
                 .invoke(order, ORDER_NO, 8L);
-    return (String) ((Map<?, ?>) result.data).get("stockActionStatus");
+    return (String) result.data.getClass().getField("stockActionStatus").get(result.data);
   }
 
   /** 当前owned库的读监测，不添加或伪造事务属性。 */
