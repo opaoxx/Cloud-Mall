@@ -9,7 +9,6 @@ import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -49,7 +48,7 @@ class OrderTimeoutUnicodeTextTest {
       String orderNo = payload.contains("LEGACY1") ? "202610LEGACY1" : "20261042";
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       pendingOrder(orders, orderNo);
       byte[] original = payload.getBytes(StandardCharsets.UTF_8);
       Message message = new Message(original.clone(), new MessageProperties());
@@ -81,7 +80,7 @@ class OrderTimeoutUnicodeTextTest {
         assertTrue(payload.chars().allMatch(codeUnit -> codeUnit <= 127));
         OrderSqlMapper orders = mock(OrderSqlMapper.class);
         StockClient stock = mock(StockClient.class);
-        OrderServiceImpl service = service(stock, orders);
+        OrderTestService service = service(stock, orders);
         pendingOrder(orders, "20261042");
         byte[] original = payload.getBytes(StandardCharsets.UTF_8);
         Message message = new Message(original.clone(), new MessageProperties());
@@ -134,8 +133,8 @@ class OrderTimeoutUnicodeTextTest {
   }
 
   /** 实际Service处理入口，不mock String消费方法；外部依赖均为替身。 */
-  private static OrderServiceImpl service(StockClient stock, OrderSqlMapper orders) {
-    return new OrderServiceImpl(
+  private static OrderTestService service(StockClient stock, OrderSqlMapper orders) {
+    return new OrderTestService(
         stock,
         mock(ProductClient.class),
         mock(UserClient.class),

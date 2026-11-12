@@ -12,7 +12,6 @@ import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderDetailQueryServiceImpl;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
@@ -66,7 +65,7 @@ class OrderDetailReadMySqlIT {
       orders.connections.clear();
       orders.expectTransaction = true;
       var target =
-          new OrderServiceImpl(
+          new OrderTestService(
               stock,
               mock(ProductClient.class),
               mock(UserClient.class),
@@ -80,7 +79,7 @@ class OrderDetailReadMySqlIT {
           new TransactionInterceptor(
               new DataSourceTransactionManager(dataSource),
               new AnnotationTransactionAttributeSource()));
-      var writeService = (OrderServiceImpl) factory.getProxy();
+      var writeService = (OrderTestService) factory.getProxy();
       writeService.paid("202610shared");
       assertEquals(List.of(true, true, true, true), orders.active);
       assertEquals(1, orders.connections.stream().distinct().count());

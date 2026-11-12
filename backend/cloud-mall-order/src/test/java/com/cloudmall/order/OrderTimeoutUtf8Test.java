@@ -9,7 +9,6 @@ import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.CharacterCodingException;
@@ -76,7 +75,7 @@ class OrderTimeoutUtf8Test {
       String orderNo = payload.contains("LEGACY1") ? "202610LEGACY1" : "20261042";
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       when(orders.findOrder("mall_order_202610", orderNo))
           .thenReturn(
               List.of(
@@ -113,7 +112,7 @@ class OrderTimeoutUtf8Test {
     for (byte[] payload : payloads) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       Message message = new Message(payload.clone(), new MessageProperties());
       checks.add(
           () -> {
@@ -146,8 +145,8 @@ class OrderTimeoutUtf8Test {
   }
 
   /** 实际Message及String业务方法，CAS默认0不访问库存动作。 */
-  private static OrderServiceImpl service(StockClient stock, OrderSqlMapper orders) {
-    return new OrderServiceImpl(
+  private static OrderTestService service(StockClient stock, OrderSqlMapper orders) {
+    return new OrderTestService(
         stock,
         mock(ProductClient.class),
         mock(UserClient.class),

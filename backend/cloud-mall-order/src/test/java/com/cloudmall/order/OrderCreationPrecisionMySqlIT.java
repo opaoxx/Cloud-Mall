@@ -26,7 +26,6 @@ import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.cloudmall.order.service.impl.OrderReservationRecovery;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -72,7 +71,7 @@ class OrderCreationPrecisionMySqlIT {
   private TransactionTemplate transaction;
 
   /** 经注解事务代理的真实订单 Service。 */
-  private OrderServiceImpl service;
+  private OrderTestService service;
 
   /** 隔离库连接地址。 */
   private String isolatedUrl;
@@ -115,7 +114,7 @@ class OrderCreationPrecisionMySqlIT {
     OrderReservationIntentService intentTarget = new OrderReservationIntentService(intentMapper);
     OrderReservationIntentService intentProxy = transactionProxy(intentTarget, dataSource);
     service =
-        new OrderServiceImpl(
+        new OrderTestService(
             mock(StockClient.class),
             mock(ProductClient.class),
             mock(UserClient.class),

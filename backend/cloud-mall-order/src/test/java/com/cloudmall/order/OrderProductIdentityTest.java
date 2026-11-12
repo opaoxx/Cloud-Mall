@@ -20,7 +20,6 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
@@ -565,7 +564,7 @@ class OrderProductIdentityTest {
     final OrderOutboxMapper outbox = mock(OrderOutboxMapper.class);
 
     /** 实际被测普通创建编排。 */
-    final OrderServiceImpl service;
+    final OrderTestService service;
 
     private Fixture() {
       AuthContext.set(8L, "USER");
@@ -598,7 +597,7 @@ class OrderProductIdentityTest {
                           BigDecimal.TEN,
                           "address_snapshot",
                           "{}")));
-      service = new OrderServiceImpl(stock, products, users, cart, orders, new ObjectMapper());
+      service = new OrderTestService(stock, products, users, cart, orders, new ObjectMapper());
       ReflectionTestUtils.setField(service, "reservationIntentService", intents);
       ReflectionTestUtils.setField(service, "reservationIntentMapper", intentMapper);
       ReflectionTestUtils.setField(service, "orderOutboxMapper", outbox);

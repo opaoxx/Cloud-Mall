@@ -22,7 +22,6 @@ import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.impl.OrderOutboxDispatcher;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.cloudmall.order.service.impl.OrderReservationRecovery;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderStockActionRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.core.context.RootContext;
@@ -458,10 +457,10 @@ class OrderReplayRecoveryShardingShadowMySqlIT {
     private OrderStockActionMapper actions;
 
     /** 原target保留原Clock注入点。 */
-    private OrderServiceImpl target;
+    private OrderTestService target;
 
     /** 原@Transactional真实代理。 */
-    private OrderServiceImpl service;
+    private OrderTestService service;
 
     /** 创建/关闭/所有断言的实际返回事实。 */
     private boolean created, shadowClosed, verified;
@@ -639,7 +638,7 @@ class OrderReplayRecoveryShardingShadowMySqlIT {
       actions = new OrderStockActionMapper(business);
       OrderReservationIntentService intentService =
           proxy(new OrderReservationIntentService(intents), manager);
-      target = new OrderServiceImpl(stock, product, user, cart, orders, new ObjectMapper());
+      target = new OrderTestService(stock, product, user, cart, orders, new ObjectMapper());
       ReflectionTestUtils.setField(target, "reservationIntentService", intentService);
       ReflectionTestUtils.setField(target, "reservationIntentMapper", intents);
       ReflectionTestUtils.setField(target, "orderOutboxMapper", outbox);
@@ -656,8 +655,12 @@ class OrderReplayRecoveryShardingShadowMySqlIT {
           TransactionDefinition.PROPAGATION_REQUIRED,
           annotations
               .getTransactionAttribute(
-                  OrderServiceImpl.class.getMethod("create", String.class, CreateOrderDTO.class),
-                  OrderServiceImpl.class)
+                  com.cloudmall.order.service.impl.OrderCreationServiceImpl.class.getMethod(
+                      "create",
+                      String.class,
+                      CreateOrderDTO.class,
+                      java.util.function.LongSupplier.class),
+                  com.cloudmall.order.service.impl.OrderCreationServiceImpl.class)
               .getPropagationBehavior());
       assertEquals(
           TransactionDefinition.PROPAGATION_REQUIRES_NEW,

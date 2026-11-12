@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询切片及创建流程中的Cart清理提取，创建主Service/状态迁移/消息职责待继续。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理和普通创建Service提取，状态迁移/秒杀/消息职责待继续。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、查询、创建Cart清理切片完成，见第23至26节；创建主Service/状态迁移/消息职责待继续 |
+| Order | 进行中 | Seata演练、查询、Cart清理及普通创建Service切片完成，见第23至27节；状态迁移/秒杀/消息职责待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1507,4 +1507,52 @@ git revert refactor/order-cart-cleanup-complete-20261111
 
 ### 27.3 实施结果
 
-待实施验证。
+普通创建已完整迁入OrderCreationServiceImpl（370行），由OrderCreationController构造器注入业务接口并承接原POST；旧混合实现由967行减至572行，不再暴露create入口，也不持有Cart、创建时钟、意图Service/Mapper等专属依赖。商品快照规则、共享写流程辅助及计算明细独立归位，七个新生产类型全部落盘。剩余状态和秒杀/消息仍在旧实现，空OrderService随后续整理移除，本轮不宣称Order全模块完成。
+
+实际调用链为：
+
+```text
+POST /api/orders → OrderCreationController
+  → 创建Service代理先开启原REQUIRED事务
+  → 获取OrderWriteMonitor → 原位置读取身份
+  → 直接幂等重放 / 数量与Cart证明 / 地址与商品金额、metadata、JSON准备
+  → 原独立INIT提交 → 原Stock预扣及持久证明 → 独立RESERVED
+  → 同事务订单/明细/幂等/outbox/COMMITTED → 注册原Cart回调
+  → 解锁 → 事务提交及afterCommit → Controller包装原OrderVO
+原cancel/paid代理 → 开启事务 → 获取同一监视器 → 原状态/CAS/动作 → 解锁后提交
+原confirm/秒杀/消息入口保持原锁与事务范围
+```
+
+历史混合矩阵通过仅测试的OrderTestService使用真实创建算法；该夹具保留原测试事务入口，不用于证明生产事务注解。直接装配生产类的OrderCreationWiringTest独立验证真实Spring事务拦截器、共同监视器、两个竞争者已开始事务但不能进入业务、commit/rollback时当前线程已解锁、异常释放、原confirm不加锁/不新开事务、HTTP绑定和提交失败不返回成功。ShardingRuntime使用真实生产创建Controller/Service代理并核对两个目标持有同一个监视器；这些验证未经过混合测试夹具。
+
+| 最终有效范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 原公共契约，创建入口/规则源码检查指向新类 |
+| Order单测 | 322 | 原317项及5项直接生产装配/MVC/锁边界检查 |
+| OrderCreationPrecisionMySqlIT | 72 | 全类创建精度、商品/金额/快照、意图/补偿、Cart提交边界 |
+| OrderCreationShardingShadowMySqlIT | 2 | 全类物理/逻辑创建影子及故障事实 |
+| OrderReplayRecoveryShardingShadowMySqlIT | 4 | 全类幂等重放、意图、outbox和库存动作恢复影子 |
+| OrderShardingRuntimeMySqlIT | 3 | 实际装配、启动拒绝及冷发布/回退 |
+| 合计 | 428 | 66个类，最终逐类去重报告0失败、0错误、0跳过 |
+
+首次整体运行并非全绿：Runtime重启及Replay库存动作两项在客户端建立MySQL socket时失败，Runtime根因链为java.net.BindException Address already in use；Replay的CannotGetJdbcConnectionException消息SHA与其一致。只读观察TCP默认49152起/16384端口、当时全机TIME_WAIT约3752/本实验约3112，不能据此确定全机端口耗尽。保留首轮日志和两个失败XML后，两类分别独立重跑全类通过，Replay重跑同时再次通过全部单测。没有调整业务、断言、MySQL或Windows网络配置来绕过失败；最终统计不重复计算重跑，也不把首次失败抹去。
+
+新增装配测试初次编译出现ObjectMapper::new与registerBean重载推断歧义，改成明确Supplier lambda后通过；源码审计首次误将地址字段字符串id纳入变量改名，限定变量位置后通过，未修改生产行为满足审计。以上均记录于原Bug台账。
+
+19组迁移方法体及状态同步包装按声明变换逐token一致，其他混合结构/算法对照通过；Order其他168份原源码/资源哈希保持，22个适配测试文件的原方法全部保留。32个变更Java文件完成Google Java Format，新增同步块按完整方法格式化；diff检查通过。Order打包及八模块test-compile通过，Jar七个新生产类型与最终class逐字节相同，无测试夹具或旧ItemRow，旧混合类无create。创建Service没有AuthContext/Web绑定依赖，仍保留原@Transactional；显式同步块由真实装配测试验证，不再使用各自方法的隐式this锁。
+
+### 27.4 证据、资源与回退
+
+证据根 `target/backend-refactor-20261112/order-creation/` 的verification.json记录最终428项、首轮失败与独立重跑、Jar摘要、方法对照和资源状态。66份最终XML、两个失败XML、504份本轮native工件均保留；成功的三个native run满足其自身清理门，最初两个失败run按原门保留现场，不能归为成功清理。
+
+新MySQL8.0.46/19943的七张来源表均精确0行，所有成功用例UUID库已移除。按native记录保留三个失败现场库（一个cm17ej、两个cm17ei），已用只读mysqldump导出并记录SHA，且仍存在于保留卷中；不是默认业务数据，也没有手工删库伪装测试通过。自有容器与网络已移除，`cloud-mall-refactor-order-creation-20261112_mysql_data` 卷保留。README与起始指纹一致，其已有修改和旧pycache不纳入提交。
+
+方案提交/基线 `1e28b517`，标签 `refactor/order-creation-baseline-20261112`；完成标签 `refactor/order-creation-complete-20261112`。临时Git index验证当前阶段逆补丁恢复父提交完整树，实际工作树/index与README修改不回退。
+
+```powershell
+git revert refactor/order-creation-complete-20261112
+```
+
+此回退只撤销本轮普通创建及共享监视器/辅助规则，保留之前查询/Cart/Seata成果。回退后精确清理七个新生产类型及OrderTestService/OrderCreationWiringTest（含嵌套类）对应class残留再编译，保留target历史证据；有后续依赖时按逆序处理，不使用全量clean/reset --hard。Git不恢复运行数据或忽略证据。
+
+本轮真实MySQL验证中的远端服务仍为既有mock，未执行实际Cart/Stock HTTP、TC/MQ、完整商城或性能测试。下一步拆分取消/支付/确认状态迁移，继续共享OrderWriteMonitor，保持各入口原鉴权时点、事务/无事务差别、CAS与库存动作意图；之后再处理秒杀和消息消费。

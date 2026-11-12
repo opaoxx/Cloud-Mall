@@ -8,6 +8,7 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.controller.OrderController;
+import com.cloudmall.order.controller.OrderCreationController;
 import com.cloudmall.order.controller.OrderDetailQueryController;
 import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.dto.*;
@@ -653,14 +654,17 @@ class OrderShardingRuntimeMySqlIT {
       OrderVO normal;
       try {
         AuthContext.set(7L, "USER");
-        normal = (OrderVO) controller.create(key, request()).data;
+        normal =
+            (OrderVO)
+                runtime.context.getBean(OrderCreationController.class).create(key, request()).data;
         verifyVO(normal, "PENDING_PAYMENT", 2);
         assertEquals(1, runtime.probe.reserves.get());
         assertEquals(1, runtime.probe.cartCleanup.get());
         Map<String, List<Map<String, Object>>> before = rows();
         int calls = runtime.probe.rpc.size();
         int writes = runtime.probe.writes();
-        OrderVO replay = (OrderVO) controller.create(key, null).data;
+        OrderVO replay =
+            (OrderVO) runtime.context.getBean(OrderCreationController.class).create(key, null).data;
         assertEquals(JSON.writeValueAsString(normal), JSON.writeValueAsString(replay));
         assertEquals(before, rows());
         assertEquals(calls, runtime.probe.rpc.size());
@@ -1158,6 +1162,9 @@ class OrderShardingRuntimeMySqlIT {
           OrderStockActionRecovery.class,
           SeckillMessageRecovery.class,
           OrderController.class,
+          OrderCreationController.class,
+          OrderCreationServiceImpl.class,
+          OrderWriteMonitor.class,
           OrderDetailQueryController.class,
           OrderDetailQueryServiceImpl.class,
           OrderQueryController.class,
@@ -1250,6 +1257,18 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(fixture.database, actual.getCatalog());
       }
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderCreationController.class)));
+      assertTrue(
+          AopUtils.isAopProxy(
+              context.getBean(com.cloudmall.order.service.OrderCreationService.class)));
+      assertSame(
+          context.getBean(OrderWriteMonitor.class),
+          ReflectionTestUtils.getField(context.getBean(OrderController.class), "writeMonitor"));
+      assertSame(
+          context.getBean(OrderWriteMonitor.class),
+          ReflectionTestUtils.getField(
+              context.getBean(com.cloudmall.order.service.OrderCreationService.class),
+              "writeMonitor"));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderDetailQueryController.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderDetailQueryServiceImpl.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderQueryController.class)));

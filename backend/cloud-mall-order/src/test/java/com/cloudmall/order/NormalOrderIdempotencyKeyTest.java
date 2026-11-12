@@ -19,7 +19,6 @@ import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.Arrays;
@@ -52,7 +51,7 @@ class NormalOrderIdempotencyKeyTest {
   private OrderReservationIntentService intents;
 
   /** 被验证的真实普通下单编排。 */
-  private OrderServiceImpl service;
+  private OrderTestService service;
 
   @BeforeEach
   void setup() {
@@ -62,7 +61,7 @@ class NormalOrderIdempotencyKeyTest {
     cart = mock(CartClient.class);
     orders = mock(OrderSqlMapper.class);
     intents = mock(OrderReservationIntentService.class);
-    service = new OrderServiceImpl(stock, products, users, cart, orders, new ObjectMapper());
+    service = new OrderTestService(stock, products, users, cart, orders, new ObjectMapper());
     ReflectionTestUtils.setField(service, "reservationIntentService", intents);
     AuthContext.set(8L, "USER");
   }

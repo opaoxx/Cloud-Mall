@@ -10,7 +10,6 @@ import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -41,7 +40,7 @@ class OrderTimeoutEnvelopeTest {
         Message message = message(envelope);
         OrderSqlMapper orders = mock(OrderSqlMapper.class);
         StockClient stock = mock(StockClient.class);
-        OrderServiceImpl service = service(stock, orders);
+        OrderTestService service = service(stock, orders);
         String label = fieldName + ":" + variantIndex;
         checks.add(
             () ->
@@ -59,7 +58,7 @@ class OrderTimeoutEnvelopeTest {
     for (String expiration : List.of("2000-01-01T00:00:00+08:00", "2000-01-01T00:00:00Z")) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       when(orders.findOrder("mall_order_202610", orderNo))
           .thenReturn(
               List.of(
@@ -103,7 +102,7 @@ class OrderTimeoutEnvelopeTest {
             List.of("ORDER_TIMEOUT"))) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       Map<String, Object> envelope = envelope();
       envelope.put("eventType", eventType);
       Message message = message(envelope);
@@ -112,7 +111,7 @@ class OrderTimeoutEnvelopeTest {
     }
     OrderSqlMapper orders = mock(OrderSqlMapper.class);
     StockClient stock = mock(StockClient.class);
-    OrderServiceImpl service = service(stock, orders);
+    OrderTestService service = service(stock, orders);
     Map<String, Object> envelope = envelope();
     envelope.put("orderNo", " 20261042 ");
     Message message = message(envelope);
@@ -132,8 +131,8 @@ class OrderTimeoutEnvelopeTest {
   }
 
   /** 直接构造实际业务服务，不截获String入口或改变参数。 */
-  private static OrderServiceImpl service(StockClient stock, OrderSqlMapper orders) {
-    return new OrderServiceImpl(
+  private static OrderTestService service(StockClient stock, OrderSqlMapper orders) {
+    return new OrderTestService(
         stock,
         mock(ProductClient.class),
         mock(UserClient.class),

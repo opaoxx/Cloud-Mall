@@ -17,7 +17,6 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
@@ -36,8 +35,8 @@ class SeckillAddressPropagationTest {
     when(products.sku(7L)).thenReturn(ApiResponse.ok(sku));
     when(orderSqlMapper.findOrderId(anyString(), anyString())).thenReturn(88L);
 
-    OrderServiceImpl service =
-        new OrderServiceImpl(
+    OrderTestService service =
+        new OrderTestService(
             mock(StockClient.class),
             products,
             mock(com.cloudmall.order.feign.UserClient.class),

@@ -16,7 +16,6 @@ import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
@@ -113,7 +112,7 @@ class OrderCreateCompensationProofTest {
         new DataAccessResourceFailureException("create unavailable");
 
     /** 实际被测创建与补偿编排。 */
-    final OrderServiceImpl service;
+    final OrderTestService service;
 
     private Fixture() {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
@@ -134,7 +133,7 @@ class OrderCreateCompensationProofTest {
           .reserve(any());
       when(orders.insertOrder(anyString(), any(OrderPO.class))).thenThrow(creationFailure);
       service =
-          new OrderServiceImpl(
+          new OrderTestService(
               stock, products, users, mock(CartClient.class), orders, new ObjectMapper());
       ReflectionTestUtils.setField(service, "reservationIntentService", intents);
       AuthContext.set(7L, "USER");

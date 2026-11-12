@@ -9,7 +9,6 @@ import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.exc.MismatchedInputException;
@@ -74,7 +73,7 @@ class OrderTimeoutDuplicateKeysTest {
       StockClient stock = mock(StockClient.class);
       ObjectMapper mapper = new ObjectMapper();
       assertGlobalFlagsAreUnchanged(mapper);
-      OrderServiceImpl service = service(stock, orders, mapper);
+      OrderTestService service = service(stock, orders, mapper);
       when(orders.findOrder("mall_order_202610", orderNo))
           .thenReturn(
               List.of(
@@ -110,7 +109,7 @@ class OrderTimeoutDuplicateKeysTest {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
       ObjectMapper mapper = new ObjectMapper();
-      OrderServiceImpl service = service(stock, orders, mapper);
+      OrderTestService service = service(stock, orders, mapper);
       checks.add(
           () -> {
             IllegalArgumentException rejected =
@@ -143,9 +142,9 @@ class OrderTimeoutDuplicateKeysTest {
   }
 
   /** 实际Message/String业务方法，CAS默认0不会触及库存动作。 */
-  private static OrderServiceImpl service(
+  private static OrderTestService service(
       StockClient stock, OrderSqlMapper orders, ObjectMapper mapper) {
-    return new OrderServiceImpl(
+    return new OrderTestService(
         stock,
         mock(ProductClient.class),
         mock(UserClient.class),

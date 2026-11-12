@@ -17,7 +17,6 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
@@ -756,8 +755,8 @@ class SeckillProductIdentityTest {
     final OrderOutboxMapper outbox = mock(OrderOutboxMapper.class);
 
     /** 实际被测消费编排。 */
-    final OrderServiceImpl service =
-        new OrderServiceImpl(
+    final OrderTestService service =
+        new OrderTestService(
             stock, products, mock(UserClient.class), cart, orders, new ObjectMapper());
 
     private Fixture() {

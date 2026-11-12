@@ -284,8 +284,12 @@ class BackendP1RulesTest {
     String order = source("cloud-mall-order", "OrderServiceImpl.java");
     assertTrue(handler.contains("MissingRequestHeaderException"));
     assertTrue(handler.contains("COMMON_INVALID_ARGUMENT"));
-    assertTrue(order.contains("@RequestHeader(\"Idempotency-Key\")"));
-    assertTrue(compact(order).contains("key==null||key.isBlank()"));
+    assertTrue(
+        source("cloud-mall-order", "OrderCreationController.java")
+            .contains("@RequestHeader(\"Idempotency-Key\")"));
+    assertTrue(
+        compact(source("cloud-mall-order", "OrderCreationServiceImpl.java"))
+            .contains("key==null||key.isBlank()"));
   }
 
   /** 执行 resource 相关操作。 */

@@ -9,7 +9,6 @@ import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -34,7 +33,7 @@ class OrderTimeoutLegacyMessageTest {
             "2026101234567890123456789012345678901234567890")) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       pendingOrder(orders, orderNo);
       Message message = message(" \r\n" + orderNo + "\t");
       checks.add(() -> assertDoesNotThrow(() -> service.consumeTimeout(message), orderNo));
@@ -65,7 +64,7 @@ class OrderTimeoutLegacyMessageTest {
                 + "\",\"expireAt\":\"2000-01-01T00:00:00+08:00\"}")) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       pendingOrder(orders, orderNo);
       service.consumeTimeout(message(payload));
       verify(orders).findOrder("mall_order_202610", orderNo);
@@ -90,7 +89,7 @@ class OrderTimeoutLegacyMessageTest {
             "[20261042]")) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders);
+      OrderTestService service = service(stock, orders);
       assertThrows(
           IllegalArgumentException.class, () -> service.consumeTimeout(message(payload)), payload);
       verifyNoInteractions(orders, stock);
@@ -98,8 +97,8 @@ class OrderTimeoutLegacyMessageTest {
   }
 
   /** 通过实际Message入口及String业务方法，保持数据库CAS失败不回滚Stock的既有规则。 */
-  private static OrderServiceImpl service(StockClient stock, OrderSqlMapper orders) {
-    return new OrderServiceImpl(
+  private static OrderTestService service(StockClient stock, OrderSqlMapper orders) {
+    return new OrderTestService(
         stock,
         mock(ProductClient.class),
         mock(UserClient.class),

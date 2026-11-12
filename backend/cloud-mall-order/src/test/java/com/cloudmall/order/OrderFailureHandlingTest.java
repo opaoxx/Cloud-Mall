@@ -33,7 +33,6 @@ import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import com.cloudmall.order.service.impl.StockCircuitOpenException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -89,7 +88,7 @@ class OrderFailureHandlingTest {
     when(orderSqlMapper.findIdempotentOrders(8L, "circuit-open")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
-    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderTestService orderService = service(stockClient, productClient, userClient, orderSqlMapper);
     OrderReservationIntentService intentService =
         (OrderReservationIntentService) ReflectionTestUtils.getField(
             orderService, "reservationIntentService");
@@ -124,7 +123,7 @@ class OrderFailureHandlingTest {
       when(remoteFailure.status()).thenReturn(409);
       when(remoteFailure.contentUTF8()).thenReturn("{\"code\":\"" + code + "\"}");
       doThrow(remoteFailure).when(stockClient).reserve(any());
-      OrderServiceImpl target = service(stockClient, productClient, userClient, orders);
+      OrderTestService target = service(stockClient, productClient, userClient, orders);
       OrderReservationIntentService intents =
           (OrderReservationIntentService)
               ReflectionTestUtils.getField(target, "reservationIntentService");
@@ -157,7 +156,7 @@ class OrderFailureHandlingTest {
     when(remoteFailure.status()).thenReturn(409);
     when(remoteFailure.contentUTF8()).thenReturn("{\"code\":\"COMMON_CONFLICT\"}");
     doThrow(remoteFailure).when(stockClient).reserve(any());
-    OrderServiceImpl target = service(stockClient, products, users, orders);
+    OrderTestService target = service(stockClient, products, users, orders);
     OrderReservationIntentService intents =
         (OrderReservationIntentService)
             ReflectionTestUtils.getField(target, "reservationIntentService");
@@ -197,7 +196,7 @@ class OrderFailureHandlingTest {
             })
         .when(stockClient)
         .reserve(any());
-    OrderServiceImpl target = service(stockClient, products, users, orders);
+    OrderTestService target = service(stockClient, products, users, orders);
     OrderReservationIntentService intents =
         (OrderReservationIntentService)
             ReflectionTestUtils.getField(target, "reservationIntentService");
@@ -238,7 +237,7 @@ class OrderFailureHandlingTest {
             })
         .when(stockClient)
         .reserve(any());
-    OrderServiceImpl target = service(stockClient, products, users, orders);
+    OrderTestService target = service(stockClient, products, users, orders);
     OrderReservationIntentService intents =
         (OrderReservationIntentService)
             ReflectionTestUtils.getField(target, "reservationIntentService");
@@ -273,7 +272,7 @@ class OrderFailureHandlingTest {
     when(malformed.status()).thenReturn(409);
     when(malformed.contentUTF8()).thenReturn("not-json");
     doThrow(malformed).when(stockClient).reserve(any());
-    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderTestService orderService = service(stockClient, productClient, userClient, orderSqlMapper);
     OrderReservationIntentService intentService =
         (OrderReservationIntentService)
             ReflectionTestUtils.getField(orderService, "reservationIntentService");
@@ -299,7 +298,7 @@ class OrderFailureHandlingTest {
     when(orderSqlMapper.findIdempotentOrders(8L, "invalid-address")).thenReturn(List.of());
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of()));
-    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderTestService orderService = service(stockClient, productClient, userClient, orderSqlMapper);
 
     AuthContext.set(8L, "USER");
     assertThrows(BizException.class, () -> orderService.create("invalid-address", orderRequest()));
@@ -328,7 +327,7 @@ class OrderFailureHandlingTest {
         .thenAnswer(invocation -> legacyStockFact(invocation.getArgument(0), "ROLLED_BACK"));
     when(orderSqlMapper.insertOrder(anyString(), any(OrderPO.class)))
         .thenThrow(new DataAccessResourceFailureException("database unavailable"));
-    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderTestService orderService = service(stockClient, productClient, userClient, orderSqlMapper);
 
     AuthContext.set(8L, "USER");
     assertThrows(
@@ -356,7 +355,7 @@ class OrderFailureHandlingTest {
     when(productClient.sku(7L)).thenReturn(ApiResponse.ok(sku()));
     when(userClient.addresses()).thenReturn(ApiResponse.ok(List.of(Map.of("id", 9L))));
     doThrow(new IllegalStateException("read timeout")).when(stockClient).reserve(any());
-    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderTestService orderService = service(stockClient, productClient, userClient, orderSqlMapper);
     OrderReservationIntentService intentService =
         (OrderReservationIntentService)
             ReflectionTestUtils.getField(orderService, "reservationIntentService");
@@ -393,7 +392,7 @@ class OrderFailureHandlingTest {
         new RetryableException(
             -1, "product read timeout", Request.HttpMethod.GET, (java.util.Date) null, productRequest);
     when(productClient.sku(7L)).thenThrow(remoteTimeout);
-    OrderServiceImpl orderService = service(stockClient, productClient, userClient, orderSqlMapper);
+    OrderTestService orderService = service(stockClient, productClient, userClient, orderSqlMapper);
     OrderReservationIntentService intentService =
         (OrderReservationIntentService)
             ReflectionTestUtils.getField(orderService, "reservationIntentService");
@@ -413,7 +412,8 @@ class OrderFailureHandlingTest {
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
     String orderNo = "202609conflictpaid";
     pendingOrder(orderSqlMapper, orderNo);
-    OrderServiceImpl orderService = service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
+    OrderTestService orderService =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
 
     AuthContext.set(8L, "USER");
     assertThrows(BizException.class, () -> orderService.paid(orderNo));
@@ -430,8 +430,8 @@ class OrderFailureHandlingTest {
     pendingOrder(orderSqlMapper, orderNo);
     when(orderSqlMapper.updateStatus(anyString(), eq(orderNo), eq("PAID"),
         eq("PENDING_PAYMENT"), any())).thenReturn(1);
-    OrderServiceImpl orderService = service(stockClient, mock(ProductClient.class),
-        mock(UserClient.class), orderSqlMapper);
+    OrderTestService orderService =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
     OrderStockActionMapper actionMapper =
         (OrderStockActionMapper) ReflectionTestUtils.getField(orderService, "orderStockActionMapper");
 
@@ -450,8 +450,8 @@ class OrderFailureHandlingTest {
     pendingOrder(orderSqlMapper, orderNo);
     when(orderSqlMapper.updateStatus(anyString(), eq(orderNo), eq("CANCELLED"),
         eq("PENDING_PAYMENT"), any())).thenReturn(1);
-    OrderServiceImpl orderService = service(stockClient, mock(ProductClient.class),
-        mock(UserClient.class), orderSqlMapper);
+    OrderTestService orderService =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
     OrderStockActionMapper actionMapper =
         (OrderStockActionMapper) ReflectionTestUtils.getField(orderService, "orderStockActionMapper");
 
@@ -467,7 +467,8 @@ class OrderFailureHandlingTest {
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
     String orderNo = "202609conflicttimeout";
     pendingOrder(orderSqlMapper, orderNo);
-    OrderServiceImpl orderService = service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
+    OrderTestService orderService =
+        service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
 
     orderService.consumeTimeout(orderNo);
 
@@ -481,7 +482,7 @@ class OrderFailureHandlingTest {
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
     String orderNo = "202609conflictmessage";
     pendingOrder(orderSqlMapper, orderNo);
-    OrderServiceImpl orderService =
+    OrderTestService orderService =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
     Message envelope =
         message(
@@ -504,7 +505,7 @@ class OrderFailureHandlingTest {
     OrderSqlMapper orderSqlMapper = mock(OrderSqlMapper.class);
     String orderNo = "202609paymentstate";
     pendingOrder(orderSqlMapper, orderNo);
-    OrderServiceImpl orderService =
+    OrderTestService orderService =
         service(
             mock(StockClient.class),
             mock(ProductClient.class),
@@ -530,7 +531,7 @@ class OrderFailureHandlingTest {
     stockStatus.orderNo = orderNo;
     stockStatus.status = "CONFIRMED";
     when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(stockStatus));
-    OrderServiceImpl orderService =
+    OrderTestService orderService =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
 
     ApiResponse<?> response = OrderReadTestSupport.paymentState(orderService, orderNo, 8L);
@@ -548,7 +549,7 @@ class OrderFailureHandlingTest {
     stockStatus.orderNo = orderNo;
     stockStatus.status = "CONFIRMED";
     when(stockClient.reservation(orderNo)).thenReturn(ApiResponse.ok(stockStatus));
-    OrderServiceImpl orderService =
+    OrderTestService orderService =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), orderSqlMapper);
 
     ApiResponse<?> response = OrderReadTestSupport.paymentState(orderService, orderNo, 8L);
@@ -576,7 +577,7 @@ class OrderFailureHandlingTest {
           StockClient stockClient = mock(StockClient.class);
           when(stockClient.reservation(orderNo))
               .thenReturn(legacyStockFact(responseOrderNo, stockStatus));
-          OrderServiceImpl service =
+          OrderTestService service =
               service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
 
           ApiResponse<?> response = OrderReadTestSupport.paymentState(service, orderNo, 8L);
@@ -612,7 +613,7 @@ class OrderFailureHandlingTest {
         orderWithStatus(sqlMapper, orderNo, orderStatus);
         StockClient stockClient = mock(StockClient.class);
         when(stockClient.reservation(orderNo)).thenReturn(legacyStockFact(orderNo, stockStatus));
-        OrderServiceImpl service =
+        OrderTestService service =
             service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
         String actionStatus =
             expected.equals(stockStatus)
@@ -646,7 +647,7 @@ class OrderFailureHandlingTest {
         when(stockClient.reservation(orderNo)).thenReturn(rejected);
       } else if ("EXCEPTION".equals(phase))
         doThrow(new IllegalStateException("Stock unknown")).when(stockClient).reservation(orderNo);
-      OrderServiceImpl service =
+      OrderTestService service =
           service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
       assertEquals(
           "UNKNOWN",
@@ -681,7 +682,7 @@ class OrderFailureHandlingTest {
         row.put("order_no", storedOrderNo);
         when(sqlMapper.findOrder(anyString(), eq(requestedOrderNo))).thenReturn(List.of(row));
         StockClient stockClient = mock(StockClient.class);
-        OrderServiceImpl target =
+        OrderTestService target =
             service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
         AuthContext.set(8L, "USER");
         BizException failure =
@@ -714,7 +715,7 @@ class OrderFailureHandlingTest {
   void missingOrderAndDatabaseLookupErrorsKeepTheirOriginalMeaning() {
     OrderSqlMapper sqlMapper = mock(OrderSqlMapper.class);
     StockClient stockClient = mock(StockClient.class);
-    OrderServiceImpl target =
+    OrderTestService target =
         service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
     String orderNo = "202609missing";
     assertEquals(
@@ -770,7 +771,7 @@ class OrderFailureHandlingTest {
         when(sqlMapper.findOrder(anyString(), eq(orderNo))).thenReturn(List.of(row));
         StockClient stockClient = mock(StockClient.class);
         when(stockClient.reservation(orderNo)).thenReturn(legacyStockFact(orderNo, stockStatus));
-        OrderServiceImpl target =
+        OrderTestService target =
             service(stockClient, mock(ProductClient.class), mock(UserClient.class), sqlMapper);
         Map<?, ?> state = (Map<?, ?>) OrderReadTestSupport.paymentState(target, orderNo, 8L).data;
         assertEquals("UNKNOWN", state.get("stockActionStatus"));
@@ -797,18 +798,19 @@ class OrderFailureHandlingTest {
     return new Message(payload.getBytes(StandardCharsets.UTF_8), new MessageProperties());
   }
 
-  private static OrderServiceImpl service(
+  private static OrderTestService service(
       StockClient stockClient,
       ProductClient productClient,
       UserClient userClient,
       OrderSqlMapper orderSqlMapper) {
-    OrderServiceImpl orderService = new OrderServiceImpl(
-        stockClient,
-        productClient,
-        userClient,
-        mock(CartClient.class),
-        orderSqlMapper,
-        new ObjectMapper());
+    OrderTestService orderService =
+        new OrderTestService(
+            stockClient,
+            productClient,
+            userClient,
+            mock(CartClient.class),
+            orderSqlMapper,
+            new ObjectMapper());
     OrderReservationIntentService intentService = mock(OrderReservationIntentService.class);
     when(intentService.createIntent(any())).thenReturn(true);
     ReflectionTestUtils.setField(orderService, "reservationIntentService", intentService);

@@ -16,7 +16,6 @@ import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.core.context.RootContext;
 import java.lang.reflect.*;
@@ -432,7 +431,7 @@ class OrderCreationShardingShadowMySqlIT {
     private ObservingJdbcTemplate business;
 
     /** 真正create注解代理。 */
-    private OrderServiceImpl service;
+    private OrderTestService service;
 
     /** 库创建与影子关闭的明确返回事实。 */
     private boolean created, shadowClosed;
@@ -592,8 +591,8 @@ class OrderCreationShardingShadowMySqlIT {
       IntentObserver intents = new IntentObserver(this, business);
       OrderReservationIntentService intentService =
           proxy(new OrderReservationIntentService(intents), manager);
-      OrderServiceImpl target =
-          new OrderServiceImpl(stock, product, user, cart, mapper, new ObjectMapper());
+      OrderTestService target =
+          new OrderTestService(stock, product, user, cart, mapper, new ObjectMapper());
       ReflectionTestUtils.setField(target, "reservationIntentService", intentService);
       ReflectionTestUtils.setField(target, "reservationIntentMapper", intents);
       ReflectionTestUtils.setField(target, "orderOutboxMapper", new OutboxObserver(this, business));
@@ -608,8 +607,12 @@ class OrderCreationShardingShadowMySqlIT {
           TransactionDefinition.PROPAGATION_REQUIRED,
           attributes
               .getTransactionAttribute(
-                  OrderServiceImpl.class.getMethod("create", String.class, CreateOrderDTO.class),
-                  OrderServiceImpl.class)
+                  com.cloudmall.order.service.impl.OrderCreationServiceImpl.class.getMethod(
+                      "create",
+                      String.class,
+                      CreateOrderDTO.class,
+                      java.util.function.LongSupplier.class),
+                  com.cloudmall.order.service.impl.OrderCreationServiceImpl.class)
               .getPropagationBehavior());
       for (String method : List.of("createIntent", "markReserved", "markReleased")) {
         Class<?> arg =

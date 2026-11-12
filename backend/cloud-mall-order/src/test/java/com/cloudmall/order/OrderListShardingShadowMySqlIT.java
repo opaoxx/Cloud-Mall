@@ -25,7 +25,6 @@ import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.util.OrderJdbcLocalDateTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.core.context.RootContext;
@@ -1154,8 +1153,8 @@ class OrderListShardingShadowMySqlIT {
     /** 原get本身无事务；此处RR只属于比较harness，不扩大API快照保证。 */
     Detail physicalDetail(String orderNo) {
       assertEquals(Role.DETAIL, role);
-      OrderServiceImpl service =
-          new OrderServiceImpl(
+      OrderTestService service =
+          new OrderTestService(
               stock, product, user, cart, new OrderSqlMapper(sql), new ObjectMapper());
       return transaction(
           base,

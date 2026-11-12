@@ -23,7 +23,6 @@ import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.creation.OrderCartCleanupCoordinator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -520,7 +519,7 @@ class OrderCartCommitBoundaryTest {
     final UserClient users = mock(UserClient.class);
 
     /** 实际创建与提交清理编排。 */
-    final OrderServiceImpl service;
+    final OrderTestService service;
 
     private Fixture() {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
@@ -563,7 +562,7 @@ class OrderCartCommitBoundaryTest {
       when(cart.cleanupSnapshot(anyLong(), anyLong()))
           .thenAnswer(invocation -> ApiResponse.ok(snapshot(invocation.getArgument(0))));
       when(cart.cleanupItem(anyLong(), anyLong(), any())).thenReturn(ApiResponse.ok(true));
-      service = new OrderServiceImpl(stock, products, users, cart, orders, new ObjectMapper());
+      service = new OrderTestService(stock, products, users, cart, orders, new ObjectMapper());
       ReflectionTestUtils.setField(service, "reservationIntentService", intents);
       ReflectionTestUtils.setField(service, "reservationIntentMapper", intentMapper);
       ReflectionTestUtils.setField(service, "orderOutboxMapper", mock(OrderOutboxMapper.class));

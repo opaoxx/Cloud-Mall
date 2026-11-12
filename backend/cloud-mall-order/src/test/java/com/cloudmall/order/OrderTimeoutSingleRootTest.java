@@ -9,7 +9,6 @@ import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.exc.MismatchedInputException;
@@ -42,7 +41,7 @@ class OrderTimeoutSingleRootTest {
             "\"20261042\" \"20261043\"")) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders, new ObjectMapper());
+      OrderTestService service = service(stock, orders, new ObjectMapper());
       checks.add(
           () -> {
             IllegalArgumentException rejected =
@@ -70,7 +69,7 @@ class OrderTimeoutSingleRootTest {
       StockClient stock = mock(StockClient.class);
       ObjectMapper mapper = new ObjectMapper();
       assertFalse(mapper.isEnabled(DeserializationFeature.FAIL_ON_TRAILING_TOKENS));
-      OrderServiceImpl service = service(stock, orders, mapper);
+      OrderTestService service = service(stock, orders, mapper);
       when(orders.findOrder("mall_order_202610", orderNo))
           .thenReturn(
               List.of(
@@ -105,7 +104,7 @@ class OrderTimeoutSingleRootTest {
     for (String payload : List.of("", " ", "\t\r\n", "null", "true", "[]")) {
       OrderSqlMapper orders = mock(OrderSqlMapper.class);
       StockClient stock = mock(StockClient.class);
-      OrderServiceImpl service = service(stock, orders, new ObjectMapper());
+      OrderTestService service = service(stock, orders, new ObjectMapper());
       checks.add(
           () ->
               assertThrows(
@@ -133,9 +132,9 @@ class OrderTimeoutSingleRootTest {
   }
 
   /** 保持真实String消费方法，默认CAS0不访问库存动作或Stock。 */
-  private static OrderServiceImpl service(
+  private static OrderTestService service(
       StockClient stock, OrderSqlMapper orders, ObjectMapper mapper) {
-    return new OrderServiceImpl(
+    return new OrderTestService(
         stock,
         mock(ProductClient.class),
         mock(UserClient.class),

@@ -16,7 +16,6 @@ import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -60,7 +59,7 @@ class OrderLegacyStockIdentityMySqlIT {
   private StockClient stock;
 
   /** 本地Service与真实订单/动作Mapper组成的只读支付状态链。 */
-  private OrderServiceImpl service;
+  private OrderTestService service;
 
   @BeforeAll
   static void readOriginalDatabase() {
@@ -89,7 +88,7 @@ class OrderLegacyStockIdentityMySqlIT {
     sqlMapper = new OrderSqlMapper(fixture);
     stock = mock(StockClient.class);
     service =
-        new OrderServiceImpl(
+        new OrderTestService(
             stock,
             mock(ProductClient.class),
             mock(UserClient.class),
@@ -490,7 +489,7 @@ class OrderLegacyStockIdentityMySqlIT {
     seed("PENDING_PAYMENT");
     var observedSqlMapper = spy(sqlMapper);
     var target =
-        new OrderServiceImpl(
+        new OrderTestService(
             stock,
             mock(ProductClient.class),
             mock(UserClient.class),
