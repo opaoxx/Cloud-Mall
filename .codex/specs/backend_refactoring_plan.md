@@ -1480,3 +1480,31 @@ git revert refactor/order-cart-cleanup-complete-20261111
 仅撤销当前Cart协调器提取，保留前面Order查询/Seata成果。实际回退后精确清理新OrderCartCleanupCoordinator及其匿名回调class残留并重新编译；保留历史target证据，不做全量clean/reset --hard。Git不回退数据库或忽略工件，后续依赖提交应先处理依赖与冲突。
 
 下一切片继续普通创建主Service：先冻结共享操作监视器身份、事务在加锁前开启/解锁后提交的原区间、REQUIRES_NEW意图、结果未知与补偿以及Cart协调器装配。届时同时处理创建HTTP委托和现有测试依赖构造，不把创建Service与剩余状态Service各自加synchronized当作等价实现。
+
+## 27. Order 普通创建Service与共享写锁（2026-11-12）
+
+### 27.1 范围冻结
+
+基线 `c9da3dfc`，主Agent继续单独执行。已复读规则、README、Bug台账、架构普通下单/状态迁移、创建实现及事务/购物车规格。README已有修改和旧pycache保留。此次完整迁移普通create，保留秒杀/状态/消息流程为后续切片。
+
+- 新增 `service.OrderCreationService` 与 `service.impl.OrderCreationServiceImpl`，create返回OrderVO，接收原key/request及LongSupplier身份来源。新增 `controller.OrderCreationController` 承接原POST `/api/orders`，Idempotency-Key和请求体绑定不变，传入AuthContext::requireUserId，成功后包装ApiResponse。原混合实现移除create HTTP/Java入口、创建专属依赖和辅助规则。
+- 新增单例 `service.impl.OrderWriteMonitor`（普通Component，无AOP方法），创建、取消、支付业务体共同在synchronized(writeMonitor)中运行。三个入口原@Transactional默认REQUIRED保持，锁在代理事务开始之后获取，在方法返回/抛出时释放、早于提交/回滚与afterCommit。不是跨提交互斥，也不是分布式锁，不扩大confirm/秒杀/消息入口的锁范围。原三个方法的隐式this锁替换为显式同一监视器，不保留彼此独立的synchronized方法。
+- 剩余OrderServiceImpl暂通过原字段装配注入共享监视器；仅手动构造的隔离对象默认拥有自身监视器。生产Spring注入的实例与新CreationService构造注入的实例必须相同，并以真实装配和并发用例核验。旧orderController Bean及其余入口保持。
+- 以构造器注入Stock/Product/User/Cart、OrderSqlMapper/ObjectMapper、意图Service/Mapper、OutboxMapper与监视器；creationClock保持原上海默认与单次采样语义。创建体内鉴权仍在获取锁后的原第一步。Cart协调器继续在原数量预检后建立、成功末尾注册。
+- 完整保持直接幂等重放、数量/商品身份/金额/metadata/JSON校验顺序、原INIT独立提交、Stock专用持久拒绝证明、UNKNOWN202、独立RESERVED、主事务订单/明细/幂等/outbox/COMMITTED、补偿原错误及suppressed链。不开Seata全局事务，不改SQL、表、Redis、消息、Feign协议或状态机。
+- 公用商品快照校验进入包内 `OrderProductSnapshotRules`；普通/秒杀写流程复用的地址读取、JSON/Feign错误解码、超时outbox及原时间/标识小函数进入包内 `OrderWorkflowSupport`，显式接收已有客户端/JSON配置，无Bean/事务。主实现与新创建实现调用同一算法，不复制金额或消息规则。原内部ItemRow改为独立 `service.impl.creation.OrderCreationLine` 记录（sku/lineAmount/quantity），只用于创建计算，不作为HTTP/持久化DTO。
+- ApiResponse构造从事务内移至Controller返回阶段，requestId生成时点变化但未持久化或参与幂等；commit/afterCommit错误仍沿原异常处理流程，不额外补偿已提交订单。
+
+### 27.2 测试迁移与验收
+
+大量原测试在同一对象上测试普通/秒杀/状态，并动态替换依赖。新增仅测试使用的OrderTestService混合夹具，继承剩余实现，在测试create入口保留原REQUIRED边界，构造实际CreationService并使用相同监视器/依赖/时钟，返回旧统一响应以保留原矩阵断言；不复制创建业务。历史用例侧重原算法/事务事实，其注解检查改指真实生产CreationService。生产Controller/Service代理、共享监视器、事务在等锁前开启/提交时已解锁，必须另用直接装配生产类的测试验收，不能以夹具注解代替。
+
+现有CreationPrecisionMySqlIT、CreationShardingShadowMySqlIT、ReplayRecoveryShardingShadowMySqlIT全类回归；ShardingRuntimeMySqlIT实际装配新增CreationController/Service与监视器，直接运行生产创建代理。Common源码守卫迁移到实际入口/实现。补充真实MVC绑定与响应、并发创建/取消/支付互斥、原无锁入口、异常释放及事务生命周期检查。测试旧方法保留，其他模块仅编译/契约检查，不改冻结runner。
+
+先提交方案及 `refactor/order-creation-baseline-20261112`，运行Common/Order单测基线。实库使用新独立Compose项目 `cloud-mall-refactor-order-creation-20261112`，MySQL19943、10.254.253.0/24，确认项目/卷/端口不存在后建立。只从原schema.sql提取七张空Order源表（3模板、幂等、意图、outbox、动作），测试写入自有UUID库；沿原保留/清理门，结束归档后删除本项目容器/网络，卷保留。
+
+最终门：适用测试全部通过，迁移方法/剩余算法对照、原方法保留、真实Java格式化、Order打包、八模块test-compile、Jar旧入口/新类型检查、git diff --check、README指纹保持。完成标签 `refactor/order-creation-complete-20261112`，临时index逆补丁恢复父树验证；不动真实工作树做演示回滚，不全量clean，不回退运行数据。真实Cart/Stock HTTP、TC/MQ、全商城及性能不在本切片验收范围。
+
+### 27.3 实施结果
+
+待实施验证。
