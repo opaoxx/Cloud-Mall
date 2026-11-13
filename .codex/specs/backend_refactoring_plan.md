@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成只读查询、支付创建及共享写锁提取，后续处理成功/失败/回调职责。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成查询、创建、模拟成功和共用处理规则提取，后续处理失败/回调职责。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 查询与创建已组合委托，共享写锁保持，见第34至35节；成功/失败/回调及旧继承入口待后续处理 |
+| Pay | 实施中 | 查询、创建与模拟成功已组合委托，共享写锁和协议规则保持，见第34至36节；失败/回调及旧继承入口待后续处理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2095,3 +2095,40 @@ git revert refactor/pay-creation-complete-20261113
 补充独立PaySuccessMySqlIT验证实际Mapper读出的模式/意图、异常与终态拒绝先于业务驱动、原成功重读。只有编排为受控替身，不代表真实扣款或TCC资金闭环。新Compose项目cloud-mall-refactor-pay-success-20261113，仅MySQL19955、候选子网10.254.235.0/24；先检查无冲突，用全新卷与空Pay源表，每例UUID库。成功核对后删除测试库，失败归档保留；结束归档并移除自有容器/网络，卷保留。默认和历史资源不动，旧M2五项不算本轮通过。
 
 证据入口target/backend-refactor-20261113/pay-success；方案/实施分开提交，完成标签refactor/pay-success-complete-20261113，临时index逆补丁验证恢复父树。README原修改、两个旧pycache及忽略证据不混入提交，Git不恢复运行数据；不运行完整TC/User/Order/Stock交付或性能矩阵。
+
+### 36.3 实施与验证结果
+
+新成功Controller/接口/71行实现已组合委托；79行包内PayProcessingSupport保存六个无状态共用方法。旧混合实现262→175行，删除success路由和原无调用ownedForUpdate及失去用途的findBy/toView；fail/callback方法体逐token保持，私有方法仅精确委托共享规则。旧字段/四参数构造器、继承Controller及空接口暂留，未提前改变失败或回调入口的装配边界。
+
+调用链复盘：`POST绑定 → 传入身份supplier → 获取原PayWriteMonitor → 身份/支付首读/归属 → 支付次读恰一条与意图模式 → MOCK_SUCCESS指标 → 终态判断 → 唯一原Legacy/TCC编排 → SUCCESS重读或原202/409 → 释放锁 → Controller包装`。结果未知/异常不增加重试、退款或切换协议；旧回调仍先claim再执行原编排，最后complete后重读；旧fail仍在原位置走其独立当前读授权Service。支持类不注册Bean、不开事务、不持有监视器，锁仍由入口业务持有。
+
+| 最终执行范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共及源码约束 |
+| Pay原有全部单测 | 621 | 原协议/资金/回调/指标及查询/创建边界，必要调用点适配 |
+| PaySuccessContractTest | 8 | 新旧实际HTTP入口同一读取/路由/状态/金额时间/null/异常矩阵 |
+| PaySuccessWiringTest | 2 | 真实Spring无新增事务、保留调用者资源、锁内身份读取 |
+| PaySuccessMySqlIT | 3 | 真实Mapper/意图SQL、12组拒绝、双协议单次分流/成功重读、未知/异常零改写 |
+| 合计 | 659 | 70类，最终0失败、0错误、0跳过 |
+
+旧入口654项基线独立归档，不与最终计数叠加。八项契约方法体在前后装配之间逐token保持；特别保留首次完整映射及归属、次读精确数量、协议先于终态、指标先于终态、SUCCESS重读且不新增重读状态校验、null结果原202与TCC缺失503/no-store。调用者已有事务测试捕获原业务202后仍只提交调用者一次，成功Service/Controller无事务代理；未登录请求在另一线程等待共享监视器后才401。上轮创建屏障继续验证创建、新成功和旧回调共用同一锁，查询/失败仍可独立完成。
+
+MySQL三例使用三个UUID库：第一例12组SQL null、空/小写/尾空格/未知模式及意图冲突均在已SUCCESS状态下返回503，指标/编排零调用、两表完整事实不变；第二例LEGACY/TCC各只调用一次对应替身，由替身受控更新本地投影后验证第三次查询读回金额和+08时间；第三例两协议各覆盖null/UNKNOWN/原异常，保持两表事实和原异常对象、不重试。这里的投影写入由测试替身完成，不能描述为真实资金或订单交付；源表NOT NULL约束未改，仅UUID夹具两列放开以构造SQL null。
+
+成功入口109个token及共享六方法在明确的依赖参数、返回包装、身份supplier、变量名和原映射展开后等价；失败/回调两个入口正文和私有委托核验通过。1056份其他已跟踪后端文件及README原修改逐字节保持，全部七份适配旧测试方法名保留，Balance原两个测试断言按入口类型改名规范化后相同。15份Java实际格式化、八模块test-compile、Pay打包及diff检查通过；Jar184个Pay生产class与最终classes一致，新增四类型存在、无测试类混入。
+
+首次迁移后仅测试编译失败：自动适配误定位BalancePaymentContractTest局部变量而非private factory，已从基线恢复并限定factory范围修改，两个原测试断言逐token复核。源码校验工具首次又把return调用行识别为声明，限定真实方法声明后完成全部等价校验。两项均未导致生产业务修补，首轮编译日志和Bug记录保留；修正装配后654项单测及最终659项分别通过，新实库首次运行全部通过，无新增失败数据库。
+
+### 36.4 证据、回退与后续
+
+方案提交506bb6ad，基线标签refactor/pay-success-baseline-20261113；完成标签refactor/pay-success-complete-20261113。证据入口 `target/backend-refactor-20261113/pay-success/verification.json`，包含前后独立XML、编译失败日志、源码/断言对照、三库原生事实、实际指标工件、Jar摘要及临时index逆补丁证明。
+
+独立MySQL8.0.46的两张空源表最终0行，debit_mode仍NOT NULL；全部三个UUID库通过成功门删除。自有容器/网络已移除，mysql_data卷保留，没有新增失败库；上轮三个失败库及更早历史卷、默认中间件均不操作。
+
+```powershell
+git revert refactor/pay-success-complete-20261113
+```
+
+临时index已验证逆补丁恢复父树，真实暂存内容及README保持。实际回退后精确清理本轮四个新生产类型和三个新测试类（含内部class）的target残留并重编译，不全量clean或回退运行数据；后续依赖先逆序评估。README、两个旧pycache及忽略工件不入提交。
+
+下一步以模拟支付失败入口为候选，保持其无外层事务/无共享锁、先持久模式再分流、Legacy独立当前读授权与TCC失败入口语义，单独冻结拆分方案。回调仍保留原token/持久绑定/完成顺序，最后再移除旧继承入口。旧M2固定13307矩阵本轮仅编译适配，未运行；新实库结果不替代其原审计矩阵，也不代表真实TC/User/Order/Stock资金、Gateway Bearer、全商城或性能验证。

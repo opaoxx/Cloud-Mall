@@ -10,6 +10,7 @@ import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.controller.PayController;
 import com.cloudmall.pay.controller.PayCreationController;
 import com.cloudmall.pay.controller.PayQueryController;
+import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
@@ -20,7 +21,10 @@ import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayCreationService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
+import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.*;
@@ -118,7 +122,7 @@ class PayCreationWiringTest {
       RunningCall<?> callback;
       synchronized (fixture.monitor) {
         creation = fixture.submit(() -> fixture.controller.create("key", request()));
-        success = fixture.submit(() -> fixture.legacy.success("pay-1"));
+        success = fixture.submit(() -> fixture.success.success("pay-1"));
         callback =
             fixture.submit(
                 () ->
@@ -266,6 +270,9 @@ class PayCreationWiringTest {
     /** 原成功/失败/回调入口。 */
     private final PayController legacy;
 
+    /** 新成功入口，与创建和回调共用同一个锁。 */
+    private final PaySuccessController success;
+
     /** 原查询入口。 */
     private final PayQueryController query;
 
@@ -276,6 +283,8 @@ class PayCreationWiringTest {
           PayCreationController.class,
           PayCreationServiceImpl.class,
           PayController.class,
+          PaySuccessController.class,
+          PaySuccessServiceImpl.class,
           PayQueryController.class,
           PayQueryServiceImpl.class);
       var beans = context.getBeanFactory();
@@ -295,12 +304,16 @@ class PayCreationWiringTest {
       service = context.getBean(PayCreationService.class);
       controller = context.getBean(PayCreationController.class);
       legacy = context.getBean(PayController.class);
+      success = context.getBean(PaySuccessController.class);
       query = context.getBean(PayQueryController.class);
       assertTrue(AopUtils.isAopProxy(service));
       assertFalse(AopUtils.isAopProxy(legacy));
       Object creationTarget = AopTestUtils.getTargetObject(service);
       assertSame(monitor, ReflectionTestUtils.getField(creationTarget, "writeMonitor"));
       assertSame(monitor, ReflectionTestUtils.getField(legacy, "writeMonitor"));
+      assertSame(
+          monitor,
+          ReflectionTestUtils.getField(context.getBean(PaySuccessService.class), "writeMonitor"));
       assertEquals(1, context.getBeansOfType(PayWriteMonitor.class).size());
     }
 

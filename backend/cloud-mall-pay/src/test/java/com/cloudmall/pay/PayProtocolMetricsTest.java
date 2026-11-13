@@ -8,6 +8,7 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.po.*;
@@ -17,6 +18,8 @@ import com.cloudmall.pay.mapper.*;
 import com.cloudmall.pay.service.*;
 import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
+import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -52,8 +55,8 @@ class PayProtocolMetricsTest {
         fixture.payment.debitMode = persisted;
         when(fixture.mode.newPaymentMode()).thenReturn(persisted.equals("TCC") ? "LEGACY" : "TCC");
         AuthContext.set(7L, "USER");
-        fixture.controller.success(Fixture.PAY);
-        fixture.controller.success(Fixture.PAY);
+        fixture.successController.success(Fixture.PAY);
+        fixture.successController.success(Fixture.PAY);
         fixture.controller.fail(Fixture.PAY);
         fixture.controller.callback("test-token", fixture.callback(true));
         assertEquals(
@@ -92,7 +95,7 @@ class PayProtocolMetricsTest {
         AuthContext.set(7L, "USER");
         assertEquals(
             503,
-            assertThrows(BizException.class, () -> fixture.controller.success(Fixture.PAY))
+            assertThrows(BizException.class, () -> fixture.successController.success(Fixture.PAY))
                 .getHttpStatus());
         assertTrue(registry.getMeters().isEmpty());
         verifyNoInteractions(fixture.publicTcc, fixture.legacyFailure, fixture.logs);
@@ -546,7 +549,7 @@ class PayProtocolMetricsTest {
     Fixture fixture = new Fixture();
     fixture.install(new PayProtocolMetrics(registry));
     AuthContext.set(7L, "USER");
-    assertNotNull(fixture.controller.success(Fixture.PAY));
+    assertNotNull(fixture.successController.success(Fixture.PAY));
     verify(registry)
         .counter("cloudmall.pay.protocol.route", "mode", "LEGACY", "entry", "MOCK_SUCCESS");
     BizException original = new BizException("PAY_TCC_DELIVERY_CONFLICT", "original", 409);
@@ -567,14 +570,15 @@ class PayProtocolMetricsTest {
         .when(registry)
         .counter("cloudmall.pay.protocol.route", "mode", "LEGACY", "entry", "MOCK_SUCCESS");
     doThrow(new IllegalStateException("metrics increment")).when(counter).increment();
-    assertNotNull(fixture.controller.success(Fixture.PAY));
+    assertNotNull(fixture.successController.success(Fixture.PAY));
     verify(counter).increment();
     verify(registry, times(2))
         .counter("cloudmall.pay.protocol.route", "mode", "LEGACY", "entry", "MOCK_SUCCESS");
     AssertionError fatal = new AssertionError("jvm error");
     doThrow(fatal).when(counter).increment();
     assertSame(
-        fatal, assertThrows(AssertionError.class, () -> fixture.controller.success(Fixture.PAY)));
+        fatal,
+        assertThrows(AssertionError.class, () -> fixture.successController.success(Fixture.PAY)));
     verify(counter, times(2)).increment();
     verify(registry, times(3))
         .counter("cloudmall.pay.protocol.route", "mode", "LEGACY", "entry", "MOCK_SUCCESS");
@@ -740,6 +744,14 @@ class PayProtocolMetricsTest {
     /** 六类真实业务实现。 */
     final PayController controller = new PayController();
 
+    /** 与新成功服务及旧回调入口共用的原监视器。 */
+    final PayWriteMonitor writeMonitor = new PayWriteMonitor();
+
+    /** 实际成功业务与HTTP入口，避免旧继承兼容桥。 */
+    final PaySuccessServiceImpl successService;
+
+    final PaySuccessController successController;
+
     /** 真实Legacy恢复方法。 */
     final PayConsistencyService legacy;
 
@@ -890,12 +902,18 @@ class PayProtocolMetricsTest {
       ObjectProvider<PayTccPaymentService> provider = mock(ObjectProvider.class);
       when(provider.getIfAvailable()).thenReturn(publicTcc);
       ReflectionTestUtils.setField(controller, "tccPaymentService", provider);
+      ReflectionTestUtils.setField(controller, "writeMonitor", writeMonitor);
+      successService =
+          new PaySuccessServiceImpl(
+              records, intents, legacy, provider, PayProtocolMetrics.noop(), writeMonitor);
+      successController = new PaySuccessController(successService);
     }
 
     /** 单测显式接线；端点测试不用此方法，而由Spring mandatory字段注入。 */
     void install(PayProtocolMetrics metrics) {
       for (Object service :
-          List.of(controller, legacy, evidence, coordinator, delivery, callbackReceipt))
+          List.of(
+              controller, successService, legacy, evidence, coordinator, delivery, callbackReceipt))
         ReflectionTestUtils.setField(service, "metrics", metrics);
     }
 

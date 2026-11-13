@@ -6,8 +6,12 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
+import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.seata.core.context.RootContext;
@@ -123,19 +127,19 @@ class PayProtocolMetricsEndpointTest {
                         beans.registerSingleton("legacyFailureService", fixture.legacyFailure);
                         beans.registerSingleton("tccPaymentService", fixture.publicTcc);
                         beans.registerSingleton("debitModeConfiguration", fixture.mode);
-                        beans.registerSingleton(
-                            "payWriteMonitor",
-                            new com.cloudmall.pay.service.impl.PayWriteMonitor());
+                        beans.registerSingleton("payWriteMonitor", fixture.writeMonitor);
                       })
                   .run("--spring.config.name=cm18-protocol-metrics-endpoint-test");
       PayProtocolMetrics metrics = context.getBean(PayProtocolMetrics.class);
       PrometheusMeterRegistry registry = context.getBean(PrometheusMeterRegistry.class);
       assertSame(registry, ReflectionTestUtils.getField(metrics, "registry"));
       PayController controller = context.getBean(PayController.class);
+      PaySuccessController successController = context.getBean(PaySuccessController.class);
       assertSame(fixture.controller, controller);
       for (Object service :
           List.of(
               controller,
+              context.getBean(PaySuccessServiceImpl.class),
               context.getBean(PayConsistencyService.class),
               context.getBean(PayTccCoordinatorServiceImpl.class),
               context.getBean(PayTccExecutionEvidence.class),
@@ -184,8 +188,8 @@ class PayProtocolMetricsEndpointTest {
       AuthContext.set(7L, "USER");
       try {
         fixture.payment.debitMode = "TCC";
-        controller.success(PayProtocolMetricsTest.Fixture.PAY);
-        controller.success(PayProtocolMetricsTest.Fixture.PAY);
+        successController.success(PayProtocolMetricsTest.Fixture.PAY);
+        successController.success(PayProtocolMetricsTest.Fixture.PAY);
         controller.callback("test-token", fixture.callback(true));
         fixture.payment.debitMode = "LEGACY";
         when(fixture.intents.findByPayNo(PayProtocolMetricsTest.Fixture.PAY))
@@ -457,6 +461,25 @@ class PayProtocolMetricsEndpointTest {
     PrometheusMetricsExportAutoConfiguration.class
   })
   static class EndpointConfiguration {
+    /** 新成功业务必须使用该真实指标容器注入的组件及原共享锁。 */
+    @Bean
+    PaySuccessServiceImpl successService(
+        PayProtocolMetricsTest.Fixture fixture,
+        PayProtocolMetrics metrics,
+        org.springframework.beans.factory.ObjectProvider<
+                com.cloudmall.pay.service.impl.PayTccPaymentService>
+            tcc,
+        PayWriteMonitor writeMonitor) {
+      return new PaySuccessServiceImpl(
+          fixture.records, fixture.intents, fixture.legacy, tcc, metrics, writeMonitor);
+    }
+
+    /** 成功HTTP路由与原回调/失败入口同时装配。 */
+    @Bean
+    PaySuccessController successController(PaySuccessService service) {
+      return new PaySuccessController(service);
+    }
+
     /** 真实HTTP Bean，继承的metrics字段由Spring注入。 */
     @Bean
     PayController controller(PayProtocolMetricsTest.Fixture fixture) {

@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
@@ -24,7 +25,9 @@ import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.PayConsistencyService;
 import com.cloudmall.pay.service.impl.PayServiceImpl;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
+import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -41,6 +44,8 @@ class PayTccPublicRoutingTest {
   private ObjectProvider<PayTccPaymentService> tccProvider;
   private PayCallbackReceiptService callbackReceipts;
   private PayServiceImpl service;
+  private PaySuccessServiceImpl successService;
+  private PaySuccessController successController;
 
   /** 准备支付入口依赖。 */
   @BeforeEach
@@ -62,6 +67,15 @@ class PayTccPublicRoutingTest {
     ReflectionTestUtils.setField(service, "tccPaymentService", tccProvider);
     ReflectionTestUtils.setField(service, "callbackReceipts", callbackReceipts);
     ReflectionTestUtils.setField(service, "callbackToken", "token");
+    successService =
+        new PaySuccessServiceImpl(
+            payments,
+            (PayDebitIntentMapper) ReflectionTestUtils.getField(service, "payDebitIntentMapper"),
+            legacy,
+            tccProvider,
+            com.cloudmall.pay.service.PayProtocolMetrics.noop(),
+            (PayWriteMonitor) ReflectionTestUtils.getField(service, "writeMonitor"));
+    successController = new PaySuccessController(successService);
     AuthContext.set(7L, "USER");
   }
 
@@ -77,7 +91,8 @@ class PayTccPublicRoutingTest {
     when(payments.selectByPayNo("pay-routing")).thenReturn(List.of(payment("LEGACY", "PENDING")));
     when(legacy.initiate(any(PayVO.class))).thenReturn("ORDER_SYNC_UNKNOWN");
 
-    BizException pending = assertThrows(BizException.class, () -> service.success("pay-routing"));
+    BizException pending =
+        assertThrows(BizException.class, () -> successController.success("pay-routing"));
 
     assertEquals(202, pending.getHttpStatus());
     verify(legacy).initiate(any(PayVO.class));
@@ -94,7 +109,7 @@ class PayTccPublicRoutingTest {
             List.of(payment("TCC", "SUCCESS")));
     when(tcc.pay(any(PayVO.class))).thenReturn("SUCCESS");
 
-    ApiResponse<?> response = service.success("pay-routing");
+    ApiResponse<?> response = successController.success("pay-routing");
 
     assertEquals("SUCCESS", ((PayVO) response.data).status);
     verify(tcc).pay(any(PayVO.class));
@@ -108,8 +123,10 @@ class PayTccPublicRoutingTest {
     when(payments.selectByPayNo("pay-routing")).thenReturn(List.of(payment("TCC", "PENDING")));
     when(intents.findByPayNo("pay-routing")).thenReturn(intent("LEGACY"));
     ReflectionTestUtils.setField(service, "payDebitIntentMapper", intents);
+    ReflectionTestUtils.setField(successService, "payDebitIntentMapper", intents);
 
-    BizException failure = assertThrows(BizException.class, () -> service.success("pay-routing"));
+    BizException failure =
+        assertThrows(BizException.class, () -> successController.success("pay-routing"));
 
     assertEquals(503, failure.getHttpStatus());
     verify(tcc, never()).pay(any());
@@ -122,7 +139,8 @@ class PayTccPublicRoutingTest {
     when(tccProvider.getIfAvailable()).thenReturn(null);
     when(payments.selectByPayNo("pay-routing")).thenReturn(List.of(payment("TCC", "PENDING")));
 
-    BizException failure = assertThrows(BizException.class, () -> service.success("pay-routing"));
+    BizException failure =
+        assertThrows(BizException.class, () -> successController.success("pay-routing"));
 
     assertEquals(503, failure.getHttpStatus());
     verify(legacy, never()).initiate(any());

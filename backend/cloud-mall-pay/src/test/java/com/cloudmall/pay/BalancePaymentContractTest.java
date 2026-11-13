@@ -10,19 +10,17 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
-import com.cloudmall.pay.feign.OrderClient;
-import com.cloudmall.pay.feign.UserClient;
-import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayConsistencyService;
-import com.cloudmall.pay.service.impl.PayServiceImpl;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
+import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /** 支付入口对已确认和待恢复结果的 HTTP 契约回归。 */
 class BalancePaymentContractTest {
@@ -37,7 +35,7 @@ class BalancePaymentContractTest {
     PayConsistencyService consistencyService = mock(PayConsistencyService.class);
     when(payRecordMapper.selectByPayNo("pay-1")).thenReturn(List.of(payment("PENDING")));
     when(consistencyService.initiate(any(PayVO.class))).thenReturn("ORDER_SYNC_UNKNOWN");
-    PayServiceImpl payService = service(payRecordMapper, consistencyService);
+    PaySuccessController payService = service(payRecordMapper, consistencyService);
 
     AuthContext.set(7L, "USER");
     BizException outcome = assertThrows(BizException.class, () -> payService.success("pay-1"));
@@ -54,7 +52,7 @@ class BalancePaymentContractTest {
     when(payRecordMapper.selectByPayNo("pay-1"))
         .thenReturn(List.of(payment("PENDING")), List.of(payment("SUCCESS")));
     when(consistencyService.initiate(any(PayVO.class))).thenReturn("SUCCESS");
-    PayServiceImpl payService = service(payRecordMapper, consistencyService);
+    PaySuccessController payService = service(payRecordMapper, consistencyService);
 
     AuthContext.set(7L, "USER");
     ApiResponse<?> result = payService.success("pay-1");
@@ -62,19 +60,17 @@ class BalancePaymentContractTest {
     assertEquals("SUCCESS", ((PayVO) result.data).status);
   }
 
-  private static PayServiceImpl service(
+  private static PaySuccessController service(
       PayRecordMapper payRecordMapper, PayConsistencyService consistencyService) {
-    PayServiceImpl payService =
-        new PayServiceImpl(
-            mock(OrderClient.class),
-            mock(UserClient.class),
-            payRecordMapper,
-            mock(PayCallbackLogMapper.class));
-    ReflectionTestUtils.setField(payService, "payConsistencyService", consistencyService);
-    ReflectionTestUtils.setField(
-        payService,
-        "payDebitIntentMapper",
-        mock(com.cloudmall.pay.mapper.PayDebitIntentMapper.class));
+    PaySuccessController payService =
+        new PaySuccessController(
+            new PaySuccessServiceImpl(
+                payRecordMapper,
+                mock(com.cloudmall.pay.mapper.PayDebitIntentMapper.class),
+                consistencyService,
+                mock(org.springframework.beans.factory.ObjectProvider.class),
+                com.cloudmall.pay.service.PayProtocolMetrics.noop(),
+                new PayWriteMonitor()));
     return payService;
   }
 

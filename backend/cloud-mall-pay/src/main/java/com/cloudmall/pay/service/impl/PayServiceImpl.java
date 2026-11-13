@@ -5,8 +5,6 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
-import com.cloudmall.pay.domain.po.PayDebitIntentPO;
-import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
@@ -17,7 +15,6 @@ import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.PayService;
 import com.cloudmall.pay.util.PayDebitModes;
-import java.util.List;
 import java.util.Objects;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -79,24 +76,6 @@ public class PayServiceImpl implements PayService {
     this.users = users;
     this.payRecordMapper = payRecordMapper;
     this.payCallbackLogMapper = payCallbackLogMapper;
-  }
-
-  @PostMapping("/{payNo}/mock-success")
-  /** 执行 success 相关操作。 */
-  public ApiResponse<?> success(@PathVariable String payNo) {
-    synchronized (writeMonitor) {
-      // 1. 接收并整理 success 的业务请求。
-      // 2. 执行 success 的核心业务校验与状态处理。
-      // 3. 返回 success 的处理结果。
-      PayVO payment = owned(payNo);
-      String mode = paymentMode(payNo);
-      metrics.route(PayProtocolMetrics.mode(mode), Entry.MOCK_SUCCESS);
-      if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
-      if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
-        throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
-      String outcome = initiate(payment, mode);
-      return responseForOutcome(payNo, outcome);
-    }
   }
 
   @PostMapping("/{payNo}/mock-fail")
@@ -161,102 +140,36 @@ public class PayServiceImpl implements PayService {
 
   /** 将可恢复中的支付结果映射为明确的 HTTP 业务状态。 */
   private ApiResponse<?> responseForOutcome(String payNo, String outcome) {
-    if ("SUCCESS".equals(outcome)) return ApiResponse.ok(find(payNo));
-    if ("REFUNDED".equals(outcome) || "FAILED".equals(outcome))
-      throw new BizException("PAYMENT_FAILED", "订单未完成支付，余额已按账本处理", 409);
-    if ("REFUND_PENDING".equals(outcome))
-      throw new BizException("PAY_REFUND_PENDING", "订单已取消，余额退款处理中", 202);
-    throw new BizException("PAY_ORDER_SYNC_UNKNOWN", "扣款或订单结果待确认", 202);
+    return ApiResponse.ok(PayProcessingSupport.paymentForOutcome(payRecordMapper, payNo, outcome));
   }
 
   /** 在回调、模拟成功或失败产生副作用前核验原支付协议。 */
   private String paymentMode(String payNo) {
-    List<PayRecordPO> records = payRecordMapper.selectByPayNo(payNo);
-    if (records.size() != 1) throw PayDebitModes.unavailable();
-    String mode = records.get(0).debitMode;
-    PayDebitIntentPO intent = payDebitIntentMapper.findByPayNo(payNo);
-    if (PayDebitModes.TCC.equals(mode)) {
-      if (intent != null) throw PayDebitModes.unavailable();
-      return mode;
-    }
-    PayDebitModes.requireSupported(mode);
-    if (intent != null) PayDebitModes.requireSupported(intent.debitMode);
-    return PayDebitModes.LEGACY;
+    return PayProcessingSupport.paymentMode(payRecordMapper, payDebitIntentMapper, payNo);
   }
 
   /** 依据持久协议选择唯一的资金编排入口。 */
   private String initiate(PayVO payment, String mode) {
-    return PayDebitModes.TCC.equals(mode)
-        ? tccEntry().pay(payment)
-        : payConsistencyService.initiate(payment);
+    return PayProcessingSupport.initiate(payment, mode, payConsistencyService, tccPaymentService);
   }
 
   /** 缺失显式入口依赖时关闭 TCC 路由，不降级为 Legacy。 */
   private PayTccPaymentService tccEntry() {
-    PayTccPaymentService entry = tccPaymentService.getIfAvailable();
-    if (entry == null) throw PayDebitModes.unavailable();
-    return entry;
+    return PayProcessingSupport.tccEntry(tccPaymentService);
   }
 
-  /** 执行 owned 相关操作。 */
-  private PayVO owned(String orderNo) {
-    // 1. 接收并整理 owned 的业务请求。
-    // 2. 执行 owned 的核心业务校验与状态处理。
-    // 3. 返回 owned 的处理结果。
-    return ownedForUser(orderNo, AuthContext.requireUserId());
+  /** 在原调用位置读取身份，再委托共用支付归属规则。 */
+  private PayVO owned(String payNo) {
+    return ownedForUser(payNo, AuthContext.requireUserId());
   }
 
-  /** 执行 ownedForUpdate 相关操作。 */
-  private PayVO ownedForUpdate(String orderNo) {
-    // 1. 接收并整理 ownedForUpdate 的业务请求。
-    // 2. 执行 ownedForUpdate 的核心业务校验与状态处理。
-    // 3. 返回 ownedForUpdate 的处理结果。
-    List<PayVO> records =
-        payRecordMapper.selectForUpdate(orderNo).stream().map(PayServiceImpl::toView).toList();
-    if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
-    PayVO p = records.get(0);
-    if (!Objects.equals(p.userId, AuthContext.requireUserId()))
-      throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此支付记录", 403);
-    return p;
+  /** 委托原支付归属检查，不改变读取和异常顺序。 */
+  private PayVO ownedForUser(String payNo, long userId) {
+    return PayProcessingSupport.ownedForUser(payRecordMapper, payNo, userId);
   }
 
-  /** 执行 ownedForUser 相关操作。 */
-  private PayVO ownedForUser(String orderNo, long userId) {
-    // 1. 接收并整理 ownedForUser 的业务请求。
-    // 2. 执行 ownedForUser 的核心业务校验与状态处理。
-    // 3. 返回 ownedForUser 的处理结果。
-    PayVO p = find(orderNo);
-    if (!Objects.equals(p.userId, userId))
-      throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此支付记录", 403);
-    return p;
-  }
-
-  /** 执行 find 相关操作。 */
-  private PayVO find(String orderNo) {
-    // 1. 接收并整理 find 的业务请求。
-    // 2. 执行 find 的核心业务校验与状态处理。
-    // 3. 返回 find 的处理结果。
-    List<PayVO> records = findBy("pay_no", orderNo);
-    if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
-    return records.get(0);
-  }
-
-  /** 执行 findBy 相关操作。 */
-  private List<PayVO> findBy(String column, String value) {
-    // 1. 接收并整理 findBy 的业务请求。
-    // 2. 执行 findBy 的核心业务校验与状态处理。
-    // 3. 返回 findBy 的处理结果。
-    if ("pay_no".equals(column)) {
-      return payRecordMapper.selectByPayNo(value).stream().map(PayServiceImpl::toView).toList();
-    }
-    if ("order_no".equals(column)) {
-      return payRecordMapper.selectByOrderNo(value).stream().map(PayServiceImpl::toView).toList();
-    }
-    throw new IllegalArgumentException("Unsupported payment lookup column: " + column);
-  }
-
-  /** 将支付记录持久化对象转换为响应视图。 */
-  private static PayVO toView(PayRecordPO paymentRecord) {
-    return com.cloudmall.pay.util.PayRecordViews.toView(paymentRecord);
+  /** 委托原支付读取及首条/空结果规则。 */
+  private PayVO find(String payNo) {
+    return PayProcessingSupport.find(payRecordMapper, payNo);
   }
 }

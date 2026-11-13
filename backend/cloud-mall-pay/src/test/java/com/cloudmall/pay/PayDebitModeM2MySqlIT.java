@@ -14,12 +14,14 @@ import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayProtocolMetrics;
+import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.PayConsistencyService;
 import com.cloudmall.pay.service.impl.PayDebitIntentService;
 import com.cloudmall.pay.service.impl.PayLegacyFailureService;
-import com.cloudmall.pay.service.impl.PayServiceImpl;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
+import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
@@ -209,7 +211,8 @@ class PayDebitModeM2MySqlIT {
       controlledOnly =
           RootContext.getXID() == null
               && !TransactionSynchronizationManager.isActualTransactionActive();
-      for (String path : List.of("PayServiceImpl.success", "PayConsistencyService.process")) {
+      for (String path :
+          List.of("PaySuccessServiceImpl.succeed", "PayConsistencyService.process")) {
         Map<String, Object> observation = observePath(context, fixture, path);
         paths.add(observation);
         last = facts(fixture.jdbc, fixture.schema);
@@ -296,9 +299,12 @@ class PayDebitModeM2MySqlIT {
     Throwable failure = null;
     Object returned = null;
     try {
-      if (path.equals("PayServiceImpl.success")) {
+      if (path.equals("PaySuccessServiceImpl.succeed")) {
         AuthContext.set(7L, "USER");
-        returned = context.getBean(PayServiceImpl.class).success(fixture.payNo);
+        returned =
+            context
+                .getBean(PaySuccessService.class)
+                .succeed(fixture.payNo, AuthContext::requireUserId);
       } else returned = context.getBean(PayConsistencyService.class).process(fixture.payNo);
     } catch (Throwable actual) {
       failure = actual;
@@ -509,8 +515,14 @@ class PayDebitModeM2MySqlIT {
     }
 
     @Bean
-    PayServiceImpl payments() {
-      return new PayServiceImpl();
+    PaySuccessServiceImpl payments(
+        PayRecordMapper records,
+        PayDebitIntentMapper intents,
+        PayConsistencyService consistency,
+        org.springframework.beans.factory.ObjectProvider<PayTccPaymentService> tcc,
+        PayProtocolMetrics metrics,
+        PayWriteMonitor writeMonitor) {
+      return new PaySuccessServiceImpl(records, intents, consistency, tcc, metrics, writeMonitor);
     }
   }
 
@@ -1255,7 +1267,7 @@ class PayDebitModeM2MySqlIT {
         "productionInitializerClassSha256",
         classSha(com.cloudmall.pay.config.PayDebitIntentTableInitializer.class));
     report.put("productionRecordMapperClassSha256", classSha(PayRecordMapper.class));
-    report.put("productionPayServiceClassSha256", classSha(PayServiceImpl.class));
+    report.put("productionPayServiceClassSha256", classSha(PaySuccessServiceImpl.class));
     report.put("productionConsistencyClassSha256", classSha(PayConsistencyService.class));
     report.put("productionIntentServiceClassSha256", classSha(PayDebitIntentService.class));
     report.put("seataRootContextClassSha256", classSha(RootContext.class));

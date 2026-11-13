@@ -10,15 +10,18 @@ import com.cloudmall.common.web.AuthInterceptor;
 import com.cloudmall.pay.controller.PayController;
 import com.cloudmall.pay.controller.PayCreationController;
 import com.cloudmall.pay.controller.PayQueryController;
+import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayCreationService;
 import com.cloudmall.pay.service.PayQueryService;
+import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.PayCreationServiceImpl;
 import com.cloudmall.pay.service.impl.PayQueryServiceImpl;
 import com.cloudmall.pay.service.impl.PayServiceImpl;
+import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import java.lang.reflect.Modifier;
 import java.util.List;
@@ -114,7 +117,10 @@ class PayQueryWiringTest {
     var query = new PayQueryController(new PayQueryServiceImpl(payments));
     var mvc =
         MockMvcBuilders.standaloneSetup(
-                legacy, query, new PayCreationController(mock(PayCreationService.class)))
+                legacy,
+                query,
+                new PayCreationController(mock(PayCreationService.class)),
+                new PaySuccessController(mock(PaySuccessService.class)))
             .addInterceptors(new AuthInterceptor())
             .build();
     var mappings =
@@ -131,6 +137,11 @@ class PayQueryWiringTest {
           } else if (mapping.getPatternValues().equals(Set.of("/api/payments"))) {
             assertEquals(Set.of(RequestMethod.POST), mapping.getMethodsCondition().getMethods());
             assertEquals(PayCreationController.class, handler.getBeanType());
+          } else if (mapping
+              .getPatternValues()
+              .equals(Set.of("/api/payments/{payNo}/mock-success"))) {
+            assertEquals(Set.of(RequestMethod.POST), mapping.getMethodsCondition().getMethods());
+            assertEquals(PaySuccessController.class, handler.getBeanType());
           } else {
             assertEquals(Set.of(RequestMethod.POST), mapping.getMethodsCondition().getMethods());
             assertEquals(PayController.class, handler.getBeanType());
@@ -154,7 +165,8 @@ class PayQueryWiringTest {
     var create =
         PayCreationServiceImpl.class.getMethod(
             "create", String.class, PayCreateDTO.class, LongSupplier.class);
-    var success = PayServiceImpl.class.getMethod("success", String.class);
+    var success =
+        PaySuccessServiceImpl.class.getMethod("succeed", String.class, LongSupplier.class);
     var callback = PayServiceImpl.class.getMethod("callback", String.class, PayCallbackDTO.class);
     var failure = PayServiceImpl.class.getMethod("fail", String.class);
     assertTrue(create.isAnnotationPresent(Transactional.class));
