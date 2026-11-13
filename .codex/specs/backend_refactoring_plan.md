@@ -2434,3 +2434,25 @@ git revert refactor/pay-tcc-dispatch-complete-20261113
 临时index用no-renames精确路径逆补丁验证父树恢复，真实index与README保持。实际回退后仅精确清理dispatch迁入两类型及新增实库测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序处理。README、两个旧pycache及忽略工件不入提交。
 
 下一步继续审查回执与执行事实校验共享的包内边界，再安排剩余22个TCC写组件分组。Pay整体尚未收尾，本轮未运行旧固定环境全链IT、完整TC资金流程、Gateway/Nacos或性能验证。
+
+## 42. Pay LocalTCC回执与资源事实校验分组（2026-11-13）
+
+### 42.1 范围与兼容基线
+
+从40844c98继续，主Agent按本会话单Agent约定评审、实施和验证。将PayTccReceiptServiceImpl、PayTccReceiptStore、PayTccReceiptBusinessCallback、PayTccReceiptLocalResourceImpl、PayTccExecutionEvidence整体迁入`service.impl.receipt`。Evidence用ReceiptStore包内状态/分支门核对回执、Fence和传入的User镜像，给执行编排提供资源结论；它随回执整体移动，保留类名/Bean名和包内helper可见性，不进入只读诊断evidence包。receipt为LocalTCC资源回执，callback仍为公开支付回调日志。根包29类减至24类，余17个TCC写组件后续处理。
+
+保留Store无条件@Service及DependsOn取消表初始化器、claim的REQUIRES_NEW、transitionClaimed/transition的REQUIRED；read/lock不增加事务。ExecutionEvidence的classify仍为REQUIRED/readOnly/REPEATABLE_READ，指标观察及原异常对象传播不变。Facade继续按receipt.enabled条件装配，先Bridge.prepare→独立claim→唯一winner登记分支→读回核验；Callback/LocalResource仍由原ReceiptConfiguration的@Bean生成，不加@Component。配置只改类型import，Bean名/顺序、同一裸数据源校验及官方Fence生命周期保持。
+
+LocalTCC接口不迁移；ACTION_NAME=cloudmallPayDebitReceipt、request上下文参数名、commit/rollback方法名及useTCCFence=false全部不变。LocalResource继续用同一REQUIRED事务模板组合官方Fence与业务Callback，Confirm/Cancel反射目标随原类地址更新；Try异常整体回滚，清算失败返回false等原语义保持。空回滚/永久终态/Fence清理/被拒分支owner门、原锁序、金额/键/载荷/查询次数和分类优先级不改。仅LocalResource的Logger类别随新FQN变化，日志内容/级别不变。原26份Java引用按实际清单适配，包括6生产文件与20测试文件；根包同包引用需补显式import。
+
+### 42.2 验证、实验与提交策略
+
+先提交本节与`refactor/pay-tcc-receipt-baseline-20261113`，运行Common/Pay全部*Test基线。新增PayTccReceiptMySqlIT三个方法（默认/开启、认领及Try/Confirm、正常/空Cancel），实际扫描新包并注册原配置/初始化器的短Bean名，使用真实MyBatis、事务管理器、TCCFenceConfig及官方TCCFenceHandler。核验关闭时仅Store/Evidence、开启时五类型及原Bean；独立claim不被调用者回滚撤销；Try/Confirm/Cancel注入SQL故障时回执/Fence一同回滚，恢复后同方向重放、Fence清理及迟到Try继续遵守永久事实。classify通过真实RR代理执行，验证单连接只读和原资源分类。
+
+新夹具只绑定测试BusinessActionContext/XID，不注册真实TC分支；Bridge为受控替身，Facade仅验证read/已认领重放，实际分支登记仍由既有单测及原契约守卫覆盖，不宣称真实TC/RM通过。原Fence配置启动其真实清理任务，数据仅位于本轮owned库；上下文关闭后等待清理执行器退出，再恢复Handler的DataSource/TransactionTemplate与DAO表名，核验LOG_QUEUE为空；不宣称官方类初始化没有后台daemon。每个新库成功才删，失败保留，准备时写fixture元数据。
+
+旧PayLegacyRefundLedgerMySqlIT只运行25个既有方法，方法清单保存在本节证据legacy-methods.json，并在结果记录列明：覆盖lookup/source/fresh/replay/readback、合法/非法状态分支、被拒owner的分支/四键/载荷、两次Fence身份读取、public read及ExecutionEvidence的CLAIMED/Fence矩阵。原方法与断言不变，保留其程序化事务/官方Fence scoped static绑定、源表指纹、池关闭及AfterAll清理（失败也删）。不运行整个巨型测试类或旧固定Nacos/TC全链IT。
+
+独立Compose项目`cloud-mall-refactor-pay-tcc-receipt-20261113`，候选MySQL19961/10.254.229.0/24，预检后新卷。pay_record/pay_debit_intent采用schema.sql，dispatch/receipt/execution/Fence采用原Mapper ensureTable DDL，准备六张空源表供旧夹具复制；取消表仅在新owned库按原初始化器创建。默认/历史资源不动，归档成功且集合检查通过后才down自有容器/网络，卷保留。
+
+两类包内helper及五类算法去package/import/注释逐token比较，引用文件正文仅地址适配，其他后端及README字节保持。完整格式化迁移类/包说明/新测试，纯引用文件仅整理import；八模块test-compile、全部单测+新3实库+旧25方法、Pay打包/新旧Jar路径、diff检查通过。精确备份移除旧五类型class，不全量clean。证据`target/backend-refactor-20261113/pay-tcc-receipt`，临时index逆补丁恢复父树验证后提交与`refactor/pay-tcc-receipt-complete-20261113`标签；README/旧pycache/忽略工件不入提交，Git不回退数据库。
