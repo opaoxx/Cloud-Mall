@@ -1804,3 +1804,35 @@ git revert refactor/order-timeout-complete-20261113
 实际回退后精确清理四个新增生产类型及OrderTimeoutWiringTest/OrderTimeoutMySqlRabbitIT（含嵌套类）的class，再编译恢复后的旧三个生产类型和夹具；不全量清空target、不回退数据卷。有后续依赖时逆序处理。
 
 Order主业务/消息入口拆分已完成，模块整体尚未结束。下一步先盘点并整理outbox、库存动作、预扣意图恢复和秒杀恢复辅助实现的职责分组，冻结Bean名、定时任务和配置契约后再实施；之后再进入Pay。未执行真实Stock/Product/TC/Nacos、完整商城、进程硬停或性能测试。
+
+## 32. Order 辅助实现职责分组（2026-11-13）
+
+### 32.1 实施前评审与迁移清单
+
+基线 `82c3eb49`。主Agent继续单独执行，已核对项目规则、README、Bug台账、架构中的意图/动作/outbox边界及发布完成证明、中断规格。本轮只整理五个已有独立辅助类的包归属，不拆改恢复状态机、不引入新业务接口或兼容桥。顶层业务Service实现与包内共享规则保持，避免为包美观扩大工具可见性或复制算法。
+
+| 原service.impl顶层类 | 新包（类名保持） | 保留的Bean名/职责 |
+| --- | --- | --- |
+| OrderReservationIntentService | service.impl.reservation | orderReservationIntentService；五个原REQUIRES_NEW写入口和原无事务查询 |
+| OrderReservationRecovery | service.impl.reservation | orderReservationRecovery；普通预扣意图按原单恢复 |
+| OrderStockActionRecovery | service.impl.stockaction | orderStockActionRecovery；确认/回滚动作的租约与远端事实核验 |
+| OrderOutboxDispatcher | service.impl.outbox | orderOutboxDispatcher；已提交超时事件的投递与确认 |
+| SeckillMessageRecovery | service.impl.seckill | seckillMessageRecovery；秒杀死信持久化、验真及重放 |
+
+- 类名、默认Bean名、构造器/方法签名、字段名与可见性保持，移动后仍由启动根包递归扫描。增加四个package-info并补充顶层包说明；SeckillMessageRecovery原缺失的成员/构造器说明补齐，不改语句。默认Class日志类别随包路径变化，原日志消息/级别/参数不变。
+- 四个Scheduled的原配置键及默认1000/30000/5000/5000毫秒保持；不新增定时任务、初始延迟、并发线程或代理层。Seckill死信继续SECKILL_DLQ和seckillDlqContainerFactory的MANUAL确认，先持久化/确认重投再单次ACK，异常与中断语义保持。
+- 普通意图五个REQUIRES_NEW仍在创建主事务之外提交；恢复器/outbox不新增本地事务。原数据源、扫描/认领/租约/CAS、业务指纹、原事件号、publisher confirm/returned、UNKNOWN/CONFLICT及单条失败隔离全部保持，不改Mapper/SQL/PO/API/Feign/Redis/消息字段。
+- 原共享OrderStockCircuitBreaker/异常及其资源名留在顶层；三个迁移恢复器显式import公共熔断入口。创建Service显式import意图类。更新普通import、全限定引用及两个原通配符装配点，不给历史日志/规格批量改名。
+- 测试源只做必要类型地址适配，保留原方法；OrderCreationFaultProcess仅两条import更新以继续标准Maven编译，进程/控制/故障逻辑不改。deploy中的冻结实验runner、历史工件、默认中间件均不修改或执行。未发现外部配置/脚本依赖这五个旧完整类名。
+
+### 32.2 验证、实验与提交
+
+先提交本节及 `refactor/order-auxiliary-baseline-20261113`，运行Common/Order单测基线。新增实际子包扫描装配测试：五个原Bean名恰各一份、原REQUIRES_NEW代理、四个原调度任务及间隔、秒杀死信队列/MANUAL factory；使用不执行任务的测试TaskScheduler和不启动连接的容器配置，避免虚构真实网络结果。
+
+执行全部Common/Order单测，OrderIntentStrictInsertMySqlIT全13项、OrderCreationShardingShadowMySqlIT全2项、OrderReplayRecoveryShardingShadowMySqlIT全4项、SeckillRecoveryDispatchMySqlIT全28项、SeckillRecoveryJsonMySqlIT全27项、OrderStockActionStateMySqlIT全4项、Runtime精确explicitModeUsesProductionMappersAfterBootstrapAndAudit一项，分组串行运行。原普通恢复72项大矩阵本轮不重复全跑，其历史首轮异常原因仍未确认。
+
+新增实际moved OutboxDispatcher→publisher confirm→原DLX→TimeoutService→MySQL关单/动作的用例，放入已有OrderTimeoutMySqlRabbitIT并回归该类。其余远端仍为原替身，不把租约/恢复实库写成真实Stock/全商城链。旧OrderTimeoutRabbitFixture硬编码默认Rabbit端口，本轮不调用或改写它。
+
+新Compose项目 `cloud-mall-refactor-order-auxiliary-20261113`，MySQL19951、Rabbit19952/管理19953、子网10.254.237.0/24；核实无冲突后从基础compose创建全新卷。只在本实验健康探针使用 `env ERL_FLAGS=+S 2:2 rabbitmq-diagnostics -q ping`，不改变broker。七张Order空源表和测试UUID库；遵守各自清理门，证据归档后移除自有容器/网络、保留两卷，不动历史失败卷。
+
+验收门：五个迁移类去除package/import/注释后逐token一致、引用适配之外源码/资源不变、原测试方法保持、Java实际格式化、Common/Order与指定实库全通过、Order打包及八模块test-compile、Jar新类型唯一/旧类无残留、git diff --check及README指纹保持。仅对五个旧类型及其内部class精确备份清理，不全量clean。完成标签 `refactor/order-auxiliary-complete-20261113`，临时index逆补丁恢复父树，不操作真实工作树演示回滚；Git不恢复数据卷。之后进行Order模块阶段盘点与收尾，再细化Pay首切片。
