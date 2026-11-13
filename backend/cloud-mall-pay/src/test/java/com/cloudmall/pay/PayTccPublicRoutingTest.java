@@ -13,20 +13,18 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
-import com.cloudmall.pay.feign.OrderClient;
-import com.cloudmall.pay.feign.UserClient;
-import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayConsistencyService;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
-import com.cloudmall.pay.service.impl.PayServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
@@ -45,7 +43,8 @@ class PayTccPublicRoutingTest {
   private PayTccPaymentService tcc;
   private ObjectProvider<PayTccPaymentService> tccProvider;
   private PayCallbackReceiptService callbackReceipts;
-  private PayServiceImpl service;
+  private PayCallbackController service;
+  private PayCallbackServiceImpl callbackService;
   private PaySuccessServiceImpl successService;
   private PaySuccessController successController;
   private PayFailureController failureController;
@@ -59,33 +58,36 @@ class PayTccPublicRoutingTest {
     tccProvider = mock(ObjectProvider.class);
     callbackReceipts = mock(PayCallbackReceiptService.class);
     when(tccProvider.getIfAvailable()).thenReturn(tcc);
-    service =
-        new PayServiceImpl(
-            mock(OrderClient.class),
-            mock(UserClient.class),
+    var intents = mock(PayDebitIntentMapper.class);
+    var monitor = new PayWriteMonitor();
+    var legacyFailure = mock(com.cloudmall.pay.service.impl.PayLegacyFailureService.class);
+    callbackService =
+        new PayCallbackServiceImpl(
             payments,
-            mock(PayCallbackLogMapper.class));
-    ReflectionTestUtils.setField(service, "payConsistencyService", legacy);
-    ReflectionTestUtils.setField(service, "payDebitIntentMapper", mock(PayDebitIntentMapper.class));
-    ReflectionTestUtils.setField(service, "tccPaymentService", tccProvider);
-    ReflectionTestUtils.setField(service, "callbackReceipts", callbackReceipts);
-    ReflectionTestUtils.setField(service, "callbackToken", "token");
+            intents,
+            legacyFailure,
+            legacy,
+            tccProvider,
+            callbackReceipts,
+            com.cloudmall.pay.service.PayProtocolMetrics.noop(),
+            monitor,
+            "token");
+    service = new PayCallbackController(callbackService);
     successService =
         new PaySuccessServiceImpl(
             payments,
-            (PayDebitIntentMapper) ReflectionTestUtils.getField(service, "payDebitIntentMapper"),
+            intents,
             legacy,
             tccProvider,
             com.cloudmall.pay.service.PayProtocolMetrics.noop(),
-            (PayWriteMonitor) ReflectionTestUtils.getField(service, "writeMonitor"));
+            monitor);
     successController = new PaySuccessController(successService);
     failureController =
         new PayFailureController(
             new PayFailureServiceImpl(
                 payments,
-                (PayDebitIntentMapper)
-                    ReflectionTestUtils.getField(service, "payDebitIntentMapper"),
-                mock(com.cloudmall.pay.service.impl.PayLegacyFailureService.class),
+                intents,
+                legacyFailure,
                 tccProvider,
                 com.cloudmall.pay.service.PayProtocolMetrics.noop()));
     AuthContext.set(7L, "USER");
@@ -134,7 +136,7 @@ class PayTccPublicRoutingTest {
     PayDebitIntentMapper intents = mock(PayDebitIntentMapper.class);
     when(payments.selectByPayNo("pay-routing")).thenReturn(List.of(payment("TCC", "PENDING")));
     when(intents.findByPayNo("pay-routing")).thenReturn(intent("LEGACY"));
-    ReflectionTestUtils.setField(service, "payDebitIntentMapper", intents);
+    ReflectionTestUtils.setField(callbackService, "payDebitIntentMapper", intents);
     ReflectionTestUtils.setField(successService, "payDebitIntentMapper", intents);
 
     BizException failure =

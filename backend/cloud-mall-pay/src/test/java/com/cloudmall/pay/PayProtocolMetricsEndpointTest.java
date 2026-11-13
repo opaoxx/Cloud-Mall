@@ -5,13 +5,15 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.auth.AuthContext;
-import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PaySuccessController;
+import com.cloudmall.pay.service.PayCallbackService;
 import com.cloudmall.pay.service.PayFailureService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
@@ -136,12 +138,14 @@ class PayProtocolMetricsEndpointTest {
       PayProtocolMetrics metrics = context.getBean(PayProtocolMetrics.class);
       PrometheusMeterRegistry registry = context.getBean(PrometheusMeterRegistry.class);
       assertSame(registry, ReflectionTestUtils.getField(metrics, "registry"));
-      PayController controller = context.getBean(PayController.class);
+      PayCallbackController controller = context.getBean(PayCallbackController.class);
       PaySuccessController successController = context.getBean(PaySuccessController.class);
-      assertSame(fixture.controller, controller);
+      assertSame(
+          context.getBean(PayCallbackService.class),
+          ReflectionTestUtils.getField(controller, "callbackService"));
       for (Object service :
           List.of(
-              controller,
+              context.getBean(PayCallbackServiceImpl.class),
               context.getBean(PaySuccessServiceImpl.class),
               context.getBean(PayFailureServiceImpl.class),
               context.getBean(PayConsistencyService.class),
@@ -500,10 +504,32 @@ class PayProtocolMetricsEndpointTest {
       return new PaySuccessController(service);
     }
 
-    /** 真实HTTP Bean，继承的metrics字段由Spring注入。 */
+    /** 实际回调业务使用该容器的指标、独立Receipt代理和原凭证。 */
     @Bean
-    PayController controller(PayProtocolMetricsTest.Fixture fixture) {
-      return fixture.controller;
+    PayCallbackServiceImpl callbackService(
+        PayProtocolMetricsTest.Fixture fixture,
+        PayProtocolMetrics metrics,
+        org.springframework.beans.factory.ObjectProvider<PayTccPaymentService> tcc,
+        PayWriteMonitor writeMonitor,
+        @org.springframework.beans.factory.annotation.Value(
+                "${cloudmall.internal.callback-token:cloudmall-local-callback}")
+            String callbackToken) {
+      return new PayCallbackServiceImpl(
+          fixture.records,
+          fixture.intents,
+          fixture.legacyFailure,
+          fixture.legacy,
+          tcc,
+          fixture.callbackReceipt,
+          metrics,
+          writeMonitor,
+          callbackToken);
+    }
+
+    /** 原回调路径由组合式Controller提供。 */
+    @Bean
+    PayCallbackController controller(PayCallbackService service) {
+      return new PayCallbackController(service);
     }
 
     /** 原Legacy service，不启用调度器。 */

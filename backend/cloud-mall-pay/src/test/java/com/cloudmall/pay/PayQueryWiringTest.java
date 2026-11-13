@@ -7,7 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.web.AuthInterceptor;
-import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.controller.PayCreationController;
 import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PayQueryController;
@@ -16,14 +16,15 @@ import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.service.PayCallbackService;
 import com.cloudmall.pay.service.PayCreationService;
 import com.cloudmall.pay.service.PayFailureService;
 import com.cloudmall.pay.service.PayQueryService;
 import com.cloudmall.pay.service.PaySuccessService;
+import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayCreationServiceImpl;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PayQueryServiceImpl;
-import com.cloudmall.pay.service.impl.PayServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import java.lang.reflect.Modifier;
@@ -38,7 +39,6 @@ import org.springframework.aop.support.AopUtils;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
@@ -116,11 +116,11 @@ class PayQueryWiringTest {
   void queryAndFourOriginalPostRoutesHaveUniqueOwnersAndKeepWriteBoundaries() throws Exception {
     var payments = mock(PayRecordMapper.class);
     when(payments.selectByOrderNoAndUserId("order-1", 7L)).thenReturn(List.of(new PayRecordPO()));
-    var legacy = new PayController();
+    var callback = new PayCallbackController(mock(PayCallbackService.class));
     var query = new PayQueryController(new PayQueryServiceImpl(payments));
     var mvc =
         MockMvcBuilders.standaloneSetup(
-                legacy,
+                callback,
                 query,
                 new PayCreationController(mock(PayCreationService.class)),
                 new PaySuccessController(mock(PaySuccessService.class)),
@@ -151,8 +151,8 @@ class PayQueryWiringTest {
             assertEquals(PayFailureController.class, handler.getBeanType());
           } else {
             assertEquals(Set.of(RequestMethod.POST), mapping.getMethodsCondition().getMethods());
-            assertEquals(PayController.class, handler.getBeanType());
-            assertEquals(PayServiceImpl.class, handler.getMethod().getDeclaringClass());
+            assertEquals(PayCallbackController.class, handler.getBeanType());
+            assertEquals(PayCallbackController.class, handler.getMethod().getDeclaringClass());
           }
         });
     assertEquals(
@@ -167,21 +167,27 @@ class PayQueryWiringTest {
             .collect(java.util.stream.Collectors.toSet()));
     mvc.perform(get("/api/payments/orders/order-1").header("X-User-Id", "7"))
         .andExpect(status().isOk());
-    assertThrows(
-        NoSuchMethodException.class, () -> PayServiceImpl.class.getMethod("get", String.class));
+    for (String removed :
+        List.of(
+            "com.cloudmall.pay.controller.PayController",
+            "com.cloudmall.pay.service.impl.PayServiceImpl",
+            "com.cloudmall.pay.service.PayService")) {
+      assertThrows(ClassNotFoundException.class, () -> Class.forName(removed));
+    }
     var create =
         PayCreationServiceImpl.class.getMethod(
             "create", String.class, PayCreateDTO.class, LongSupplier.class);
     var success =
         PaySuccessServiceImpl.class.getMethod("succeed", String.class, LongSupplier.class);
-    var callback = PayServiceImpl.class.getMethod("callback", String.class, PayCallbackDTO.class);
+    var callbackMethod =
+        PayCallbackServiceImpl.class.getMethod("handle", String.class, PayCallbackDTO.class);
     var failure = PayFailureServiceImpl.class.getMethod("fail", String.class, long.class);
     assertTrue(create.isAnnotationPresent(Transactional.class));
-    for (var method : List.of(create, success, callback)) {
+    for (var method : List.of(create, success, callbackMethod)) {
       assertFalse(Modifier.isSynchronized(method.getModifiers()));
     }
     assertFalse(Modifier.isSynchronized(failure.getModifiers()));
-    for (var method : List.of(success, callback, failure)) {
+    for (var method : List.of(success, callbackMethod, failure)) {
       assertFalse(method.isAnnotationPresent(Transactional.class));
     }
     assertFalse(
@@ -198,9 +204,7 @@ class PayQueryWiringTest {
   void queryCompletesWhileAnotherThreadOwnsOriginalWriteMonitor() throws Exception {
     var payments = mock(PayRecordMapper.class);
     when(payments.selectByOrderNoAndUserId("order-1", 7L)).thenReturn(List.of(new PayRecordPO()));
-    var legacy = new PayController();
     var monitor = new PayWriteMonitor();
-    ReflectionTestUtils.setField(legacy, "writeMonitor", monitor);
     var query = new PayQueryController(new PayQueryServiceImpl(payments));
     var executor = Executors.newSingleThreadExecutor();
     try {

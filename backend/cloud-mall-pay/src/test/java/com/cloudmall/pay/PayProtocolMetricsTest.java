@@ -7,7 +7,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
-import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
@@ -19,6 +19,7 @@ import com.cloudmall.pay.mapper.*;
 import com.cloudmall.pay.service.*;
 import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
@@ -592,7 +593,7 @@ class PayProtocolMetricsTest {
     Fixture fixture = new Fixture();
     for (Object service :
         List.of(
-            fixture.controller,
+            fixture.callbackService,
             fixture.legacy,
             fixture.evidence,
             fixture.coordinator,
@@ -744,7 +745,10 @@ class PayProtocolMetricsTest {
     boolean settleOnRpc = true;
 
     /** 六类真实业务实现。 */
-    final PayController controller = new PayController();
+    final PayCallbackController controller;
+
+    /** 实际回调业务，指标字段归业务实现持有。 */
+    final PayCallbackServiceImpl callbackService;
 
     /** 与新成功服务及旧回调入口共用的原监视器。 */
     final PayWriteMonitor writeMonitor = new PayWriteMonitor();
@@ -896,20 +900,21 @@ class PayProtocolMetricsTest {
       } catch (Exception impossible) {
         throw new AssertionError(impossible);
       }
-      ReflectionTestUtils.setField(controller, "orders", orders);
-      ReflectionTestUtils.setField(controller, "users", users);
-      ReflectionTestUtils.setField(controller, "payRecordMapper", records);
-      ReflectionTestUtils.setField(controller, "payCallbackLogMapper", logs);
-      ReflectionTestUtils.setField(controller, "legacyFailureService", legacyFailure);
-      ReflectionTestUtils.setField(controller, "payConsistencyService", legacy);
-      ReflectionTestUtils.setField(controller, "callbackReceipts", callbackReceipt);
-      ReflectionTestUtils.setField(controller, "payDebitIntentMapper", intents);
-      ReflectionTestUtils.setField(controller, "callbackToken", "test-token");
       @SuppressWarnings("unchecked")
       ObjectProvider<PayTccPaymentService> provider = mock(ObjectProvider.class);
       when(provider.getIfAvailable()).thenReturn(publicTcc);
-      ReflectionTestUtils.setField(controller, "tccPaymentService", provider);
-      ReflectionTestUtils.setField(controller, "writeMonitor", writeMonitor);
+      callbackService =
+          new PayCallbackServiceImpl(
+              records,
+              intents,
+              legacyFailure,
+              legacy,
+              provider,
+              callbackReceipt,
+              PayProtocolMetrics.noop(),
+              writeMonitor,
+              "test-token");
+      controller = new PayCallbackController(callbackService);
       successService =
           new PaySuccessServiceImpl(
               records, intents, legacy, provider, PayProtocolMetrics.noop(), writeMonitor);
@@ -924,7 +929,7 @@ class PayProtocolMetricsTest {
     void install(PayProtocolMetrics metrics) {
       for (Object service :
           List.of(
-              controller,
+              callbackService,
               successService,
               failureService,
               legacy,

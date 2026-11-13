@@ -7,6 +7,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.po.PayDebitIntentPO;
@@ -14,12 +15,11 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
-import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
-import com.cloudmall.pay.service.impl.PayServiceImpl;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -27,7 +27,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /** Legacy 失败入口的只读终态分类、退款中语义及意图完整性。 */
 class PayLegacyFailureOutcomeTest {
@@ -47,7 +46,7 @@ class PayLegacyFailureOutcomeTest {
   private final PayCallbackReceiptService receipts = mock(PayCallbackReceiptService.class);
 
   /** 公开失败入口。 */
-  private PayServiceImpl service;
+  private PayCallbackController service;
 
   /** 新失败入口，复用原底层授权实例。 */
   private PayFailureController failureController;
@@ -57,22 +56,30 @@ class PayLegacyFailureOutcomeTest {
 
   @BeforeEach
   void prepare() {
-    service = new PayServiceImpl(orders, users, payments, mock(PayCallbackLogMapper.class));
-    ReflectionTestUtils.setField(service, "payDebitIntentMapper", intents);
-    ReflectionTestUtils.setField(service, "callbackReceipts", receipts);
-    ReflectionTestUtils.setField(service, "callbackToken", "token");
-    ReflectionTestUtils.setField(
-        service,
-        "legacyFailureService",
-        new com.cloudmall.pay.service.impl.PayLegacyFailureService(payments, intents, orders));
+    var legacyFailure =
+        new com.cloudmall.pay.service.impl.PayLegacyFailureService(payments, intents, orders);
+    org.springframework.beans.factory.ObjectProvider<
+            com.cloudmall.pay.service.impl.PayTccPaymentService>
+        tcc = mock(org.springframework.beans.factory.ObjectProvider.class);
+    service =
+        new PayCallbackController(
+            new PayCallbackServiceImpl(
+                payments,
+                intents,
+                legacyFailure,
+                mock(com.cloudmall.pay.service.impl.PayConsistencyService.class),
+                tcc,
+                receipts,
+                com.cloudmall.pay.service.PayProtocolMetrics.noop(),
+                new com.cloudmall.pay.service.impl.PayWriteMonitor(),
+                "token"));
     failureController =
         new PayFailureController(
             new PayFailureServiceImpl(
                 payments,
                 intents,
-                (com.cloudmall.pay.service.impl.PayLegacyFailureService)
-                    ReflectionTestUtils.getField(service, "legacyFailureService"),
-                mock(org.springframework.beans.factory.ObjectProvider.class),
+                legacyFailure,
+                tcc,
                 com.cloudmall.pay.service.PayProtocolMetrics.noop()));
     payment = new PayRecordPO();
     payment.payNo = "legacy-pay";

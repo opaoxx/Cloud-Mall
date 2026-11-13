@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成查询、创建、模拟成功/失败和共用处理规则提取，后续处理回调及旧继承入口。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay五个公开支付入口均已组合委托，旧继承结构已清理，后续盘点辅助组件的职责与命名分组。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 查询、创建、模拟成功/失败已组合委托，锁、协议和独立事务边界保持，见第34至37节；回调及旧继承入口待后续处理 |
+| Pay | 实施中 | 五个公开支付入口已组合委托，旧继承Controller/混合实现/空接口已移除，见第34至38节；辅助组件职责与命名分组待盘点 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2214,3 +2214,41 @@ claim仍在终态检查/编排之前，以原PayCallbackReceiptService.REQUIRES_
 新Compose项目cloud-mall-refactor-pay-callback-20261113，仅MySQL19957、候选子网10.254.233.0/24，预检后用全新卷和原schema.sql三张Pay空源表，每例UUID库成功才清理、失败保留。结束归档后移除自有容器/网络，卷保留，默认/历史资源不动。运行全部Common/Pay *Test、新实库全类、八模块test-compile和Pay打包；不运行旧M2、完整Gateway/TC/User/Order/Stock或性能矩阵。
 
 实际格式化所有新增/必要改动Java，核验迁移body token、旧夹具断言、未涉及文件和README指纹；精确备份并删除旧三类型class（及其内部class），不全量clean，以Jar和源码扫描确认旧类型无残留。证据target/backend-refactor-20261113/pay-callback，实施独立提交及refactor/pay-callback-complete-20261113；临时index逆补丁恢复父树。README原修改、两个旧pycache和忽略证据不入提交，Git不恢复运行数据。后续盘点Pay辅助组件及剩余命名/分组，不以本切片代表Pay全模块结束。
+
+### 38.3 实施与验证结果
+
+新增回调Controller/接口/119行实现，保留原凭证键/默认值、头/体绑定和共享临界区；删除旧PayController、154行PayServiceImpl及空PayService，不保留兼容桥或无用构造器。原六个私有委托直接调用已有PayProcessingSupport，原Receipt、Legacy/TCC资金/授权服务及Mapper/配置未改。五条公开支付路由分别归查询、创建、成功、失败、回调Controller，实际MVC同时注册无重复；Pay Controller不再继承Service实现。
+
+调用链复盘：`HTTP绑定 → Service共享锁 → token → 参数/原callbackId或payNo回退 → payload身份归属 → 持久模式 → 金额compareTo → CALLBACK指标 → Receipt.claim独立提交 → 原终态/协议处理 → Receipt.complete独立提交 → 原支付重读 → 解锁 → Controller包装`。外层没有新事务或AuthContext身份替换；未知/拒绝/异常沿原位置退出，不执行后续complete。失败方向仍复用原TCC/Legacy失败处理，成功终态仍执行claim/complete而不重复编排。
+
+| 最终执行范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共与源码契约 |
+| Pay原有全部单测 | 638 | 原资金/协议/Receipt/指标及此前入口边界，必要装配适配 |
+| PayCallbackContractTest | 8 | 新旧入口完全相同的HTTP/步骤/参数/结果断言 |
+| PayCallbackMySqlIT | 4 | 真实Mapper、Receipt/Legacy事务代理、持久绑定、故障/重放、外层RR回滚 |
+| 合计 | 675 | 72类，最终0失败、0错误、0跳过 |
+
+基线671项、迁移后671项单测及最终675项分别归档，三轮均首次通过，不叠加计数。八项新契约方法体逐token保持，原七份适配测试案例名全部保留；原Legacy结果/TCC路由/指标及全链hook方法的断言按明确入口/依赖归属变化规范化后保持。覆盖原token先于参数、绑定先于token、payload身份独立于请求会话、callbackId空白回退/非空逐字保留、模式先于金额、claim先于终态拒绝、两协议成功/失败方向、未知/失败结果无complete、原异常及金额/时间/null。无效JSON仍由原全局处理产生既有500，本轮没有顺带更改参数错误策略。
+
+原创建屏障在新回调Service上继续证明共享监视器唯一、token校验前等待该锁、失败/查询不受阻塞；新回调外层无事务代理。MySQL四例首次全部通过：未知结果保留RECEIVED_SUCCESS，方向/冻结金额/全局callbackId复用冲突拒绝且不追加业务副作用，FAILED支付的成功回调仍先持久claim再409；业务替身提交SUCCESS但complete触发器失败时保留RECEIVED_SUCCESS，随后complete成功而末读故障时日志已SUCCESS/processed_at非null，原键重放不再次编排。
+
+真实Legacy失败回调按claim→独立取消/CAS→complete→读取形成FAILED日志，同方向/金额尺度不同重放不重复取消且原冻结payload保持。外层RR快照始终看不到本次新日志，但claim/complete各使用不同于外层且彼此不同的实际连接提交，外层回滚后外部连接仍看到SUCCESS；没有把本地事务描述为可撤销远端资金或Order事实。成功/TCC编排及Order仍为替身，完整资金/网关/TC链未执行。
+
+回调338个token在明确共用依赖调用、响应包装迁移后等价，凭证配置/头体绑定准确保持。1066份其他已跟踪后端文件及README原修改逐字节保持，覆盖原Receipt/资金/SQL/配置及其他模块。12份新增/改动Java实际格式化，八模块test-compile、Pay打包和diff检查通过；精确备份/移除3个旧class，不全量clean。Jar187个Pay生产class与最终classes一致，新三类型存在，旧三类型及测试夹具均无残留。
+
+旧PayTccPublicEntryIT的失败首读屏障已改指实际PayFailureServiceImpl，除局部变量及目标类型外原方法token保持，完整文件编译通过；其真实Gateway/TC交付测试本轮未重跑，不能把这个夹具修正写成全链回归完成。本轮没有新增测试失败、失败库或环境问题。
+
+### 38.4 证据、回退与后续
+
+方案提交a07b8201，基线标签refactor/pay-callback-baseline-20261113；完成标签refactor/pay-callback-complete-20261113。证据入口 `target/backend-refactor-20261113/pay-callback/verification.json`，包含基线/最终独立XML、源码/断言对照、四库原生事实与事务连接观察、指标工件、旧class备份、Jar摘要和回退证明。
+
+独立MySQL8.0.46三源表最终0行，全部四个UUID库按成功门清理，无新增失败库。自有容器/网络已移除，mysql_data卷保留；默认数据库、此前失败卷及其他项目保持。
+
+```powershell
+git revert refactor/pay-callback-complete-20261113
+```
+
+临时index验证逆补丁恢复父树，真实index及README保持；删除/新增路径按no-renames清单精确核验。实际回退后清理三个新生产类型及两个新增测试类（含内部class）的target残留，再重编译恢复的旧三类型；不全量clean或回退运行数据，后续依赖先逆序处理。README原修改、两个旧pycache及忽略工件不入提交。
+
+下一步盘点Pay辅助组件的职责、命名和包分组，优先识别Legacy恢复、TCC编排/交付/取消、只读取证的边界与Bean/反射引用，再冻结最小迁移清单。五个公开入口已拆分不等于整个Pay模块收尾；旧M2固定矩阵、完整Gateway/TC/User/Order/Stock资金交付和性能本轮未运行。

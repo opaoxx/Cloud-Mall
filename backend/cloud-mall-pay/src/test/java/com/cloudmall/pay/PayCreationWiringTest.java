@@ -7,7 +7,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
-import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.controller.PayCreationController;
 import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PayQueryController;
@@ -20,10 +20,12 @@ import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.service.PayCallbackService;
 import com.cloudmall.pay.service.PayCreationService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
@@ -129,7 +131,8 @@ class PayCreationWiringTest {
             fixture.submit(
                 () ->
                     assertThrows(
-                        BizException.class, () -> fixture.legacy.callback("invalid-token", null)));
+                        BizException.class,
+                        () -> fixture.callback.callback("invalid-token", null)));
         creation.awaitBlocked();
         success.awaitBlocked();
         callback.awaitBlocked();
@@ -270,7 +273,7 @@ class PayCreationWiringTest {
     private final PayCreationController controller;
 
     /** 原成功/失败/回调入口。 */
-    private final PayController legacy;
+    private final PayCallbackController callback;
 
     /** 新成功入口，与创建和回调共用同一个锁。 */
     private final PaySuccessController success;
@@ -287,7 +290,8 @@ class PayCreationWiringTest {
           Transactions.class,
           PayCreationController.class,
           PayCreationServiceImpl.class,
-          PayController.class,
+          PayCallbackController.class,
+          PayCallbackServiceImpl.class,
           PaySuccessController.class,
           PaySuccessServiceImpl.class,
           PayFailureController.class,
@@ -310,15 +314,17 @@ class PayCreationWiringTest {
       context.refresh();
       service = context.getBean(PayCreationService.class);
       controller = context.getBean(PayCreationController.class);
-      legacy = context.getBean(PayController.class);
+      callback = context.getBean(PayCallbackController.class);
       success = context.getBean(PaySuccessController.class);
       failureController = context.getBean(PayFailureController.class);
       query = context.getBean(PayQueryController.class);
       assertTrue(AopUtils.isAopProxy(service));
-      assertFalse(AopUtils.isAopProxy(legacy));
+      assertFalse(AopUtils.isAopProxy(context.getBean(PayCallbackService.class)));
       Object creationTarget = AopTestUtils.getTargetObject(service);
       assertSame(monitor, ReflectionTestUtils.getField(creationTarget, "writeMonitor"));
-      assertSame(monitor, ReflectionTestUtils.getField(legacy, "writeMonitor"));
+      assertSame(
+          monitor,
+          ReflectionTestUtils.getField(context.getBean(PayCallbackService.class), "writeMonitor"));
       assertSame(
           monitor,
           ReflectionTestUtils.getField(context.getBean(PaySuccessService.class), "writeMonitor"));

@@ -855,12 +855,12 @@ class PayTccPublicEntryIT {
   @Order(12)
   void legacyFailureCannotMissIntentCommittedAfterItsOldSnapshot() throws Exception {
     createLegacyPublic();
-    Object controller =
+    Object failureTarget =
         org.springframework.test.util.AopTestUtils.getUltimateTargetObject(
-            application.getBean(com.cloudmall.pay.controller.PayController.class));
+            application.getBean(com.cloudmall.pay.service.impl.PayFailureServiceImpl.class));
     var original =
         (com.cloudmall.pay.mapper.PayRecordMapper)
-            ReflectionTestUtils.getField(controller, "payRecordMapper");
+            ReflectionTestUtils.getField(failureTarget, "payRecordMapper");
     CountDownLatch snapshotRead = new CountDownLatch(1), resumeFailure = new CountDownLatch(1);
     AtomicBoolean held = new AtomicBoolean();
     var intercepted =
@@ -890,7 +890,7 @@ class PayTccPublicEntryIT {
                   }
                   return result;
                 });
-    ReflectionTestUtils.setField(controller, "payRecordMapper", intercepted);
+    ReflectionTestUtils.setField(failureTarget, "payRecordMapper", intercepted);
     ExecutorService callers = Executors.newSingleThreadExecutor();
     try {
       Future<Response> failed =
@@ -939,7 +939,7 @@ class PayTccPublicEntryIT {
       assertFunds("90.00", 1, 0);
     } finally {
       resumeFailure.countDown();
-      ReflectionTestUtils.setField(controller, "payRecordMapper", original);
+      ReflectionTestUtils.setField(failureTarget, "payRecordMapper", original);
       callers.shutdownNow();
       if (!"SUCCESS".equals(paymentState())
           && payDb.queryForObject(
