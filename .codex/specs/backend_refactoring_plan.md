@@ -2522,3 +2522,23 @@ git revert refactor/pay-tcc-receipt-complete-20261113
 临时index按no-renames精确路径逆补丁恢复父树，真实index及README保持。实际回退后仅清理receipt中新迁入五类型及新增实库测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序回退。README、两个旧pycache及忽略工件不入提交。
 
 下一步审查执行协调/恢复与交付/取消之间的依赖，冻结剩余17个TCC写组件的下一组范围。Pay整体尚未收尾；本轮没有真实TC分支注册、RM扫描代理、User资金RPC、Gateway/Nacos全链或压测结论。
+
+## 43. Pay TCC执行协调与恢复分组（2026-11-13）
+
+### 43.1 范围与兼容基线
+
+从497a967a继续，主Agent按本会话单Agent约定评审、实施、验证。将PayTccCoordinatorServiceImpl、PayTccExecutionStore、PayTccExecutionRecoveryStore、PayTccRecoveryScheduler迁入`service.impl.execution`，保留原类名/Bean名及public接口。PublicStateStore/RollbackProjectionService作为后续投影切片暂留原包，通过原public方法连接；DeliveryStore对retryDelaySeconds的调用仅补新import。根包由24类减至20类，剩余13个TCC写组件另行安排。
+
+Coordinator/RecoveryScheduler继续按各自开关条件装配，RecoveryScheduler的DependsOn执行表初始化器、ExecutionStore的DependsOn取消表初始化器保持；两个Store始终存在。ExecutionStore十个写/锁定入口和RecoveryStore三个租约入口仍REQUIRES_NEW，其余读取无新事务，Coordinator和Scheduler无外层事务。新包只收拢既有实现，不重命名动作、扩可见性、拆方法或改原异常优先级。
+
+固定流程仍为独立claim→唯一首次begin→原XID绑定→原两Try→独立同向决议→原TC请求→原快照复核。recover只观察原事实并重试原决议，NONE不生成决议；caller context拒绝/本次XID清理、冲突原样传播、状态不可逆、来源与owner快照、诊断和指标保持。恢复租约不转移begin/Try权；两阶段交替优先、共享批量/时间预算、AtomicBoolean重入门、随机token、租约期/退避和投影调用保持。调度仍使用原interval-ms键的fixedDelay和initialDelay（默认5000ms），不新增调度；Scheduler日志类别随FQN变化，模板/等级保持。
+
+### 43.2 验证、实验与提交策略
+
+先提交本节及`refactor/pay-tcc-execution-baseline-20261113`，运行Common/Pay全部*Test基线。新增PayTccExecutionWiringTest两个方法：实际扫描新子包与原表初始化器，验证默认两Bean、coordinator开启三Bean、recovery同时开启四Bean；两个Store的十三个REQUIRES_NEW、原Bean名、默认/覆盖间隔的一项调度；保留caller XID的前置拒绝与零业务依赖调用。TaskScheduler替身只注册不执行，TC/Bridge/Receipt/Evidence/Projection为替身，不把本测试称作真实TC配置启动。recovery缺少coordinator时必须按原DependsOn失败，不能静默启动。
+
+实库复用PayTccRecoveryScanMySqlIT全14项：启动实际PayApplication的NONE上下文，关闭Nacos发现/注册和Seata、coordinator/recovery入口，使用独立MySQL；无Pay Rabbit监听器，Legacy/回调扫描只面对owned表。原断言覆盖SQL限流前过滤、两扫描器竞争、租约接管/过期/精确token、退避、幂等DDL、回滚投影租约和不反转决议。另只运行PayLegacyRefundLedgerMySqlIT精确22方法（清单在本轮legacy-methods.json，结果逐名列明），覆盖execution读写域/锁/影响行数、实际Spring Store owner事务、决议/RPC顺序、上下文漂移与原异常、恢复finish token等原完整矩阵。两旧夹具都保留原源表指纹/关闭/AfterAll owned库删除（失败也删）规则；不改测试正文、不宣称全巨型类通过或保留失败DB。
+
+独立Compose项目`cloud-mall-refactor-pay-tcc-execution-20261113`，候选MySQL19962/10.254.228.0/24，预检后新卷；源库仅准备pay_record/pay_debit_intent/pay_callback_log及原dispatch/receipt/execution/Fence DDL，execution恢复列按原Mapper固定定义补齐，七张源表保持空。新表/恢复列只用于本轮实验源与owned库，生产DDL不变。URL只带allowPublicKeyRetrieval单参数；不会访问默认数据库。归档成功并核对事件/剩余schema后才移除自有容器/网络，卷保留。
+
+证据`target/backend-refactor-20261113/pay-tcc-execution`。四类去package/import/注释逐token相等，原22份引用文件只改地址/import，其余后端及README字节保持。完整格式化迁移类/包说明/新测试，引用文件仅整理import；八模块test-compile、全部单测/两项新装配/36项指定实库、Pay打包/Jar新旧路径/diff通过。备份后精确清除旧四class，不全量clean；临时index逆补丁验证父树恢复后提交及`refactor/pay-tcc-execution-complete-20261113`。README、旧pycache、忽略工件不入提交。下一步考虑公开状态投影；本轮不接真实TC/User资金或性能全链。
