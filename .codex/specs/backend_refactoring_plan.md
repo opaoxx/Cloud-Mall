@@ -1740,3 +1740,25 @@ git revert refactor/order-seckill-creation-complete-20261113
 实际回退后精确清理三个新生产类型与OrderSeckillMessageListenerTest/OrderSeckillMessageMySqlRabbitIT（含嵌套类）的class残留，再编译恢复后的旧实现/夹具；不清空target证据。后续依赖按逆序处理，Git不恢复数据卷或忽略工件。
 
 下一步提取超时消息解析/关单Service并移除旧OrderController继承和空OrderService；随后盘点Order辅助实现的职责分组。本轮没有真实Product/Stock远端、TC/Nacos、完整商城或性能验证，Order模块整体尚未完成。
+
+## 31. Order 超时消费与旧继承入口收尾（2026-11-13）
+
+### 31.1 实施前评审
+
+基线 `6116cb53`。上次中断仅完成只读核对，没有代码修改；本轮主Agent继续单独评审、实施及验证。已复读项目规则、README/Bug记录及17DP/DQ/DR/DS/DT/DU/DV消息与期限规格，工作树仅有原README和两个pycache，均保留。
+
+- 新增 `service.OrderTimeoutService`、`service.impl.OrderTimeoutServiceImpl`，提供closeFromMessage(Message)与closeExpiredOrder(String)两个原REQUIRED入口。接口保留原AMQP Message输入，以保持获取body之前已进入事务、容器原始字节输入和异常时点；本轮不引入消息DTO或再次JSON转换。Message入口在同一目标对象内委托String业务，不新增第二个代理调用、独立事务或共享写锁。
+- 新增 `util.OrderTimeoutMessageParser`，只接收原ObjectMapper和byte[]，返回原orderNo。严格UTF-8 REPORT、per-call reader的single-root/duplicate-key、四字段原生文本/必填代理对、裸ASCII整数整份原文、quoted/raw legacy、catch顺序及cause保持。消息头/contentType/encoding不参与猜测；不修改共享ObjectMapper或原body，不新增expireAt语法/身份校验。
+- 新增 `config.OrderTimeoutMessageListener`，consumeTimeout(Message)仅调用业务接口，保留TIMEOUT_DLQ队列、默认factory、无显式endpoint ID和无手工ACK。原三次重试/AUTO/default-requeue-rejected=false保持；TIMEOUT_DLQ自身没有二级DLX，耗尽后的原拒绝行为不伪称再次进入其他死信队列。
+- 关单仍完整读取原详情、精确状态为PENDING_PAYMENT才继续；缺失DB期限拒绝、未来期限拒绝，消息expireAt不可授权关单。原共享OrderStateWriter条件更新恰1行才插入ROLLBACK动作，两者同事务；CAS=0不补写动作/远端回滚，不借用HTTP取消鉴权。不改SQL、字段、时间采样、ID或状态机。
+- 删除已无剩余职责的OrderController、OrderServiceImpl和空OrderService。OrderTestService改为普通测试装配，接管原三个注入字段并保留两个@Transactional适配入口，调用真实TimeoutService；OrderReadTestSupport使用具体测试夹具类型。MVC/创建/Runtime/秒杀监听装配中的旧Controller引用逐一改为真实新角色或移除空HTTP注册，原测试方法保留。Common守卫指向新监听器；旧故障runner无类名依赖，其容器外事务结束观测仍适用，本轮不改冻结runner。
+
+### 31.2 验收、实验与回退
+
+先提交本节及 `refactor/order-timeout-baseline-20261113`，运行Common/Order单测基线。适配后运行全部单测，原OrderLegacyStockIdentityMySqlIT全18项、状态实库3项、秒杀真实消息4项和Runtime精确explicitModeUsesProductionMappersAfterBootstrapAndAudit一项；创建大矩阵不重复全跑，本轮新增/改动依赖的创建装配单测继续覆盖，上一阶段普通恢复首轮原因未确认的记录不改成已修复。
+
+新增监听委托/无继承检查，以及实际生产Service/MySQL/Rabbit测试：原TTL→DLX到期关单及重复/legacy无重复动作；动作INSERT故障三次整单回滚后同原消息可重试；非法UTF-8/重复键/多root在已开启事务内拒绝且不访问订单；缺失/未来DB期限不被消息文本覆盖、已支付等终态不加动作。记录真实事务开始/提交/回滚和原队列注册，不以测试夹具代替生产代理证明。
+
+新Compose项目 `cloud-mall-refactor-order-timeout-20261113`，MySQL19948、Rabbit19949/管理19950、子网10.254.238.0/24，创建前核实无项目/卷/端口/子网冲突。固定镜像、root/root与基础compose保持；仅本实验override把健康探针命令设为 `env ERL_FLAGS=+S 2:2 rabbitmq-diagnostics -q ping`，只限制短命CLI进程的调度器，避免上轮默认探针启动超过3秒，不改变broker进程。七张Order空源表、测试自有UUID库；成功库清理、失败按原门保留，归档后仅移除自有容器/网络、两卷保留。
+
+阶段门：四个原方法拆分前后对照、原测试方法保留、未改源码/资源指纹、真实格式化、Order打包及八模块test-compile、Jar确认三个旧类型及测试夹具不存在、git diff --check和README指纹保持。仅对已删除类型的target class精确备份/清理后重编译，不全量clean。完成标签 `refactor/order-timeout-complete-20261113`；临时index逆补丁还原父树，不动真实工作树展示回退。未验证真实Stock/Product/TC/Nacos、完整商城、进程硬停及性能范围明确保留。
