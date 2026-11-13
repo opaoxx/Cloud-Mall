@@ -2606,3 +2606,23 @@ git revert refactor/pay-tcc-execution-complete-20261113
 临时index用no-renames精确路径逆补丁恢复父树，真实index及README保持。实际回退后精确清理execution迁入四类型及新增装配测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序回退。README、两个旧pycache及忽略工件不入提交。
 
 下一步整理公开支付状态投影的两个组件，再按依赖梳理交付/取消及TCC公开编排。Pay整体尚未收尾；本轮无真实TC/RM、User资金RPC、Gateway/Nacos全链或压测结论。
+
+## 44. Pay TCC公开支付状态投影分组（2026-11-13）
+
+### 44.1 范围与兼容基线
+
+从0264d487继续，主Agent按本会话单Agent约定评审、实施、验证。将PayTccRollbackProjectionService、PayTccPublicStateStore整体迁入`service.impl.projection`；保留原class/Bean名、无条件@Service、public方法和配置token键/默认值。原13份引用文件仅地址/import适配（2生产、11测试），执行恢复扫描仍通过原public投影服务连接，不增加扫描器或开关。根包20类减至18类，余11个TCC写组件另行分组。
+
+两投影入口继续NOT_SUPPORTED，暂停调用者本地事务后，先由Store.cancelledProof的REQUIRED/readOnly/RR与receipt Evidence代理取得同库快照，离开本地事务才查询原User GET，然后由projectFailed/projectFailedClaimed的REQUIRES_NEW独立提交。execution普通读取不新增事务，User调用/字段/错误处理顺序保持；FeignException沿原202 pending，其他RuntimeException原样传播。不能将无租约公开路径用于后台失败兜底，不主动取消、退款、改execution决议或写callback。
+
+保留原TCC模式/tuple、Legacy意图和取消台账互斥、receipt/Fence/dispatch及User CANCELLED/显式no-ledger证明。projectClaimed先验证token域，写入时继续按Pay→execution锁序重核token/未来lease；原公开路径仍无lease，FAILED重放与SUCCESS/REFUNDED拒绝、其他未知状态与CAS语义不变。不补新的远端重查、重试、来源或状态门，不修改SQL/DTO/VO/Feign/金额/时间契约。
+
+### 44.2 验证、实验与提交策略
+
+先提交本节及`refactor/pay-tcc-projection-baseline-20261113`，运行Common/Pay全部*Test基线。新增PayTccProjectionMySqlIT三个方法，实际扫描新包并注册真实Receipt Evidence、Mapper和DataSourceTransactionManager，User为受控替身：验证实际原Bean及事务代理；public投影在调用者RR内暂停/恢复原连接、证明单连接RR、GET无事务、独立FAILED提交不被外层回滚撤销；后台GET窗口发生owner接管或lease过期后，当前读拒绝旧token且不降级公开路径；Feign不可用、缺账本字段、空响应及其他Runtime异常时无状态写入并恢复调用者。新夹具成功才删UUID库，失败留事实；RootContext/TC不模拟成真实资金流程。
+
+旧PayLegacyRefundLedgerMySqlIT只运行8个完整方法：invalidRollbackProjectionTokensCannotChangeAnyFacts、validRollbackProjectionTokensKeepWritesAndPublicPath、incompleteRollbackLedgerProofCannotWriteAcrossStatesAndDecisions、explicitNoLedgerProofKeepsBothProjectionPaths、numericLedgerTokenCannotAuthorizeRollbackProjection、fractionalUserBranchCannotAuthorizeRollbackProjection、numericUserAmountCannotAuthorizeRollbackProjection、duplicateUserLedgerCannotAuthorizeRollbackProjection。其程序化事务/受控proof不冒称Spring集成，由新实库补实际代理边界。另运行PayTccRecoveryScanMySqlIT的rollbackProjectionFiltersBeforeLimitAndDrainsMultipleBatches、oldRecoveryTokenCannotProjectAfterRollbackLeaseTakeover两方法，实际Pay NONE上下文关闭TC/Nacos，验证扫描与投影租约接口。两旧夹具的指纹、关闭、AfterAll删库规则保持（失败也删）。
+
+独立Compose项目`cloud-mall-refactor-pay-tcc-projection-20261113`，候选MySQL19963/10.254.227.0/24，核验后新卷。原schema的pay_record/pay_debit_intent/pay_callback_log，加原Mapper的dispatch/receipt/execution/Fence/cancel及execution固定恢复列，共八张空源表供owned复制。URL显式指向独立loopback，仅携带allowPublicKeyRetrieval；不使用默认库或历史卷。归档成功并核对精确schema/事件集合后才down自有容器/网络，卷保留。
+
+证据`target/backend-refactor-20261113/pay-tcc-projection`。两类去package/import/注释逐token等价，引用正文不改，其余后端和README按字节保持；完整格式化迁移/新测试/包说明，引用文件只整理import。全部单测、3项新实库及10项旧实库、八模块test-compile、Pay打包/Jar新旧类型及diff通过。精确备份清除旧两class，不全量clean；临时index逆补丁恢复父树验证后提交及`refactor/pay-tcc-projection-complete-20261113`。README、旧pycache和忽略工件不入提交，Git不回退运行数据；后续交付/取消及TCC公开编排另行处理。
