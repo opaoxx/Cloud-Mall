@@ -4167,7 +4167,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var returned = new java.util.concurrent.atomic.AtomicReference<String>();
     org.junit.jupiter.api.Assertions.assertAll(
@@ -5150,7 +5150,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 只克隆原execution DDL，实际Recovery Mapper与Store使用同一owned有界连接池。 */
-  private com.cloudmall.pay.service.impl.PayTccExecutionRecoveryStore
+  private com.cloudmall.pay.service.impl.execution.PayTccExecutionRecoveryStore
       ownedExecutionRecoveryTokenStore() {
     ownedExecutionObservationStore();
     var configuration = new MybatisConfiguration();
@@ -5163,7 +5163,7 @@ class PayLegacyRefundLedgerMySqlIT {
     try {
       var session = new SqlSessionTemplate(factory.getObject());
       var mapper = session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionRecoveryMapper.class);
-      return new com.cloudmall.pay.service.impl.PayTccExecutionRecoveryStore(
+      return new com.cloudmall.pay.service.impl.execution.PayTccExecutionRecoveryStore(
           mapper, executionObservationMapper, records);
     } catch (Exception failure) {
       throw new IllegalStateException("owned recovery token factory failed", failure);
@@ -5269,7 +5269,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     seedOwnedExecution("CLAIMED", "NONE", null);
     alignOwnedExecutionReadSource();
@@ -5388,7 +5388,7 @@ class PayLegacyRefundLedgerMySqlIT {
               new com.cloudmall.common.error.BizException(
                   "REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
       var coordinator =
-          new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+          new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
               store, receiptService, bridge, evidence, transactions);
       var recovered = coordinator.recover("pay-1");
       assertEquals(decision.equals("NONE") ? "UNKNOWN" : decision + "_REQUESTED", recovered.state);
@@ -5726,7 +5726,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 在真实同数据源事务中调用原公开写入口；失败前后比较完整三表，避免只核返回。 */
   private void assertLockedExecutionDomainConflict(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo, String action) {
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store, String payNo, String action) {
     var before = executionReadFacts();
     String originalXid =
         (String) fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1").get("xid");
@@ -5859,7 +5859,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 只将Java调用参数传入实际Store事务；三表不变与无返回同时核验。 */
   private void assertNativeCommandArgumentConflict(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String argument) {
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store, String argument) {
     var before = executionReadFacts();
     String currentXid =
         (String) fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1").get("xid");
@@ -6032,7 +6032,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 在同owned数据源真实事务中调用claim，保Boolean返回而不更改其它事务helper。 */
   private boolean claimOwnedTransaction(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store,
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store,
       com.cloudmall.pay.domain.dto.PayTccDispatchDTO request) {
     var template =
         new org.springframework.transaction.support.TransactionTemplate(
@@ -6042,7 +6042,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 核409、无Boolean返回和三表不变，避免false重放被当作合法拒绝。 */
   private void assertOwnedClaimReplayConflict(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store,
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store,
       com.cloudmall.pay.domain.dto.PayTccDispatchDTO request) {
     var before = executionReadFacts();
     var returned = new java.util.concurrent.atomic.AtomicReference<Boolean>();
@@ -6069,7 +6069,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var before = executionReadFacts();
     var returned =
@@ -6177,7 +6177,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     for (String ambient : List.of("caller-xid", "another-caller-xid")) {
       io.seata.core.context.RootContext.bind(ambient);
@@ -6267,7 +6267,7 @@ class PayLegacyRefundLedgerMySqlIT {
               if (checkpoint && contextFacts.get() == null) changeContext.execute();
               return result;
             });
-    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
+    var store = (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore) handoff.getProxy();
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
@@ -6325,7 +6325,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return "TRYING";
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -6496,7 +6496,7 @@ class PayLegacyRefundLedgerMySqlIT {
               if (checkpoint && driftFacts.get() == null) changeContext.execute();
               return result;
             });
-    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
+    var store = (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore) handoff.getProxy();
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
@@ -6550,7 +6550,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return "TRYING";
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -6763,7 +6763,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return outcome;
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -6923,7 +6923,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return "TRYING";
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -7091,7 +7091,7 @@ class PayLegacyRefundLedgerMySqlIT {
               }
               return result;
             });
-    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
+    var store = (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore) handoff.getProxy();
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
@@ -7110,7 +7110,7 @@ class PayLegacyRefundLedgerMySqlIT {
     when(bridge.recover(request.payNo)).thenReturn(user);
     when(evidence.classify(any(), any())).thenReturn("TRYING");
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -7304,7 +7304,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return "UNKNOWN";
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -7498,7 +7498,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return "TRYING";
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -7547,7 +7547,7 @@ class PayLegacyRefundLedgerMySqlIT {
     when(bridge.recover("pay-1"))
         .thenThrow(new com.cloudmall.common.error.BizException(null, "owned code missing", 503));
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var paymentBefore = rawIntentTimeFacts();
     var expected = fixture.queryForMap("SELECT * FROM pay_tcc_execution");
@@ -7631,7 +7631,7 @@ class PayLegacyRefundLedgerMySqlIT {
                 .when(transactions)
                 .rollback("t221-stable-xid");
           var coordinator =
-              new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+              new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
                   store, receipts, bridge, evidence, transactions);
           try {
             var result =
@@ -7709,7 +7709,7 @@ class PayLegacyRefundLedgerMySqlIT {
       org.mockito.Mockito.doAnswer(lostResponse).when(transactions).commit("t221-old-xid");
     else org.mockito.Mockito.doAnswer(lostResponse).when(transactions).rollback("t221-old-xid");
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -7870,7 +7870,7 @@ class PayLegacyRefundLedgerMySqlIT {
                 return "t220-healthy-xid";
               });
       var coordinator =
-          new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+          new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
               store, receipts, bridge, evidence, transactions);
       try {
         String decision = ordinaryFailure ? "ROLLBACK" : "COMMIT";
@@ -7984,7 +7984,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return "TRYING";
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -8176,7 +8176,7 @@ class PayLegacyRefundLedgerMySqlIT {
             });
     when(evidence.classify(any(), eq(user))).thenReturn(observation);
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -8296,7 +8296,7 @@ class PayLegacyRefundLedgerMySqlIT {
       assertEquals("peer-worker", observed.recoveryOwner);
       assertEquals(9, observed.recoveryAttempts);
       assertEquals(paymentBefore, rawIntentTimeFacts());
-      if (com.cloudmall.pay.service.impl.PayTccExecutionStore.terminal(scenario[0])) {
+      if (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore.terminal(scenario[0])) {
         assertEquals(before, executionReadFacts());
         assertEquals("peer-diagnostic", observed.lastError);
       } else assertEquals("snapshot-observation", observed.lastError);
@@ -8317,21 +8317,21 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 真正Spring事务代理包裹实际Store；不启动应用或Seata，不改变原Mapper。 */
-  private com.cloudmall.pay.service.impl.PayTccExecutionStore proxiedExecutionObservationStore() {
+  private com.cloudmall.pay.service.impl.execution.PayTccExecutionStore proxiedExecutionObservationStore() {
     var target = ownedExecutionObservationStore();
     return proxyExecutionObservationStore(target);
   }
 
   /** 显式代理给定actual Store，允许锁探针装饰Mapper而保持实际事务入口。 */
-  private com.cloudmall.pay.service.impl.PayTccExecutionStore proxyExecutionObservationStore(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore target) {
+  private com.cloudmall.pay.service.impl.execution.PayTccExecutionStore proxyExecutionObservationStore(
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore target) {
     var proxy = new org.springframework.aop.framework.ProxyFactory(target);
     proxy.setProxyTargetClass(true);
     proxy.addAdvice(
         new org.springframework.transaction.interceptor.TransactionInterceptor(
             new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool),
             new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource()));
-    var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) proxy.getProxy();
+    var store = (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore) proxy.getProxy();
     assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(store));
     return store;
   }
@@ -8370,7 +8370,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return observation;
             });
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -8533,7 +8533,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 实际Coordinator在原Pay来源冲突时停止，Bridge的503替身不能触发观察或TC重试。 */
   private void assertOwnedSourceConflictStopsRecovery(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store) {
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
@@ -8543,7 +8543,7 @@ class PayLegacyRefundLedgerMySqlIT {
             new com.cloudmall.common.error.BizException(
                 "REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var before = executionReadFacts();
     var returned =
@@ -8646,7 +8646,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 同源实际事务中检查当前NULL关联；只核本地三表，不构造TC/receipt事实。 */
   private void assertOwnedUnboundPairConflict(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store,
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store,
       com.cloudmall.pay.domain.dto.PayTccDispatchDTO request,
       String action) {
     var before = executionReadFacts();
@@ -8693,7 +8693,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 对原读取样本继续执行实际查询，拒绝必须为原业务409。 */
   private void assertNativeUnboundReadConflict(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo) {
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store, String payNo) {
     var failure =
         org.junit.jupiter.api.Assertions.assertThrows(
             com.cloudmall.common.error.BizException.class, () -> store.read(payNo));
@@ -8703,13 +8703,13 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 真实Store/Coordinator与owned Mapper；桥503和TC只为替身，不发送真实RPC。 */
   private void assertExecutionReadConflictStopsRecovery(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store) {
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store) {
     assertExecutionReadConflictStopsRecovery(store, "pay-1");
   }
 
   /** 按变异后的原支付号恢复，避免将查询不到记录误作有效域拒绝。 */
   private void assertExecutionReadConflictStopsRecovery(
-      com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo) {
+      com.cloudmall.pay.service.impl.execution.PayTccExecutionStore store, String payNo) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
@@ -8719,7 +8719,7 @@ class PayLegacyRefundLedgerMySqlIT {
             new com.cloudmall.common.error.BizException(
                 "REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var before = executionReadFacts();
     var returned =
@@ -8748,7 +8748,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** owned库克隆原execution DDL，不启动应用或TC，只建立实际MyBatis读取和写入入口。 */
-  private com.cloudmall.pay.service.impl.PayTccExecutionStore ownedExecutionObservationStore() {
+  private com.cloudmall.pay.service.impl.execution.PayTccExecutionStore ownedExecutionObservationStore() {
     fixture.execute("DROP TABLE IF EXISTS pay_tcc_execution");
     fixture.execute(
         (String) source.queryForMap("SHOW CREATE TABLE pay_tcc_execution").get("Create Table"));
@@ -8770,9 +8770,9 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** observe只使用execution，未使用的其他资源为替身，无远端调用。 */
-  private com.cloudmall.pay.service.impl.PayTccExecutionStore executionObservationStore(
+  private com.cloudmall.pay.service.impl.execution.PayTccExecutionStore executionObservationStore(
       com.cloudmall.pay.mapper.PayTccExecutionMapper mapper) {
-    return new com.cloudmall.pay.service.impl.PayTccExecutionStore(
+    return new com.cloudmall.pay.service.impl.execution.PayTccExecutionStore(
         mapper,
         records,
         mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),

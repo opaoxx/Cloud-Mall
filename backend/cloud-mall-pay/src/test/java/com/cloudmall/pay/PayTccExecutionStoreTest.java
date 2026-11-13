@@ -17,7 +17,7 @@ import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
-import com.cloudmall.pay.service.impl.PayTccExecutionStore;
+import com.cloudmall.pay.service.impl.execution.PayTccExecutionStore;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -315,7 +315,7 @@ class PayTccExecutionStoreTest {
       var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
       var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
       var coordinator =
-          new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+          new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
               store, receiptService, bridge, evidence, transactions);
       var failure = assertThrows(BizException.class, () -> coordinator.recover("pay-store-1"));
       org.junit.jupiter.api.Assertions.assertEquals(
@@ -374,7 +374,7 @@ class PayTccExecutionStoreTest {
           when(bridge.recover(row.payNo))
               .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
           var coordinator =
-              new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+              new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
                   store, receiptService, bridge, evidence, transactions);
           var before = snapshotExecution(row);
           var failure = assertThrows(BizException.class, () -> coordinator.recover(row.payNo));
@@ -423,7 +423,7 @@ class PayTccExecutionStoreTest {
     var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
-        new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+        new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
             store, receiptService, bridge, evidence, transactions);
     var before = snapshotExecution(row);
     org.mockito.Mockito.reset(payments);
@@ -497,7 +497,7 @@ class PayTccExecutionStoreTest {
         when(bridge.recover(row.payNo))
             .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
         var coordinator =
-            new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+            new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
                 store, receiptService, bridge, evidence, transactions);
         var before = snapshotExecution(row);
         var failure = assertThrows(BizException.class, () -> coordinator.recover(row.payNo));
@@ -648,7 +648,7 @@ class PayTccExecutionStoreTest {
           when(bridge.recover(row.payNo))
               .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
           var coordinator =
-              new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
+              new com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl(
                   store, receiptService, bridge, evidence, transactions);
           var before = snapshotExecution(row);
           var failure = assertThrows(BizException.class, () -> coordinator.recover(row.payNo));

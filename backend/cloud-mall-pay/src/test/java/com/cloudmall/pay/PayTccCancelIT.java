@@ -1071,7 +1071,7 @@ class PayTccCancelIT {
     AtomicBoolean recoveryRunning =
         (AtomicBoolean)
             ReflectionTestUtils.getField(
-                application.getBean(com.cloudmall.pay.service.impl.PayTccRecoveryScheduler.class),
+                application.getBean(com.cloudmall.pay.service.impl.execution.PayTccRecoveryScheduler.class),
                 "running");
     LostBeginTransactions probe = new LostBeginTransactions(original);
     boolean ownsRecovery = false;
@@ -1334,11 +1334,11 @@ class PayTccCancelIT {
         org.springframework.test.util.AopTestUtils.getUltimateTargetObject(
             application.getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class));
     var original =
-        (com.cloudmall.pay.service.impl.PayTccExecutionStore)
+        (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore)
             ReflectionTestUtils.getField(coordinator, "executions");
     var intercepted =
         org.mockito.Mockito.mock(
-            com.cloudmall.pay.service.impl.PayTccExecutionStore.class,
+            com.cloudmall.pay.service.impl.execution.PayTccExecutionStore.class,
             org.mockito.AdditionalAnswers.delegatesTo(original));
     AtomicInteger decisionCalls = new AtomicInteger();
     org.mockito.Mockito.doAnswer(
@@ -2527,7 +2527,7 @@ class PayTccCancelIT {
     /** 原协调器及独立事务Store代理。 */
     private final Object coordinator;
 
-    private final com.cloudmall.pay.service.impl.PayTccExecutionStore original;
+    private final com.cloudmall.pay.service.impl.execution.PayTccExecutionStore original;
 
     /** 测试持有恢复调度权时不让定时器提前清算。 */
     private final AtomicBoolean recoveryRunning;
@@ -2570,17 +2570,17 @@ class PayTccCancelIT {
           org.springframework.test.util.AopTestUtils.getUltimateTargetObject(
               application.getBean(com.cloudmall.pay.service.PayTccCoordinatorService.class));
       original =
-          (com.cloudmall.pay.service.impl.PayTccExecutionStore)
+          (com.cloudmall.pay.service.impl.execution.PayTccExecutionStore)
               ReflectionTestUtils.getField(coordinator, "executions");
       recoveryRunning =
           (AtomicBoolean)
               ReflectionTestUtils.getField(
-                  application.getBean(com.cloudmall.pay.service.impl.PayTccRecoveryScheduler.class),
+                  application.getBean(com.cloudmall.pay.service.impl.execution.PayTccRecoveryScheduler.class),
                   "running");
       await(() -> recoveryRunning.compareAndSet(false, true), 10);
       var intercepted =
           org.mockito.Mockito.mock(
-              com.cloudmall.pay.service.impl.PayTccExecutionStore.class,
+              com.cloudmall.pay.service.impl.execution.PayTccExecutionStore.class,
               org.mockito.AdditionalAnswers.delegatesTo(original));
       org.mockito.Mockito.doAnswer(
               invocation -> {

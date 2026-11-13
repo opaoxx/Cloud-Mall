@@ -17,7 +17,7 @@ import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.impl.PayTccDeliveryScheduler;
 import com.cloudmall.pay.service.impl.PayTccDeliveryStore;
-import com.cloudmall.pay.service.impl.PayTccRecoveryScheduler;
+import com.cloudmall.pay.service.impl.execution.PayTccRecoveryScheduler;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;

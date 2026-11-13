@@ -1,7 +1,7 @@
 package com.cloudmall.pay.config;
 
 import com.cloudmall.pay.service.impl.PayTccDeliveryScheduler;
-import com.cloudmall.pay.service.impl.PayTccRecoveryScheduler;
+import com.cloudmall.pay.service.impl.execution.PayTccRecoveryScheduler;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Configuration;
 

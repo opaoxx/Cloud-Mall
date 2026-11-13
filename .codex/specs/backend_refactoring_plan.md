@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥及资源回执分组，后续整理其余TCC写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥、资源回执及执行协调/恢复分组，后续整理状态投影与交付/取消组件。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥及资源回执分组已完成，见第34至42节；其余TCC写编排待分批整理 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥、资源回执及执行协调/恢复分组已完成，见第34至43节；状态投影与交付/取消待整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2542,3 +2542,67 @@ Coordinator/RecoveryScheduler继续按各自开关条件装配，RecoverySchedul
 独立Compose项目`cloud-mall-refactor-pay-tcc-execution-20261113`，候选MySQL19962/10.254.228.0/24，预检后新卷；源库仅准备pay_record/pay_debit_intent/pay_callback_log及原dispatch/receipt/execution/Fence DDL，execution恢复列按原Mapper固定定义补齐，七张源表保持空。新表/恢复列只用于本轮实验源与owned库，生产DDL不变。URL只带allowPublicKeyRetrieval单参数；不会访问默认数据库。归档成功并核对事件/剩余schema后才移除自有容器/网络，卷保留。
 
 证据`target/backend-refactor-20261113/pay-tcc-execution`。四类去package/import/注释逐token相等，原22份引用文件只改地址/import，其余后端及README字节保持。完整格式化迁移类/包说明/新测试，引用文件仅整理import；八模块test-compile、全部单测/两项新装配/36项指定实库、Pay打包/Jar新旧路径/diff通过。备份后精确清除旧四class，不全量clean；临时index逆补丁验证父树恢复后提交及`refactor/pay-tcc-execution-complete-20261113`。README、旧pycache、忽略工件不入提交。下一步考虑公开状态投影；本轮不接真实TC/User资金或性能全链。
+
+### 43.3 实施与验证结果
+
+四类已迁入execution；原class/Bean名、public边界与业务语句保持，未新建接口或旧包兼容副本。22份引用文件（2生产、20测试）仅地址/import适配；Scheduler显式导入原包RollbackProjectionService，DeliveryStore仍调用同一个public退避函数。根包剩20类，其中13个TCC写组件待整理。四类5176个业务token与基线一致，1060份其他已跟踪后端文件及README逐字节保持；79份非Java运行文件没有旧FQN依赖。
+
+核心调用链复盘：`execute → claimOwned独立提交 → begin/原XID绑定 → Pay/User Try → decideOwned独立提交 → verifyDecisionSnapshot → 原方向TC调用 → 无上下文观察`；`recoverDue → 有界两阶段候选 → 独立租约claim → recover或projectClaimed → 原token finish`。读回身份、原决议、caller拒绝/本次context清理、原异常传播、锁序与事务位置保持。恢复租约仍不能授予begin/Try执行权，交付仅引用原退避函数。逐行复核本轮包声明、引用、新装配测试及入口调用顺序，并以token和既有实库矩阵核验原内核。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 公共及源码守卫 |
+| Pay原有全部单测 | 648 | 原执行/恢复/资金/回执/指标矩阵 |
+| PayTccExecutionWiringTest | 2 | 实际条件扫描、13个独立事务、调度注册/间隔/预算、caller保护和缺依赖拒绝 |
+| PayTccRecoveryScanMySqlIT全类 | 14 | 实际PayApplication NONE上下文、真实Store/Mapper与两个扫描器竞争、过滤/接管/退避/DDL/投影租约 |
+| PayLegacyRefundLedgerMySqlIT精确方法 | 22 | 原完整数据变异循环、实际Store代理与受控Coordinator依赖 |
+| 合计 | 711 | 76类，0失败、0错误、0跳过；实库36项 |
+
+基线673项单独归档。新增装配测试验证默认两Bean、仅coordinator三Bean、同时开启四Bean，默认5000ms与覆盖7000ms均恰一项fixedDelay/initialDelay任务；批量20、租约60秒、预算10秒保持。两个Store恰13个REQUIRES_NEW；Coordinator/Scheduler未增加事务代理。初始化器原DDL委托被核验后，带caller XID的execute/recover/扫描均在业务依赖调用前拒绝并保留caller XID。recovery缺少coordinator时按原DependsOn拒绝启动。TaskScheduler只登记Runnable，不运行任务，不使用真实TC工厂。
+
+首轮36项实库及原单测均通过，新增装配测试1项因TaskScheduler替身getClock返回null，在正initialDelay注册时发生NPE。只补Clock.systemDefaultZone后，定点2项通过，随后完整711项重新执行全绿；生产调度器、间隔、事务和状态机未改。首轮/定点/最终日志及XML分别保留，未累计为最终数量，也未掩盖首轮错误。
+
+恢复实库用实际PayApplication启动，但显式关闭Seata、Nacos发现/注册和TCC协调/自动恢复开关；手动构造的两个扫描器共用真实Store代理，只用受控recover替身。完整14项证明一次有效租约中仅一个扫描器调用recover、旧owner/过期token不能清新租约或改业务字段、过滤在LIMIT之前、失败头退避让后续批次推进、计数封顶不终止恢复、DDL重复执行和回滚投影租约保护。并非真实TC或User资金交付验收。
+
+旧巨型类本轮只执行以下22方法，原方法和循环全部保留：
+
+```text
+executionLookupAliasesCannotEnterLockedActions
+exactExecutionLookupKeepsWritesTerminalsAndMissingSemantics
+invalidExecutionObservationStatesRejectBeforeSqlWrite
+executionObservationHealthyWritesAndTerminalsKeepFacts
+executionObservationSqlZeroRollsBackWithoutReadback
+invalidExecutionRecoveryFinishTokensKeepAllFacts
+validExecutionRecoveryFinishTokensAndLeaseControlsRemainUnchanged
+ownedClaimAndBindKeepWinnerReplayAndPrebeginProgress
+ownedDecisionsKeepProgressAndRollbackMissingReadback
+ordinaryExecuteFailuresKeepOriginalClaimAndBoundSnapshots
+healthyExecuteAndOrdinaryFailureKeepOriginalDecisions
+ownedExecutionRejectsContextDriftAtCallBoundaries
+ownedExecutionKeepsSameContextAndConflictPriority
+recoveryContextDriftStopsAndCleansOwnedThread
+recoveryContextKeepsEmptyFlowAndAmbientCaller
+decisionSendRejectsCommittedSnapshotAndDirectionDrift
+decisionSendKeepsLatestTerminalAndReadOnlyProgress
+lostDecisionResponsesRespectExecutionAndPaymentSnapshots
+changedExecutionAnchorsRejectReadBasedObservation
+matchingSnapshotKeepsCurrentProgressAndTransaction
+invalidOwnedExecutionSourcesStopRecoveryBeforeSideEffects
+matchingOwnedExecutionSourcesKeepPayloadAndPaymentProgress
+```
+
+29份Java按约定完整/仅import格式化并检查；修正测试后八模块test-compile、Pay打包与diff通过。Jar187个Pay生产class与最终classes逐字节一致，四类新路径存在，旧路径及测试夹具无残留；旧四class先备份再精确移除，未全量clean。
+
+### 43.4 证据、回退与后续
+
+方案提交778b068c；基线标签`refactor/pay-tcc-execution-baseline-20261113`，完成标签`refactor/pay-tcc-execution-complete-20261113`。证据入口`target/backend-refactor-20261113/pay-tcc-execution/verification.json`，含前后/首轮/定点XML、22方法清单、源码/格式/构建/Jar、源表/建删事件及临时index回退证明。
+
+独立MySQL8.0.46最终七张源表均0行。首轮和最终轮各两个owned库，共4对创建/删除事件，与最终schema清单一致；源表指纹断言、应用关闭及旧矩阵有界池关闭通过。本轮没有新增失败数据库，首轮错误仅在无数据库的调度替身。自有容器/网络归档后移除、mysql_data卷保留，默认实例和历史失败卷未动；原bugfix_log.md记录错误根因、修复与完整回归结果。
+
+```powershell
+git revert refactor/pay-tcc-execution-complete-20261113
+```
+
+临时index用no-renames精确路径逆补丁恢复父树，真实index及README保持。实际回退后精确清理execution迁入四类型及新增装配测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序回退。README、两个旧pycache及忽略工件不入提交。
+
+下一步整理公开支付状态投影的两个组件，再按依赖梳理交付/取消及TCC公开编排。Pay整体尚未收尾；本轮无真实TC/RM、User资金RPC、Gateway/Nacos全链或压测结论。

@@ -19,7 +19,7 @@ import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
-import com.cloudmall.pay.service.impl.PayTccExecutionStore;
+import com.cloudmall.pay.service.impl.execution.PayTccExecutionStore;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
