@@ -2075,3 +2075,23 @@ git revert refactor/pay-creation-complete-20261113
 临时index验证逆补丁恢复父树且真实index保持；实际回退后按本轮四个新生产类型和三个新测试类（含内部class）精确清理target残留、重编译，不全量clean或回退运行数据。后续依赖须先逆序处理。README原修改、两个旧pycache、bug台账与忽略证据不混入提交。
 
 下一步以模拟支付成功入口为候选，先梳理其与回调共享的持久模式核验、Legacy/TCC分流、结果响应映射及支付记录读取，再冻结拆分范围；沿用本轮共享监视器与原异常/状态事实。尚未完成Pay整个模块，本轮不宣称真实TC/User/Order/Stock资金链、Gateway Bearer或全商城验证通过。
+
+## 36. Pay模拟成功入口与共用处理规则（2026-11-13）
+
+### 36.1 范围与兼容基线
+
+基线3d86f278，主Agent单独评审/实施。新增PaySuccessController、PaySuccessService、PaySuccessServiceImpl承接POST `/api/payments/{payNo}/mock-success`；Controller传AuthContext::requireUserId，Service获取原PayWriteMonitor后读取身份。返回PayVO并沿原ApiResponse.ok包装，不新增Transactional、重试、调度或远程调用。创建/回调继续共用同一锁，fail/查询不加锁；调用者已有事务不被主动挂起。
+
+入口顺序冻结为：锁→身份→按payNo完整映射/首条404→归属403→再次查询支付且必须恰一条→读取原意图→精确持久模式规则→原MOCK_SUCCESS指标→SUCCESS直接返回旧视图、FAILED/REFUNDED原409→按原协议调用一次既有编排→结果映射。TCC且存在任意Legacy意图均503；非TCC只接受精确LEGACY，已有意图也必须精确LEGACY。持久SQL null、空串/小写/尾空格不能回落Legacy；TCC入口缺失503、不回落。终态快捷返回仍在模式核验和指标之后；不加首读/次读快照一致性或新业务校验。
+
+包内新增无状态PayProcessingSupport集中原ownedForUser/find/paymentMode/initiate/tccEntry/结果映射，参数显式接受原Mapper/编排依赖，不注册新Bean或事务。旧fail/callback保留入口和方法体顺序，通过私有委托复用这些规则；结果SUCCESS仍重读支付，FAILED/REFUNDED仍PAYMENT_FAILED/409，REFUND_PENDING为原202，其余含null一律原未知202。原私有ownedForUpdate已无调用；随共享读取迁移删除它和不再使用的findBy/toView，不保留死代码或复制模式算法。创建/查询自己的映射与SQL不改。
+
+旧PayController/PayServiceImpl/空接口及构造器暂留给失败/回调。适配BalancePaymentContractTest、PayTccPublicRoutingTest、指标夹具/真实指标上下文、创建/查询装配测试的实际成功入口；不引入混合测试门面。原M2只适配新调用/Bean/源码证据类型，固定13307安全门保持，继续不在本轮隔离环境运行。资金编排Service、Mapper/SQL、配置、PO/VO、HTTP/Feign/JSON、MQ/Redis及现有协议标识不变。
+
+### 36.2 验证与提交
+
+先提交方案并建立refactor/pay-success-baseline-20261113。新增成功HTTP契约先对旧入口运行，再仅替换测试装配复用断言，覆盖身份/归属/首读异常、次读唯一性、模式拒绝、终态指标顺序、Legacy/TCC唯一调用、原结果/异常与成功重读、金额/时间/null。新Spring验证成功Service无事务代理、锁内鉴权/调用、保留调用者事务；上轮创建屏障与路由唯一性测试继续约束三个写入口共享监视器。全部Common/Pay *Test和八模块test-compile、Pay打包、Java实际格式化及diff检查必须通过；核心迁移方法逐token对照并记录调用链。
+
+补充独立PaySuccessMySqlIT验证实际Mapper读出的模式/意图、异常与终态拒绝先于业务驱动、原成功重读。只有编排为受控替身，不代表真实扣款或TCC资金闭环。新Compose项目cloud-mall-refactor-pay-success-20261113，仅MySQL19955、候选子网10.254.235.0/24；先检查无冲突，用全新卷与空Pay源表，每例UUID库。成功核对后删除测试库，失败归档保留；结束归档并移除自有容器/网络，卷保留。默认和历史资源不动，旧M2五项不算本轮通过。
+
+证据入口target/backend-refactor-20261113/pay-success；方案/实施分开提交，完成标签refactor/pay-success-complete-20261113，临时index逆补丁验证恢复父树。README原修改、两个旧pycache及忽略证据不混入提交，Git不恢复运行数据；不运行完整TC/User/Order/Stock交付或性能矩阵。
