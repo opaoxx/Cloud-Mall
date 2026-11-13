@@ -55,7 +55,9 @@ class BackendP1RulesTest {
         source("cloud-mall-order", "OrderStateController.java")
             .contains("@PathVariable(\"orderNo\")"));
     assertTrue(order.contains("TIMEOUT_DLQ"));
-    assertTrue(order.contains("OrderTableRouting.tableFromOrderNo"));
+    assertTrue(
+        source("cloud-mall-order", "OrderSeckillCreationServiceImpl.java")
+            .contains("OrderTableRouting.tableFromOrderNo"));
     assertTrue(source("cloud-mall-order", "OrderTableRouting.java").contains("YearMonth.parse"));
   }
 

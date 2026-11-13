@@ -10,18 +10,32 @@ import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.impl.OrderCreationServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.cloudmall.order.service.impl.OrderSeckillAdmissionServiceImpl;
+import com.cloudmall.order.service.impl.OrderSeckillCreationServiceImpl;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderStateServiceImpl;
 import com.cloudmall.order.service.impl.OrderWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.ZoneOffset;
+import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 旧混合算法矩阵的测试装配，创建调用真实实现；不注册Spring Bean、不进入生产Jar。 旧夹具的外层事务保留在此测试入口，实际生产代理与锁顺序由直接装配生产类的测试验证。 */
 public class OrderTestService extends OrderServiceImpl {
+  /** 旧创建/秒杀矩阵可替换的商品事实依赖。 */
+  @Autowired private ProductClient products;
+
+  /** 旧创建/消息矩阵可替换的outbox依赖。 */
+  @Autowired private OrderOutboxMapper orderOutboxMapper;
+
+  /** 旧秒杀矩阵可替换的幂等与冲突持久层。 */
+  @Autowired private SeckillOrderDedupMapper seckillOrderDedupMapper;
+
+  /** 旧秒杀矩阵可替换的恢复状态持久层。 */
+  @Autowired private SeckillMessageRecoveryMapper seckillMessageRecoveryMapper;
+
   /** 旧混合夹具的Stock依赖，继续允许历史测试替换。 */
   @Autowired private StockClient stock;
 
@@ -54,7 +68,8 @@ public class OrderTestService extends OrderServiceImpl {
       CartClient cart,
       OrderSqlMapper orders,
       ObjectMapper mapper) {
-    super(products, orders, mapper);
+    super(orders, mapper);
+    this.products = products;
     this.stock = stock;
     this.users = users;
     this.cart = cart;
@@ -84,6 +99,19 @@ public class OrderTestService extends OrderServiceImpl {
     return new OrderSeckillAdmissionController(
             new OrderSeckillAdmissionServiceImpl(stock, users, field("mapper", ObjectMapper.class)))
         .seckill(key, request);
+  }
+
+  /** 旧混合矩阵保留外层事务，消费算法仅调用实际新实现。 */
+  @Transactional
+  public void consumeSeckill(Map<String, Object> event) {
+    new OrderSeckillCreationServiceImpl(
+            products,
+            field("orderSqlMapper", OrderSqlMapper.class),
+            field("mapper", ObjectMapper.class),
+            orderOutboxMapper,
+            seckillOrderDedupMapper,
+            seckillMessageRecoveryMapper)
+        .createFromMessage(event);
   }
 
   private <T> T field(String name, Class<T> type) {

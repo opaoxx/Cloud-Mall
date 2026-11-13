@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理、普通创建、状态迁移和秒杀受理Service提取，消息消费职责待继续。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理、普通创建、状态迁移、秒杀受理和秒杀消息落单Service提取，超时消费及旧继承入口待继续。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、查询、Cart清理、普通创建、状态迁移及秒杀受理切片完成，见第23至29节；消息消费职责待继续 |
+| Order | 进行中 | Seata演练、查询、Cart清理、普通创建、状态迁移、秒杀受理及消息落单切片完成，见第23至30节；超时消费及旧继承入口待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1698,3 +1698,45 @@ git revert refactor/order-seckill-admission-complete-20261113
 各实库组串行运行，保留原native清理门及失败证据，不动历史失败卷。结束核对来源表为空、成功UUID库清理、消息队列清空，归档日志/XML/本轮native及容器元数据，再仅移除自有容器/网络，新MySQL/Rabbit卷保留。
 
 验收门包括原六方法及剩余算法对照、原测试方法保留、未涉及源码/资源指纹、实际Java格式化、Order打包、八模块test-compile、Jar监听器/旧入口检查、git diff --check及README原修改保持。完成标签 `refactor/order-seckill-creation-complete-20261113`；临时Git index逆补丁恢复父树，保留真实工作树和暂存条目，不全量clean/reset。Git不回退运行数据；未测的真实Product/Stock/TC/Nacos、商城与性能范围如实记录。下一步仅剩超时消费及旧继承入口收尾，其他Order辅助服务分组随后独立盘点。
+
+### 30.3 实施结果与调用链
+
+三个新生产类型已落盘：监听器只委托接口，秒杀落单实现300行承接原业务方法及五个辅助方法；旧混合实现390→138行，只持有超时消费所需的订单/动作Mapper和ObjectMapper。测试夹具保留可替换字段与原事务适配，原算法矩阵继续调用真实新实现。Runtime直接装配新监听器/Service，验证监听器不代理、Service通过事务代理，并将本轮证据字段准确记为actualListenerClass。
+
+逐行复盘的实际调用链为：`原队列/转换器 → Map消息 → 独立监听器 → Service开启原REQUIRED事务 → 数值身份/legacy/指纹 → claim/find → 冲突证据或已提交重放 → 原时间/月门 → Product身份/价格/metadata → 订单/明细/timeout outbox → dedup恰1行COMMITTED → 匹配recovery完成 → 事务提交 → 返回监听容器AUTO确认`。业务异常沿原catch保留cause，Error不捕获；提交失败也传播到监听容器。原三次重试耗尽后拒绝并进入原DLX，没有手工ACK、额外Stock调用或独立数据库事务。
+
+| 验证范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 路由源码守卫改为检查新落单实现，其他规则保持 |
+| Order单测 | 337 | 原335项及新增2项监听委托/实际AMQP注册转换测试；秒杀队列恰一个端点，原超时端点仍在 |
+| OrderCreationPrecisionMySqlIT | 72 | 整类回归，包含秒杀时间、商品/金额/metadata、无损数值身份、冲突原文、提交结果、恢复身份及普通创建/Cart矩阵 |
+| OrderSeckillMessageMySqlRabbitIT | 4 | 真实MySQL/Rabbit/事务代理、转换器、原重试/DLX和AUTO确认；首次提交/重复、商品故障三次回滚和死信、晚期dedup写失败整体回滚及原消息重放、冲突证据 |
+| ShardingRuntime精确单方法 | 1 | 仅explicitModeUsesProductionMappersAfterBootstrapAndAudit；真实分片数据源/Mapper与新业务代理，普通/秒杀落单及原恢复扫描 |
+| 合计 | 439 | 69个类，最终去重报告0失败、0错误、0跳过 |
+
+真实Rabbit用例加载原application.yml重试参数，由Boot原factory configurer装配容器，不缩短1s/2s退避。实测商品失败恰三次调用、各次均在数据库事务内，订单/明细/outbox/claim均回滚，原消息保留类型头及x-death rejected后进入死信；纠正Product替身后同一死信重投成功。dedup更新触发器故障同样三次整体回滚，移除本例触发器后原事件成功。正常消息保留上海毫秒和30分钟期限；COMMITTED重放缺时间仍不查询Product；非法数值身份只提交原冲突证据。
+
+本轮失败与复核分别记录，未把最终通过写成从未失败：
+
+- Common原源码守卫仍要求旧实现直接调用月份路由，迁移后首轮失败；断言改指新Service并保留YearMonth.parse检查，随后完整回归通过。
+- 新消息IT首轮2项断言把原内存LongNode与wire JSON解析后的IntNode直接比较，文本实际一致；改为两侧均按原序列化字节解析后比较完整JSON，未改消息转换器或业务。全类4项复跑通过，两个首轮失败UUID库按新IT保留门留存。
+- 原72项创建实库首轮仅wrongStockOrderCannotFinishIntentAndMatchingFactCanRecoverLater失败，第二次扫描未进入认领，状态仍RESERVE_UNKNOWN。该方法和对应生产恢复代码本轮均未修改；独立同方法及整类加全部单测重跑均通过。首轮没有记录扫描参数与行值的完整时钟证据，根因仍未确认，不宣称修复了时钟或恢复业务。原夹具按既有AfterEach清理其库，失败XML/完整日志及单例输出保留。
+- 只读实验预检兼容了Docker host/none网络空IPAM配置。隔离Rabbit原3秒CLI健康探针持续超时而标记unhealthy；独立原ping约5.17秒exit0，仅诊断进程设置2个调度器时约0.53秒exit0，管理alarms为200/ok，实际AMQP全类通过。没有修改broker、基础Compose或宿主网络，不把该探针标志写成healthy。
+
+六个迁移方法按已声明改名和注解归属变化共1612个token一致；剩余超时算法对照一致，207份其他Order原源码/资源指纹不变。三个适配测试文件原方法保留。九个Java完成实际格式化（大Runtime仅改动行）、diff检查；Order打包及八模块test-compile通过。Jar三个新类型与最终class一致，无测试夹具；旧类不含秒杀方法/辅助方法或四个专属依赖，新Service不含HTTP/鉴权上下文/Rabbit监听注解/共享写锁，仍保留原事务注解。
+
+### 30.4 证据、资源、回退与后续
+
+证据入口 `target/backend-refactor-20261113/order-seckill-creation/verification.json`。同目录保留69份最终XML、各次失败/复跑日志、三个失败XML、方法对照、格式化和Jar检查、16份本轮Runtime native工件。Runtime的class-finish记录created=deleted=1、errors为空、无需保留失败库；只运行一个方法，不把class-start的声明方法总数作执行数。
+
+MySQL8.0.46七张来源表最终均精确0行；所有成功UUID库已清理。保留两个首轮消息断言失败库 `order_seckill_msg_732acb2245634319ad5ea1c754a9ce5b` 和 `order_seckill_msg_ae57844dd14d43d082f7c18723755186`，已只读导出为preserved-failed-fixtures.sql并记录SHA，数据库仍在保留卷中。Rabbit五个队列ready/unacked/consumer均为0；实验容器/网络已移除，项目mysql_data和rabbit_data卷保留。历史实验卷及失败现场未触碰，README原有修改逐字节保持，两个旧pycache不纳入提交。
+
+方案提交/基线 `5c6d17e7`，标签 `refactor/order-seckill-creation-baseline-20261113`；完成标签 `refactor/order-seckill-creation-complete-20261113`。临时Git index验证本轮逆补丁恢复父提交完整树，真实index和工作树保持。
+
+```powershell
+git revert refactor/order-seckill-creation-complete-20261113
+```
+
+实际回退后精确清理三个新生产类型与OrderSeckillMessageListenerTest/OrderSeckillMessageMySqlRabbitIT（含嵌套类）的class残留，再编译恢复后的旧实现/夹具；不清空target证据。后续依赖按逆序处理，Git不恢复数据卷或忽略工件。
+
+下一步提取超时消息解析/关单Service并移除旧OrderController继承和空OrderService；随后盘点Order辅助实现的职责分组。本轮没有真实Product/Stock远端、TC/Nacos、完整商城或性能验证，Order模块整体尚未完成。

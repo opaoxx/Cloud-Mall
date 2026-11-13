@@ -17,8 +17,10 @@ import com.cloudmall.order.domain.po.*;
 import com.cloudmall.order.domain.vo.*;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
+import com.cloudmall.order.service.OrderSeckillCreationService;
 import com.cloudmall.order.service.impl.*;
 import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
+import com.cloudmall.order.service.impl.OrderSeckillCreationServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import io.seata.core.context.RootContext;
@@ -648,8 +650,10 @@ class OrderShardingRuntimeMySqlIT {
     }
 
     void exercise(Runtime runtime) throws Exception {
-      OrderController controller = runtime.context.getBean(OrderController.class);
-      assertTrue(AopUtils.isAopProxy(controller));
+      OrderSeckillMessageListener listener =
+          runtime.context.getBean(OrderSeckillMessageListener.class);
+      assertFalse(AopUtils.isAopProxy(listener));
+      assertTrue(AopUtils.isAopProxy(runtime.context.getBean(OrderSeckillCreationService.class)));
       runtime.probe.operationStarted = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
       String key = "17ej-normal-" + UUID.randomUUID();
       OrderVO normal;
@@ -734,10 +738,10 @@ class OrderShardingRuntimeMySqlIT {
       event.put("eventId", SeckillRequestFingerprint.eventId(seckillNo));
       event.put("requestHash", SeckillRequestFingerprint.hash(1L, 7L, 7L, 1, address));
       runtime.probe.operationStarted = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
-      controller.consumeSeckill(event);
+      listener.consumeSeckill(event);
       Map<String, List<Map<String, Object>>> first = rows();
       int products = runtime.probe.products.get();
-      controller.consumeSeckill(event);
+      listener.consumeSeckill(event);
       assertEquals(products, runtime.probe.products.get());
       assertEquals(first, rows());
       try {
@@ -823,8 +827,8 @@ class OrderShardingRuntimeMySqlIT {
               facts(),
               "originalFourInitialScans",
               runtime.probe.scans,
-              "actualControllerClass",
-              controller.getClass().getName()));
+              "actualListenerClass",
+              listener.getClass().getName()));
       assertClean();
     }
 
@@ -1169,6 +1173,8 @@ class OrderShardingRuntimeMySqlIT {
           OrderStockActionRecovery.class,
           SeckillMessageRecovery.class,
           OrderController.class,
+          OrderSeckillMessageListener.class,
+          OrderSeckillCreationServiceImpl.class,
           OrderStateController.class,
           OrderStateServiceImpl.class,
           OrderCreationController.class,
@@ -1266,6 +1272,8 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(fixture.database, actual.getCatalog());
       }
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderSeckillMessageListener.class)));
+      assertTrue(AopUtils.isAopProxy(context.getBean(OrderSeckillCreationService.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderStateController.class)));
       assertTrue(
           AopUtils.isAopProxy(
