@@ -9,16 +9,22 @@ import java.time.LocalDateTime;
 public class OrderStockActionPO {
   /** 动作主键。 */
   @TableId public Long id;
+
   /** 唯一订单号。 */
   public String orderNo;
+
   /** CONFIRM 或 ROLLBACK。 */
   public String actionType;
+
   /** 传给库存服务的稳定操作键。 */
   public String operationKey;
+
   /** PENDING、UNKNOWN、SUCCEEDED 或 CONFLICT。 */
   public String status;
+
   /** 已领取的处理次数。 */
   public Integer attempts;
+
   /** 下次处理时间。 */
   public LocalDateTime nextRetryAt;
 }

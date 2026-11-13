@@ -22,13 +22,16 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class OrderRoutingConfiguration {
   /** Original default routing remains unchanged. */
   static final String DYNAMIC_MONTHLY = "dynamic-monthly";
+
   /** Only this explicit opt-in permits the published logical snapshot. */
   static final String SHARDING_MONTHLY = "sharding-monthly";
+
   /** Fixed safe rejection category, containing no connection settings. */
   static final String UNSUPPORTED = "ORDER_ROUTING_UNSUPPORTED";
 
   /** Registers a metadata-only guard before application singleton construction. */
-  @Bean public static BeanFactoryPostProcessor orderRoutingProfileGuard(Environment environment) {
+  @Bean
+  public static BeanFactoryPostProcessor orderRoutingProfileGuard(Environment environment) {
     return beanFactory -> {
       validate(environment);
       if (SHARDING_MONTHLY.equals(mode(environment))) rejectConflictingBindings(beanFactory);
@@ -42,14 +45,26 @@ public class OrderRoutingConfiguration {
 
   /** Rejects legacy profiles, unknown modes and unsupported automatic Seata combinations. */
   static void validate(Environment environment) {
-    boolean oldProfile = Arrays.stream(environment.getActiveProfiles().length == 0
-        ? environment.getDefaultProfiles() : environment.getActiveProfiles())
-        .map(profile -> profile == null ? "" : profile.trim().toLowerCase(Locale.ROOT)).anyMatch("sharding"::equals);
+    boolean oldProfile =
+        Arrays.stream(
+                environment.getActiveProfiles().length == 0
+                    ? environment.getDefaultProfiles()
+                    : environment.getActiveProfiles())
+            .map(profile -> profile == null ? "" : profile.trim().toLowerCase(Locale.ROOT))
+            .anyMatch("sharding"::equals);
     String selected = mode(environment);
-    if (oldProfile || (!DYNAMIC_MONTHLY.equals(selected) && !SHARDING_MONTHLY.equals(selected))) throw unsupported();
-    if (SHARDING_MONTHLY.equals(selected) && environment.getProperty("spring.main.allow-bean-definition-overriding", Boolean.class, false)) throw unsupported();
-    if (SHARDING_MONTHLY.equals(selected) && environment.getProperty("seata.enabled", Boolean.class, true)
-        && !"false".equalsIgnoreCase(environment.getProperty("seata.enable-auto-data-source-proxy", "").trim())) throw unsupported();
+    if (oldProfile || (!DYNAMIC_MONTHLY.equals(selected) && !SHARDING_MONTHLY.equals(selected)))
+      throw unsupported();
+    if (SHARDING_MONTHLY.equals(selected)
+        && environment.getProperty(
+            "spring.main.allow-bean-definition-overriding", Boolean.class, false))
+      throw unsupported();
+    if (SHARDING_MONTHLY.equals(selected)
+        && environment.getProperty("seata.enabled", Boolean.class, true)
+        && !"false"
+            .equalsIgnoreCase(
+                environment.getProperty("seata.enable-auto-data-source-proxy", "").trim()))
+      throw unsupported();
   }
 
   /** Uses definition types only; neither getBean nor getConnection is permitted here. */
@@ -58,22 +73,31 @@ public class OrderRoutingConfiguration {
     names.addAll(Arrays.asList(factory.getSingletonNames()));
     for (String name : names) {
       Class<?> type = factory.getType(name, false);
-      boolean business = type != null && (DataSource.class.isAssignableFrom(type)
-          || JdbcTemplate.class.isAssignableFrom(type) || PlatformTransactionManager.class.isAssignableFrom(type));
+      boolean business =
+          type != null
+              && (DataSource.class.isAssignableFrom(type)
+                  || JdbcTemplate.class.isAssignableFrom(type)
+                  || PlatformTransactionManager.class.isAssignableFrom(type));
       if (business) {
         if (!factory.containsBeanDefinition(name)) throw unsupported();
         var definition = factory.getBeanDefinition(name);
         String configuration = definition.getFactoryBeanName();
-        Class<?> configurationType = configuration == null ? null : factory.getType(configuration, false);
-        if (configurationType == null || !OrderShardingRuntimeConfiguration.class.isAssignableFrom(configurationType)
+        Class<?> configurationType =
+            configuration == null ? null : factory.getType(configuration, false);
+        if (configurationType == null
+            || !OrderShardingRuntimeConfiguration.class.isAssignableFrom(configurationType)
             || !name.equals(definition.getFactoryMethodName())
-            || !Set.of("dataSource","jdbcTemplate","transactionManager").contains(name)) throw unsupported();
+            || !Set.of("dataSource", "jdbcTemplate", "transactionManager").contains(name))
+          throw unsupported();
       } else if (type == null && factory.containsBeanDefinition(name)) {
         String className = factory.getBeanDefinition(name).getBeanClassName();
         if (className != null) {
           try {
-            if (FactoryBean.class.isAssignableFrom(Class.forName(className, false, factory.getBeanClassLoader()))) throw unsupported();
-          } catch (ClassNotFoundException unreadable) { throw unsupported(); }
+            if (FactoryBean.class.isAssignableFrom(
+                Class.forName(className, false, factory.getBeanClassLoader()))) throw unsupported();
+          } catch (ClassNotFoundException unreadable) {
+            throw unsupported();
+          }
         } else throw unsupported();
       }
     }
@@ -82,7 +106,8 @@ public class OrderRoutingConfiguration {
   /** Selects the original Repository only when the same mode parser selects dynamic routing. */
   public static final class DynamicMonthly implements Condition {
     /** Evaluates metadata without creating any data source. */
-    @Override public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+    @Override
+    public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
       return DYNAMIC_MONTHLY.equals(mode(context.getEnvironment()));
     }
   }
@@ -90,10 +115,13 @@ public class OrderRoutingConfiguration {
   /** Selects only the explicit logical production graph. */
   public static final class ShardingMonthly implements Condition {
     /** Evaluates metadata without creating any data source. */
-    @Override public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+    @Override
+    public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
       return SHARDING_MONTHLY.equals(mode(context.getEnvironment()));
     }
   }
 
-  private static IllegalStateException unsupported() { return new IllegalStateException(UNSUPPORTED); }
+  private static IllegalStateException unsupported() {
+    return new IllegalStateException(UNSUPPORTED);
+  }
 }

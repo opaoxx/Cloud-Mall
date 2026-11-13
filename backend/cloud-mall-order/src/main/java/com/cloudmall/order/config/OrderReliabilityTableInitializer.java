@@ -8,8 +8,8 @@ import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import javax.annotation.PostConstruct;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.env.Environment;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 /** 为已有本地数据库准备订单预扣恢复与 outbox 表。 */
@@ -25,20 +25,28 @@ public class OrderReliabilityTableInitializer {
   /** 支付或关单后的库存动作持久层。 */
   private final OrderStockActionMapper orderStockActionMapper;
 
+  /** 准备秒杀消费幂等表及不可变冲突原文证据表的持久层。 */
   private final SeckillOrderDedupMapper seckillOrderDedupMapper;
 
+  /** 准备秒杀死信载荷、恢复状态及租约台账的持久层。 */
   private final SeckillMessageRecoveryMapper seckillMessageRecoveryMapper;
 
   /** Spring-only mode; null retains the original direct-construction contract. */
   private Environment routingEnvironment;
+
   /** Optional only for dynamic routing; explicit mode requires a completed bootstrap. */
   private ObjectProvider<OrderShardingBootstrap> bootstrapProvider;
 
   /** Connects Spring lifecycle selection while retaining the original constructor. */
   @Autowired
-  public OrderReliabilityTableInitializer(OrderReservationIntentMapper intents, OrderOutboxMapper outbox,
-      OrderStockActionMapper actions, SeckillOrderDedupMapper dedup, SeckillMessageRecoveryMapper recovery,
-      Environment environment, ObjectProvider<OrderShardingBootstrap> provider) {
+  public OrderReliabilityTableInitializer(
+      OrderReservationIntentMapper intents,
+      OrderOutboxMapper outbox,
+      OrderStockActionMapper actions,
+      SeckillOrderDedupMapper dedup,
+      SeckillMessageRecoveryMapper recovery,
+      Environment environment,
+      ObjectProvider<OrderShardingBootstrap> provider) {
     this(intents, outbox, actions, dedup, recovery);
     this.routingEnvironment = environment;
     this.bootstrapProvider = provider;
@@ -58,7 +66,7 @@ public class OrderReliabilityTableInitializer {
     this.seckillMessageRecoveryMapper = seckillMessageRecoveryMapper;
   }
 
-  /** 以幂等 DDL 准备两张订单可靠性表。 */
+  /** 通过原Mapper准备意图、outbox、库存动作及秒杀幂等/恢复表，沿用既有分片初始化边界。 */
   @PostConstruct
   public void prepareTables() {
     if (explicitBootstrap() != null) return;
@@ -68,14 +76,19 @@ public class OrderReliabilityTableInitializer {
     orderOutboxMapper.ensureTable();
     // 3. 准备订单终态后的库存动作恢复表。
     orderStockActionMapper.ensureTable();
+    // 4. 准备秒杀消费幂等与冲突证据表。
     seckillOrderDedupMapper.ensureTable();
+    // 5. 准备秒杀死信恢复台账。
     seckillMessageRecoveryMapper.ensureTable();
   }
 
   /** New mode cannot silently fall back to business-connection DDL. */
   private OrderShardingBootstrap explicitBootstrap() {
-    if (routingEnvironment == null || !OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(routingEnvironment))) return null;
-    OrderShardingBootstrap bootstrap = bootstrapProvider == null ? null : bootstrapProvider.getIfAvailable();
+    if (routingEnvironment == null
+        || !OrderRoutingConfiguration.SHARDING_MONTHLY.equals(
+            OrderRoutingConfiguration.mode(routingEnvironment))) return null;
+    OrderShardingBootstrap bootstrap =
+        bootstrapProvider == null ? null : bootstrapProvider.getIfAvailable();
     if (bootstrap == null) throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
     bootstrap.requireReady();
     return bootstrap;

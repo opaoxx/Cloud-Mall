@@ -127,6 +127,14 @@ public class SeckillOrderDedupMapper {
         idempotencyKey);
   }
 
+  /**
+   * 按原用户和幂等键将PROCESSING记录更新为COMMITTED。
+   *
+   * @param userId 原消费用户
+   * @param idempotencyKey 原幂等键
+   * @param now 调用方提供的更新时间
+   * @return SQL影响行数，由调用方检查是否恰好为1
+   */
   public int markCommitted(long userId, String idempotencyKey, LocalDateTime now) {
     return jdbcTemplate.update(
         "UPDATE seckill_order_dedup SET status='COMMITTED',updated_at=? "
@@ -136,6 +144,15 @@ public class SeckillOrderDedupMapper {
         idempotencyKey);
   }
 
+  /**
+   * 将请求指纹不同的原PROCESSING记录标记为CONFLICT。
+   *
+   * @param userId 原消费用户
+   * @param idempotencyKey 原幂等键
+   * @param requestHash 当前消息的请求指纹，用于原SQL差异条件
+   * @param now 调用方提供的更新时间
+   * @return SQL影响行数，不改变不满足条件的记录
+   */
   public int markConflict(
       long userId, String idempotencyKey, String requestHash, LocalDateTime now) {
     return jdbcTemplate.update(

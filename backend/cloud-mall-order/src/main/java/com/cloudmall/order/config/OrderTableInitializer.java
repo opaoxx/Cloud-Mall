@@ -7,12 +7,12 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.PostConstruct;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.env.Environment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -43,12 +43,16 @@ public class OrderTableInitializer {
 
   /** Spring-only mode; null retains the original direct-construction contract. */
   private Environment routingEnvironment;
+
   /** Optional only for dynamic routing; explicit mode requires a completed bootstrap. */
   private ObjectProvider<OrderShardingBootstrap> bootstrapProvider;
 
   /** Connects Spring lifecycle selection while retaining the original constructor. */
   @Autowired
-  public OrderTableInitializer(OrderSqlMapper mapper, Environment environment, ObjectProvider<OrderShardingBootstrap> provider) {
+  public OrderTableInitializer(
+      OrderSqlMapper mapper,
+      Environment environment,
+      ObjectProvider<OrderShardingBootstrap> provider) {
     this(mapper);
     this.routingEnvironment = environment;
     this.bootstrapProvider = provider;
@@ -100,8 +104,11 @@ public class OrderTableInitializer {
 
   /** New mode cannot silently fall back to business-connection DDL. */
   private OrderShardingBootstrap explicitBootstrap() {
-    if (routingEnvironment == null || !OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(routingEnvironment))) return null;
-    OrderShardingBootstrap bootstrap = bootstrapProvider == null ? null : bootstrapProvider.getIfAvailable();
+    if (routingEnvironment == null
+        || !OrderRoutingConfiguration.SHARDING_MONTHLY.equals(
+            OrderRoutingConfiguration.mode(routingEnvironment))) return null;
+    OrderShardingBootstrap bootstrap =
+        bootstrapProvider == null ? null : bootstrapProvider.getIfAvailable();
     if (bootstrap == null) throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
     bootstrap.requireReady();
     return bootstrap;

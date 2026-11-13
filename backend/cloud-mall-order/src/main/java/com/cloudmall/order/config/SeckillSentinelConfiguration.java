@@ -19,71 +19,87 @@ import java.util.List;
 import java.util.Properties;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Registers the local fail-safe rules used before Nacos rules become available. */
 @Configuration
 public class SeckillSentinelConfiguration {
   /** 订单秒杀提交的 Sentinel 资源名。 */
   public static final String RESOURCE = "seckill-order-submit";
+
   /** 订单普通流控规则的 Nacos Data ID。 */
   private static final String FLOW_DATA_ID = "cloudmall-order-flow-rules";
+
   /** 订单热点参数规则的 Nacos Data ID。 */
   private static final String PARAM_FLOW_DATA_ID = "cloudmall-order-param-flow-rules";
+
   /** 开发环境规则组。 */
   private static final String GROUP = "CLOUDMALL_DEV";
+
   /** 规则加载和回退日志。 */
   private static final Logger log = LoggerFactory.getLogger(SeckillSentinelConfiguration.class);
 
   /** 每个订单实例的默认秒杀总 QPS。 */
   @Value("${cloudmall.order.seckill.sentinel.flow-qps:20}")
   private int defaultFlowQps = 20;
+
   /** 同一用户的默认秒杀 QPS。 */
   @Value("${cloudmall.order.seckill.sentinel.user-qps:20}")
   private int defaultUserQps = 20;
+
   /** 同一活动的默认秒杀 QPS。 */
   @Value("${cloudmall.order.seckill.sentinel.activity-qps:20}")
   private int defaultActivityQps = 20;
+
   /** 本服务创建的 Nacos 配置客户端。 */
   private volatile ConfigService configService;
+
   /** 普通流控规则的订阅状态。 */
   private volatile boolean flowSubscribed;
+
   /** 热点参数规则的订阅状态。 */
   private volatile boolean paramSubscribed;
 
   /** 普通流控规则变更时的验证与发布回调。 */
-  private final AbstractListener flowListener = new AbstractListener() {
-    @Override
-    public void receiveConfigInfo(String content) {
-      applyFlowRules(content);
-    }
-  };
+  private final AbstractListener flowListener =
+      new AbstractListener() {
+        /** 按原校验流程接收订单秒杀流控规则快照。 */
+        @Override
+        public void receiveConfigInfo(String content) {
+          applyFlowRules(content);
+        }
+      };
 
   /** 热点参数规则变更时的验证与发布回调。 */
-  private final AbstractListener paramListener = new AbstractListener() {
-    @Override
-    public void receiveConfigInfo(String content) {
-      applyParamFlowRules(content);
-    }
-  };
+  private final AbstractListener paramListener =
+      new AbstractListener() {
+        /** 按原校验流程接收用户与活动热点参数规则快照。 */
+        @Override
+        public void receiveConfigInfo(String content) {
+          applyParamFlowRules(content);
+        }
+      };
 
   /** 开发环境 Nacos 地址。 */
   @Value("${spring.cloud.nacos.discovery.server-addr:localhost:18848}")
   private String nacosServerAddress;
+
   /** Nacos 开发环境用户名。 */
   @Value("${spring.cloud.nacos.discovery.username:root}")
   private String nacosUsername;
+
   /** Nacos 开发环境密码。 */
   @Value("${spring.cloud.nacos.discovery.password:root}")
   private String nacosPassword;
 
   /** Install conservative defaults without replacing rules already supplied by Nacos. */
   public SeckillSentinelConfiguration() {
-    if (FlowRuleManager.getRules().stream().noneMatch(rule -> RESOURCE.equals(rule.getResource()))) {
+    if (FlowRuleManager.getRules().stream()
+        .noneMatch(rule -> RESOURCE.equals(rule.getResource()))) {
       FlowRule rule = new FlowRule(RESOURCE);
       rule.setCount(defaultFlowQps > 0 ? defaultFlowQps : 20);
       rule.setGrade(1);
@@ -91,11 +107,16 @@ public class SeckillSentinelConfiguration {
       rules.add(rule);
       FlowRuleManager.loadRules(rules);
     }
-    if (ParamFlowRuleManager.getRules().stream().noneMatch(rule -> RESOURCE.equals(rule.getResource()))) {
-      ParamFlowRule userRule = new ParamFlowRule(RESOURCE).setParamIdx(0)
-          .setCount(defaultUserQps > 0 ? defaultUserQps : 20);
-      ParamFlowRule activityRule = new ParamFlowRule(RESOURCE).setParamIdx(1)
-          .setCount(defaultActivityQps > 0 ? defaultActivityQps : 20);
+    if (ParamFlowRuleManager.getRules().stream()
+        .noneMatch(rule -> RESOURCE.equals(rule.getResource()))) {
+      ParamFlowRule userRule =
+          new ParamFlowRule(RESOURCE)
+              .setParamIdx(0)
+              .setCount(defaultUserQps > 0 ? defaultUserQps : 20);
+      ParamFlowRule activityRule =
+          new ParamFlowRule(RESOURCE)
+              .setParamIdx(1)
+              .setCount(defaultActivityQps > 0 ? defaultActivityQps : 20);
       List<ParamFlowRule> rules = new ArrayList<>(ParamFlowRuleManager.getRules());
       rules.add(userRule);
       rules.add(activityRule);
@@ -122,14 +143,14 @@ public class SeckillSentinelConfiguration {
         configService = NacosFactory.createConfigService(properties);
       }
       if (!flowSubscribed) {
-        String content = configService.getConfigAndSignListener(
-            FLOW_DATA_ID, GROUP, 3000, flowListener);
+        String content =
+            configService.getConfigAndSignListener(FLOW_DATA_ID, GROUP, 3000, flowListener);
         flowSubscribed = true;
         applyFlowRules(content);
       }
       if (!paramSubscribed) {
-        String content = configService.getConfigAndSignListener(
-            PARAM_FLOW_DATA_ID, GROUP, 3000, paramListener);
+        String content =
+            configService.getConfigAndSignListener(PARAM_FLOW_DATA_ID, GROUP, 3000, paramListener);
         paramSubscribed = true;
         applyParamFlowRules(content);
       }
@@ -179,13 +200,21 @@ public class SeckillSentinelConfiguration {
   public void applyFlowRules(String content) {
     try {
       List<FlowRule> incoming = parse(content, new TypeReference<>() {});
-      if (incoming.isEmpty() || incoming.stream().anyMatch(rule -> rule == null
-          || !RESOURCE.equals(rule.getResource()) || rule.getCount() <= 0)) {
+      if (incoming.isEmpty()
+          || incoming.stream()
+              .anyMatch(
+                  rule ->
+                      rule == null
+                          || !RESOURCE.equals(rule.getResource())
+                          || rule.getCount() <= 0)) {
         log.warn("Order Sentinel flow 规则无效，保留最近有效规则");
         return;
       }
-      List<FlowRule> retained = new ArrayList<>(FlowRuleManager.getRules().stream()
-          .filter(rule -> !RESOURCE.equals(rule.getResource())).toList());
+      List<FlowRule> retained =
+          new ArrayList<>(
+              FlowRuleManager.getRules().stream()
+                  .filter(rule -> !RESOURCE.equals(rule.getResource()))
+                  .toList());
       retained.addAll(incoming);
       FlowRuleManager.loadRules(retained);
     } catch (Exception ignored) {
@@ -197,15 +226,24 @@ public class SeckillSentinelConfiguration {
   public void applyParamFlowRules(String content) {
     try {
       List<ParamFlowRule> incoming = parse(content, new TypeReference<>() {});
-      if (incoming.size() != 2 || incoming.stream().anyMatch(rule -> rule == null
-          || !RESOURCE.equals(rule.getResource()) || rule.getCount() <= 0
-          || rule.getParamIdx() < 0 || rule.getParamIdx() > 1)
+      if (incoming.size() != 2
+          || incoming.stream()
+              .anyMatch(
+                  rule ->
+                      rule == null
+                          || !RESOURCE.equals(rule.getResource())
+                          || rule.getCount() <= 0
+                          || rule.getParamIdx() < 0
+                          || rule.getParamIdx() > 1)
           || incoming.stream().map(ParamFlowRule::getParamIdx).distinct().count() != 2) {
         log.warn("Order Sentinel param-flow 规则无效，保留最近有效规则");
         return;
       }
-      List<ParamFlowRule> retained = new ArrayList<>(ParamFlowRuleManager.getRules().stream()
-          .filter(rule -> !RESOURCE.equals(rule.getResource())).toList());
+      List<ParamFlowRule> retained =
+          new ArrayList<>(
+              ParamFlowRuleManager.getRules().stream()
+                  .filter(rule -> !RESOURCE.equals(rule.getResource()))
+                  .toList());
       retained.addAll(incoming);
       ParamFlowRuleManager.loadRules(retained);
     } catch (Exception ignored) {
@@ -215,7 +253,8 @@ public class SeckillSentinelConfiguration {
 
   private static <T> List<T> parse(String content, TypeReference<List<T>> type) throws Exception {
     if (content == null || content.isBlank()) return List.of();
-    return new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true)
+    return new ObjectMapper()
+        .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true)
         .readValue(content, type);
   }
 
@@ -227,7 +266,16 @@ public class SeckillSentinelConfiguration {
 
   /** Record a blocked order request without including user identifiers. */
   public static void recordBlock() {
-    Metrics.counter("sentinel.block", "service", "order", "resource", RESOURCE,
-        "rule_type", "flow", "status", "429").increment();
+    Metrics.counter(
+            "sentinel.block",
+            "service",
+            "order",
+            "resource",
+            RESOURCE,
+            "rule_type",
+            "flow",
+            "status",
+            "429")
+        .increment();
   }
 }

@@ -232,10 +232,9 @@ public class OrderSqlMapper {
       condition += " and status=?";
       arguments.add(status);
     }
-    Long count = queryForObject(
-        "select count(*) from " + tableName + condition,
-        Long.class,
-        arguments.toArray());
+    Long count =
+        queryForObject(
+            "select count(*) from " + tableName + condition, Long.class, arguments.toArray());
     if (count == null) throw new IllegalStateException("订单月表计数结果为空: " + tableName);
     return count;
   }

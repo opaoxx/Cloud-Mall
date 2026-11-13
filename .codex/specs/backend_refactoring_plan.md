@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order主业务和消息消费已拆分，旧继承入口已移除，辅助实现职责分组已完成，待模块收尾盘点。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay首个只读查询切片已完成准备，待下一步实施。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,8 +445,8 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | 主业务/消息及辅助职责分组完成，旧继承/空接口移除，见第23至32节；待模块收尾盘点 |
-| Pay | 待开始 | Order完成后按既定顺序细化与实施 |
+| Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
+| Pay | 待实施 | 首个只读支付状态查询切片已冻结边界，见第33.5节；本轮Pay源码未改 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -1891,7 +1891,7 @@ git revert refactor/order-auxiliary-complete-20261113
 
 JDK语法树初检发现30项文档缺口（28个显式public/接口/Bean入口、2个字段）及消息配置9处泛化占位注释。本轮补齐这些说明、Feign局部record参数说明，修正可靠性初始化“仅两张表”的过时描述，按原流程补注释。对Order全部生产Java执行既有Google Java Format，保留长字符串原文；只允许注释、排版和import顺序/未使用import整理，不修改变量、方法、字段、注解参数、SQL、配置、依赖或业务语句。
 
-现有Feign内部不可变record继续作为客户端局部传输模型，全部业务Controller/ServiceImpl内已无嵌套DTO/VO/PO；不为目录统一再引入跨服务模型迁移。动态分片与元数据访问保留已评审的JDBC Mapper/PO方案，不把本轮结构完成表述为所有Mapper已改成BaseMapper。全量命名改写和ORM替换不在本轮冻结范围。
+现有Feign内部不可变record继续作为客户端局部传输模型，全部业务Controller/ServiceImpl内已无嵌套DTO/VO/PO；本轮补全客户端及响应record的字段说明，不为目录统一再引入跨服务模型迁移。动态分片与元数据访问保留已评审的JDBC Mapper/PO方案，不把本轮结构完成表述为所有Mapper已改成BaseMapper。全量命名改写和ORM替换不在本轮冻结范围。
 
 本轮以当前Git源码和第32节449项归档报告作为已核实基线，另存原源码指纹和Order目录/契约盘点。现有Java缺少的注释通过源码阅读补充，不生成泛化占位文字；语法树复核显式入口/字段缺口为零。全部生产Java去注释并规范化import后逐token必须相同，resources/POM/测试源码必须不变；本轮不新增镜像实现的测试。
 
@@ -1902,3 +1902,65 @@ JDK语法树初检发现30项文档缺口（28个显式public/接口/Bean入口�
 本轮仅注释与排版，不新建MySQL/Rabbit实验，不重复之前实库矩阵；历史结果与本轮新跑结果分别列出，不累加为一次全链验证。README原有修改、历史失败现场、两个旧pycache及冻结实验runner保持。完成标签 `refactor/order-closeout-complete-20261113` 与模块结构通过点 `refactor/order-complete-20261113`；临时index验证本轮逆补丁恢复父树，Git不回退运行数据。更新模块清单、兼容保留项、已知验证限制和逆序回退索引。
 
 Pay本轮仅盘点并冻结首切片，不同时改业务源码。已确认PayController继承PayServiceImpl、PayService为空；create/success/callback原来共用this锁，创建还有本地事务，后续写拆分须单独评审共享锁与TCC/Legacy/回调事实，不能照搬Order接口形状。首个候选是无事务无锁的GET `/api/payments/orders/{orderNo}`：鉴权先于查询，原Mapper同时按orderNo/userId过滤，完整映射后取第一条，空结果原404；使用现有PayRecordViews保留金额/时间/null字段，不增加Order远端查询或支付驱动。具体实施命令与新基线在下一切片补齐，本轮不把Pay写成已重构。
+
+### 33.3 Order收尾结果与完成口径
+
+本轮为19份生产源码补说明/统一排版，没有修改业务语句。修复30项必需文档缺口（28方法/2成员）、替换9条消息配置占位注释，补齐5个record的参数说明，并修正初始化表数量的过时描述和步骤说明。JDK语法树复查显式public、接口、Bean/消息/定时入口及非record成员的JavaDoc缺口为0；record字段在各record声明说明，隐式生成的构造器/accessor不按手写入口计数。117份生产Java（含包说明）全部通过Google Java Format检查；去注释并规范化import后逐token与本轮基线一致。
+
+| Order模块检查项 | 结果与实际边界 |
+| --- | --- |
+| 命名与迁移 | 生产类型无Cm编号名；旧混合Controller/实现/空接口及辅助类旧包位置已清除；十个实施切片均有独立Git标签 |
+| HTTP与业务契约 | 6个组合式Controller、9条无重复声明路由、10个非空Service接口；9条包含默认开关控制的Seata演练路径，不等于全部环境均启用 |
+| 持久化分层 | Controller/Service无JdbcTemplate与嵌入SQL；11份PO保留TableName映射；动态分片及元数据JDBC Mapper按原评审方案保留 |
+| 配置与外部标识 | Order resources/POM自模块基线未改；cm18路径/表/Bean/事务名称为兼容标识，不作为漏改类名；Redis/MQ/Feign/金额/时间契约沿各切片核验 |
+| 业务规则与事务 | 原身份读取时点、创建/状态共享监视器、REQUIRED/REQUIRES_NEW/查询RR、消息解析/确认、租约和未知结果边界见第23至32节，未通过收尾格式化改动 |
+| 规范与复盘 | 必需入口/成员说明补齐，泛化占位说明清除；所有生产Java统一排版，核心调用链已在各切片逐项记录 |
+| 验证与资源 | 本轮新跑367项全部通过；前一源码点449项归档逐份校验SHA作为历史基线，两组不累加为一次验收；本轮无新Docker/数据库实验 |
+| 回退与遗留 | 每阶段源码回退点可定位；历史失败现场保持；普通恢复首轮未认领原因仍未确认，不借本轮结果宣称修复环境或历史问题 |
+
+以上为已约定的中等深度结构重构完成。Feign内部局部record、JDBC动态分片Mapper及冻结测试/实验工具名称属于明确保留项；没有把它写成全面ORM替换、全部历史工具改名或生产全链验收完成。
+
+本轮新执行范围：
+
+| 范围 | 测试数 | 说明 |
+| --- | ---: | --- |
+| Common单测 | 25 | 原公共与源码契约 |
+| Order单测 | 340 | 当前全部现有单测，不新增镜像实现的测试 |
+| StockSeckillFactFeignIT | 1 | 实际Order StockClient与Stock响应类型经本机HTTP，保留缺失/null字段 |
+| PayOrderStateFeignIT | 1 | 实际Pay客户端与Order状态入口经本机HTTP，保留路径、身份头、金额与null语义 |
+| 合计 | 367 | 70个类，0失败、0错误、0跳过 |
+
+八模块test-compile与Order打包通过，Jar中123个Order生产class均与最终class相同，无旧混合类型、辅助旧包类型、Cm编号生产class或测试夹具。Order/Pay其他365份被跟踪文件逐字节不变，覆盖Order配置/POM/测试以及Pay源码/资源/测试；README原修改保持。本轮未连接真实Stock/Product业务服务或中间件，没有重跑SQL/TC/Nacos、完整商城、硬停或性能场景；此前449项证据仍明确归属于第32节。
+
+### 33.4 模块回退索引与证据
+
+方案基线 `0a528bac`，标签 `refactor/order-closeout-baseline-20261113`。本轮完成标签 `refactor/order-closeout-complete-20261113`，同一源码点建立模块结构通过标签 `refactor/order-complete-20261113`。临时index验证本轮逆补丁恢复父提交完整树，不回退真实工作树或README。仅撤销本轮注释/排版时：
+
+```powershell
+git revert refactor/order-closeout-complete-20261113
+```
+
+如以后需要逐阶段撤销Order结构改造，先撤销本轮收尾，再按下表自上向下评估；每一步处理后续依赖/方案记录冲突、清理该阶段新class残留并重编译，不把这些索引当成无需核对即可执行的运行数据回滚脚本。
+
+| 逆序切片 | 实施提交 | 完成标签后缀 |
+| --- | --- | --- |
+| 辅助职责分组 | d013d831 | order-auxiliary-complete-20261113 |
+| 超时与旧继承收尾 | 82c3eb49 | order-timeout-complete-20261113 |
+| 秒杀消息落单 | 6116cb53 | order-seckill-creation-complete-20261113 |
+| 秒杀受理 | 7842d80a | order-seckill-admission-complete-20261113 |
+| 状态迁移 | e397e1e4 | order-state-complete-20261113 |
+| 普通创建 | e1779d3e | order-creation-complete-20261112 |
+| Cart清理协调 | c9da3dfc | order-cart-cleanup-complete-20261111 |
+| 详情/支付状态读取 | f430d37a | order-detail-complete-20261110 |
+| 列表查询 | 6a961c62 | order-query-complete-20261104 |
+| Seata演练命名 | b756d93a | order-seata-complete-20261104 |
+
+全部标签前缀均为 `refactor/`，十个完整SHA已通过Git读回保存到rollback-catalog.json。Git不恢复MySQL/Redis/Rabbit/Seata运行事实、历史失败卷或忽略证据，不使用全量clean/reset演示回滚。
+
+证据入口 `target/backend-refactor-20261113/order-closeout/verification.json`，包含本轮70份XML、模块/路由/PO盘点、语法树缺口前后结果、117文件token对照、全模块格式检查、Jar摘要、历史449报告验证及回退索引。本轮没有新增失败尝试或中间件资源；原Bug台账已补说明修复与验证结果。
+
+### 33.5 Pay首切片准备结论
+
+下一步从只读支付状态查询开始，候选类型为PayQueryController、PayQueryService、PayQueryServiceImpl，承接原GET `/api/payments/orders/{orderNo}`。绑定后先按原位置要求登录，再调用原selectByOrderNoAndUserId；使用PayRecordViews映射所有返回记录后取首条，空列表仍为原404“支付记录不存在”。保持无新增事务、锁、远程调用、协议路由或业务驱动；返回原PayVO字段/金额/时间/null，由Controller包装同样的响应。原共享toView方法仍服务写流程，不为迁移一个GET改写其余方法。
+
+本轮Pay源码指纹未变，也没有运行Pay业务全套测试或创建其回退标签。实施时先补精确调用点/契约测试与当前Git基线；随后再按已记录共享锁、Legacy/TCC、回调持久绑定和恢复事实逐项处理写流程。不得将这份准备结论理解为支付创建/成功/失败/回调的统一拆分授权细节已全部冻结。

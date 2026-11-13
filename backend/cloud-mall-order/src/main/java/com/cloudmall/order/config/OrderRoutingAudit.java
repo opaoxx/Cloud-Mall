@@ -10,11 +10,11 @@ import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.Advised;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.actuate.info.Info;
 import org.springframework.boot.actuate.info.InfoContributor;
 import org.springframework.core.env.Environment;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
@@ -47,12 +47,21 @@ public class OrderRoutingAudit implements InfoContributor {
 
   /** Spring injection checks the explicit snapshot without changing old direct callers. */
   @Autowired
-  public OrderRoutingAudit(DataSource dataSource, JdbcTemplate jdbcTemplate,
-      PlatformTransactionManager transactionManager, Environment environment,
+  public OrderRoutingAudit(
+      DataSource dataSource,
+      JdbcTemplate jdbcTemplate,
+      PlatformTransactionManager transactionManager,
+      Environment environment,
       ObjectProvider<OrderShardingBootstrap> provider) {
-    this(dataSource, jdbcTemplate, transactionManager, environment,
-        OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(environment))
-            ? requireBootstrap(provider) : null);
+    this(
+        dataSource,
+        jdbcTemplate,
+        transactionManager,
+        environment,
+        OrderRoutingConfiguration.SHARDING_MONTHLY.equals(
+                OrderRoutingConfiguration.mode(environment))
+            ? requireBootstrap(provider)
+            : null);
   }
 
   /** 创建并立即审计 DataSource、JdbcTemplate 和事务管理器对象绑定。 */
@@ -64,10 +73,15 @@ public class OrderRoutingAudit implements InfoContributor {
     this(dataSource, jdbcTemplate, transactionManager, environment, (OrderShardingBootstrap) null);
   }
 
-  private OrderRoutingAudit(DataSource dataSource, JdbcTemplate jdbcTemplate,
-      PlatformTransactionManager transactionManager, Environment environment, OrderShardingBootstrap bootstrap) {
-    if (OrderRoutingConfiguration.SHARDING_MONTHLY.equals(OrderRoutingConfiguration.mode(environment)) && bootstrap == null)
-      throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
+  private OrderRoutingAudit(
+      DataSource dataSource,
+      JdbcTemplate jdbcTemplate,
+      PlatformTransactionManager transactionManager,
+      Environment environment,
+      OrderShardingBootstrap bootstrap) {
+    if (OrderRoutingConfiguration.SHARDING_MONTHLY.equals(
+            OrderRoutingConfiguration.mode(environment))
+        && bootstrap == null) throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
     this.bootstrap = bootstrap;
     this.dataSource = dataSource;
     this.jdbcTemplate = jdbcTemplate;
@@ -75,7 +89,8 @@ public class OrderRoutingAudit implements InfoContributor {
     this.environment = environment;
     validateBinding();
     if (bootstrap != null) bootstrap.verifyBinding(dataSource);
-    this.underlyingType = bootstrap == null ? simpleName(underlyingDataSource(dataSource)) : "HikariDataSource";
+    this.underlyingType =
+        bootstrap == null ? simpleName(underlyingDataSource(dataSource)) : "HikariDataSource";
     LOG.info(
         "订单路由审计 mode={}, dataSource={}, underlying={}, transactionManager={}, identity={},"
             + " profiles={}, expectedMonths={}",
@@ -159,7 +174,8 @@ public class OrderRoutingAudit implements InfoContributor {
         java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai")));
   }
 
-  private static OrderShardingBootstrap requireBootstrap(ObjectProvider<OrderShardingBootstrap> provider) {
+  private static OrderShardingBootstrap requireBootstrap(
+      ObjectProvider<OrderShardingBootstrap> provider) {
     OrderShardingBootstrap bootstrap = provider.getIfAvailable();
     if (bootstrap == null) throw new IllegalStateException("ORDER_SHARD_BOOTSTRAP_NOT_READY");
     bootstrap.requireReady();

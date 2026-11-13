@@ -17,15 +17,19 @@ import java.util.function.Supplier;
 public final class OrderStockCircuitBreaker {
   /** 普通库存预扣及其原订单号恢复调用。 */
   public static final String RESERVE = "order-stock-reserve";
+
   /** 秒杀库存受理调用。 */
   public static final String SECKILL = "order-stock-seckill";
+
   /** 普通/秒杀库存持久事实查询。 */
   public static final String STATUS = "order-stock-status";
+
   /** 已提交订单状态后的库存确认或回滚。 */
   public static final String ACTION = "order-stock-action";
 
   /** 仅允许已冻结的四个资源进入统一包装。 */
   private static final Set<String> RESOURCES = Set.of(RESERVE, SECKILL, STATUS, ACTION);
+
   /** 解析 Feign 业务错误码，不反序列化库存业务 DTO。 */
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -40,8 +44,9 @@ public final class OrderStockCircuitBreaker {
     try {
       entry = SphU.entry(resource, EntryType.OUT);
     } catch (BlockException blocked) {
-      Metrics.counter("sentinel.degrade.block", "service", "order", "resource", resource,
-          "status", "503").increment();
+      Metrics.counter(
+              "sentinel.degrade.block", "service", "order", "resource", resource, "status", "503")
+          .increment();
       throw new StockCircuitOpenException(resource, blocked);
     }
     try {
@@ -51,8 +56,8 @@ public final class OrderStockCircuitBreaker {
         Tracer.traceEntry(new IllegalStateException("Stock 返回空值或非业务错误码"), entry);
       return result;
     } catch (FeignException failure) {
-      if (failure.status() < 0 || failure.status() >= 500
-          || !validBusinessResponse(failure)) Tracer.traceEntry(failure, entry);
+      if (failure.status() < 0 || failure.status() >= 500 || !validBusinessResponse(failure))
+        Tracer.traceEntry(failure, entry);
       throw failure;
     } catch (RuntimeException failure) {
       Tracer.traceEntry(failure, entry);
@@ -66,10 +71,13 @@ public final class OrderStockCircuitBreaker {
   /** 已知业务错误不会打开依赖熔断，系统错误和无法识别响应必须计入异常。 */
   private static boolean businessCode(String code) {
     if (code == null || code.isBlank()) return false;
-    return code.startsWith("SECKILL_") || code.startsWith("ORDER_")
+    return code.startsWith("SECKILL_")
+        || code.startsWith("ORDER_")
         || code.equals("GATEWAY_RATE_LIMITED")
-        || code.equals("COMMON_INVALID_ARGUMENT") || code.equals("COMMON_FORBIDDEN")
-        || code.equals("COMMON_NOT_FOUND") || code.equals("COMMON_CONFLICT");
+        || code.equals("COMMON_INVALID_ARGUMENT")
+        || code.equals("COMMON_FORBIDDEN")
+        || code.equals("COMMON_NOT_FOUND")
+        || code.equals("COMMON_CONFLICT");
   }
 
   /** 仅明确的 4xx 业务响应不向 Sentinel 记录系统异常。 */

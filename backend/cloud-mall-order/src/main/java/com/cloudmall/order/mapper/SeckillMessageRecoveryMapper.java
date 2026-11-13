@@ -36,6 +36,7 @@ public class SeckillMessageRecoveryMapper {
     this.jdbcTemplate = jdbcTemplate;
   }
 
+  /** 幂等准备秒杀死信恢复台账，保留事件号唯一约束、重试时间与租约字段。 */
   public void ensureTable() {
     jdbcTemplate.execute(
         "CREATE TABLE IF NOT EXISTS seckill_message_recovery ("

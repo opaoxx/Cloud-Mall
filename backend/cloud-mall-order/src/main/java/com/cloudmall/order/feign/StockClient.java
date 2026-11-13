@@ -27,13 +27,33 @@ public interface StockClient {
   @GetMapping("/api/stock/reservations/{orderNo}")
   ApiResponse<StockReservationStatusVO> reservation(@PathVariable("orderNo") String orderNo);
 
+  /**
+   * 按原订单号、明细和场景请求预扣库存。
+   *
+   * @param request 原订单身份和SKU数量明细
+   * @return 原库存响应信封，调用方按既有持久证明处理未知结果
+   */
   @PostMapping("/api/stock/reservations")
   ApiResponse<?> reserve(@RequestBody Reservation request);
 
+  /**
+   * 按原订单号和操作键确认库存，保持可空请求体的兼容绑定。
+   *
+   * @param orderNo 原订单号
+   * @param action 原确认操作键载荷，可为空
+   * @return 原库存确认响应信封
+   */
   @PostMapping("/api/stock/reservations/{orderNo}/confirm")
   ApiResponse<?> confirm(
       @PathVariable("orderNo") String orderNo, @RequestBody(required = false) Action action);
 
+  /**
+   * 按原订单号和操作键回滚库存，保持可空请求体的兼容绑定。
+   *
+   * @param orderNo 原订单号
+   * @param action 原回滚操作键载荷，可为空
+   * @return 原库存回滚响应信封
+   */
   @PostMapping("/api/stock/reservations/{orderNo}/rollback")
   ApiResponse<?> rollback(
       @PathVariable("orderNo") String orderNo, @RequestBody(required = false) Action action);
@@ -48,6 +68,12 @@ public interface StockClient {
     return confirm(orderNo, new Action(orderNo + ":CONFIRM"));
   }
 
+  /**
+   * 提交原秒杀受理请求；受理成功不代表异步订单已落库。
+   *
+   * @param request 原活动、SKU、用户、幂等键和地址快照载荷
+   * @return Stock原受理信封，包含其业务码和结果字段
+   */
   @PostMapping("/api/stock/seckill/reservations")
   ApiResponse<?> seckill(@RequestBody Map<String, Object> request);
 
@@ -57,10 +83,27 @@ public interface StockClient {
       @PathVariable("orderNo") String orderNo,
       @RequestHeader("X-Internal-Service") String internalService);
 
+  /**
+   * 原库存预扣请求的客户端局部传输模型。
+   *
+   * @param orderNo 原订单号
+   * @param items 原SKU及数量明细
+   * @param scene 原库存预扣场景标识
+   */
   record Reservation(String orderNo, List<Line> items, String scene) {}
 
+  /**
+   * 单个SKU的原预扣数量，不在传输层归一化。
+   *
+   * @param skuId 原SKU身份
+   * @param quantity 原请求数量
+   */
   record Line(Long skuId, int quantity) {}
 
-  /** 订单状态事务提交后使用的稳定库存动作键。 */
+  /**
+   * 订单状态事务提交后使用的稳定库存动作键。
+   *
+   * @param operationKey 原订单号和动作方向绑定的幂等操作键
+   */
   record Action(String operationKey) {}
 }

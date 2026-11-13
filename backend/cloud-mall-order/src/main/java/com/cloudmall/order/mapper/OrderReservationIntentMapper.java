@@ -136,7 +136,8 @@ public class OrderReservationIntentMapper {
   }
 
   /** 使用期待的源状态迁移意图，避免覆盖其他处理方结果。 */
-  public int updateStatus(String orderNo, String sourceStatus, String targetStatus, LocalDateTime updatedAt) {
+  public int updateStatus(
+      String orderNo, String sourceStatus, String targetStatus, LocalDateTime updatedAt) {
     return jdbcTemplate.update(
         "UPDATE order_reservation_intent SET status=?,last_error=NULL,next_retry_at=NULL,updated_at=?"
             + " WHERE order_no=? AND status=? AND (next_retry_at IS NULL OR next_retry_at<=?)",
