@@ -141,21 +141,6 @@ public class PayServiceImpl implements PayService {
     return ApiResponse.ok(find(payNo));
   }
 
-  @GetMapping("/orders/{orderNo}")
-  /** 执行 get 相关操作。 */
-  public ApiResponse<?> get(@PathVariable String orderNo) {
-    // 1. 接收并整理 get 的业务请求。
-    // 2. 执行 get 的核心业务校验与状态处理。
-    // 3. 返回 get 的处理结果。
-    long userId = AuthContext.requireUserId();
-    List<PayVO> records =
-        payRecordMapper.selectByOrderNoAndUserId(orderNo, userId).stream()
-            .map(PayServiceImpl::toView)
-            .toList();
-    if (records.isEmpty()) throw new BizException(ErrorCodes.NOT_FOUND, "支付记录不存在", 404);
-    return ApiResponse.ok(records.get(0));
-  }
-
   @PostMapping("/{payNo}/mock-success")
   /** 执行 success 相关操作。 */
   public synchronized ApiResponse<?> success(@PathVariable String payNo) {

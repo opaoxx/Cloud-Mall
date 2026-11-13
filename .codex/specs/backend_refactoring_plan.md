@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay首个只读查询切片已完成准备，待下一步实施。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay首个只读查询切片已完成，后续处理支付创建及共享写锁。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 待实施 | 首个只读支付状态查询切片已冻结边界，见第33.5节；本轮Pay源码未改 |
+| Pay | 实施中 | 只读支付状态查询已组合委托，见第34节；创建/成功/失败/回调及旧继承入口待后续处理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -1982,3 +1982,35 @@ git revert refactor/order-closeout-complete-20261113
 迁移后新增Spring装配/路由/事务检查，核验与旧Controller共存时GET仅一份、四条POST仍由旧Bean处理，新Service无新增事务，查询不等待旧写监视器。运行Common/Pay全部现有*Test，八模块test-compile、Pay打包；旧写流程测试保留原文，无新兼容测试门面。对旧实现删除get后的其余token、所有未涉及源码/资源及README指纹核验，新增/改动Java执行既有Google Java Format及git diff --check；本轮SQL未变，不创建中间件实验或重跑真实TC/TCC资金矩阵。
 
 证据存target/backend-refactor-20261113/pay-query，记录每轮日志/XML、源码基线、格式/Jar及回退校验。完成后单独实施提交和refactor/pay-query-complete-20261113；临时index逆补丁恢复父树，不修改真实工作树演示回退。README原修改、两个旧pycache和忽略证据不入提交，历史失败现场保持；Git不恢复运行数据。
+
+### 34.3 实施结果与验证
+
+新增PayQueryController、PayQueryService和PayQueryServiceImpl，旧实现仅删除15行get入口（377→362行）。调用链为 `HTTP路径绑定 → Controller.requireUserId（AuthInterceptor建立身份上下文） → PayQueryService.getByOrderNo → 原Mapper同时筛选orderNo/userId → PayRecordViews完整映射 → 首条或原404 → ApiResponse.ok → 公共金额序列化`，请求完成后仍由原Interceptor清理身份。新Service只持有Mapper，不依赖Feign、支付模式或恢复组件。
+
+先对旧实际Controller执行新增7项HTTP契约，再将测试工厂改为新组合入口，七项方法体和断言逐token保持。金额以大额且有尾零的十进制字符串验证，paidAt保留毫秒及+08:00；空对象六字段仍显式null。28组状态/模式组合包含现有状态、未来状态、LEGACY/TCC/null/非法模式，查询均只读原样返回。第二行异常仍使整次请求失败，不提前返回第一行；Mapper原异常对象保留，不转成404或成功。无身份/非法身份不访问Mapper，别用户匹配为空仍404而非403，成功/失败后上下文均清理。
+
+新增3项装配验证：真实Spring注入唯一查询Service，启用事务拦截时没有新事务代理；普通查询0次事务，在调用者事务内查询仍保留原事务和绑定资源，仅由调用者开始/提交一次。MVC同时注册新旧Controller，公开支付恰5条路由，GET唯一属于新入口，四条POST仍由旧Controller继承的方法处理；create/success/callback原synchronized和仅create的@Transactional保持。持有旧写入口监视器时另一线程查询可完成。
+
+| 当前验证 | 数量 | 结果 |
+| --- | ---: | --- |
+| Common全部*Test | 25 | 通过，原公共与源码契约保持 |
+| Pay原有全部*Test | 600 | 通过，旧测试源码逐字节保持；含原受控本机HTTP指标与协议路由验证 |
+| PayQueryContractTest | 7 | 迁移前/后同一组HTTP行为断言均通过，Mapper替身 |
+| PayQueryWiringTest | 3 | Spring注入/事务、路由归属和原写监视器边界通过 |
+| 最终合计 | 635 | 65个测试类，0失败、0错误、0跳过 |
+
+旧入口基线632项（64类）另行归档，不与迁移后635项累计。两轮均首次通过，无新增失败现场。旧实现删除get以外语句逐token相同；查询74个token在鉴权/响应边界搬迁和toView委托展开后等价，原Helper继续服务写流程。其余1051份已跟踪后端文件及README原修改逐字节保持，覆盖Mapper/SQL、PO/VO、资源/POM、其他模块及原测试。六份新增/改动Java通过实际Google Java Format检查，八模块test-compile、Pay打包及git diff --check通过；Jar中新增三类型存在，176个Pay生产class与最终classes一致、没有测试类混入。
+
+### 34.4 证据、回退及后续
+
+方案提交346ddecf，基线标签refactor/pay-query-baseline-20261113；实施完成标签refactor/pay-query-complete-20261113。证据入口 `target/backend-refactor-20261113/pay-query/verification.json`，保留前后独立XML、日志、旧源码/契约测试、源码指纹、Jar摘要、格式和临时index回退证明。只撤销本切片时：
+
+```powershell
+git revert refactor/pay-query-complete-20261113
+```
+
+前后两轮原生metrics工件各5份也已归档；归档工具首次因日志重复runId而在重复copytree处停止，按runId去重并逐文件校验源/已归档SHA后通过，不覆盖不同内容，不改业务/测试或重跑已通过检查。
+
+回退后按确切类名清理三个新生产类型及两个新增测试类（含其内部class）的target残留，再重新编译恢复后的旧get；不全量clean。临时index已验证实施逆补丁恢复父树，真实index/工作树和README保持；后续依赖按逆序评估。Git不恢复运行数据，本轮未创建或修改中间件资源、业务表或历史失败现场。
+
+下一步以支付创建为候选切片，先冻结create与success/callback的共享监视器归属、原本地事务在获取锁之前开始/解锁后提交、幂等键载荷检查顺序及新支付debit_mode选择，再执行提取。Legacy/TCC资金编排、回调持久绑定和恢复职责继续单独规划；旧PayController继承和空PayService目前明确暂留，不宣称Pay模块已完成。当前验证不覆盖真实MySQL、TC/TCC资金链、Gateway Bearer或全商城；不重复或覆盖之前阶段的真实资金矩阵与历史异常结论。
