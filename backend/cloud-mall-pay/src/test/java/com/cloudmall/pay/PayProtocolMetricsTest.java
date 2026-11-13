@@ -8,6 +8,7 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
@@ -18,6 +19,7 @@ import com.cloudmall.pay.mapper.*;
 import com.cloudmall.pay.service.*;
 import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,7 +59,7 @@ class PayProtocolMetricsTest {
         AuthContext.set(7L, "USER");
         fixture.successController.success(Fixture.PAY);
         fixture.successController.success(Fixture.PAY);
-        fixture.controller.fail(Fixture.PAY);
+        fixture.failureController.fail(Fixture.PAY);
         fixture.controller.callback("test-token", fixture.callback(true));
         assertEquals(
             2,
@@ -752,6 +754,11 @@ class PayProtocolMetricsTest {
 
     final PaySuccessController successController;
 
+    /** 独立失败服务及入口，共用原授权依赖与指标。 */
+    final PayFailureServiceImpl failureService;
+
+    final PayFailureController failureController;
+
     /** 真实Legacy恢复方法。 */
     final PayConsistencyService legacy;
 
@@ -907,14 +914,24 @@ class PayProtocolMetricsTest {
           new PaySuccessServiceImpl(
               records, intents, legacy, provider, PayProtocolMetrics.noop(), writeMonitor);
       successController = new PaySuccessController(successService);
+      failureService =
+          new PayFailureServiceImpl(
+              records, intents, legacyFailure, provider, PayProtocolMetrics.noop());
+      failureController = new PayFailureController(failureService);
     }
 
     /** 单测显式接线；端点测试不用此方法，而由Spring mandatory字段注入。 */
     void install(PayProtocolMetrics metrics) {
       for (Object service :
           List.of(
-              controller, successService, legacy, evidence, coordinator, delivery, callbackReceipt))
-        ReflectionTestUtils.setField(service, "metrics", metrics);
+              controller,
+              successService,
+              failureService,
+              legacy,
+              evidence,
+              coordinator,
+              delivery,
+              callbackReceipt)) ReflectionTestUtils.setField(service, "metrics", metrics);
     }
 
     /** 原证据状态与官方Fence保持对应，不复制生产分类算法。 */

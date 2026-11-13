@@ -7,6 +7,7 @@ import static org.mockito.Mockito.*;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.po.PayDebitIntentPO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
@@ -17,6 +18,7 @@ import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PayServiceImpl;
 import java.math.BigDecimal;
 import java.util.List;
@@ -47,6 +49,9 @@ class PayLegacyFailureOutcomeTest {
   /** 公开失败入口。 */
   private PayServiceImpl service;
 
+  /** 新失败入口，复用原底层授权实例。 */
+  private PayFailureController failureController;
+
   /** 每个案例独立的真实结构支付视图。 */
   private PayRecordPO payment;
 
@@ -60,6 +65,15 @@ class PayLegacyFailureOutcomeTest {
         service,
         "legacyFailureService",
         new com.cloudmall.pay.service.impl.PayLegacyFailureService(payments, intents, orders));
+    failureController =
+        new PayFailureController(
+            new PayFailureServiceImpl(
+                payments,
+                intents,
+                (com.cloudmall.pay.service.impl.PayLegacyFailureService)
+                    ReflectionTestUtils.getField(service, "legacyFailureService"),
+                mock(org.springframework.beans.factory.ObjectProvider.class),
+                com.cloudmall.pay.service.PayProtocolMetrics.noop()));
     payment = new PayRecordPO();
     payment.payNo = "legacy-pay";
     payment.orderNo = "legacy-order";
@@ -90,7 +104,7 @@ class PayLegacyFailureOutcomeTest {
   void mockFailureClassifiesPersistedResultWithoutSideEffects(
       String status, String intentStatus, int http, String code) {
     arrange(status, intentStatus);
-    assertResult(() -> service.fail(payment.payNo), http, code);
+    assertResult(() -> failureController.fail(payment.payNo), http, code);
     verifyNoInteractions(users);
     verify(orders, never()).cancel(any(), any());
     verify(payments, never()).markFailed(any(), any());
@@ -120,7 +134,7 @@ class PayLegacyFailureOutcomeTest {
   void mismatchedFailedIntentCannotAuthorizeTerminalReplay() {
     PayDebitIntentPO intent = arrange("FAILED", "FAILED");
     intent.amount = BigDecimal.ONE;
-    assertResult(() -> service.fail(payment.payNo), 503, "PAY_DEBIT_MODE_UNAVAILABLE");
+    assertResult(() -> failureController.fail(payment.payNo), 503, "PAY_DEBIT_MODE_UNAVAILABLE");
     assertResult(() -> service.callback("token", callback()), 503, "PAY_DEBIT_MODE_UNAVAILABLE");
     verify(orders, never()).cancel(any(), any());
     verify(receipts, never()).complete(any(), any(), any());
@@ -135,7 +149,7 @@ class PayLegacyFailureOutcomeTest {
               payment.status = "FAILED";
               return 1;
             });
-    assertResult(() -> service.fail(payment.payNo), 200, "0");
+    assertResult(() -> failureController.fail(payment.payNo), 200, "0");
     verify(orders).cancel(payment.orderNo, payment.userId);
     verify(payments).markFailed(eq(payment.payNo), any());
   }

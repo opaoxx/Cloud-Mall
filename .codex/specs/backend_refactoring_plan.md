@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成查询、创建、模拟成功和共用处理规则提取，后续处理失败/回调职责。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成查询、创建、模拟成功/失败和共用处理规则提取，后续处理回调及旧继承入口。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 查询、创建与模拟成功已组合委托，共享写锁和协议规则保持，见第34至36节；失败/回调及旧继承入口待后续处理 |
+| Pay | 实施中 | 查询、创建、模拟成功/失败已组合委托，锁、协议和独立事务边界保持，见第34至37节；回调及旧继承入口待后续处理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2154,3 +2154,39 @@ git revert refactor/pay-success-complete-20261113
 独立Compose项目cloud-mall-refactor-pay-failure-20261113，仅MySQL19956、候选子网10.254.234.0/24，预检后使用新卷、原schema.sql两张空Pay源表、每例UUID库；失败保留，成功核对后清理。结束归档并移除自有容器/网络、保留卷，不触碰默认或历史资源。旧M2固定13307矩阵不运行，不作为验收通过项；完整TC/User/Order/Stock交付、Gateway Bearer与性能本轮不测。
 
 八模块test-compile、Pay打包、实际Java格式化、diff和原失败方法token对照必须通过，其他业务/配置/测试文件按清单核验。证据存target/backend-refactor-20261113/pay-failure；实施独立提交和refactor/pay-failure-complete-20261113，临时index验证逆补丁恢复父树，Git不恢复运行数据。README原修改、两个旧pycache和忽略工件不入提交。
+
+### 37.3 实施与验证结果
+
+新增失败Controller/接口/60行实现，复用原PayProcessingSupport；旧混合实现175→154行，仅删除fail、仅供其使用的owned及AuthContext import。回调、其他私有方法、字段/构造器的token完全保持，Legacy授权、TCC失败方法、共用规则和所有Mapper/SQL均未修改。新服务不依赖PayWriteMonitor、不声明事务，真实Spring装配中没有外层事务代理。
+
+调用链复盘：`HTTP路径绑定（body仍不绑定）→ Controller.requireUserId → 支付首读/归属 → 次读/持久协议 → MOCK_FAIL指标 → Legacy REQUIRES_NEW当前锁定读/取消/CAS并返回当前视图，或TCC NOT_SUPPORTED处理并返回原被更新视图 → Controller包装`。TCC正常返回后没有第三次查询；Legacy返回对象或null均保留，不用初始视图覆盖，不加全局终态短路或自动重试。原创建/成功/回调共享监视器保持，失败入口在另一线程持有该锁时仍能完成。
+
+| 最终执行范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共/源码契约 |
+| Pay原有全部单测 | 631 | 原协议/资金/回调/指标及此前查询、创建、成功边界 |
+| PayFailureContractTest | 7 | 新旧入口同一身份/读取/分流/对象返回/异常/HTTP矩阵 |
+| PayFailureMySqlIT | 4 | 真实Mapper、Legacy独立事务、外层旧快照、真实TCC方法事务暂停/恢复 |
+| 合计 | 667 | 71类，最终0失败、0错误、0跳过 |
+
+基线663项单独归档，不与最终计数累计。七项新契约测试方法体逐token保留：未登录/无记录/他人归属先于协议与指标、完整首读与次读数量、非法模式/意图冲突、TCC同一可变视图返回、Legacy当前视图/null、原异常及无额外终态捷径。实际MockMvc保留不绑定body的既有行为（包括无效JSON文本不触发新解析）、六字段、金额字符串、时间毫秒/+08和null、503/no-store及认证上下文清理。原六份适配测试的案例方法均保留，原失败结果/TCC路由/指标方法除新入口引用外断言token保持。
+
+实库四例首次执行均通过：Legacy REQUIRES_NEW使用与外层RR不同的实际连接，独立提交FAILED后外层仍读到旧PENDING，外层回滚后独立结果仍FAILED，终态重放不重复取消；Order空响应/业务拒绝/其他异常保持原错误与PENDING，取消返回成功后本地CAS触发器故障仍保留PENDING，移除故障后原请求成功。该测试不声称本地回滚能撤销真实远端取消，Order仅为受控替身。
+
+旧快照例先在外层RR读出无意图，再通过独立连接提交INIT；外层仍见null，但原Legacy当前锁定读在新连接看到INIT并拒绝202、无Order调用，回到外层后同一旧连接/快照恢复。TCC例执行原PayTccPaymentService.failure及真实NOT_SUPPORTED代理：依赖调用时没有活动事务或外层数据源资源，UNKNOWN异常和ROLLEDBACK投影返回后均恢复外层连接/资源；后者返回被修改为FAILED的视图而库内受控样本仍PENDING，证明没有额外重读覆盖。TCC execution/projection为替身，完整启动配置的依赖门在专用测试上下文中用占位Bean隔离，未启动TC或验收真实资金证明。
+
+首次迁移后仅一项原指标重放测试失败：新failureService遗漏在夹具install列表，仍为noop；加入原显式安装列表后原计数断言通过，生产构造器及实际指标上下文无需修改。原失败日志/XML归档，无新增失败数据库。最终失败方法75个token按身份/响应边界和共用调用规范化后等价；1064份其他已跟踪后端文件及README逐字节保持。12份Java实际格式化、八模块test-compile、Pay打包及diff通过，Jar187个Pay生产class与最终classes一致，新三类型存在，无测试类混入。
+
+### 37.4 证据、回退与后续
+
+方案提交4441c370，基线标签refactor/pay-failure-baseline-20261113；完成标签refactor/pay-failure-complete-20261113。证据入口 `target/backend-refactor-20261113/pay-failure/verification.json`，保存基线/首轮失败/最终XML、源码与断言对照、四库实际事务观察与事实、指标工件、Jar摘要和回退证明。
+
+独立MySQL8.0.46两源表最终0行且debit_mode仍NOT NULL；全部四个UUID库按成功门删除，无新增失败库。自有容器/网络已移除，mysql_data卷保留；默认中间件及历史失败现场均未操作。
+
+```powershell
+git revert refactor/pay-failure-complete-20261113
+```
+
+临时index验证逆补丁恢复父树，真实暂存内容和README保持；实际回退后精确清理本轮三个新生产类型、两个新测试类（含内部class）的target残留并重编译，不全量clean，不恢复运行数据。后续依赖先逆序处理。README、两个旧pycache及忽略工件不入提交。
+
+下一步提取回调入口，先冻结原token校验、共享监视器、独立claim绑定与complete/重读时序，再移除仅剩回调的旧继承Controller/混合实现/空接口。Pay整体重构尚未结束；旧M2固定环境矩阵、完整TC/User/Order/Stock资金交付、Gateway Bearer及性能本轮未运行。

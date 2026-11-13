@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
@@ -24,6 +25,7 @@ import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.PayConsistencyService;
+import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PayServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
@@ -46,6 +48,7 @@ class PayTccPublicRoutingTest {
   private PayServiceImpl service;
   private PaySuccessServiceImpl successService;
   private PaySuccessController successController;
+  private PayFailureController failureController;
 
   /** 准备支付入口依赖。 */
   @BeforeEach
@@ -76,6 +79,15 @@ class PayTccPublicRoutingTest {
             com.cloudmall.pay.service.PayProtocolMetrics.noop(),
             (PayWriteMonitor) ReflectionTestUtils.getField(service, "writeMonitor"));
     successController = new PaySuccessController(successService);
+    failureController =
+        new PayFailureController(
+            new PayFailureServiceImpl(
+                payments,
+                (PayDebitIntentMapper)
+                    ReflectionTestUtils.getField(service, "payDebitIntentMapper"),
+                mock(com.cloudmall.pay.service.impl.PayLegacyFailureService.class),
+                tccProvider,
+                com.cloudmall.pay.service.PayProtocolMetrics.noop()));
     AuthContext.set(7L, "USER");
   }
 
@@ -155,7 +167,8 @@ class PayTccPublicRoutingTest {
         .when(tcc)
         .failure(any(PayVO.class));
 
-    BizException pending = assertThrows(BizException.class, () -> service.fail("pay-routing"));
+    BizException pending =
+        assertThrows(BizException.class, () -> failureController.fail("pay-routing"));
 
     assertEquals(202, pending.getHttpStatus());
     verify(legacy, never()).initiate(any());

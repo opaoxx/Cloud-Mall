@@ -6,10 +6,13 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.pay.controller.PayController;
+import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PaySuccessController;
+import com.cloudmall.pay.service.PayFailureService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -140,6 +143,7 @@ class PayProtocolMetricsEndpointTest {
           List.of(
               controller,
               context.getBean(PaySuccessServiceImpl.class),
+              context.getBean(PayFailureServiceImpl.class),
               context.getBean(PayConsistencyService.class),
               context.getBean(PayTccCoordinatorServiceImpl.class),
               context.getBean(PayTccExecutionEvidence.class),
@@ -461,6 +465,22 @@ class PayProtocolMetricsEndpointTest {
     PrometheusMetricsExportAutoConfiguration.class
   })
   static class EndpointConfiguration {
+    /** 失败路由的真实生产实例使用该容器的必需指标依赖。 */
+    @Bean
+    PayFailureServiceImpl failureService(
+        PayProtocolMetricsTest.Fixture fixture,
+        PayProtocolMetrics metrics,
+        org.springframework.beans.factory.ObjectProvider<PayTccPaymentService> tcc) {
+      return new PayFailureServiceImpl(
+          fixture.records, fixture.intents, fixture.legacyFailure, tcc, metrics);
+    }
+
+    /** 新失败HTTP入口与其余入口共存。 */
+    @Bean
+    PayFailureController failureController(PayFailureService service) {
+      return new PayFailureController(service);
+    }
+
     /** 新成功业务必须使用该真实指标容器注入的组件及原共享锁。 */
     @Bean
     PaySuccessServiceImpl successService(

@@ -9,6 +9,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.controller.PayController;
 import com.cloudmall.pay.controller.PayCreationController;
+import com.cloudmall.pay.controller.PayFailureController;
 import com.cloudmall.pay.controller.PayQueryController;
 import com.cloudmall.pay.controller.PaySuccessController;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
@@ -23,6 +24,7 @@ import com.cloudmall.pay.service.PayCreationService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PaySuccessService;
 import com.cloudmall.pay.service.impl.*;
+import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import java.math.BigDecimal;
@@ -137,7 +139,7 @@ class PayCreationWiringTest {
                 () -> {
                   Thread.currentThread().setName("unlocked-entries");
                   fixture.query.get("order-1");
-                  fixture.legacy.fail("pay-1");
+                  fixture.failureController.fail("pay-1");
                   return true;
                 });
         assertTrue(independent.future.get(3, TimeUnit.SECONDS));
@@ -273,6 +275,9 @@ class PayCreationWiringTest {
     /** 新成功入口，与创建和回调共用同一个锁。 */
     private final PaySuccessController success;
 
+    /** 独立失败HTTP入口，不持共享锁。 */
+    private final PayFailureController failureController;
+
     /** 原查询入口。 */
     private final PayQueryController query;
 
@@ -285,6 +290,8 @@ class PayCreationWiringTest {
           PayController.class,
           PaySuccessController.class,
           PaySuccessServiceImpl.class,
+          PayFailureController.class,
+          PayFailureServiceImpl.class,
           PayQueryController.class,
           PayQueryServiceImpl.class);
       var beans = context.getBeanFactory();
@@ -305,6 +312,7 @@ class PayCreationWiringTest {
       controller = context.getBean(PayCreationController.class);
       legacy = context.getBean(PayController.class);
       success = context.getBean(PaySuccessController.class);
+      failureController = context.getBean(PayFailureController.class);
       query = context.getBean(PayQueryController.class);
       assertTrue(AopUtils.isAopProxy(service));
       assertFalse(AopUtils.isAopProxy(legacy));

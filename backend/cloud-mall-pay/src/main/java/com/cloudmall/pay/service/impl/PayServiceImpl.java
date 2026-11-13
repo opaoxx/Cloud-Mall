@@ -1,7 +1,6 @@
 package com.cloudmall.pay.service.impl;
 
 import com.cloudmall.common.api.ApiResponse;
-import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
@@ -78,21 +77,6 @@ public class PayServiceImpl implements PayService {
     this.payCallbackLogMapper = payCallbackLogMapper;
   }
 
-  @PostMapping("/{payNo}/mock-fail")
-  /** 按持久协议处理失败请求，已失败重放和退款中状态不重复取消订单。 */
-  public ApiResponse<?> fail(@PathVariable String payNo) {
-    // 1. 读取当前用户支付并核验不可变协议。
-    PayVO payment = owned(payNo);
-    String mode = paymentMode(payNo);
-    metrics.route(PayProtocolMetrics.mode(mode), Entry.MOCK_FAIL);
-    if (PayDebitModes.TCC.equals(mode)) {
-      tccEntry().failure(payment);
-      return ApiResponse.ok(payment);
-    }
-    // 2. 独立当前读事务负责授权和取消；不使用外层旧视图决定无意图。
-    return ApiResponse.ok(legacyFailureService.fail(payment));
-  }
-
   @PostMapping("/callback")
   /** 执行 callback 相关操作。 */
   public ApiResponse<?> callback(
@@ -156,11 +140,6 @@ public class PayServiceImpl implements PayService {
   /** 缺失显式入口依赖时关闭 TCC 路由，不降级为 Legacy。 */
   private PayTccPaymentService tccEntry() {
     return PayProcessingSupport.tccEntry(tccPaymentService);
-  }
-
-  /** 在原调用位置读取身份，再委托共用支付归属规则。 */
-  private PayVO owned(String payNo) {
-    return ownedForUser(payNo, AuthContext.requireUserId());
   }
 
   /** 委托原支付归属检查，不改变读取和异常顺序。 */
