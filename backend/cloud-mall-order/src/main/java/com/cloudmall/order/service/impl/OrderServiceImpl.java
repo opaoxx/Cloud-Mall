@@ -4,29 +4,19 @@ import static com.cloudmall.order.service.impl.OrderProductSnapshotRules.fitsOrd
 import static com.cloudmall.order.service.impl.OrderProductSnapshotRules.hasCentPrecision;
 import static com.cloudmall.order.service.impl.OrderProductSnapshotRules.hasNonnegativeProductPrice;
 import static com.cloudmall.order.service.impl.OrderProductSnapshotRules.hasPersistableProductMetadata;
-import static com.cloudmall.order.service.impl.OrderWorkflowSupport.bad;
-import static com.cloudmall.order.service.impl.OrderWorkflowSupport.findAddress;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.id;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.now;
-import static com.cloudmall.order.service.impl.OrderWorkflowSupport.remoteCode;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.timeoutOutbox;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.toJson;
 
-import com.alibaba.csp.sentinel.Entry;
-import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.cloudmall.common.api.*;
-import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.*;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
-import com.cloudmall.order.config.SeckillSentinelConfiguration;
-import com.cloudmall.order.domain.dto.SeckillOrderDTO;
 import com.cloudmall.order.domain.po.OrderItemPO;
 import com.cloudmall.order.domain.po.OrderPO;
 import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.feign.ProductClient;
-import com.cloudmall.order.feign.StockClient;
-import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
@@ -39,7 +29,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.exc.MismatchedInputException;
-import feign.FeignException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -51,18 +40,10 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.*;
 
-@RequestMapping("/api")
 public class OrderServiceImpl implements OrderService {
-  /** 保存 stock 的业务状态或配置。 */
-  @Autowired private StockClient stock;
-
   /** 保存 products 的业务状态或配置。 */
   @Autowired private ProductClient products;
-
-  /** 保存 users 的业务状态或配置。 */
-  @Autowired private UserClient users;
 
   /** 保存 db 的业务状态或配置。 */
   @Autowired private OrderSqlMapper orderSqlMapper;
@@ -85,85 +66,12 @@ public class OrderServiceImpl implements OrderService {
   /** 创建由 Spring 字段注入依赖的订单服务实例。 */
   public OrderServiceImpl() {}
 
-  /** 手动装配剩余状态/秒杀流程；创建依赖由独立Service管理。 */
+  /** 手动装配尚未迁移的消息消费依赖。 */
   public OrderServiceImpl(
-      StockClient stock,
-      ProductClient products,
-      UserClient users,
-      OrderSqlMapper orderSqlMapper,
-      ObjectMapper mapper) {
-    this.stock = stock;
+      ProductClient products, OrderSqlMapper orderSqlMapper, ObjectMapper mapper) {
     this.products = products;
-    this.users = users;
     this.orderSqlMapper = orderSqlMapper;
     this.mapper = mapper;
-  }
-
-  @PostMapping("/seckill/orders")
-  /** 执行 seckill 相关操作。 */
-  public ApiResponse<?> seckill(
-      @RequestHeader("Idempotency-Key") String key, @RequestBody SeckillOrderDTO req) {
-    // 1. 接收并整理 seckill 的业务请求。
-    // 2. 执行 seckill 的核心业务校验与状态处理。
-    // 3. 返回 seckill 的处理结果。
-    long userId = AuthContext.requireUserId();
-    if (key == null
-        || key.isBlank()
-        || key.codePointCount(0, key.length()) > 128
-        || req == null
-        || req.activityId == null
-        || req.skuId == null
-        || req.addressId == null) bad("秒杀参数不完整");
-    Entry sentinelEntry;
-    try {
-      sentinelEntry = SeckillSentinelConfiguration.enter(userId, req.activityId);
-    } catch (BlockException blocked) {
-      SeckillSentinelConfiguration.recordBlock();
-      throw new BizException("GATEWAY_RATE_LIMITED", "请求过于频繁，请稍后重试", 429);
-    }
-    try {
-      Map<String, Object> address = findAddress(users, req.addressId);
-      Map<String, Object> stockRequest = new HashMap<>();
-      stockRequest.put("activityId", req.activityId);
-      stockRequest.put("skuId", req.skuId);
-      stockRequest.put("userId", userId);
-      stockRequest.put("idempotencyKey", key);
-      stockRequest.put("addressSnapshot", toJson(mapper, address));
-      try {
-        ApiResponse<?> row =
-            OrderStockCircuitBreaker.call(
-                OrderStockCircuitBreaker.SECKILL, () -> stock.seckill(stockRequest));
-        if (row == null)
-          throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
-        return row;
-      } catch (FeignException exception) {
-        if (exception.status() == 429) {
-          String downstreamCode = remoteCode(mapper, exception);
-          if ("GATEWAY_RATE_LIMITED".equals(downstreamCode))
-            throw new BizException("GATEWAY_RATE_LIMITED", "请求过于频繁，请稍后重试", 429);
-          if ("SECKILL_LIMIT_REACHED".equals(downstreamCode))
-            throw new BizException("SECKILL_LIMIT_REACHED", "每位用户只能购买一次该秒杀商品", 429);
-          throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
-        }
-        String downstreamCode = remoteCode(mapper, exception);
-        if (exception.status() == 409 && "SECKILL_IDEMPOTENCY_CONFLICT".equals(downstreamCode))
-          throw new BizException("SECKILL_IDEMPOTENCY_CONFLICT", "秒杀幂等键载荷已被占用", 409);
-        if (exception.status() == 409
-            && Set.of(
-                    "SECKILL_NOT_STARTED",
-                    "SECKILL_ENDED",
-                    "SECKILL_SOLD_OUT",
-                    "SECKILL_CLAIM_CONFLICT",
-                    "COMMON_CONFLICT")
-                .contains(downstreamCode))
-          throw new BizException("SECKILL_NOT_AVAILABLE", "秒杀活动当前不可参与，请稍后再试", 409);
-        throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
-      } catch (StockCircuitOpenException circuitOpen) {
-        throw new BizException("GATEWAY_SERVICE_UNAVAILABLE", "秒杀服务暂时不可用，请稍后再试", 503);
-      }
-    } finally {
-      sentinelEntry.exit(1, userId, req.activityId);
-    }
   }
 
   /**
@@ -479,5 +387,4 @@ public class OrderServiceImpl implements OrderService {
   private OrderVO find(String orderNo) {
     return OrderDetailReader.read(orderSqlMapper, mapper, orderNo);
   }
-
 }

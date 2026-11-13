@@ -9,12 +9,11 @@ import static org.mockito.Mockito.when;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
+import com.cloudmall.order.controller.OrderSeckillAdmissionController;
 import com.cloudmall.order.domain.dto.SeckillOrderDTO;
-import com.cloudmall.order.feign.CartClient;
-import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.feign.UserClient;
-import com.cloudmall.order.mapper.OrderSqlMapper;
+import com.cloudmall.order.service.impl.OrderSeckillAdmissionServiceImpl;
 import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import com.cloudmall.order.service.impl.StockCircuitOpenException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,14 +63,11 @@ class SeckillSentinelFeignMappingTest {
 
   private final StockClient stock = mock(StockClient.class);
   private final UserClient users = mock(UserClient.class);
-  private final OrderTestService orders =
-      new OrderTestService(
-          stock,
-          mock(ProductClient.class),
-          users,
-          mock(CartClient.class),
-          mock(OrderSqlMapper.class),
-          new ObjectMapper());
+
+  /** 原错误映射矩阵直接经过实际新Controller/Service。 */
+  private final OrderSeckillAdmissionController orders =
+      new OrderSeckillAdmissionController(
+          new OrderSeckillAdmissionServiceImpl(stock, users, new ObjectMapper()));
 
   @AfterEach
   void clearAuth() {

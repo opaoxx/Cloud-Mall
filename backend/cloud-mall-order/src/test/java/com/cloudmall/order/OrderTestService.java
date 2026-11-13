@@ -2,22 +2,32 @@ package com.cloudmall.order;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
+import com.cloudmall.order.controller.OrderSeckillAdmissionController;
 import com.cloudmall.order.domain.dto.CreateOrderDTO;
+import com.cloudmall.order.domain.dto.SeckillOrderDTO;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.impl.OrderCreationServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.OrderSeckillAdmissionServiceImpl;
 import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderStateServiceImpl;
 import com.cloudmall.order.service.impl.OrderWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.ZoneOffset;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 旧混合算法矩阵的测试装配，创建调用真实实现；不注册Spring Bean、不进入生产Jar。 旧夹具的外层事务保留在此测试入口，实际生产代理与锁顺序由直接装配生产类的测试验证。 */
 public class OrderTestService extends OrderServiceImpl {
+  /** 旧混合夹具的Stock依赖，继续允许历史测试替换。 */
+  @Autowired private StockClient stock;
+
+  /** 旧混合夹具的User依赖，继续允许历史测试替换。 */
+  @Autowired private UserClient users;
+
   /** 旧手动装配夹具的创建/状态入口共用监视器。 */
   private OrderWriteMonitor writeMonitor = new OrderWriteMonitor();
 
@@ -44,7 +54,9 @@ public class OrderTestService extends OrderServiceImpl {
       CartClient cart,
       OrderSqlMapper orders,
       ObjectMapper mapper) {
-    super(stock, products, users, orders, mapper);
+    super(products, orders, mapper);
+    this.stock = stock;
+    this.users = users;
     this.cart = cart;
   }
 
@@ -65,6 +77,13 @@ public class OrderTestService extends OrderServiceImpl {
             field("writeMonitor", OrderWriteMonitor.class));
     ReflectionTestUtils.setField(creation, "creationClock", creationClock);
     return ApiResponse.ok(creation.create(key, request, AuthContext::requireUserId));
+  }
+
+  /** 秒杀旧夹具调用真实Controller和受理实现，不复制算法或添加事务。 */
+  public ApiResponse<?> seckill(String key, SeckillOrderDTO request) {
+    return new OrderSeckillAdmissionController(
+            new OrderSeckillAdmissionServiceImpl(stock, users, field("mapper", ObjectMapper.class)))
+        .seckill(key, request);
   }
 
   private <T> T field(String name, Class<T> type) {

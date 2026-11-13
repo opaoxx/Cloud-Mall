@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理、普通创建和状态迁移Service提取，秒杀/消息职责待继续。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理、普通创建、状态迁移和秒杀受理Service提取，消息消费职责待继续。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、查询、Cart清理、普通创建及状态迁移切片完成，见第23至28节；秒杀/消息职责待继续 |
+| Order | 进行中 | Seata演练、查询、Cart清理、普通创建、状态迁移及秒杀受理切片完成，见第23至29节；消息消费职责待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1641,3 +1641,37 @@ git revert refactor/order-state-complete-20261113
 本入口没有Order持久化路径，本轮不新建MySQL/Redis/RabbitMQ实验；不重跑无关实库矩阵。全Common/Order单测、Order打包、八模块test-compile、迁移方法/剩余源码对照、Java格式化、Jar入口和git diff --check为门槛。原测试方法保留、未涉及源码/资源哈希与README指纹核验。所有尝试与最终报告归档到 `target/backend-refactor-20261113/order-seckill-admission/`。
 
 完成后建立 `refactor/order-seckill-admission-complete-20261113`，临时Git index验证逆补丁恢复父树，不动真实工作树展示回滚，不全量clean或reset --hard。Git回退不恢复数据库或忽略工件；实际撤销新增类型后只精确清理对应class并重编译。尚未运行的真实Nacos规则订阅、Stock/User HTTP业务、中间件和完整商城链明确列为限制。
+
+### 29.3 实施结果与调用链
+
+三个受理类型已落盘，Service实现110行；旧混合类483→390行，只剩消息消费及其辅助方法，不再持有Stock/User客户端、AuthContext、HTTP注解或秒杀受理方法。旧OrderController暂保留Bean承载原Rabbit监听器，注释已说明当前用途；空OrderService与剩余继承关系等待消息切片收尾。
+
+实际调用链为：`POST绑定 → Controller读取原身份 → AdmissionService参数校验 → 原Sentinel IN资源 → User地址查询/首个数值ID匹配 → JSON快照 → 五字段Stock载荷 → 原Stock熔断OUT资源 → 一次Feign调用 → 完整上游响应透传/原错误映射 → finally退出资源`。没有Order Mapper、消息发布或新增事务；原已有调用方事务不被挂起。未修改Sentinel配置/指标、Feign接口和拦截器、地址helper、Stock受理事实或异步落单协议。
+
+| 验证范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 原公共契约与跨模块规则 |
+| Order既有单测 | 326 | 原创建/状态/消息矩阵，含直接改用新入口的6项秒杀错误映射 |
+| OrderSeckillAdmissionContractTest | 8 | 原响应对象身份及完整HTTP信封、绑定与鉴权顺序、原参数/地址/五字段载荷、实际Sentinel流控指标及用户/活动参数位置、成功/异常资源退出、JSON失败、Spring无新增事务及沿用外层事务 |
+| OrderSeckillAdmissionFeignTest | 1 | 实际StockClient/SpringMvcContract/认证拦截器到本机HTTP替身的18组响应；原路径、两个身份头、原键/快照、完整响应、全部已知409/429和未知/畸形/null/5xx映射，每次恰一次Stock请求 |
+| 合计 | 360 | 65个类，0失败、0错误、0跳过 |
+
+HTTP绑定验证保留了既有统一异常处理器将畸形JSON归为500的行为，没有在结构重构中顺带调整错误协议。业务层继续只要求活动/SKU/地址非null，不新增正数门；地址只匹配数值ID而不接受字符串ID，选择首个匹配项，保留null字段。非null上游响应不检查成功码、不改requestId或data；受理结果不被误表述为订单落库。
+
+首次测试编译因当前Micrometer SimpleMeterRegistry未实现AutoCloseable失败，已改为finally移除全局registry并显式close；同时按Feign Encoder接口处理测试JSON序列化受检异常。修复后先15项定向通过，再完整360项通过。原失败日志保留，生产逻辑未为测试错误调整。测试HTTP服务器/线程池、Spring上下文和指标注册器均在结束路径释放。
+
+受理方法457个token经声明的变量改名及身份读取移到Controller后逐项一致；剩余混合源码（含两个消费者和辅助规则）对照一致，其他201份Order原源码/资源哈希保持。两个适配测试文件原方法保留，夹具只委托实际新入口。九个变更Java文件完成Google Java Format及diff检查。Order打包和八模块test-compile通过；Jar三个新类型与最终class逐字节一致，无测试夹具，旧混合类不再依赖Stock/User或HTTP绑定，新Service无AuthContext/Web绑定/事务注解/订单Mapper/共享监视器依赖。
+
+### 29.4 证据、回退与后续
+
+证据入口 `target/backend-refactor-20261113/order-seckill-admission/verification.json`，同目录保留基线、失败编译、定向及最终日志、65份最终XML、源码对照、格式化/产物校验及逆补丁记录。README与起始字节指纹一致，其原修改及旧pycache不入提交。本轮未创建Docker实验资源，历史容器/卷及上轮失败现场未触碰。
+
+方案提交/基线 `e90cc7b2`，标签 `refactor/order-seckill-admission-baseline-20261113`；完成标签 `refactor/order-seckill-admission-complete-20261113`。临时Git index验证本轮逆补丁恢复父提交完整树，真实index和工作树保持。
+
+```powershell
+git revert refactor/order-seckill-admission-complete-20261113
+```
+
+只回退本轮秒杀受理职责迁移。实际回退后精确清理三个新增生产类型、OrderSeckillAdmissionContractTest和OrderSeckillAdmissionFeignTest（含嵌套类）的class残留，再编译恢复后的旧实现/夹具；不清空target历史证据。后续存在依赖时逆序处理，Git不恢复运行数据或忽略工件。
+
+下一步提取秒杀消息落单Service与监听适配器，先冻结消费事务、重复/冲突指纹、时间/商品快照和原重试/死信语义；随后拆分超时消费者并移除旧Controller继承和空OrderService。本轮未执行真实User/Stock业务服务、Nacos规则订阅、中间件、完整商城或性能验证，Order模块整体尚未完成。
