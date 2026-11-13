@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分和Legacy/回调收据分组，后续整理TCC只读取证及写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调收据及TCC只读取证分组，后续整理TCC写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理与Legacy/回调收据分组已完成，见第34至39节；TCC只读取证与写编排待分批整理 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调收据及TCC只读取证分组已完成，见第34至40节；TCC写编排待分批整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2342,3 +2342,39 @@ git revert refactor/pay-legacy-callback-complete-20261113
 独立Compose项目`cloud-mall-refactor-pay-tcc-evidence-20261113`，MySQL候选19959/10.254.231.0/24，预检后全新卷；从现有schema.sql精确复制所需空源表，不导入业务数据、不触碰默认实例。结束归档并移除自有容器/网络，卷保留。八模块test-compile先生成跨模块反射夹具需要的标准classes，再执行矩阵；Pay打包、Jar新旧类路径检查、精确清除旧12类class、格式化及diff检查均必须通过。
 
 源码去package/import/注释后逐token比较12类和所有引用文件；其余后端及README按字节校验。纯引用文件仅整理imports；迁移类、包说明、新测试完整格式化。证据位于`target/backend-refactor-20261113/pay-tcc-evidence`。完成提交及`refactor/pay-tcc-evidence-complete-20261113`标签前，在临时index逆补丁验证恢复父树；只提交本节方案、精确迁移/引用文件和新测试，不包含README、旧pycache或忽略工件。后续审查24个TCC写组件，Pay模块尚不宣告完成。
+
+### 40.3 实施与验证结果
+
+12类已整体迁入evidence，原Bean名、构造器、包内校验可见性和业务语句保持。30份引用文件（10个Controller、20份测试）只适配import/FQN；新增PayTccEvidenceWiringTest与包说明，impl根包剩31类。去package/import/注释后12类共17635个token与基线完全一致，原20份测试正文不变；1038份其他已跟踪后端文件及README按字节保持。另核对79份已跟踪非Java运行文件，没有旧FQN依赖。
+
+实际子包扫描验证默认配置及所有诊断开关显式开启两个上下文：恰12个原Bean、恰两个事务代理和三个REQUIRED/readOnly/RR方法；默认关闭返回503、开启后错误凭证返回403，所有Mapper、Feign及事务管理器零调用。各入口未增加事务，Account/LinkedRefund包内静态校验继续闭合在本包。
+
+核心调用链复盘：`内部Controller → 原独立开关与共享入口门 → ReadService代理 → 有界无锁Mapper读取`；交付查询在外层RR中经localReader代理加入同一连接；远端取证为`第一次Pay RR capture → 事务外GET（隔离并恢复AuthContext）→ 第二次Pay RR capture → 变化优先/原生字段校验`。诊断报告始终不授权资金动作，读组件未引入写Store、恢复器或调度器。逐行复核本轮包声明、引用、包内依赖及新装配测试，原算法另以token对照与既有矩阵验证。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共及源码守卫 |
+| Pay原有全部单测 | 647 | 原入口/协议/取证/资金/恢复/指标矩阵 |
+| PayTccEvidenceWiringTest | 1 | 实际扫描、原Bean、事务代理及默认/开启后拒绝门 |
+| PayTccReconciliationMySqlIT / DeliveryEvidenceMySqlIT | 7 / 9 | 六/八来源同连接RR、并发写不混快照、所有原事实不变 |
+| PayTccOrderEvidenceMySqlIT / StockEvidenceMySqlIT | 9 / 6 | 实际GET及原实现读取、源表指纹、上下文隔离、变化优先 |
+| PayTccUserEvidenceMySqlIT / UserAccountEvidenceMySqlIT | 9 / 9 | 实际User读取、凭证、原账户观察、未授权动作 |
+| PayTccUserFrozenOwnershipEvidenceMySqlIT / UserLinkedRefundEvidenceMySqlIT | 8 / 8 | 有界集合、独立并发写、冻结归属与关联退款观察 |
+| PayTccUserPaymentLedgerEvidenceMySqlIT / UserTerminalFrozenOwnershipEvidenceMySqlIT | 8 / 7 | 同支付账本、终态归属、上下文恢复及无副作用 |
+| 合计 | 753 | 83类，0失败、0错误、0跳过；其中实库80项 |
+
+迁移前672项基线单独归档，不与最终累计。编译与最终测试首次通过；迁移清单检查在编译前拦截了3份通配符import遗漏，补明确新import后30份正文等价，原断言未改。实验DDL准备时识别订单item模板使用LIKE，按原schema依赖顺序复制基础表，不改生产DDL。45份Java通过约定完整/仅import格式化及检查；八模块test-compile、Pay打包与diff通过。Jar187个Pay生产class与最终classes逐字节一致，新12类型存在、旧路径与测试夹具无残留；旧12个class已备份并精确移除，未全量clean。
+
+### 40.4 证据、回退与后续
+
+方案提交f75b2f4e，基线标签`refactor/pay-tcc-evidence-baseline-20261113`，完成标签`refactor/pay-tcc-evidence-complete-20261113`。证据入口`target/backend-refactor-20261113/pay-tcc-evidence/verification.json`，含基线/最终XML、token及文件指纹、格式/编译/Jar、源表检查、数据库创建/删除事件和临时index回退证明。
+
+独立MySQL8.0.46的Pay/User/Order/Stock共11张源表最终均0行，10类夹具创建的18个owned库全部删除，服务端binlog的18对CREATE/DROP事件与最终schema清单互证；各类原AfterAll源表checksum断言通过，HTTP监听与loader由夹具原逻辑关闭。本轮无测试失败现场，历史失败卷未触碰。归档初次尝试镜像缺失的mysqlbinlog命令，外层脚本未检查退出码而提前down；卷保留后只恢复本轮实例补存只读事实，改用SHOW BINLOG EVENTS并在归档成功后才down。问题与修复记录在原bugfix_log.md，未改业务或测试。最终自有容器/网络移除、mysql_data卷保留，README及旧pycache不入提交。
+
+```powershell
+git revert refactor/pay-tcc-evidence-complete-20261113
+```
+
+临时index用no-renames完整路径逆补丁恢复父树，真实index与README保持。实际回退后仅精确清理evidence迁入的12类型及新增装配测试class（含内部class），重编译恢复旧包路径；不全量clean、不回退运行数据，后续依赖先逆序回退。
+
+下一步审查24个TCC写组件的回执、执行/恢复和交付/取消职责及跨包可见性，再冻结下一组最小迁移。Pay整体仍未收尾，本轮未部署完整Gateway/Nacos/TC链路、运行资金写入闭环或压测。

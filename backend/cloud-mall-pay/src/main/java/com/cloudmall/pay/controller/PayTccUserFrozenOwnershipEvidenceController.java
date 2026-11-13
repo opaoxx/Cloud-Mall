@@ -3,7 +3,7 @@ package com.cloudmall.pay.controller;
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.vo.PayTccUserFrozenOwnershipReconciliationVO;
-import com.cloudmall.pay.service.impl.PayTccUserFrozenOwnershipEvidenceService;
+import com.cloudmall.pay.service.impl.evidence.PayTccUserFrozenOwnershipEvidenceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
