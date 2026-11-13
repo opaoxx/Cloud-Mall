@@ -1964,3 +1964,21 @@ git revert refactor/order-closeout-complete-20261113
 下一步从只读支付状态查询开始，候选类型为PayQueryController、PayQueryService、PayQueryServiceImpl，承接原GET `/api/payments/orders/{orderNo}`。绑定后先按原位置要求登录，再调用原selectByOrderNoAndUserId；使用PayRecordViews映射所有返回记录后取首条，空列表仍为原404“支付记录不存在”。保持无新增事务、锁、远程调用、协议路由或业务驱动；返回原PayVO字段/金额/时间/null，由Controller包装同样的响应。原共享toView方法仍服务写流程，不为迁移一个GET改写其余方法。
 
 本轮Pay源码指纹未变，也没有运行Pay业务全套测试或创建其回退标签。实施时先补精确调用点/契约测试与当前Git基线；随后再按已记录共享锁、Legacy/TCC、回调持久绑定和恢复事实逐项处理写流程。不得将这份准备结论理解为支付创建/成功/失败/回调的统一拆分授权细节已全部冻结。
+
+## 34. Pay只读支付状态查询（2026-11-13）
+
+### 34.1 范围与冻结契约
+
+基线458efb7c，仍由主Agent单独实施和评审。新增controller.PayQueryController、service.PayQueryService、service.impl.PayQueryServiceImpl；Controller通过构造器组合Service，get方法保留GET `/api/payments/orders/{orderNo}`，先读取AuthContext.requireUserId，再委托getByOrderNo(orderNo,userId)，包装ApiResponse.ok。Service只依赖既有PayRecordMapper，复用PayRecordViews.toView，返回PayVO。
+
+原selectByOrderNoAndUserId同时按orderNo和userId过滤，SQL没有ORDER BY/LIMIT；保留数据库原返回顺序，不宣称“最新支付记录”。仍完整映射所有返回行后取首条，空列表原404/COMMON_NOT_FOUND/“支付记录不存在”；Mapper异常及异常行原失败行为不变。身份必须在Mapper之前读取，不增加订单远端查询、403判断、trim或额外路径校验。保持六响应字段、金额字符串、+08:00 paidAt及显式null，debit_mode不参与GET路由/校验，状态原样返回。
+
+删除旧PayServiceImpl的get方法，不留委托桥。已搜索现有测试/源码，没有直接调用该get的生产或测试调用点；现有构造器、旧PayController继承和其余四条POST暂留。create/success/callback的原this同步监视器、create本地事务及fail无同步全部不变。只读新入口不添加Transactional、锁、模式指标、写操作或恢复动作，也不挂起调用者已有事务。Mapper、PO/VO、映射工具、Feign、配置/依赖、DDL/Redis/MQ契约均不改。
+
+### 34.2 验证与提交策略
+
+先提交方案并建立refactor/pay-query-baseline-20261113。新增HTTP行为契约测试先对原PayController运行，再只替换测试装配至新组合入口，复用同一组断言，覆盖认证前置、身份过滤、原首条/完整映射、404、金额/时间/null、各状态/模式只读返回及Mapper异常。使用实际AuthInterceptor、全局异常处理和公共Jackson配置，Mapper为受控替身；不称作真实数据库或Gateway/Bearer全链测试。
+
+迁移后新增Spring装配/路由/事务检查，核验与旧Controller共存时GET仅一份、四条POST仍由旧Bean处理，新Service无新增事务，查询不等待旧写监视器。运行Common/Pay全部现有*Test，八模块test-compile、Pay打包；旧写流程测试保留原文，无新兼容测试门面。对旧实现删除get后的其余token、所有未涉及源码/资源及README指纹核验，新增/改动Java执行既有Google Java Format及git diff --check；本轮SQL未变，不创建中间件实验或重跑真实TC/TCC资金矩阵。
+
+证据存target/backend-refactor-20261113/pay-query，记录每轮日志/XML、源码基线、格式/Jar及回退校验。完成后单独实施提交和refactor/pay-query-complete-20261113；临时index逆补丁恢复父树，不修改真实工作树演示回退。README原修改、两个旧pycache和忽略证据不入提交，历史失败现场保持；Git不恢复运行数据。
