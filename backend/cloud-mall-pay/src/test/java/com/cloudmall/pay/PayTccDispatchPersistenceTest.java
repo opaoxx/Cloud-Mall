@@ -14,7 +14,7 @@ import com.cloudmall.pay.domain.po.PayTccDispatchPO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
-import com.cloudmall.pay.service.impl.PayTccDispatchPersistence;
+import com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;

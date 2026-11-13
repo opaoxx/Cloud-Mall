@@ -12467,28 +12467,28 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 真实Persistence的三个方法各自进入短事务，未运行Spring REQUIRES_NEW代理。 */
-  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
-      com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
+  private com.cloudmall.pay.service.impl.dispatch.PayTccBridgeServiceImpl bridgeLedgerTransactions(
+      com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence actual,
       com.cloudmall.pay.feign.UserTccClient user) {
     return bridgeLedgerTransactions(actual, user, () -> {});
   }
 
   /** 只在领取短事务开始前调用受控hook，其余prepare/mirror事务边界不变。 */
-  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
-      com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
+  private com.cloudmall.pay.service.impl.dispatch.PayTccBridgeServiceImpl bridgeLedgerTransactions(
+      com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence actual,
       com.cloudmall.pay.feign.UserTccClient user,
       Runnable beforeClaim) {
     return bridgeLedgerTransactions(actual, user, beforeClaim, () -> {}, () -> {});
   }
 
   /** 后置hook在实际claim/mirror事务提交后、Bridge读回之前执行，其余场景默认noop。 */
-  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridgeLedgerTransactions(
-      com.cloudmall.pay.service.impl.PayTccDispatchPersistence actual,
+  private com.cloudmall.pay.service.impl.dispatch.PayTccBridgeServiceImpl bridgeLedgerTransactions(
+      com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence actual,
       com.cloudmall.pay.feign.UserTccClient user,
       Runnable beforeClaim,
       Runnable afterClaim,
       Runnable afterMirror) {
-    var boundary = mock(com.cloudmall.pay.service.impl.PayTccDispatchPersistence.class);
+    var boundary = mock(com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence.class);
     var transactions =
         new org.springframework.transaction.support.TransactionTemplate(
             new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
@@ -12533,7 +12533,7 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 公开dispatch重用原prepared锚点，只为一次POST提供原XID上下文并finally还原。 */
   private com.cloudmall.pay.domain.vo.PayTccDispatchVO bridgeLedgerPost(
-      com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl bridge) {
+      com.cloudmall.pay.service.impl.dispatch.PayTccBridgeServiceImpl bridge) {
     String original = io.seata.core.context.RootContext.unbind();
     io.seata.core.context.RootContext.bind("t171-xid");
     try {
@@ -12550,12 +12550,12 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 仅构造真实Bridge逻辑及owned Mapper，User为替身，不启用应用或真实网络。 */
-  private com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl ownedDispatchBridge(
-      com.cloudmall.pay.service.impl.PayTccDispatchPersistence persistence,
+  private com.cloudmall.pay.service.impl.dispatch.PayTccBridgeServiceImpl ownedDispatchBridge(
+      com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence persistence,
       com.cloudmall.pay.feign.UserTccClient user) {
     var configuration = mock(com.cloudmall.pay.config.PayTccBridgeConfiguration.class);
     when(configuration.isEnabled()).thenReturn(true);
-    return new com.cloudmall.pay.service.impl.PayTccBridgeServiceImpl(
+    return new com.cloudmall.pay.service.impl.dispatch.PayTccBridgeServiceImpl(
         records, dispatchMirrorMapper, persistence, user, configuration, "owned-callback");
   }
 
@@ -12749,7 +12749,7 @@ class PayLegacyRefundLedgerMySqlIT {
         .when(guarded)
         .mirrorState(any(), any(), any(), any(), any(), any());
     var rejected =
-        new com.cloudmall.pay.service.impl.PayTccDispatchPersistence(
+        new com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence(
             guarded, records, mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
     var failure =
         org.junit.jupiter.api.Assertions.assertThrows(
@@ -13209,7 +13209,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 仅在owned库克隆原dispatch DDL，以原真实MyBatis Mapper执行public镜像逻辑。 */
-  private com.cloudmall.pay.service.impl.PayTccDispatchPersistence ownedDispatchPersistence() {
+  private com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence ownedDispatchPersistence() {
     fixture.execute("DROP TABLE IF EXISTS pay_tcc_dispatch");
     String definition =
         (String) source.queryForMap("SHOW CREATE TABLE pay_tcc_dispatch").get("Create Table");
@@ -13224,7 +13224,7 @@ class PayLegacyRefundLedgerMySqlIT {
     try {
       var session = new SqlSessionTemplate(factory.getObject());
       dispatchMirrorMapper = session.getMapper(com.cloudmall.pay.mapper.PayTccDispatchMapper.class);
-      return new com.cloudmall.pay.service.impl.PayTccDispatchPersistence(
+      return new com.cloudmall.pay.service.impl.dispatch.PayTccDispatchPersistence(
           dispatchMirrorMapper, records, mock(com.cloudmall.pay.mapper.PayTccCancelMapper.class));
     } catch (Exception failure) {
       throw new IllegalStateException("owned dispatch factory failed", failure);

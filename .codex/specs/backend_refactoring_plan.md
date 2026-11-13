@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调收据及TCC只读取证分组，后续整理TCC写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调收据、TCC只读取证及派发桥分组，后续整理其余TCC写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调收据及TCC只读取证分组已完成，见第34至40节；TCC写编排待分批整理 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调收据、TCC只读取证及派发桥分组已完成，见第34至41节；其余TCC写编排待分批整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2395,6 +2395,42 @@ git revert refactor/pay-tcc-evidence-complete-20261113
 
 既有PayLegacyRefundLedgerMySqlIT只运行以下12个方法，原断言/循环不变：incompleteBridgeLedgerEvidenceKeepsUnknownAndOnePost、dispatchMirrorPrefixesFitColumnAndKeepFacts、dispatchMirrorGuardsAndZeroRowRollbackKeepFacts、dispatchMirrorAnchorChangesBlockTrustedAndUnknownResponses、dispatchMirrorKeepsMutableProgressAndOnePostPermission、changedPostClaimFieldsKeepPermissionAndSuppressAllUserRpc、postClaimStateAndMarkerMatrixKeepsSinglePostPermission、readbackAnchorChangesCannotReturnForeignPayloads、readbackKeepsMutableProgressAndMissingRowFallback、dispatchLookupAliasesRejectAllRecoveryAndMirrorStates、exactDispatchLookupKeepsRecoveryMirrorAndMissingSemantics、preparedDispatchWithConsumedMarkerCannotPostAgain。该旧夹具使用真实Mapper/短TransactionTemplate和受控RPC窗口，不代表Spring REQUIRES_NEW代理；由新增实库补此边界。保留旧池/源表指纹和AfterAll删库规则（失败也删），不宣称全类通过或保留失败库。
 
-独立Compose项目`cloud-mall-refactor-pay-tcc-dispatch-20261113`，候选MySQL19960/10.254.230.0/24，核验后全新卷。仅复制原pay_record/pay_debit_intent空源表；owned库使用现有Mapper建dispatch/cancel表。归档成功后才移除自有容器/网络，卷保留；脚本失败必须阻断后续清理，不依赖镜像外置mysqlbinlog。默认实例及历史卷不动。
+独立Compose项目`cloud-mall-refactor-pay-tcc-dispatch-20261113`，候选MySQL19960/10.254.230.0/24，核验后全新卷。复制原pay_record/pay_debit_intent空源表，另按原Mapper DDL准备pay_tcc_dispatch空源表供旧矩阵SHOW CREATE TABLE复制；owned库使用现有Mapper建dispatch/cancel表。归档成功后才移除自有容器/网络，卷保留；脚本失败必须阻断后续清理，不依赖镜像外置mysqlbinlog。默认实例及历史卷不动。
 
 证据位于`target/backend-refactor-20261113/pay-tcc-dispatch`；两类和引用文件去package/import/注释逐token相等，其他后端及README按字节保持。Java使用既有格式化器，纯引用文件只整理import；八模块test-compile、Pay打包、Jar新旧类检查、精确备份清除旧两class及git diff --check通过后，临时index逆补丁验证父树恢复。仅提交方案、两类迁包/说明、四份引用测试与新增实库测试，建立`refactor/pay-tcc-dispatch-complete-20261113`；Pay剩余22个TCC写组件另行分组，不宣称模块或资金全链收尾。
+
+### 41.3 实施与验证结果
+
+两类已迁入dispatch，包内sameAnchor及全部业务语句保持，未增加接口或旧包兼容副本。四份引用测试正文保持，仅适配import/FQN；增加包说明和PayTccDispatchMySqlIT，impl根包剩29类。两类去package/import/注释后共3129个token与基线一致；1076份其他已跟踪后端文件及README逐字节保持，79份已跟踪非Java运行文件无旧FQN依赖。
+
+逐行复核的调用链为`prepareDispatch → Persistence.prepare(REQUIRES_NEW) → postOnce → Persistence.markPostAttempted(REQUIRES_NEW) → User POST → Persistence.mirror(REQUIRES_NEW) → 原锚点读回`。已消费权限的重入走recover，只GET原User事实；PREPARED/终态捷径、DuplicateKey原行核验、取消gate、锁序、错误截断及未知结果仍使用原实现。事务在独立Bean上，未把Bridge整体包进新事务。原四份测试和两类生产算法的token对照同时通过。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共及源码守卫 |
+| Pay原有全部单测 | 648 | 原入口/协议/派发/回执/取证/恢复/指标矩阵 |
+| PayTccDispatchMySqlIT | 3 | 实际扫描与原配置、默认门、三个独立事务、响应丢失及镜像故障后的单次POST权限 |
+| PayLegacyRefundLedgerMySqlIT精确12方法 | 12 | 原完整方法循环：镜像锚点/状态/字段矩阵、权限与读回、Unicode截断、错误和零行回滚 |
+| 合计 | 688 | 75类，0失败、0错误、0跳过；实库15项 |
+
+基线673项与最终688项分别归档，不累计。新实库使用实际子包扫描、原BridgeConfiguration/CancelTableInitializer、真实MyBatis和裸数据源事务管理器；启动的原建表行为保留，默认关闭请求在启动完成后零业务SQL/零User调用。两类仍按原短Bean名装配，Bridge无事务代理、Persistence三个public方法恰为REQUIRES_NEW。调用者RR在三个独立提交前后仍看见旧空快照，三个写连接均不同于调用者，调用者回滚后PREPARED认领、POST标记及TRY_UNKNOWN镜像仍持久存在；支付仍PENDING。
+
+另一实库例在User替身执行前确认POST_ATTEMPTED已经提交且无本地事务；模拟响应丢失，再用owned SQL trigger使镜像写失败，原POST权限和原载荷保留。移除测试故障后同请求重入只发一次GET并保存TRY_UNKNOWN，全部过程中POST恰一次、支付不被投影成功。RootContext仅绑定测试XID；没有实际TC/RM、User资金请求或全局事务。
+
+首轮673项原单测通过，15项实库均在准备阶段错误：旧12项需要复制源pay_tcc_dispatch表，初始实验漏建；新3项的@Import使初始化器采用全限定Bean名，与生产DependsOn短名不匹配。补原Mapper派发表DDL，并把原配置/初始化器改为context.register保持生产短名后，完整688项回归通过。没有修改生产DependsOn、事务或业务断言。first-tests.log/XML与三个初始化失败库保留；旧夹具失败库按原AfterAll清理，未改其规则。
+
+9份Java通过约定格式化/检查；修正后八模块test-compile、Pay打包和diff再次通过。Jar187个Pay生产class与最终classes逐字节一致，新两类型存在、旧路径及测试夹具无残留；旧两class先备份再精确移除，未全量clean。
+
+### 41.4 证据、回退与后续
+
+方案提交8e9c3ab2；基线标签`refactor/pay-tcc-dispatch-baseline-20261113`，完成标签`refactor/pay-tcc-dispatch-complete-20261113`。证据入口`target/backend-refactor-20261113/pay-tcc-dispatch/verification.json`，含基线/首轮/最终日志与XML、三实库事实、精确12方法清单、源码/格式/构建/Jar和临时index回退证明。
+
+独立MySQL8.0.46最终三张源表均0行。最终成功轮的3个新夹具库及1个旧矩阵库清理；首轮旧矩阵库按原逻辑清理，首轮3个初始化失败库保留，DDL/数据与首次归档完全相同。服务端事件共8次建库、5次删库，剩余集合精确等于三个失败库。初次归档事件解析漏认旧夹具的DROP DATABASE IF EXISTS，断言正确阻断了清理；兼容实际语法后重新核对完整集合并成功归档，未放宽条件。最终自有容器/网络移除，mysql_data卷及失败现场保留；默认实例和历史卷未动。问题、根因、修复及验证均写入原bugfix_log.md。
+
+```powershell
+git revert refactor/pay-tcc-dispatch-complete-20261113
+```
+
+临时index用no-renames精确路径逆补丁验证父树恢复，真实index与README保持。实际回退后仅精确清理dispatch迁入两类型及新增实库测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序处理。README、两个旧pycache及忽略工件不入提交。
+
+下一步继续审查回执与执行事实校验共享的包内边界，再安排剩余22个TCC写组件分组。Pay整体尚未收尾，本轮未运行旧固定环境全链IT、完整TC资金流程、Gateway/Nacos或性能验证。
