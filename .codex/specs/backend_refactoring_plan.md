@@ -1675,3 +1675,26 @@ git revert refactor/order-seckill-admission-complete-20261113
 只回退本轮秒杀受理职责迁移。实际回退后精确清理三个新增生产类型、OrderSeckillAdmissionContractTest和OrderSeckillAdmissionFeignTest（含嵌套类）的class残留，再编译恢复后的旧实现/夹具；不清空target历史证据。后续存在依赖时逆序处理，Git不恢复运行数据或忽略工件。
 
 下一步提取秒杀消息落单Service与监听适配器，先冻结消费事务、重复/冲突指纹、时间/商品快照和原重试/死信语义；随后拆分超时消费者并移除旧Controller继承和空OrderService。本轮未执行真实User/Stock业务服务、Nacos规则订阅、中间件、完整商城或性能验证，Order模块整体尚未完成。
+
+## 30. Order 秒杀消息落单Service（2026-11-13）
+
+### 30.1 实施前评审与边界
+
+基线 `7842d80a`。主Agent继续单独评审、实施及验证；已读取项目规则、README、Bug台账及秒杀时间、商品身份、数值解析、冲突原文/序列化、dedup提交结果规格。只迁移consumeSeckill及其五个私有辅助方法，超时消费、恢复扫描、Mapper/SQL、消息协议和共享创建/状态锁保持原样。
+
+- 新增 `service.OrderSeckillCreationService`、`service.impl.OrderSeckillCreationServiceImpl`，以createFromMessage(Map<String,Object>)承接原方法。新实现构造器注入ProductClient、OrderSqlMapper、ObjectMapper、OrderOutboxMapper、SeckillOrderDedupMapper、SeckillMessageRecoveryMapper；保留方法级默认REQUIRED，不新增锁、独立事务或重试。
+- `config.OrderSeckillMessageListener` 作为消息接入适配器，构造器注入Service接口，consumeSeckill只委托服务。原RabbitListener队列、默认containerFactory、Map泛型签名、转换器和异常传播保持；事务在业务体前开启，commit成功后才返回监听容器。监听器不捕获或包装Service异常，Service原catch(Exception)继续保留cause、Error不吞，提交阶段异常仍传播至容器。
+- 原注解没有显式endpoint ID，本轮仍由框架自动生成，自动序号不作为业务标识；不新增固定ID或改变consumerTag策略。实际注册时秒杀队列只允许一个监听端点，旧OrderController移除秒杀方法后继续承载原超时端点。原AUTO确认、三次重试、1s/2s退避及拒绝后DLX配置不修改；不新增手工ACK/NACK。
+- 保留原null消息返回、Number/String无损long解析、legacy缺地址规则、原指纹计算与大小写比较、claim/find分支、两类冲突证据、COMMITTED重放先于时间/Product的顺序。首次落单保留上海毫秒/月份校验、商品身份/金额/metadata规则、quantity=1、原时间和30分钟期限。
+- 订单、明细、timeout outbox、dedup COMMITTED及匹配恢复状态沿同一原事务提交；markCommitted必须恰1行。冲突只使用成功序列化的一份文本生成原文/哈希/稳定事件号，不把Rabbit原始body与Map序列化文本混称。所有helper算法迁入新实现，不复制到旧类，不扩大捕获范围。
+- 旧实现移除Product、Outbox、秒杀dedup/recovery专属依赖，手动构造器只保留OrderSqlMapper/ObjectMapper。对应字段迁至OrderTestService测试夹具（保持反射字段名和注入能力），consumeSeckill测试适配保留原外层@Transactional并调用真实新实现；不以夹具替代生产代理证据。Runtime实库装配改为实际新监听器与服务代理。
+
+### 30.2 验证与提交策略
+
+先提交本节并建立 `refactor/order-seckill-creation-baseline-20261113`，运行Common/Order单测基线。保留原单测及CreationPrecisionMySqlIT全部72方法；Runtime只运行 `explicitModeUsesProductionMappersAfterBootstrapAndAudit`，不声称全类。新增监听适配单测和真实Spring AMQP注册/转换验证，检查无重复监听、同一消息委托和异常不吞。
+
+新独立Compose项目 `cloud-mall-refactor-order-seckill-creation-20261113`，MySQL19945、Rabbit19946/管理19947、子网10.254.239.0/24；核实项目/卷/端口/子网不存在后创建，沿用deploy/experiments/compose.yml的固定镜像/认证。只从schema.sql准备原Order七张空源表，实库用自有UUID库。新增真实MySQL/Rabbit IT直接装配生产Service、监听器、消息配置/转换器及原重试参数，覆盖正常提交/重复、商品失败回滚并三次重试入DLQ、提交门故障回滚/原消息可重放、冲突证据落盘。远端Product为受控替身，不宣称真实商品/库存全链。
+
+各实库组串行运行，保留原native清理门及失败证据，不动历史失败卷。结束核对来源表为空、成功UUID库清理、消息队列清空，归档日志/XML/本轮native及容器元数据，再仅移除自有容器/网络，新MySQL/Rabbit卷保留。
+
+验收门包括原六方法及剩余算法对照、原测试方法保留、未涉及源码/资源指纹、实际Java格式化、Order打包、八模块test-compile、Jar监听器/旧入口检查、git diff --check及README原修改保持。完成标签 `refactor/order-seckill-creation-complete-20261113`；临时Git index逆补丁恢复父树，保留真实工作树和暂存条目，不全量clean/reset。Git不回退运行数据；未测的真实Product/Stock/TC/Nacos、商城与性能范围如实记录。下一步仅剩超时消费及旧继承入口收尾，其他Order辅助服务分组随后独立盘点。
