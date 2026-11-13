@@ -27,6 +27,7 @@ import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
 import com.cloudmall.pay.service.impl.legacy.PayDebitIntentService;
 import com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService;
+import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;

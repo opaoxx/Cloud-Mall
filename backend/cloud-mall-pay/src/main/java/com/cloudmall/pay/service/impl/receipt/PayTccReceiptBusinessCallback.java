@@ -1,4 +1,4 @@
-package com.cloudmall.pay.service.impl;
+package com.cloudmall.pay.service.impl.receipt;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;

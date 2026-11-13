@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调收据、TCC只读取证及派发桥分组，后续整理其余TCC写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥及资源回执分组，后续整理其余TCC写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调收据、TCC只读取证及派发桥分组已完成，见第34至41节；其余TCC写编排待分批整理 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥及资源回执分组已完成，见第34至42节；其余TCC写编排待分批整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2456,3 +2456,69 @@ LocalTCC接口不迁移；ACTION_NAME=cloudmallPayDebitReceipt、request上下�
 独立Compose项目`cloud-mall-refactor-pay-tcc-receipt-20261113`，候选MySQL19961/10.254.229.0/24，预检后新卷。pay_record/pay_debit_intent采用schema.sql，dispatch/receipt/execution/Fence采用原Mapper ensureTable DDL，准备六张空源表供旧夹具复制；取消表仅在新owned库按原初始化器创建。默认/历史资源不动，归档成功且集合检查通过后才down自有容器/网络，卷保留。
 
 两类包内helper及五类算法去package/import/注释逐token比较，引用文件正文仅地址适配，其他后端及README字节保持。完整格式化迁移类/包说明/新测试，纯引用文件仅整理import；八模块test-compile、全部单测+新3实库+旧25方法、Pay打包/新旧Jar路径、diff检查通过。精确备份移除旧五类型class，不全量clean。证据`target/backend-refactor-20261113/pay-tcc-receipt`，临时index逆补丁恢复父树验证后提交与`refactor/pay-tcc-receipt-complete-20261113`标签；README/旧pycache/忽略工件不入提交，Git不回退数据库。
+
+### 42.3 实施与验证结果
+
+五类已整体进入receipt；samePayload、hasValidStateAndBranch继续为包内静态方法，原类名、Bean名及业务语句保持。26份引用文件（6生产、20测试）仅适配地址/import；增加包说明与PayTccReceiptMySqlIT，impl根包剩24类，其中17个TCC写组件待处理。五类共4271个业务token与基线一致，原引用文件正文全部等价；1053份其他已跟踪后端文件及README逐字节保持。79份非Java运行文件没有旧FQN依赖，LocalTCC接口及其动作契约未改。
+
+逐行复核的调用链为`Facade → Bridge.prepare → Store.claim独立提交 → 唯一winner的LocalTCC资源 → 原读回核验`；`LocalResource的REQUIRED模板 → 官方Fence → 新包Callback → 同事务Store状态迁移`；`ExecutionEvidence的只读RR代理 → receipt/Fence → 原User镜像与永久终态校验 → 原指标观察`。Callback的反射Method随新类型正确绑定，原配置工厂/DependsOn和条件开关未改，未扩大包内方法可见性。LocalResource日志类别随新FQN变化，模板、等级与参数保持。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共及源码守卫 |
+| Pay原有全部单测 | 648 | 原回执/资源证据/指标及其他支付矩阵 |
+| PayTccReceiptMySqlIT | 3 | 实际配置/扫描、独立claim、官方Fence原子回滚/重放、真实RR分类和静态恢复；含5个独立夹具 |
+| PayLegacyRefundLedgerMySqlIT精确方法 | 25 | 原完整方法/数据变异循环，未改断言或事务夹具 |
+| 合计 | 701 | 75类，0失败、0错误、0跳过；实库28项 |
+
+基线673项另存，未与最终相加。编译、全部测试和实库本轮首次通过。新测试默认关闭时实际发现Store/Evidence两Bean，开启时发现原五类型；Store/Evidence为事务代理，Facade/Callback/LocalResource未增加事务代理，配置Bean与接口动作名/commit/rollback/useTCCFence保持。原启动建表和官方清理任务真实执行，但仅指向owned库。
+
+认领在调用者RR之外的连接独立提交，调用者仍看旧空快照且回滚后CLAIMED保留。Try的SQL故障使新Fence与TRYING一起回滚；Confirm故障使Fence/receipt一起保持TRYING。正常Cancel与CLAIMED空Cancel的SQL故障均整体回滚，成功后分别为Fence3/Fence4和CANCELLED。Fence删除后同向终态可重放，迟到Try不复活回执且不留下新Fence；相反清算被拒。Facade只实测read和已认领重放，未模拟成真实TC分支登记。
+
+实际classify代理分别返回COMMITTED、CONFLICT、ROLLEDBACK、UNKNOWN；每次receipt/Fence查询都断言readOnly/RR、同一连接，前后五表事实一致。User镜像为受控输入，不能据此宣称远端User账本或真实资金一致性已验收。5个夹具均恢复官方Handler的DataSource/TransactionTemplate、DAO表名和原XID，LOG_QUEUE保持空；4个启用上下文的真实清理执行器均停止并等待退出，官方类初始化daemon不宣称被测试关闭。
+
+旧矩阵本轮精确执行以下25个方法（完整源码循环保留）：
+
+```text
+receiptLookupAliasesRejectAcrossAllPersistedStates
+exactReceiptLookupsKeepNullAndCallbackSemantics
+receiptClaimRejectsAliasSourcesBeforeFirstOrReplay
+receiptClaimExactSourcesKeepWinnerReplayAndOriginalRejections
+freshReceiptPermissionPredicatesBlockWithoutResourceCalls
+freshReceiptWinnerAndExistingReplayKeepTheirBoundaries
+receiptReadbackPayloadChangesCannotPublishForeignViews
+receiptReadbackKeepsProgressEqualMoneyAndMissingResult
+receiptReplayRejectsInvalidStateBranchMatrix
+receiptReadbackRejectsInvalidStateBranchMatrix
+receiptValidStateBranchMatrixKeepsReplayAndReadbackProgress
+rejectedReceiptRollbackRejectsInvalidOwnerMatrix
+rejectedReceiptRollbackKeepsValidOwnersAndPreconditionQueries
+receiptSettlementRejectsFenceIdentityMismatchAtBothReads
+receiptSettlementKeepsExactAndMissingFenceTerminalEvidence
+rejectedReceiptOwnerRejectsPureAliasKeyMatrix
+rejectedReceiptOwnerKeepsEachExactUniqueKeyAssociation
+rejectedReceiptOwnerRejectsInvalidPayloadDomains
+rejectedReceiptOwnerKeepsValidIndependentPayloadDomains
+publicReceiptReadRejectsInvalidStateBranchMatrix
+publicReceiptReadKeepsValidEvidenceAndLookupPriority
+claimedReceiptEvidenceRejectsInvalidBranchAcrossUserStates
+claimedReceiptEvidenceKeepsValidUnknownAndMissingReceipt
+alienFenceOnEachFundPhaseRejectsWithoutMutation
+exactOwnedFenceKeepsAllConclusionsAndCleanup
+```
+
+34份Java按完整/仅import范围格式化并检查通过；八模块test-compile、Pay打包和diff通过。Jar187个Pay生产class与classes逐字节一致，迁移五类型的新路径存在，旧路径及测试夹具无残留；旧五class先备份再精确移除，无全量clean。
+
+### 42.4 证据、回退与后续
+
+方案提交05d530ad，基线标签`refactor/pay-tcc-receipt-baseline-20261113`，完成标签`refactor/pay-tcc-receipt-complete-20261113`。证据入口`target/backend-refactor-20261113/pay-tcc-receipt/verification.json`，包括基线/最终XML、五夹具事实与共享绑定恢复、旧25方法清单、源码/格式/构建/Jar、资源事件和临时index回退证明。
+
+独立MySQL8.0.46的六张源表最终均0行。新5个夹具库与旧矩阵1库全部删除，服务端6对建库/删库事件与schema清单互证；原源表checksum与有界池关闭断言通过。本轮没有新增失败库；自有容器/网络归档后移除，mysql_data卷保留，历史失败卷和默认实例未动。原bugfix_log.md记录本切片结果。
+
+```powershell
+git revert refactor/pay-tcc-receipt-complete-20261113
+```
+
+临时index按no-renames精确路径逆补丁恢复父树，真实index及README保持。实际回退后仅清理receipt中新迁入五类型及新增实库测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序回退。README、两个旧pycache及忽略工件不入提交。
+
+下一步审查执行协调/恢复与交付/取消之间的依赖，冻结剩余17个TCC写组件的下一组范围。Pay整体尚未收尾；本轮没有真实TC分支注册、RM扫描代理、User资金RPC、Gateway/Nacos全链或压测结论。

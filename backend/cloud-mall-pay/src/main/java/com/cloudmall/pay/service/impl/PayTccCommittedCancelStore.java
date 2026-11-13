@@ -13,6 +13,7 @@ import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDeliveryMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
+import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;

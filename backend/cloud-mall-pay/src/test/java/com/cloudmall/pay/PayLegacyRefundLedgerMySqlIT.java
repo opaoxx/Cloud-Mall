@@ -4164,7 +4164,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var before = ownedExecutionLookupFacts();
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
@@ -4805,7 +4805,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 原execution/receipt/Fence表只在owned克隆，通过实际Mapper同RR快照读取。 */
-  private com.cloudmall.pay.service.impl.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
+  private com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence ownedFenceIdentityEvidence() {
     ownedExecutionObservationStore();
     for (String table : List.of("pay_tcc_receipt", "tcc_fence_log")) {
       fixture.execute("DROP TABLE IF EXISTS " + table);
@@ -4823,7 +4823,7 @@ class PayLegacyRefundLedgerMySqlIT {
     try {
       var session = new SqlSessionTemplate(factory.getObject());
       fenceIdentityMapper = session.getMapper(com.cloudmall.pay.mapper.PayTccFenceMapper.class);
-      return new com.cloudmall.pay.service.impl.PayTccExecutionEvidence(
+      return new com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence(
           session.getMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class),
           fenceIdentityMapper);
     } catch (Exception failure) {
@@ -4833,13 +4833,13 @@ class PayLegacyRefundLedgerMySqlIT {
 
   /** 同一个只读RR快照核对实际execution/receipt/Fence，User镜像仅受控传值。 */
   private String classifyOwnedFence(
-      com.cloudmall.pay.service.impl.PayTccExecutionEvidence evidence, String userState) {
+      com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence evidence, String userState) {
     return classifyOwnedFence(evidence, userState, "pay-1");
   }
 
   /** 在同RR快照中用变异后的原支付号读取执行，避免测试将查询缺失误作拒绝。 */
   private String classifyOwnedFence(
-      com.cloudmall.pay.service.impl.PayTccExecutionEvidence evidence,
+      com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence evidence,
       String userState,
       String payNo) {
     var template =
@@ -5266,7 +5266,7 @@ class PayLegacyRefundLedgerMySqlIT {
       }
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
@@ -5381,7 +5381,7 @@ class PayLegacyRefundLedgerMySqlIT {
       var executionBefore = fixture.queryForMap("SELECT * FROM pay_tcc_execution WHERE id=1");
       var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
       var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
       var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
       when(bridge.recover("pay-1"))
           .thenThrow(
@@ -6066,7 +6066,7 @@ class PayLegacyRefundLedgerMySqlIT {
     prepareOwnedClaimReplay("COMMITTED", "COMMIT", null, "PENDING");
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
@@ -6175,7 +6175,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var coordinator =
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
             store, receipts, bridge, evidence, transactions);
@@ -6270,7 +6270,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var originalConflict =
         new com.cloudmall.common.error.BizException(
@@ -6499,7 +6499,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var originalConflict =
         new com.cloudmall.common.error.BizException(
@@ -6712,7 +6712,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = proxyExecutionObservationStore(executionObservationStore(decorated));
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     org.junit.jupiter.api.function.Executable changePeer =
         () -> {
@@ -6882,7 +6882,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = proxyExecutionObservationStore(executionObservationStore(decorated));
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     when(transactions.begin())
         .thenAnswer(
@@ -7094,7 +7094,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = (com.cloudmall.pay.service.impl.PayTccExecutionStore) handoff.getProxy();
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     when(transactions.begin())
         .thenAnswer(
@@ -7279,7 +7279,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = proxyExecutionObservationStore(executionObservationStore(decorated));
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     when(transactions.begin())
         .thenAnswer(
@@ -7449,7 +7449,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = proxyExecutionObservationStore(executionObservationStore(decorated));
     var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     org.junit.jupiter.api.function.Executable changePeer =
         () -> {
@@ -7542,7 +7542,7 @@ class PayLegacyRefundLedgerMySqlIT {
     prepareOwnedClaimReplay("RUNNING", "NONE", "t221-old-xid", "PENDING");
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     when(bridge.recover("pay-1"))
         .thenThrow(new com.cloudmall.common.error.BizException(null, "owned code missing", 503));
@@ -7599,7 +7599,7 @@ class PayLegacyRefundLedgerMySqlIT {
           var paymentBefore = rawIntentTimeFacts();
           var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
           var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-          var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+          var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
           var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
           var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
           receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
@@ -7684,7 +7684,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = proxyExecutionObservationStore(executionObservationStore(decorated));
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
     receipt.state = decision.equals("COMMIT") ? "TRYING" : "CLAIMED";
@@ -7848,7 +7848,7 @@ class PayLegacyRefundLedgerMySqlIT {
       var paymentBefore = rawIntentTimeFacts();
       var receipts = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
       var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
       var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
       var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
       receipt.state = "TRYING";
@@ -7934,7 +7934,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var store = proxyExecutionObservationStore(executionObservationStore(decorated));
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var receipt = new com.cloudmall.pay.domain.vo.PayTccReceiptVO();
     receipt.state = "TRYING";
@@ -8157,7 +8157,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var executionBefore = fixture.queryForList("SELECT * FROM pay_tcc_execution");
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
     var peerFacts =
@@ -8343,7 +8343,7 @@ class PayLegacyRefundLedgerMySqlIT {
     prepareOwnedClaimReplay("RUNNING", "NONE", "t218-old-xid", "PENDING");
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var user = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
     user.payNo = "pay-1";
@@ -8536,7 +8536,7 @@ class PayLegacyRefundLedgerMySqlIT {
       com.cloudmall.pay.service.impl.PayTccExecutionStore store) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     when(bridge.recover("pay-1"))
         .thenThrow(
@@ -8712,7 +8712,7 @@ class PayLegacyRefundLedgerMySqlIT {
       com.cloudmall.pay.service.impl.PayTccExecutionStore store, String payNo) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     when(bridge.recover(payNo))
         .thenThrow(
@@ -9195,7 +9195,7 @@ class PayLegacyRefundLedgerMySqlIT {
           records,
           executionObservationMapper,
           mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),
-          mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class));
+          mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class));
     } catch (Exception failure) {
       throw new IllegalStateException("owned delivery identity factory failed", failure);
     }
@@ -10032,7 +10032,7 @@ class PayLegacyRefundLedgerMySqlIT {
       receipt.branchId = 41L;
       var dispatches = mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class);
       var receipts = mock(com.cloudmall.pay.mapper.PayTccReceiptMapper.class);
-      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
       when(dispatches.selectByPayNo(any())).thenReturn(dispatch);
       when(receipts.selectByPayNo(any())).thenReturn(receipt);
       when(evidence.classify(any(), any())).thenReturn("TRYING");
@@ -10598,7 +10598,7 @@ class PayLegacyRefundLedgerMySqlIT {
           records,
           session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),
           mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),
-          mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class),
+          mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class),
           cancelRecoveryIdentityMapper,
           intents);
     } catch (Exception failure) {
@@ -10728,7 +10728,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
     var facade =
-        new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+        new com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl(bridge, store, resource);
     var before = ownedReceiptClaimFacts();
     var returned = new java.util.concurrent.atomic.AtomicReference<String>();
     org.junit.jupiter.api.Assertions.assertAll(
@@ -10748,7 +10748,7 @@ class PayLegacyRefundLedgerMySqlIT {
   @Test
   void receiptLookupAliasesRejectAcrossAllPersistedStates() {
     var store = ownedReceiptClaimStore();
-    var callback = new com.cloudmall.pay.service.impl.PayTccReceiptBusinessCallback(store);
+    var callback = new com.cloudmall.pay.service.impl.receipt.PayTccReceiptBusinessCallback(store);
     for (boolean uppercaseOriginal : List.of(false, true)) {
       String original = uppercaseOriginal ? "PAY-1" : "pay-1";
       String requested = uppercaseOriginal ? "pay-1" : "PAY-1";
@@ -10803,11 +10803,11 @@ class PayLegacyRefundLedgerMySqlIT {
   @Test
   void exactReceiptLookupsKeepNullAndCallbackSemantics() {
     var store = ownedReceiptClaimStore();
-    var callback = new com.cloudmall.pay.service.impl.PayTccReceiptBusinessCallback(store);
+    var callback = new com.cloudmall.pay.service.impl.receipt.PayTccReceiptBusinessCallback(store);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
     var facade =
-        new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+        new com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl(bridge, store, resource);
     var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
     for (String state : List.of("CLAIMED", "TRYING", "CONFIRMED", "CANCELLED")) {
       var dispatch = seedOwnedReceiptClaim();
@@ -11087,22 +11087,22 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** claim独立程序化提交，read是真实Mapper，bridge/resource仅为受控替身。 */
-  private com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl receiptClaimFacade(
-      com.cloudmall.pay.service.impl.PayTccReceiptStore actual,
+  private com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl receiptClaimFacade(
+      com.cloudmall.pay.service.impl.receipt.PayTccReceiptStore actual,
       com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch,
       com.cloudmall.pay.service.PayTccReceiptLocalResource resource) {
     return receiptClaimFacade(actual, dispatch, resource, () -> {});
   }
 
   /** 后置hook只在claim短事务结束后运行，资源注册仍为外部受控替身。 */
-  private com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl receiptClaimFacade(
-      com.cloudmall.pay.service.impl.PayTccReceiptStore actual,
+  private com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl receiptClaimFacade(
+      com.cloudmall.pay.service.impl.receipt.PayTccReceiptStore actual,
       com.cloudmall.pay.domain.vo.PayTccDispatchVO dispatch,
       com.cloudmall.pay.service.PayTccReceiptLocalResource resource,
       Runnable afterClaim) {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     when(bridge.prepare(any())).thenReturn(dispatch);
-    var boundary = mock(com.cloudmall.pay.service.impl.PayTccReceiptStore.class);
+    var boundary = mock(com.cloudmall.pay.service.impl.receipt.PayTccReceiptStore.class);
     when(boundary.claim(any()))
         .thenAnswer(
             invocation -> {
@@ -11111,7 +11111,7 @@ class PayLegacyRefundLedgerMySqlIT {
               return winner;
             });
     when(boundary.read(any())).thenAnswer(invocation -> actual.read(invocation.getArgument(0)));
-    return new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, boundary, resource);
+    return new com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl(bridge, boundary, resource);
   }
 
   /** 仅构造与原锚点匹配的既有DTO，不添加协议字段。 */
@@ -11824,7 +11824,7 @@ class PayLegacyRefundLedgerMySqlIT {
         var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
         var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
         var facade =
-            new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+            new com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl(bridge, store, resource);
         var before = ownedReceiptClaimFacts();
         var result = facade.read(dispatch.payNo);
         assertEquals(dispatch.payNo, result.payNo);
@@ -11845,7 +11845,7 @@ class PayLegacyRefundLedgerMySqlIT {
       var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
       var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
       var facade =
-          new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+          new com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl(bridge, store, resource);
       var before = ownedReceiptClaimFacts();
       var failure =
           org.junit.jupiter.api.Assertions.assertThrows(
@@ -11869,7 +11869,7 @@ class PayLegacyRefundLedgerMySqlIT {
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var resource = mock(com.cloudmall.pay.service.PayTccReceiptLocalResource.class);
     var facade =
-        new com.cloudmall.pay.service.impl.PayTccReceiptServiceImpl(bridge, store, resource);
+        new com.cloudmall.pay.service.impl.receipt.PayTccReceiptServiceImpl(bridge, store, resource);
     var before = ownedReceiptClaimFacts();
     var returned =
         new java.util.concurrent.atomic.AtomicReference<
@@ -11905,7 +11905,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 每个计数wrapper都转发真实Mapper；锁和事务仍由同一owned数据源执行。 */
-  private com.cloudmall.pay.service.impl.PayTccReceiptLocalResourceImpl
+  private com.cloudmall.pay.service.impl.receipt.PayTccReceiptLocalResourceImpl
       ownedReceiptRollbackResource() {
     var store = ownedReceiptClaimStore();
     fixture.execute("DROP TABLE IF EXISTS tcc_fence_log");
@@ -11931,9 +11931,9 @@ class PayLegacyRefundLedgerMySqlIT {
               com.cloudmall.pay.mapper.PayTccFenceMapper.class,
               org.mockito.AdditionalAnswers.delegatesTo(
                   session.getMapper(com.cloudmall.pay.mapper.PayTccFenceMapper.class)));
-      return new com.cloudmall.pay.service.impl.PayTccReceiptLocalResourceImpl(
+      return new com.cloudmall.pay.service.impl.receipt.PayTccReceiptLocalResourceImpl(
           new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool),
-          new com.cloudmall.pay.service.impl.PayTccReceiptBusinessCallback(store),
+          new com.cloudmall.pay.service.impl.receipt.PayTccReceiptBusinessCallback(store),
           fenceIdentityMapper,
           receiptRollbackMapper);
     } catch (Exception failure) {
@@ -12032,7 +12032,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 原Pay/Dispatch/Receipt实际Mapper共享owned数据源；cancel gate仅为无取消替身。 */
-  private com.cloudmall.pay.service.impl.PayTccReceiptStore ownedReceiptClaimStore() {
+  private com.cloudmall.pay.service.impl.receipt.PayTccReceiptStore ownedReceiptClaimStore() {
     ownedDispatchPersistence();
     fixture.execute("DROP TABLE IF EXISTS pay_tcc_receipt");
     fixture.execute(
@@ -12046,7 +12046,7 @@ class PayLegacyRefundLedgerMySqlIT {
     factory.setConfiguration(configuration);
     try {
       var session = new SqlSessionTemplate(factory.getObject());
-      return new com.cloudmall.pay.service.impl.PayTccReceiptStore(
+      return new com.cloudmall.pay.service.impl.receipt.PayTccReceiptStore(
           session.getMapper(com.cloudmall.pay.mapper.PayTccReceiptMapper.class),
           records,
           dispatchMirrorMapper,

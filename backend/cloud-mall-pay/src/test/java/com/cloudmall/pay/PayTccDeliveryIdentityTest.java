@@ -25,7 +25,7 @@ import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.service.impl.PayTccDeliveryServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccDeliveryStore;
-import com.cloudmall.pay.service.impl.PayTccExecutionEvidence;
+import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;

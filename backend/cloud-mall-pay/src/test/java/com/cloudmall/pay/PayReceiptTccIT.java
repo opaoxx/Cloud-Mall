@@ -9,7 +9,7 @@ import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.service.PayTccBridgeService;
 import com.cloudmall.pay.service.PayTccReceiptLocalResource;
 import com.cloudmall.pay.service.PayTccReceiptService;
-import com.cloudmall.pay.service.impl.PayTccReceiptStore;
+import com.cloudmall.pay.service.impl.receipt.PayTccReceiptStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.common.Constants;
 import io.seata.core.context.RootContext;

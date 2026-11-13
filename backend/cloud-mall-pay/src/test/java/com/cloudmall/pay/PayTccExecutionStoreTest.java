@@ -312,7 +312,7 @@ class PayTccExecutionStoreTest {
       when(executions.selectByPayNo("pay-store-1")).thenReturn(row);
       var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
       var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-      var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+      var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
       var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
       var coordinator =
           new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
@@ -369,7 +369,7 @@ class PayTccExecutionStoreTest {
           when(executions.selectByPayNo(row.payNo)).thenReturn(row);
           var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
           var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-          var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+          var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
           var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
           when(bridge.recover(row.payNo))
               .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
@@ -420,7 +420,7 @@ class PayTccExecutionStoreTest {
     when(executions.updateObservation(any(), any(), any(), any())).thenReturn(1);
     var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
     var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-    var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+    var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
     var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
     var coordinator =
         new com.cloudmall.pay.service.impl.PayTccCoordinatorServiceImpl(
@@ -492,7 +492,7 @@ class PayTccExecutionStoreTest {
         when(executions.selectByPayNo(row.payNo)).thenReturn(row);
         var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
         var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-        var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+        var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
         var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
         when(bridge.recover(row.payNo))
             .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));
@@ -643,7 +643,7 @@ class PayTccExecutionStoreTest {
           when(executions.selectByPayNo(row.payNo)).thenReturn(row);
           var bridge = mock(com.cloudmall.pay.service.PayTccBridgeService.class);
           var receiptService = mock(com.cloudmall.pay.service.PayTccReceiptService.class);
-          var evidence = mock(com.cloudmall.pay.service.impl.PayTccExecutionEvidence.class);
+          var evidence = mock(com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence.class);
           var transactions = mock(com.cloudmall.pay.service.PayTccTransactionClient.class);
           when(bridge.recover(row.payNo))
               .thenThrow(new BizException("REMOTE_UNAVAILABLE", "owned Bridge 503", 503));

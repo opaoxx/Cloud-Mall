@@ -12,6 +12,7 @@ import com.cloudmall.pay.service.PayTccBridgeService;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccReceiptService;
 import com.cloudmall.pay.service.PayTccTransactionClient;
+import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
 import io.seata.core.context.RootContext;
 import java.util.Objects;
 import org.springframework.beans.factory.annotation.Autowired;

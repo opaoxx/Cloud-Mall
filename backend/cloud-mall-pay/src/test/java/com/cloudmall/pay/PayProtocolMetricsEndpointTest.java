@@ -19,6 +19,7 @@ import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
+import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.seata.core.context.RootContext;
