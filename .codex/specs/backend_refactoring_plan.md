@@ -1619,3 +1619,25 @@ git revert refactor/order-state-complete-20261113
 只回退本轮状态职责迁移，保留创建与之前切片。实际回退后按清单精确清理四个新生产类型和OrderStateContractTest/OrderStateMySqlIT/PayOrderStateFeignIT（含嵌套类）的class残留并编译，不清空target历史证据；已修改的OrderTestService恢复源码后重新编译。Git不回退数据库/忽略工件，有后续依赖时先处理冲突，不使用reset --hard。
 
 下一步拆分秒杀受理入口：冻结Sentinel资源与参数、地址快照、Stock返回包装/错误码透传及无新增事务的边界，再整理秒杀落单和超时消息消费者，最终移除剩余Controller继承和空OrderService。
+
+## 29. Order 秒杀受理Service（2026-11-13）
+
+### 29.1 实施前评审与范围
+
+基线 `e397e1e4`，本会话仍由主Agent单独评审、实施及验证。已核对项目规则、README、Bug台账、架构/API和Sentinel秒杀规格及当前调用点。本轮只迁移POST `/api/seckill/orders` 的受理编排；秒杀落单与超时消费者、队列/事务和恢复任务后续单独拆分。README原有修改与两个pycache目录保留，不纳入提交。
+
+- 新增 `controller.OrderSeckillAdmissionController`、`service.OrderSeckillAdmissionService`、`service.impl.OrderSeckillAdmissionServiceImpl`。Controller构造器注入接口，保留必填Idempotency-Key和原SeckillOrderDTO绑定，在原首个业务动作读取AuthContext身份，传入Service的long userId；Service只注入StockClient、UserClient和ObjectMapper。
+- 鉴权仍早于业务参数校验；Spring绑定失败仍早于方法执行。不添加正数校验、trim或归一化，保留Unicode code point最多128、空字段及空请求语义。没有原先需要延迟到读库/等锁之后的身份读取，本入口无需LongSupplier。
+- 维持原顺序：参数校验 → Sentinel `seckill-order-submit` IN/一次计数/参数[userId,activityId] → 原地址首个数值ID匹配与JSON快照 → 五字段Stock请求 → `order-stock-seckill` OUT保护的一次Stock调用。进入资源后所有成功/异常路径都通过原finally退出；本地Block只记录原指标并返回429，不调用User/Stock。
+- 明确保留完整上游 `ApiResponse<?>` 对象：code、message、data（含额外字段/null）和requestId全部透传，Controller不重新包装。这里是远端受理响应的兼容边界，不把它改成OrderVO或ApiResponse.ok(data)；不新增中间包装DTO。原StockClient Map契约本轮保持，避免合并跨服务模型迁移。
+- 保留全部原错误分类与消息：已知429区分短期流控/限购，未知429为503；409幂等冲突保留，五种活动拒绝映射SECKILL_NOT_AVAILABLE，其他HTTP错误、null结果、熔断为503。User/序列化异常继续原样沿原边界传播，不扩大catch或增加写重试。非null的上游非零业务码仍透传，不追加成功码校验。
+- 不新增事务、锁、SQL、Redis、MQ操作或服务调用，不挂起调用方已有事务；accepted只表示受理。原混合类删除该HTTP方法及专属Stock/User依赖，手动构造器只保留Product/Mapper/JSON。暂保留旧Controller Bean承载原消息消费者，最后消息切片再移除继承和空接口。
+- 旧OrderTestService测试夹具接管Stock/User字段（保持反射字段名）及seckill适配，调用实际新Controller/Service，不复制业务。其余旧测试保留；六项既有秒杀错误映射测试直接装配新入口，不依赖混合夹具。
+
+### 29.2 验收与提交
+
+先提交本节及 `refactor/order-seckill-admission-baseline-20261113`，运行Common/Order单测基线。补充实际MVC与Spring装配覆盖响应完整透传、绑定/鉴权/参数/地址先后、Sentinel流控/用户和活动热点、异常退出、原无新增事务与沿用已有事务。通过本机HTTP替身与实际StockClient、SpringMvcContract、原Feign认证拦截器验证路径、五字段载荷、身份头、一次调用、原409/429/503映射及响应信封；不把受控Stock替身写成真实Stock持久受理测试。
+
+本入口没有Order持久化路径，本轮不新建MySQL/Redis/RabbitMQ实验；不重跑无关实库矩阵。全Common/Order单测、Order打包、八模块test-compile、迁移方法/剩余源码对照、Java格式化、Jar入口和git diff --check为门槛。原测试方法保留、未涉及源码/资源哈希与README指纹核验。所有尝试与最终报告归档到 `target/backend-refactor-20261113/order-seckill-admission/`。
+
+完成后建立 `refactor/order-seckill-admission-complete-20261113`，临时Git index验证逆补丁恢复父树，不动真实工作树展示回滚，不全量clean或reset --hard。Git回退不恢复数据库或忽略工件；实际撤销新增类型后只精确清理对应class并重编译。尚未运行的真实Nacos规则订阅、Stock/User HTTP业务、中间件和完整商城链明确列为限制。
