@@ -1,4 +1,4 @@
-package com.cloudmall.order.service.impl;
+package com.cloudmall.order.service.impl.outbox;
 
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.domain.po.OrderOutboxPO;

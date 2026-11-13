@@ -36,6 +36,7 @@ import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.OrderCreationService;
 import com.cloudmall.order.service.impl.creation.OrderCartCleanupCoordinator;
 import com.cloudmall.order.service.impl.creation.OrderCreationLine;
+import com.cloudmall.order.service.impl.reservation.OrderReservationIntentService;
 import com.cloudmall.order.util.OrderCreationTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

@@ -6,10 +6,13 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.config.OrderTimeoutMessageListener;
+import com.cloudmall.order.domain.po.OrderOutboxPO;
+import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.OrderTimeoutService;
 import com.cloudmall.order.service.impl.OrderTimeoutServiceImpl;
+import com.cloudmall.order.service.impl.outbox.OrderOutboxDispatcher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +49,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.transaction.support.DefaultTransactionStatus;
@@ -53,6 +57,59 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /** 真实TTL/DLX、原重试链和MySQL事务验收；不启动Stock远端或outbox调度器。 */
 class OrderTimeoutMySqlRabbitIT {
+  @Test
+  void movedOutboxDispatcherAndTimeoutConsumerKeepOriginalDurableFacts() throws Exception {
+    try (var fixture = new Fixture()) {
+      String orderNo = "20261146";
+      fixture.seed(1L, orderNo, "PENDING_PAYMENT", LocalDateTime.of(2000, 1, 1, 0, 0));
+      var outbox = new OrderOutboxMapper(fixture.jdbc);
+      outbox.ensureTable();
+      var event = new OrderOutboxPO();
+      event.id = 1L;
+      event.eventId = "timeout:" + orderNo;
+      event.eventType = "ORDER_TIMEOUT";
+      event.orderNo = orderNo;
+      event.payload = new String(envelope(orderNo), StandardCharsets.UTF_8);
+      event.status = "PENDING";
+      event.attempts = 0;
+      event.createdAt = LocalDateTime.now().minusMinutes(1);
+      event.updatedAt = event.createdAt;
+      event.nextRetryAt = event.createdAt;
+      assertEquals(1, outbox.insert(event));
+      var publisher =
+          new CachingConnectionFactory(
+              "127.0.0.1", Integer.parseInt(System.getProperty("cloudmall.rabbit.test.port")));
+      publisher.setUsername("root");
+      publisher.setPassword("root");
+      publisher.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
+      publisher.setPublisherReturns(true);
+      try {
+        var template = new RabbitTemplate(publisher);
+        template.setMessageConverter(fixture.context.getBean(Jackson2JsonMessageConverter.class));
+        var dispatcher =
+            new OrderOutboxDispatcher(outbox, template, new ObjectMapper(), new MockEnvironment());
+        dispatcher.dispatchPending();
+        assertEquals(
+            "PUBLISHED",
+            fixture.jdbc.queryForObject("SELECT status FROM order_outbox", String.class));
+        await(() -> fixture.transactions.commits.get() == 1);
+        assertEquals("CANCELLED", fixture.status(orderNo));
+        assertEquals(1, fixture.actionCount());
+        assertEquals(
+            orderNo + ":ROLLBACK",
+            fixture.jdbc.queryForObject(
+                "SELECT operation_key FROM order_stock_action", String.class));
+        dispatcher.dispatchPending();
+        assertEquals(
+            1, fixture.jdbc.queryForObject("SELECT COUNT(*) FROM order_outbox", Integer.class));
+        assertEquals(1, fixture.actionCount());
+        fixture.verified = true;
+      } finally {
+        publisher.destroy();
+      }
+    }
+  }
+
   @Test
   void ttlDeliveryCommitsCancelAndRollbackOnceAndLegacyRedeliveriesAreNoOps() throws Exception {
     try (var fixture = new Fixture()) {

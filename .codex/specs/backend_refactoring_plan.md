@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order主业务和消息消费已拆分，旧Controller继承入口与空接口已移除，辅助实现职责分组待继续。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order主业务和消息消费已拆分，旧继承入口已移除，辅助实现职责分组已完成，待模块收尾盘点。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | 主业务与消息消费切片完成，旧继承/空接口移除，见第23至31节；辅助实现职责分组待继续 |
+| Order | 进行中 | 主业务/消息及辅助职责分组完成，旧继承/空接口移除，见第23至32节；待模块收尾盘点 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1836,3 +1836,49 @@ Order主业务/消息入口拆分已完成，模块整体尚未结束。下一�
 新Compose项目 `cloud-mall-refactor-order-auxiliary-20261113`，MySQL19951、Rabbit19952/管理19953、子网10.254.237.0/24；核实无冲突后从基础compose创建全新卷。只在本实验健康探针使用 `env ERL_FLAGS=+S 2:2 rabbitmq-diagnostics -q ping`，不改变broker。七张Order空源表和测试UUID库；遵守各自清理门，证据归档后移除自有容器/网络、保留两卷，不动历史失败卷。
 
 验收门：五个迁移类去除package/import/注释后逐token一致、引用适配之外源码/资源不变、原测试方法保持、Java实际格式化、Common/Order与指定实库全通过、Order打包及八模块test-compile、Jar新类型唯一/旧类无残留、git diff --check及README指纹保持。仅对五个旧类型及其内部class精确备份清理，不全量clean。完成标签 `refactor/order-auxiliary-complete-20261113`，临时index逆补丁恢复父树，不操作真实工作树演示回滚；Git不恢复数据卷。之后进行Order模块阶段盘点与收尾，再细化Pay首切片。
+
+### 32.3 实施结果与验收
+
+五个辅助类已按清单迁入reservation、stockaction、outbox、seckill四个子包，保留原类名和五个默认Bean名；四份子包说明及顶层说明已落盘。顶层入口Service和包内共享规则继续就近协作，不引入空接口或兼容桥。36份原测试文件完成类型地址适配，原测试方法体全部保留；仅OrderTimeoutMySqlRabbitIT增加一个新投递链用例。OrderCreationFaultProcess恰两条import变化，控制/故障逻辑不变；deploy冻结runner和历史工件未修改。
+
+真实子包扫描装配验证五个Bean各一份，只有意图Service被事务代理；五个写方法仍REQUIRES_NEW，findByUserAndKey无新事务。实际Scheduled注册器恰四个固定延迟任务，目标Bean和1000/30000/5000/5000间隔均保持；扫描测试的TaskScheduler不执行Runnable，数据库/RPC替身零调用。原秒杀死信监听唯一绑定SECKILL_DLQ、MANUAL确认，测试仅关闭自动连接；两个原构造器仍各一次设置Rabbit mandatory。
+
+调用链复盘：`创建Service → reservation意图独立提交 → 原Stock调用 → 主订单事务`；`reservation恢复扫描 → 原租约/原单查询 → 原预扣/补偿事实`；`stockaction扫描 → 原owner认领 → Stock持久事实/同操作键动作 → 完成或UNKNOWN/CONFLICT`；`outbox扫描 → 原超时载荷与身份校验 → broker confirm/returned → 原发布完成证明`；`seckill死信持久化/延迟重投后ACK → 原租约扫描/Stock验真 → 原事件重放及完成CAS`。上述语句、异常/中断和状态条件保持。
+
+| 最终验证范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 原公共契约和源码规则 |
+| Order单测 | 340 | 原339项及新增1项真实子包扫描/Bean/事务/调度/监听注册验证 |
+| OrderIntentStrictInsertMySqlIT | 13 | 原意图严格插入、并发和状态/错误记录矩阵 |
+| OrderCreationShardingShadowMySqlIT | 2 | 独立意图与主事务创建、outbox失败补偿的真实分片对照 |
+| OrderReplayRecoveryShardingShadowMySqlIT | 4 | 原订单重放、预扣恢复、outbox完成/失败、库存动作租约与结果写入 |
+| SeckillRecoveryDispatchMySqlIT | 28 | 原租约认领/验真/发送/完成与异常隔离 |
+| SeckillRecoveryJsonMySqlIT | 27 | 原死信原文、数值/指纹、JSON/UTF-8及确认规则 |
+| OrderStockActionStateMySqlIT | 4 | 原动作状态与条件更新 |
+| OrderTimeoutMySqlRabbitIT | 5 | 原4项真实超时矩阵及新增实际moved dispatcher投递链 |
+| ShardingRuntime精确单方法 | 1 | 仅explicitModeUsesProductionMappersAfterBootstrapAndAudit，四恢复任务真实装配及分片调用 |
+| 合计 | 449 | 76个类，0失败、0错误、0跳过 |
+
+新增投递链使用独立实验Rabbit的实际publisher confirm/returned及原JSON converter：原已过期事件由迁包后的OrderOutboxDispatcher送入原DLX，outbox持久化为PUBLISHED，实际TimeoutService将订单CANCELLED并写唯一原ROLLBACK操作键；再次扫描不产生新动作。发布确认和消费者提交是异步事实，不宣称两者原子提交或固定先后。该用例没有启动outbox定时器，调度注册另由上述装配测试和Runtime实测保障；没有调用默认Rabbit硬编码夹具。
+
+五类去掉package/import/注释后共7898个token与基线一致；其他引用文件除明确新增测试外正文一致，179份未涉及原源码/资源哈希保持。48个Java文件执行实际格式化：五类、新包说明和新增测试按完整文件，纯引用适配文件仅整理import，避免扩散旧代码样式差异。Order打包、八模块test-compile、diff检查通过；Jar新类型及内部class与最终产物一致，旧五类型及其内部class均无残留，无测试夹具混入。九份旧class先精确备份再移除，未清空target。
+
+本轮所有基线及迁移后测试首次执行均通过，没有新增失败现场。日志类别按新包路径变化，日志消息/等级/参数保持。原72项创建精度大矩阵本轮未全跑，其先前普通恢复首轮未认领原因仍未确认，不用本轮结果覆盖该历史限制。
+
+### 32.4 证据、资源、回退与后续
+
+证据入口 `target/backend-refactor-20261113/order-auxiliary/verification.json`，保留76份最终XML、分组日志、源码/引用对照、格式化与Jar校验、252份本轮native工件。三个class-finish均errors为空且无需保留失败库：CreationShadow创建/删除4个库，ReplayShadow8个，Runtime1个；Runtime只执行约定单方法。
+
+MySQL8.0.46七源表最终精确0行，全部本轮UUID库清理；Rabbit五队列ready/unacked/consumer均为0，归档时两容器healthy。自有容器和网络已移除，mysql_data/rabbit_data两卷保留；没有操作历史失败卷或默认中间件。README原修改逐字节保持，两个旧pycache及忽略证据不入提交。
+
+方案提交/基线 `aa3f2822`，标签 `refactor/order-auxiliary-baseline-20261113`；完成标签 `refactor/order-auxiliary-complete-20261113`。临时index验证逆补丁恢复父提交完整树，真实暂存条目与工作树保持。
+
+回退工具首次仅在路径清单比较处停止：Windows迁移清单使用反斜杠、Git返回正斜杠；统一表示后显式54个非rename路径与暂存区完全一致，再执行逆补丁校验。没有调整业务、测试或放宽暂存文件范围。
+
+```powershell
+git revert refactor/order-auxiliary-complete-20261113
+```
+
+实际回退后精确清理四个新子包中本轮五类型及内部class、OrderAuxiliaryWiringTest残留，再重新编译恢复后的旧路径类及测试；不全量clean、不回退运行数据。后续依赖按逆序处理。
+
+下一步做Order阶段收尾盘点，核对原方案剩余项、公共类型/契约和完整模块目录，再细化Pay首切片。本轮未跑真实Stock/Product/TC/Nacos、完整商城、进程硬停或性能验证，不宣告全项目重构结束。

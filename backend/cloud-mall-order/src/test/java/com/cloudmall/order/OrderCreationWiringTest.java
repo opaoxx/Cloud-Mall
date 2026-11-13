@@ -18,6 +18,7 @@ import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.OrderCreationService;
 import com.cloudmall.order.service.OrderStateService;
 import com.cloudmall.order.service.impl.*;
+import com.cloudmall.order.service.impl.reservation.OrderReservationIntentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;

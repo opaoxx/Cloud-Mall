@@ -19,7 +19,7 @@ import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.reservation.OrderReservationIntentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;

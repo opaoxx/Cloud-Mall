@@ -15,8 +15,9 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
-import com.cloudmall.order.service.impl.SeckillMessageRecovery;
+import com.cloudmall.order.service.impl.seckill.SeckillMessageRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rabbitmq.client.Channel;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -28,7 +29,6 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import com.rabbitmq.client.Channel;
 
 /** 死信验真后才重放原事件，缺库存事实时保留消息。 */
 class SeckillMessageRecoveryTest {

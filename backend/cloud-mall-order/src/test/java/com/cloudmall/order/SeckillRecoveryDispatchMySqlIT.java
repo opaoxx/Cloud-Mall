@@ -7,7 +7,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
-import com.cloudmall.order.service.impl.SeckillMessageRecovery;
+import com.cloudmall.order.service.impl.seckill.SeckillMessageRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.ArrayList;

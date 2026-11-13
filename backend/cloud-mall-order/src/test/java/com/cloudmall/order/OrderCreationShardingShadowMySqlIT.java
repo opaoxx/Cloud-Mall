@@ -15,7 +15,7 @@ import com.cloudmall.order.domain.vo.OrderVO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
-import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.reservation.OrderReservationIntentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.core.context.RootContext;
 import java.lang.reflect.*;

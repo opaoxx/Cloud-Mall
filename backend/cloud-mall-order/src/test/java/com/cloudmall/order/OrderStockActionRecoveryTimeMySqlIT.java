@@ -8,7 +8,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
-import com.cloudmall.order.service.impl.OrderStockActionRecovery;
+import com.cloudmall.order.service.impl.stockaction.OrderStockActionRecovery;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;

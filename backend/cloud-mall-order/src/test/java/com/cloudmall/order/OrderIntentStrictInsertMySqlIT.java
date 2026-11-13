@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
-import com.cloudmall.order.service.impl.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.reservation.OrderReservationIntentService;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;

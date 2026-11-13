@@ -8,7 +8,7 @@ import com.cloudmall.order.domain.po.OrderReservationIntentPO;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
-import com.cloudmall.order.service.impl.OrderReservationRecovery;
+import com.cloudmall.order.service.impl.reservation.OrderReservationRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.time.ZoneId;

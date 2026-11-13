@@ -1,9 +1,10 @@
-package com.cloudmall.order.service.impl;
+package com.cloudmall.order.service.impl.seckill;
 
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
+import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import com.cloudmall.order.util.OrderCreationTime;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -42,14 +43,25 @@ import org.springframework.stereotype.Component;
 /** 持久化并自动重放秒杀死信，确保原事件号和载荷不变。 */
 @Component
 public class SeckillMessageRecovery {
+  /** 记录死信取证、租约核验和重投失败，不把未知结果写成成功。 */
   private static final Logger LOGGER = LoggerFactory.getLogger(SeckillMessageRecovery.class);
+
+  /** 秒杀死信载荷、原身份和恢复租约的持久层。 */
   private final SeckillMessageRecoveryMapper recoveryMapper;
+
+  /** 承担原事件重投、confirm及returned观察的Rabbit模板。 */
   private final RabbitTemplate rabbitTemplate;
+
+  /** 原死信证据解析和序列化配置。 */
   private final ObjectMapper objectMapper;
+
+  /** 只读核验秒杀库存持久受理事实的远端契约。 */
   private final StockClient stockClient;
+
   /** 恢复操作的单次新鲜时钟；测试可模拟批次停顿，不注册新的配置 Bean。 */
   private Clock recoveryClock = Clock.system(ZoneOffset.ofHours(8));
 
+  /** 注入原持久层、消息和库存依赖，沿原设置开启mandatory返回观察。 */
   public SeckillMessageRecovery(
       SeckillMessageRecoveryMapper recoveryMapper,
       RabbitTemplate rabbitTemplate,
@@ -463,7 +475,9 @@ public class SeckillMessageRecovery {
     return "legacy-seckill:hash:" + sha256(raw);
   }
 
-  private static long id() { return Math.abs(UUID.randomUUID().getMostSignificantBits()); }
+  private static long id() {
+    return Math.abs(UUID.randomUUID().getMostSignificantBits());
+  }
 
   private static String sha256(String value) {
     return sha256(value.getBytes(StandardCharsets.UTF_8));

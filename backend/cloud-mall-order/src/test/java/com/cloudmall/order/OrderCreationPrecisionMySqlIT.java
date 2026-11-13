@@ -1,5 +1,6 @@
 package com.cloudmall.order;
 
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -24,8 +25,8 @@ import com.cloudmall.order.mapper.OrderReservationIntentMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
-import com.cloudmall.order.service.impl.OrderReservationIntentService;
-import com.cloudmall.order.service.impl.OrderReservationRecovery;
+import com.cloudmall.order.service.impl.reservation.OrderReservationIntentService;
+import com.cloudmall.order.service.impl.reservation.OrderReservationRecovery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -3564,7 +3565,7 @@ class OrderCreationPrecisionMySqlIT {
         (SeckillMessageRecoveryMapper)
             ReflectionTestUtils.getField(service, "seckillMessageRecoveryMapper");
     var recovery =
-        new com.cloudmall.order.service.impl.SeckillMessageRecovery(
+        new com.cloudmall.order.service.impl.seckill.SeckillMessageRecovery(
             recoveryMapper, rabbit, new ObjectMapper(), stock);
     doAnswer(
             invocation -> {

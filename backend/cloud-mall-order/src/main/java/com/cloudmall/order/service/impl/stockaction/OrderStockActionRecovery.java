@@ -1,10 +1,11 @@
-package com.cloudmall.order.service.impl;
+package com.cloudmall.order.service.impl.stockaction;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.order.domain.po.OrderStockActionPO;
 import com.cloudmall.order.domain.vo.StockReservationStatusVO;
 import com.cloudmall.order.feign.StockClient;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
+import com.cloudmall.order.service.impl.OrderStockCircuitBreaker;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Collections;
@@ -24,6 +25,7 @@ import org.springframework.stereotype.Component;
 public class OrderStockActionRecovery {
   /** 无法自动收敛的库存动作日志。 */
   private static final Logger log = LoggerFactory.getLogger(OrderStockActionRecovery.class);
+
   /** 业务数据库时区。 */
   private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
 
@@ -110,23 +112,27 @@ public class OrderStockActionRecovery {
         if (Thread.currentThread().isInterrupted()) return;
         actionMapper.finish(action.id, claimOwner, "CONFLICT", "库存已处于不可逆的相反终态: " + current, now());
         if (Thread.currentThread().isInterrupted()) return;
-        log.error("订单库存动作与库存事实冲突，需人工对账，orderNo={}，action={}，stock={}",
-            action.orderNo, action.actionType, current);
+        log.error(
+            "订单库存动作与库存事实冲突，需人工对账，orderNo={}，action={}，stock={}",
+            action.orderNo,
+            action.actionType,
+            current);
         return;
       }
-      if (!"RESERVED".equals(current))
-        throw new IllegalStateException("库存预扣尚未达到可结算状态: " + current);
+      if (!"RESERVED".equals(current)) throw new IllegalStateException("库存预扣尚未达到可结算状态: " + current);
       // 2. 只对 RESERVED 使用同一操作键重试，远端写响应不能代表最终事实。
       StockClient.Action request = new StockClient.Action(action.operationKey);
       if (Thread.currentThread().isInterrupted()) return;
-      ApiResponse<?> result = "CONFIRM".equals(action.actionType)
-          ? OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.ACTION,
-              () -> stockClient.confirm(action.orderNo, request))
-          : OrderStockCircuitBreaker.call(OrderStockCircuitBreaker.ACTION,
-              () -> stockClient.rollback(action.orderNo, request));
+      ApiResponse<?> result =
+          "CONFIRM".equals(action.actionType)
+              ? OrderStockCircuitBreaker.call(
+                  OrderStockCircuitBreaker.ACTION,
+                  () -> stockClient.confirm(action.orderNo, request))
+              : OrderStockCircuitBreaker.call(
+                  OrderStockCircuitBreaker.ACTION,
+                  () -> stockClient.rollback(action.orderNo, request));
       if (Thread.currentThread().isInterrupted()) return;
-      if (result == null || !"0".equals(result.code))
-        throw new IllegalStateException("库存动作响应未确认");
+      if (result == null || !"0".equals(result.code)) throw new IllegalStateException("库存动作响应未确认");
       // 3. 再读持久状态；仅目标终态允许把本地动作标记成功。
       String afterWrite = stockStatus(action.orderNo);
       if (Thread.currentThread().isInterrupted()) return;
@@ -138,8 +144,7 @@ public class OrderStockActionRecovery {
         if (Thread.currentThread().isInterrupted()) return;
         actionMapper.finish(action.id, claimOwner, "CONFLICT", "库存写入后为相反终态: " + afterWrite, now());
         if (Thread.currentThread().isInterrupted()) return;
-        log.error("订单库存动作写入后发生终态冲突，orderNo={}，action={}",
-            action.orderNo, action.actionType);
+        log.error("订单库存动作写入后发生终态冲突，orderNo={}，action={}", action.orderNo, action.actionType);
       } else {
         throw new IllegalStateException("库存动作写入后的状态待确认: " + afterWrite);
       }
@@ -154,7 +159,8 @@ public class OrderStockActionRecovery {
       // 4. 先保留原业务错误证据，再按原token尝试一次UNKNOWN退避。
       log.warn(
           "订单库存动作结果待恢复，orderNo={}，action={}", action.orderNo, action.actionType, unknownResult);
-      long delaySeconds = Math.min(60, 5L * Math.max(1, action.attempts == null ? 1 : action.attempts));
+      long delaySeconds =
+          Math.min(60, 5L * Math.max(1, action.attempts == null ? 1 : action.attempts));
       if (Thread.currentThread().isInterrupted()) return;
       actionMapper.retry(
           action.id, claimOwner, unknownResult.toString(), now().plusSeconds(delaySeconds), now());

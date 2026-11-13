@@ -11,7 +11,7 @@ import static org.mockito.Mockito.verify;
 
 import com.cloudmall.order.domain.po.OrderOutboxPO;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
-import com.cloudmall.order.service.impl.OrderOutboxDispatcher;
+import com.cloudmall.order.service.impl.outbox.OrderOutboxDispatcher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.List;

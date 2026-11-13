@@ -1,4 +1,4 @@
-package com.cloudmall.order.service.impl;
+package com.cloudmall.order.service.impl.reservation;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
