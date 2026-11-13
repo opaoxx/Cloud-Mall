@@ -11,7 +11,7 @@ import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
-import com.cloudmall.pay.service.impl.PayTccPublicStateStore;
+import com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore;
 import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
 import java.math.BigDecimal;
 import java.util.List;

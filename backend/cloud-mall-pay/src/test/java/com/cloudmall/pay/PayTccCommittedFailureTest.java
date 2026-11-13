@@ -11,8 +11,8 @@ import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.impl.PayTccCancelService;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
-import com.cloudmall.pay.service.impl.PayTccPublicStateStore;
-import com.cloudmall.pay.service.impl.PayTccRollbackProjectionService;
+import com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore;
+import com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 

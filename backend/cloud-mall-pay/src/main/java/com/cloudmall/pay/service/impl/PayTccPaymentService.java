@@ -13,6 +13,8 @@ import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
+import com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore;
+import com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService;
 import java.util.Objects;
 import java.util.Set;
 import org.springframework.beans.factory.annotation.Autowired;

@@ -9829,9 +9829,9 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 本地proof/User为受控替身，真实JSON解User布尔；只有最终Store写使用owned真实事务。 */
-  private com.cloudmall.pay.service.impl.PayTccRollbackProjectionService
+  private com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService
       rollbackLedgerPresenceService(
-          com.cloudmall.pay.service.impl.PayTccPublicStateStore actualStore, String ledgerVariant) {
+          com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore actualStore, String ledgerVariant) {
     var payment = rollbackTokenPayment();
     var proof = new com.cloudmall.pay.domain.vo.PayTccDispatchVO();
     proof.payNo = payment.payNo;
@@ -9881,7 +9881,7 @@ class PayLegacyRefundLedgerMySqlIT {
     }
     var users = mock(com.cloudmall.pay.feign.UserTccClient.class);
     when(users.state(any(), any(), any(), any(), any(), any())).thenReturn(ApiResponse.ok(decoded));
-    var boundary = mock(com.cloudmall.pay.service.impl.PayTccPublicStateStore.class);
+    var boundary = mock(com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore.class);
     when(boundary.cancelledProof(any())).thenReturn(proof);
     org.mockito.Mockito.doAnswer(
             invocation ->
@@ -9901,7 +9901,7 @@ class PayLegacyRefundLedgerMySqlIT {
                             invocation.getArgument(2))))
         .when(boundary)
         .projectFailedClaimed(any(), any(), any());
-    return new com.cloudmall.pay.service.impl.PayTccRollbackProjectionService(
+    return new com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService(
         boundary, users, "internal-token");
   }
 
@@ -10583,7 +10583,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 原DDL和实际Pay/Execution/Cancel/Intent Mapper验证本地门，不执行远端证明。 */
-  private com.cloudmall.pay.service.impl.PayTccPublicStateStore ownedRollbackTokenStore() {
+  private com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore ownedRollbackTokenStore() {
     ownedCancelRecoveryIdentityStore();
     var configuration = new MybatisConfiguration();
     configuration.setMapUnderscoreToCamelCase(true);
@@ -10594,7 +10594,7 @@ class PayLegacyRefundLedgerMySqlIT {
     factory.setConfiguration(configuration);
     try {
       var session = new SqlSessionTemplate(factory.getObject());
-      return new com.cloudmall.pay.service.impl.PayTccPublicStateStore(
+      return new com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore(
           records,
           session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),
           mock(com.cloudmall.pay.mapper.PayTccDispatchMapper.class),

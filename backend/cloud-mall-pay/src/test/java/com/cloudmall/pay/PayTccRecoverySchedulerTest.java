@@ -149,7 +149,7 @@ class PayTccRecoverySchedulerTest {
     return new PayTccRecoveryScheduler(
         store,
         coordinator,
-        mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+        mock(com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService.class),
         batchSize,
         leaseSeconds,
         budgetMillis);

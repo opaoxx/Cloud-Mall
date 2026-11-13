@@ -334,7 +334,7 @@ class PayTccRecoveryScanMySqlIT {
         new PayTccRecoveryScheduler(
             store,
             coordinator,
-            mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+            mock(com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService.class),
             20,
             60,
             10000);
@@ -342,7 +342,7 @@ class PayTccRecoveryScanMySqlIT {
         new PayTccRecoveryScheduler(
             store,
             coordinator,
-            mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+            mock(com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService.class),
             20,
             60,
             10000);
@@ -382,7 +382,7 @@ class PayTccRecoveryScanMySqlIT {
         new PayTccRecoveryScheduler(
             store,
             coordinator,
-            mock(com.cloudmall.pay.service.impl.PayTccRollbackProjectionService.class),
+            mock(com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService.class),
             20,
             60,
             10000);
@@ -499,7 +499,7 @@ class PayTccRecoveryScanMySqlIT {
     payment.orderNo = "order-rollback-lease";
     payment.amount = java.math.BigDecimal.TEN;
     var projectionStore =
-        application.getBean(com.cloudmall.pay.service.impl.PayTccPublicStateStore.class);
+        application.getBean(com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore.class);
     assertThrows(
         BizException.class,
         () ->

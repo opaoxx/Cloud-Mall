@@ -4,7 +4,7 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.domain.po.PayTccExecutionPO;
 import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
-import com.cloudmall.pay.service.impl.PayTccRollbackProjectionService;
+import com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService;
 import io.seata.core.context.RootContext;
 import java.time.LocalDateTime;
 import java.time.ZoneId;

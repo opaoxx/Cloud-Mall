@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥、资源回执及执行协调/恢复分组，后续整理状态投影与交付/取消组件。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复及公开状态投影分组，后续整理交付/取消及TCC公开编排。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥、资源回执及执行协调/恢复分组已完成，见第34至43节；状态投影与交付/取消待整理 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复及公开状态投影分组已完成，见第34至44节；交付/取消及TCC公开编排待整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2626,3 +2626,40 @@ git revert refactor/pay-tcc-execution-complete-20261113
 独立Compose项目`cloud-mall-refactor-pay-tcc-projection-20261113`，候选MySQL19963/10.254.227.0/24，核验后新卷。原schema的pay_record/pay_debit_intent/pay_callback_log，加原Mapper的dispatch/receipt/execution/Fence/cancel及execution固定恢复列，共八张空源表供owned复制。URL显式指向独立loopback，仅携带allowPublicKeyRetrieval；不使用默认库或历史卷。归档成功并核对精确schema/事件集合后才down自有容器/网络，卷保留。
 
 证据`target/backend-refactor-20261113/pay-tcc-projection`。两类去package/import/注释逐token等价，引用正文不改，其余后端和README按字节保持；完整格式化迁移/新测试/包说明，引用文件只整理import。全部单测、3项新实库及10项旧实库、八模块test-compile、Pay打包/Jar新旧类型及diff通过。精确备份清除旧两class，不全量clean；临时index逆补丁恢复父树验证后提交及`refactor/pay-tcc-projection-complete-20261113`。README、旧pycache和忽略工件不入提交，Git不回退运行数据；后续交付/取消及TCC公开编排另行处理。
+
+### 44.3 实施与验证结果
+
+两类已迁入projection，原Bean名/配置键/方法和异常顺序保持；13份引用文件（2生产、11测试）仅地址/import适配，增加包说明和PayTccProjectionMySqlIT，impl根包剩18类，其中11个TCC写组件待分组。两类1525个业务token与基线一致，原引用正文全部等价；1073份其他已跟踪后端文件及README字节保持，79份非Java运行文件无旧FQN依赖。
+
+逐行复核调用链：`project/projectClaimed代理暂停caller本地事务 → cancelledProof的RR事务 → 同连接Receipt Evidence → 结束本地证明 → User GET → projectFailed/projectFailedClaimed独立事务 → 恢复caller`。后台在原Pay→execution锁序内重核token/lease，公开路径继续无lease；FAILED重放和成功/退款保护、互斥来源、显式账本标志、金额字符串及Feign/普通异常差异保持。未增加查询、重试、清理callback或写execution决议。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共及源码守卫 |
+| Pay原有全部单测 | 650 | 原投影/租约/公开入口及其他支付矩阵，含上轮装配检查 |
+| PayTccProjectionMySqlIT | 3 | 四个独立UUID夹具，实际扫描/代理、调用者暂停恢复、独立提交、租约窗口与异常边界 |
+| PayLegacyRefundLedgerMySqlIT精确8方法 | 8 | 原token/三种decision/可写状态/账本缺失及原生JSON证明矩阵 |
+| PayTccRecoveryScanMySqlIT精确2方法 | 2 | 实际Pay NONE上下文的投影候选过滤与旧token接管保护 |
+| 合计 | 688 | 77类，0失败、0错误、0跳过；实库13项 |
+
+基线675项单独归档，编译及本轮所有测试首次通过。新增实库通过实际新包扫描取得两个原Bean及其代理，Receipt Evidence也是真实组件。public成功例证明：caller原RR连接被暂停，证明阶段全部被观察Mapper使用同一readOnly/RR连接，User GET时无本地事务/绑定资源；投影写阶段使用另一连接，与caller及证明连接不同。调用返回后caller原连接/旧PENDING快照恢复，外层回滚后独立FAILED仍存在；execution/dispatch/receipt/Fence/意图/取消六表不变，User GET恰一次。
+
+后台例在User替身窗口分别提交owner接管和lease过期，之后实际带锁当前读以202拒绝旧token，Pay保持PENDING、markFailed零调用，未降级公开路径；原caller连接和旧owner快照恢复，外部已提交的新owner/到期lease在caller回滚后仍保留。该窗口由同线程GET替身执行owned SQL构造，不冒称真实分布式并发。
+
+Feign异常、缺ledgerApplied证明、空响应均维持202 pending；其他RuntimeException保持同一异常对象。四变体全部恢复原caller连接/事务，七表事实不变且没有写阶段Mapper调用。测试User响应为受控对象，真实User资金事实或TC未参与。
+
+旧巨型类只运行本节冻结的8方法；RecoveryScan只运行冻结的2方法，未把整类结果计入。其原程序化事务/受控proof与新实际Spring三段事务分别记录，旧源表指纹、应用/有界池关闭断言通过。18份Java按完整/仅import范围格式化并检查；八模块test-compile、Pay打包及diff通过。Jar187个Pay生产class与classes逐字节一致，新两路径存在、旧路径及测试夹具无残留，旧两class先备份后精确移除，未全量clean。
+
+### 44.4 证据、回退与后续
+
+方案提交2249c37e；基线标签`refactor/pay-tcc-projection-baseline-20261113`，完成标签`refactor/pay-tcc-projection-complete-20261113`。证据入口`target/backend-refactor-20261113/pay-tcc-projection/verification.json`，含前后XML、四新夹具的连接/读写属性/事实与异常变体、旧8+2精确方法清单、源码/格式/构建/Jar、资源事件及临时index回退证明。
+
+独立MySQL8.0.46八张源表最终均0行。四新夹具库与两旧夹具库全部删除，六对建库/删库事件与剩余schema互证，无新增失败库；自有容器/网络归档后移除、mysql_data卷保留，默认和历史资源未动。原bugfix_log.md记录本切片结果。
+
+```powershell
+git revert refactor/pay-tcc-projection-complete-20261113
+```
+
+临时index按no-renames精确路径逆补丁恢复父树，真实index及README保持。实际回退后仅清理projection迁入两类型及新增实库测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序回退。README、两个旧pycache和忽略工件不入提交。
+
+下一步检查交付三组件及其同包测试的可见性，再整理交付/取消与TCC公开编排。Pay整体尚未收尾，本轮无真实User资金RPC、TC/RM、Gateway/Nacos全链或性能结论。
