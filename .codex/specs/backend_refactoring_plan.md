@@ -2322,3 +2322,23 @@ git revert refactor/pay-legacy-callback-complete-20261113
 临时index按no-renames完整路径清单逆补丁恢复父树，真实暂存内容与README保持。实际回退后精确清理本轮两新子包五类型及新增装配测试class（含内部class），重编译恢复旧路径；不全量clean、不回退运行数据，后续依赖先逆序处理。
 
 下一步以12个TCC只读取证组件为候选，先核验跨类/包可见性、入口/ReadService及条件装配，再冻结最小迁移清单；24个TCC写编排组件继续另行安排。公共入口/shared规则与监视器留在impl顶层。Pay整体尚未收尾，本轮未运行旧M2固定环境、全量Legacy大矩阵、真实TC/User/Order/Stock、全商城或性能验证。
+
+## 40. Pay TCC只读取证职责分组（2026-11-13）
+
+### 40.1 范围与兼容基线
+
+从c0e51687继续，本会话按用户要求由主Agent独立评审、实现、验证。将以下12类整体迁入`service.impl.evidence`，保留类名、默认Bean名、构造器和可见性：PayTccReconciliationService、PayTccReconciliationReadService、PayTccDeliveryEvidenceService、PayTccDeliveryEvidenceReadService、PayTccOrderEvidenceService、PayTccStockEvidenceService、PayTccUserEvidenceService、PayTccUserAccountEvidenceService、PayTccUserFrozenOwnershipEvidenceService、PayTccUserLinkedRefundEvidenceService、PayTccUserPaymentLedgerEvidenceService、PayTccUserTerminalFrozenOwnershipEvidenceService。
+
+12类内部依赖闭合；Account的verify/verifyLinkedRefundBase及LinkedRefund的verify为包内纯校验，随调用者一起迁移，不扩大public接口。PayTccExecutionEvidence参与写入授权，继续留在写编排范围。生产引用为10个原Controller，另20份既有测试仅适配import/FQN；Controller、Mapper、DTO/VO、Feign与SQL不迁移。增加包说明，impl根包由43类减至31类。无新接口、旧地址兼容副本或业务逻辑合并。
+
+所有12类原本均为无条件@Service；默认关闭的是入口配置开关，并非Bean条件装配。原本地门按开关、凭证/caller、payNo、Spring事务/Seata XID校验；各扩展入口的独立开关顺序保持原样，不能统一调整。两个ReadService的三个public方法仍为REQUIRED、readOnly、REPEATABLE_READ；Delivery读事务内通过另一Bean的localReader.capture加入同一快照。其余入口无新增事务；远端GET位于两次独立本地快照之间，AuthContext清理/恢复、异常后第二次采集、变化优先级、原生JSON字段校验及automaticActionsAllowed=false不变。不触发写入、恢复、TC、MQ或重试。仅两个审计Logger类别随新FQN变化，日志模板/等级/参数不变。
+
+### 40.2 验证、实验与提交策略
+
+先提交本节并建立`refactor/pay-tcc-evidence-baseline-20261113`。迁移前运行Common/Pay全部*Test基线；迁移后运行全部*Test并新增实际子包扫描测试，检查恰12个原Bean、恰两个只读事务代理/三个RR方法及各默认禁用门，禁用请求不接触Mapper/Feign/事务管理器。
+
+运行既有10类完整实库矩阵：PayTccReconciliationMySqlIT、PayTccDeliveryEvidenceMySqlIT、PayTccOrderEvidenceMySqlIT、PayTccStockEvidenceMySqlIT、PayTccUserEvidenceMySqlIT、PayTccUserAccountEvidenceMySqlIT、PayTccUserFrozenOwnershipEvidenceMySqlIT、PayTccUserLinkedRefundEvidenceMySqlIT、PayTccUserPaymentLedgerEvidenceMySqlIT、PayTccUserTerminalFrozenOwnershipEvidenceMySqlIT。现有夹具覆盖单连接RR、独立写入不混快照、两次Pay采集、真实Feign GET/本地HTTP适配、跨服务源表指纹、凭证/上下文隔离、无写与有界证据。它们装配实际User/Order/Stock读取实现与独立库，不代表部署完整微服务、Nacos、Gateway或真实资金/TC流程。旧夹具AfterAll会删除owned库（包括失败时），保留日志/XML；不改其清理逻辑或宣称保留失败库。
+
+独立Compose项目`cloud-mall-refactor-pay-tcc-evidence-20261113`，MySQL候选19959/10.254.231.0/24，预检后全新卷；从现有schema.sql精确复制所需空源表，不导入业务数据、不触碰默认实例。结束归档并移除自有容器/网络，卷保留。八模块test-compile先生成跨模块反射夹具需要的标准classes，再执行矩阵；Pay打包、Jar新旧类路径检查、精确清除旧12类class、格式化及diff检查均必须通过。
+
+源码去package/import/注释后逐token比较12类和所有引用文件；其余后端及README按字节校验。纯引用文件仅整理imports；迁移类、包说明、新测试完整格式化。证据位于`target/backend-refactor-20261113/pay-tcc-evidence`。完成提交及`refactor/pay-tcc-evidence-complete-20261113`标签前，在临时index逆补丁验证恢复父树；只提交本节方案、精确迁移/引用文件和新测试，不包含README、旧pycache或忽略工件。后续审查24个TCC写组件，Pay模块尚不宣告完成。
