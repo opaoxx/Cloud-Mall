@@ -1556,3 +1556,30 @@ git revert refactor/order-creation-complete-20261112
 此回退只撤销本轮普通创建及共享监视器/辅助规则，保留之前查询/Cart/Seata成果。回退后精确清理七个新生产类型及OrderTestService/OrderCreationWiringTest（含嵌套类）对应class残留再编译，保留target历史证据；有后续依赖时按逆序处理，不使用全量clean/reset --hard。Git不恢复运行数据或忽略证据。
 
 本轮真实MySQL验证中的远端服务仍为既有mock，未执行实际Cart/Stock HTTP、TC/MQ、完整商城或性能测试。下一步拆分取消/支付/确认状态迁移，继续共享OrderWriteMonitor，保持各入口原鉴权时点、事务/无事务差别、CAS与库存动作意图；之后再处理秒杀和消息消费。
+
+## 28. Order 状态迁移Service（2026-11-13）
+
+### 28.1 范围与兼容边界
+
+基线 `e1779d3e`，主Agent继续单独执行。已复读项目规则、README、Bug台账、架构/API状态迁移及超时关单规格；README原有修改和旧pycache保留。只迁移cancel/paid/confirm及其专属鉴权/竞争重读辅助，秒杀和消息入口继续后续处理。
+
+- 新增 `service.OrderStateService`、`service.impl.OrderStateServiceImpl` 与 `controller.OrderStateController`，承接原POST `/api/orders/{orderNo}/cancel|paid|confirm`。Service返回OrderVO，Controller构造器注入接口并包装ApiResponse。cancel只保留可选X-User-Id绑定，不新增reason请求体解析或校验；paid/confirm保持由AuthContext获取身份，不新增显式Header参数。
+- 身份以LongSupplier延迟读取：三个入口仍先读取并证明原订单及明细，再取身份/核归属；取消显式Header优先。错误顺序（404/数据库/快照失败优先于401）、严格状态比较、原消息/HTTP码保持。CAS竞争重读只按原目标状态决定幂等返回或409，不追加鉴权/修复/远程Stock操作。
+- cancel/paid保留方法级默认REQUIRED及synchronized(writeMonitor)，使用与创建Service同一单例；事务先于等锁开始、解锁后提交。confirm不新增事务/锁，也不挂起调用方已有事务。三个状态方法不新增重试、RR或锁定SELECT。
+- 原setStatus提取到包内无状态 `OrderStateWriter.transition(OrderSqlMapper,OrderVO,targetStatus)`，原UPDATE条件/时间采样/影响行数==1保持。超时String消费者仅改为调用同一helper，原到期门、事务、无共享写锁及消息解析保持。
+- 只有CAS成功的取消/支付写原ROLLBACK/CONFIRM动作；动作插入与订单状态在同一原事务内，失败继续回滚。目标终态重放不新增动作；收货确认不新增库存动作。SQL、PO、状态机、Feign、消息/Redis、OrderWriteMonitor均不改。
+- 旧混合类移除三个HTTP/Java入口、owned和completedOrConflict、writeMonitor字段及旧setStatus。剩余timeout仍需OrderSqlMapper/ObjectMapper/动作Mapper与private find。新StateService仅构造器注入这三项及监视器，无StockClient依赖；ApiResponse构造移至代理返回后的Controller，requestId不参与持久化。
+
+### 28.2 测试、实验与提交
+
+先提交本节并建立 `refactor/order-state-baseline-20261113`，运行Common/Order单测基线。OrderTestService仅测试夹具接管原状态方法适配，保留旧矩阵响应及外层测试事务，调用真实StateService；把原手动对象的监视器移到夹具以保持与创建共用。直接生产装配的OrderCreationWiringTest改为真实StateController/Service，继续检查互斥、无锁confirm及事务时序；ShardingRuntime显式装配新Bean并核对状态/创建Service监视器身份。
+
+新增状态MVC矩阵覆盖原绑定、延迟身份、严格目标状态、CAS0重读和金额/null响应。真实StateService/MySQL测试覆盖取消/支付状态与动作原子性、动作INSERT失败回滚、幂等重放及无事务confirm；OrderDetailReadMySqlIT改为直接使用生产StateService代理。回归OrderLegacyStockIdentityMySqlIT及适用动作实库，保留原方法。新增Pay侧显式IT用实际OrderClient与本机HTTP/MVC验证新状态入口的Header/路径/响应，Order Mapper为受控替身；不增加生产模块依赖或把它当成完整Nacos/商城链。
+
+新Compose项目 `cloud-mall-refactor-order-state-20261113`，MySQL19944、10.254.254.0/24，确认项目/卷/端口不存在后创建。原schema.sql仅取Order七张空源表；用例只写自有UUID库。吸取上一阶段客户端socket异常经验，相关实库分组串行执行；ShardingRuntime只运行与本次装配/业务直接相关的 `explicitModeUsesProductionMappersAfterBootstrapAndAudit`，不把一个方法写成全类通过。保留原失败清理门，不动上轮保留卷/现场；本轮结束归档、移除自有容器/网络、新卷保留。
+
+阶段门：适用测试全部通过、迁移方法与剩余逻辑对照、原测试方法保留、实际Java格式化、Order打包/八模块test-compile、Jar旧入口与测试夹具检查、git diff --check、README指纹保持。完成标签 `refactor/order-state-complete-20261113`，临时index验证逆补丁恢复父树；不做真实工作树回滚展示、全量clean或reset --hard。未运行部分和失败尝试如实记录，Git不恢复运行数据或忽略证据。
+
+### 28.3 实施结果
+
+待实施验证。
