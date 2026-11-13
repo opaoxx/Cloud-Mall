@@ -1882,3 +1882,23 @@ git revert refactor/order-auxiliary-complete-20261113
 实际回退后精确清理四个新子包中本轮五类型及内部class、OrderAuxiliaryWiringTest残留，再重新编译恢复后的旧路径类及测试；不全量clean、不回退运行数据。后续依赖按逆序处理。
 
 下一步做Order阶段收尾盘点，核对原方案剩余项、公共类型/契约和完整模块目录，再细化Pay首切片。本轮未跑真实Stock/Product/TC/Nacos、完整商城、进程硬停或性能验证，不宣告全项目重构结束。
+
+## 33. Order 模块收尾与Pay准备（2026-11-13）
+
+### 33.1 本轮范围与基线
+
+基线 `d013d831`，主Agent继续单独执行。Order十个实施切片已覆盖演练命名、HTTP组合委托、查询/创建/状态/消息职责和辅助包分组。只读检查确认Controller/Service无JdbcTemplate或内嵌SQL、生产类无Cm编号命名、无旧OrderController/OrderServiceImpl/空OrderService残留；保留的cm18 URL、Bean名、表名和事务名是已冻结协议标识。
+
+JDK语法树初检发现30项文档缺口（28个显式public/接口/Bean入口、2个字段）及消息配置9处泛化占位注释。本轮补齐这些说明、Feign局部record参数说明，修正可靠性初始化“仅两张表”的过时描述，按原流程补注释。对Order全部生产Java执行既有Google Java Format，保留长字符串原文；只允许注释、排版和import顺序/未使用import整理，不修改变量、方法、字段、注解参数、SQL、配置、依赖或业务语句。
+
+现有Feign内部不可变record继续作为客户端局部传输模型，全部业务Controller/ServiceImpl内已无嵌套DTO/VO/PO；不为目录统一再引入跨服务模型迁移。动态分片与元数据访问保留已评审的JDBC Mapper/PO方案，不把本轮结构完成表述为所有Mapper已改成BaseMapper。全量命名改写和ORM替换不在本轮冻结范围。
+
+本轮以当前Git源码和第32节449项归档报告作为已核实基线，另存原源码指纹和Order目录/契约盘点。现有Java缺少的注释通过源码阅读补充，不生成泛化占位文字；语法树复核显式入口/字段缺口为零。全部生产Java去注释并规范化import后逐token必须相同，resources/POM/测试源码必须不变；本轮不新增镜像实现的测试。
+
+### 33.2 验证、资源及提交
+
+先提交本节并建立 `refactor/order-closeout-baseline-20261113`。完成后运行Common/Order全部现有单测、Order侧StockSeckillFactFeignIT、Pay侧PayOrderStateFeignIT，后两者用本机HTTP与实际客户端/响应类型核对兼容；先以标准八模块test-compile准备相应模块class。Order打包、Google Java Format全模块检查、git diff --check、旧类型/空接口/嵌套业务模型/SQL分层及原协议标识核验共同组成收尾证据。
+
+本轮仅注释与排版，不新建MySQL/Rabbit实验，不重复之前实库矩阵；历史结果与本轮新跑结果分别列出，不累加为一次全链验证。README原有修改、历史失败现场、两个旧pycache及冻结实验runner保持。完成标签 `refactor/order-closeout-complete-20261113` 与模块结构通过点 `refactor/order-complete-20261113`；临时index验证本轮逆补丁恢复父树，Git不回退运行数据。更新模块清单、兼容保留项、已知验证限制和逆序回退索引。
+
+Pay本轮仅盘点并冻结首切片，不同时改业务源码。已确认PayController继承PayServiceImpl、PayService为空；create/success/callback原来共用this锁，创建还有本地事务，后续写拆分须单独评审共享锁与TCC/Legacy/回调事实，不能照搬Order接口形状。首个候选是无事务无锁的GET `/api/payments/orders/{orderNo}`：鉴权先于查询，原Mapper同时按orderNo/userId过滤，完整映射后取第一条，空结果原404；使用现有PayRecordViews保留金额/时间/null字段，不增加Order远端查询或支付驱动。具体实施命令与新基线在下一切片补齐，本轮不把Pay写成已重构。
