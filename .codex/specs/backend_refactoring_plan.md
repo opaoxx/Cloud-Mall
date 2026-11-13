@@ -2132,3 +2132,25 @@ git revert refactor/pay-success-complete-20261113
 临时index已验证逆补丁恢复父树，真实暂存内容及README保持。实际回退后精确清理本轮四个新生产类型和三个新测试类（含内部class）的target残留并重编译，不全量clean或回退运行数据；后续依赖先逆序评估。README、两个旧pycache及忽略工件不入提交。
 
 下一步以模拟支付失败入口为候选，保持其无外层事务/无共享锁、先持久模式再分流、Legacy独立当前读授权与TCC失败入口语义，单独冻结拆分方案。回调仍保留原token/持久绑定/完成顺序，最后再移除旧继承入口。旧M2固定13307矩阵本轮仅编译适配，未运行；新实库结果不替代其原审计矩阵，也不代表真实TC/User/Order/Stock资金、Gateway Bearer、全商城或性能验证。
+
+## 37. Pay模拟失败入口（2026-11-13）
+
+### 37.1 冻结范围与契约
+
+基线49238b39，主Agent单独评审/实施。新增PayFailureController、PayFailureService、PayFailureServiceImpl承接POST `/api/payments/{payNo}/mock-fail`。原方法无请求体绑定，继续忽略可选reason及其他body，不新增DTO校验。Controller在调用业务前requireUserId，再传显式long身份；原入口本来无事务/锁且第一步即鉴权，本切片无需延迟supplier。Service复用已提取PayProcessingSupport，返回PayVO，Controller沿原ApiResponse.ok包装。
+
+顺序保持身份→支付完整首读/404/归属403→支付次读恰一条及意图持久协议核验→MOCK_FAIL指标→唯一原协议入口。TCC调用原failure(payment)，正常返回后直接返回同一个可能被更新的payment视图，不重新查询；Legacy返回原legacyFailureService.fail(payment)的当前事实视图，含null结果语义。未知/退款中/终态拒绝和原异常不改，TCC依赖缺失仍503，不回落，不重试、不增加全局终态短路。
+
+新入口无PayWriteMonitor、synchronized、Transactional或事务挂起；不能把成功入口的锁照搬过来。Legacy仍由原真实REQUIRES_NEW代理先Pay行锁再intent当前锁定读，按既有条件取消并CAS；TCC仍由原真实NOT_SUPPORTED代理暂停调用者事务。两底层类、Mapper/SQL、共用处理规则、HTTP/Feign/JSON、模式/指标配置及所有资金状态机保持。旧实现仅删除fail及失去调用的owned/AuthContext依赖，callback及全部相关私有方法保持；旧继承入口待下一切片处理。
+
+适配原Legacy失败结果、TCC路由、指标夹具/上下文、创建共享锁和查询路由测试，只替换入口及必要装配，保留原案例与断言；不引入生产兼容桥或混合测试门面。
+
+### 37.2 验证、实验及提交
+
+先提交方案及refactor/pay-failure-baseline-20261113。新增失败契约先在旧入口运行，再仅切换装配验证新入口，覆盖鉴权/归属/完整首读、协议门与指标顺序、TCC正常返回同一视图且无重读、Legacy返回当前视图/null、缺失依赖与原异常，以及HTTP忽略body/金额时间/null。运行全部Common/Pay *Test，上轮锁屏障继续证明失败入口在创建/成功/回调锁被持有时可完成，五条公开路由仍唯一归属。
+
+新增PayFailureMySqlIT使用真实Mapper和原LegacyFailureService事务代理：核对取消成功/重放、远端失败与本地CAS异常、外层RR旧快照中的无意图不能覆盖独立当前读看到的新INIT意图，调用者回滚不能撤销已提交的独立失败事务。另以真实PayTccPaymentService.failure方法/NOT_SUPPORTED代理和受控依赖验证外层事务暂停及返回后恢复；不启动TC或资金RPC。新入口无事务代理，读/授权/事务边界均观察实际Spring/MySQL行为。
+
+独立Compose项目cloud-mall-refactor-pay-failure-20261113，仅MySQL19956、候选子网10.254.234.0/24，预检后使用新卷、原schema.sql两张空Pay源表、每例UUID库；失败保留，成功核对后清理。结束归档并移除自有容器/网络、保留卷，不触碰默认或历史资源。旧M2固定13307矩阵不运行，不作为验收通过项；完整TC/User/Order/Stock交付、Gateway Bearer与性能本轮不测。
+
+八模块test-compile、Pay打包、实际Java格式化、diff和原失败方法token对照必须通过，其他业务/配置/测试文件按清单核验。证据存target/backend-refactor-20261113/pay-failure；实施独立提交和refactor/pay-failure-complete-20261113，临时index验证逆补丁恢复父树，Git不恢复运行数据。README原修改、两个旧pycache和忽略工件不入提交。
