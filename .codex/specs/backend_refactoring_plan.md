@@ -2014,3 +2014,23 @@ git revert refactor/pay-query-complete-20261113
 回退后按确切类名清理三个新生产类型及两个新增测试类（含其内部class）的target残留，再重新编译恢复后的旧get；不全量clean。临时index已验证实施逆补丁恢复父树，真实index/工作树和README保持；后续依赖按逆序评估。Git不恢复运行数据，本轮未创建或修改中间件资源、业务表或历史失败现场。
 
 下一步以支付创建为候选切片，先冻结create与success/callback的共享监视器归属、原本地事务在获取锁之前开始/解锁后提交、幂等键载荷检查顺序及新支付debit_mode选择，再执行提取。Legacy/TCC资金编排、回调持久绑定和恢复职责继续单独规划；旧PayController继承和空PayService目前明确暂留，不宣称Pay模块已完成。当前验证不覆盖真实MySQL、TC/TCC资金链、Gateway Bearer或全商城；不重复或覆盖之前阶段的真实资金矩阵与历史异常结论。
+
+## 35. Pay支付创建与共享写监视器（2026-11-13）
+
+### 35.1 冻结范围与行为
+
+基线35ac1bb0，主Agent单独评审/实施。新增PayCreationController、PayCreationService、PayCreationServiceImpl和单例PayWriteMonitor，提取POST `/api/payments`。请求头Idempotency-Key和PayCreateDTO绑定不变；Controller传入AuthContext::requireUserId，创建Service原REQUIRED事务开始后获取共享监视器，再调用身份supplier，保证未登录请求不提前绕过原事务/锁顺序。Service返回PayVO，Controller提交成功后ApiResponse.ok包装。
+
+原create/success/callback共享this监视器迁为同一Spring PayWriteMonitor；success/callback保留原方法体和完整临界区，只将synchronized方法改为synchronized(writeMonitor)，不新增事务。fail和查询继续不加锁/事务。监视器在Service返回/抛异常时释放，事务提交/回滚在解锁后，不能扩大为提交锁或分布式锁。旧实现字段使用直接构造时独立默认实例以保持原手工测试单对象互斥；生产@Autowired必须注入同一Bean，不能required=false或静态全局锁。两个手工Spring测试上下文补此Bean，普通根包扫描自动发现。
+
+创建顺序保持：身份→原非空/正金额校验→SHA-256(userId+":"+原key)前48位小写hex→按payNo完整映射/首条重放（orderNo/userId/BigDecimal.compareTo一致，否则原409）→原Order.get→null响应/data的404→归属403→PENDING_PAYMENT检查409→金额409→按orderNo完整映射/首条返回→采样+08时间/原UUID主键→newPaymentMode→insert→按payNo重读及原404。保留空白orderNo、金额精度、原key字节、远端非零code但非null data等既有行为，不借重构收紧校验、不引入重试或额外身份/状态检查。
+
+create专属order/payNoFor/now/id辅助方法及模式配置依赖迁入创建实现；剩余写流程的find/findBy/toView和四参数旧构造器暂留，查询仍复用PayRecordViews。不改Mapper/SQL/PO/VO、模式开关、Feign/资金编排、回调绑定、调度、消息或DDL。直接创建支付的PayTccDeliveryIT一处改用真实新Service代理，保留资金断言；旧指标夹具移除已迁走mode字段注入；源码守卫及上轮查询装配测试改指新归属和显式共享锁，保留原行为约束，不新增生产桥或混合测试门面。
+
+### 35.2 验证与回退策略
+
+先提交方案并建立refactor/pay-creation-baseline-20261113。新增创建契约测试先对旧入口验证，再只改装配验证新入口；覆盖认证/参数、key重放冲突、完整映射、原Order错误顺序、订单已有记录、新模式/插入/重读失败、金额时间及HTTP绑定。新装配测试使用真实Spring事务代理与可控屏障，验证事务先于锁/鉴权、commit及rollback在锁外、三个写入口共用一个监视器及fail/查询不受其阻塞。
+
+真实MySQL新用例通过生产Mapper和新事务Service核验创建/幂等重放/LEGACY与TCC持久模式、插入后读取失败整笔回滚，以及同key并发最终至多一行；不把单JVM监视器描述为跨实例幂等保证。独立Compose项目cloud-mall-refactor-pay-creation-20261113，仅mysql，候选宿主19954、子网10.254.236.0/24；先核实无冲突，创建全新卷，按schema.sql复制Pay空源表，测试各自UUID库。失败保留库并归档，成功核对后清理测试库，最终归档后移除自有容器/网络、保留卷，不触碰默认/历史中间件。
+
+运行Common/Pay全部*Test、新MySQL全类及原PayDebitModeM2MySqlIT五个持久模式拒绝方法（不运行其启动子进程/迁移族）；八模块test-compile、Pay打包、Java实际格式化、diff及源码token对照。完整TC/User/Order/Stock资金交付矩阵本轮不运行，PayTccDeliveryIT仅编译适配，不算真实链路通过。证据存target/backend-refactor-20261113/pay-creation；README原修改与两个旧pycache不入提交。实施独立提交及refactor/pay-creation-complete-20261113，临时index逆补丁验证恢复父树；Git不回退运行数据。
