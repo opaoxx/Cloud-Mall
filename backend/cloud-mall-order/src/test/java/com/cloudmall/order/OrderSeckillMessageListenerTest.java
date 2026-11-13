@@ -5,10 +5,11 @@ import static org.mockito.Mockito.*;
 
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.config.OrderSeckillMessageListener;
-import com.cloudmall.order.controller.OrderController;
+import com.cloudmall.order.config.OrderTimeoutMessageListener;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.OrderSeckillCreationService;
+import com.cloudmall.order.service.OrderTimeoutService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import java.util.LinkedHashMap;
@@ -58,8 +59,9 @@ class OrderSeckillMessageListenerTest {
           ListenerConfiguration.class,
           OrderMessagingConfiguration.class,
           OrderSeckillMessageListener.class,
-          OrderController.class);
+          OrderTimeoutMessageListener.class);
       context.registerBean(OrderSeckillCreationService.class, () -> service);
+      context.registerBean(OrderTimeoutService.class, () -> mock(OrderTimeoutService.class));
       context.registerBean(OrderSqlMapper.class, () -> mock(OrderSqlMapper.class));
       context.registerBean(OrderStockActionMapper.class, () -> mock(OrderStockActionMapper.class));
       context.registerBean(ObjectMapper.class, () -> new ObjectMapper());
@@ -103,6 +105,21 @@ class OrderSeckillMessageListenerTest {
       ArgumentCaptor<Map<String, Object>> captured = ArgumentCaptor.forClass(Map.class);
       verify(service).createFromMessage(captured.capture());
       assertEquals(event, captured.getValue());
+      var timeoutAdapter =
+          (ChannelAwareMessageListener)
+              byQueue.get(OrderMessagingConfiguration.TIMEOUT_DLQ).getMessageListener();
+      var invalidProperties = new MessageProperties();
+      invalidProperties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+      var invalidJson =
+          new org.springframework.amqp.core.Message(
+              new byte[] {(byte) 0xC3, 0x28}, invalidProperties);
+      assertThrows(
+          org.springframework.amqp.rabbit.support.ListenerExecutionFailedException.class,
+          () -> timeoutAdapter.onMessage(invalidJson, mock(Channel.class)));
+      verifyNoInteractions(context.getBean(OrderTimeoutService.class));
+      invalidProperties.setContentType(MessageProperties.CONTENT_TYPE_TEXT_PLAIN);
+      timeoutAdapter.onMessage(invalidJson, mock(Channel.class));
+      verify(context.getBean(OrderTimeoutService.class)).closeFromMessage(same(invalidJson));
       assertFalse(byQueue.get(OrderMessagingConfiguration.SECKILL_QUEUE).isRunning());
     }
   }

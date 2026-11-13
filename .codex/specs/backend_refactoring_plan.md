@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理、普通创建、状态迁移、秒杀受理和秒杀消息落单Service提取，超时消费及旧继承入口待继续。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order主业务和消息消费已拆分，旧Controller继承入口与空接口已移除，辅助实现职责分组待继续。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、查询、Cart清理、普通创建、状态迁移、秒杀受理及消息落单切片完成，见第23至30节；超时消费及旧继承入口待继续 |
+| Order | 进行中 | 主业务与消息消费切片完成，旧继承/空接口移除，见第23至31节；辅助实现职责分组待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1749,6 +1749,7 @@ git revert refactor/order-seckill-creation-complete-20261113
 
 - 新增 `service.OrderTimeoutService`、`service.impl.OrderTimeoutServiceImpl`，提供closeFromMessage(Message)与closeExpiredOrder(String)两个原REQUIRED入口。接口保留原AMQP Message输入，以保持获取body之前已进入事务、容器原始字节输入和异常时点；本轮不引入消息DTO或再次JSON转换。Message入口在同一目标对象内委托String业务，不新增第二个代理调用、独立事务或共享写锁。
 - 新增 `util.OrderTimeoutMessageParser`，只接收原ObjectMapper和byte[]，返回原orderNo。严格UTF-8 REPORT、per-call reader的single-root/duplicate-key、四字段原生文本/必填代理对、裸ASCII整数整份原文、quoted/raw legacy、catch顺序及cause保持。消息头/contentType/encoding不参与猜测；不修改共享ObjectMapper或原body，不新增expireAt语法/身份校验。
+- 上述事务边界是进入业务方法后的body读取/解析。原Spring AMQP转换器仍在方法调用前运行，application/json本身无法转换时先拒绝且不开业务事务；text/plain保留原byte[]并交给Message入口。解析工具不读取消息头，不代表可以跳过原容器转换过程；前置转换拒绝与业务内解析拒绝分别验收。
 - 新增 `config.OrderTimeoutMessageListener`，consumeTimeout(Message)仅调用业务接口，保留TIMEOUT_DLQ队列、默认factory、无显式endpoint ID和无手工ACK。原三次重试/AUTO/default-requeue-rejected=false保持；TIMEOUT_DLQ自身没有二级DLX，耗尽后的原拒绝行为不伪称再次进入其他死信队列。
 - 关单仍完整读取原详情、精确状态为PENDING_PAYMENT才继续；缺失DB期限拒绝、未来期限拒绝，消息expireAt不可授权关单。原共享OrderStateWriter条件更新恰1行才插入ROLLBACK动作，两者同事务；CAS=0不补写动作/远端回滚，不借用HTTP取消鉴权。不改SQL、字段、时间采样、ID或状态机。
 - 删除已无剩余职责的OrderController、OrderServiceImpl和空OrderService。OrderTestService改为普通测试装配，接管原三个注入字段并保留两个@Transactional适配入口，调用真实TimeoutService；OrderReadTestSupport使用具体测试夹具类型。MVC/创建/Runtime/秒杀监听装配中的旧Controller引用逐一改为真实新角色或移除空HTTP注册，原测试方法保留。Common守卫指向新监听器；旧故障runner无类名依赖，其容器外事务结束观测仍适用，本轮不改冻结runner。
@@ -1762,3 +1763,44 @@ git revert refactor/order-seckill-creation-complete-20261113
 新Compose项目 `cloud-mall-refactor-order-timeout-20261113`，MySQL19948、Rabbit19949/管理19950、子网10.254.238.0/24，创建前核实无项目/卷/端口/子网冲突。固定镜像、root/root与基础compose保持；仅本实验override把健康探针命令设为 `env ERL_FLAGS=+S 2:2 rabbitmq-diagnostics -q ping`，只限制短命CLI进程的调度器，避免上轮默认探针启动超过3秒，不改变broker进程。七张Order空源表、测试自有UUID库；成功库清理、失败按原门保留，归档后仅移除自有容器/网络、两卷保留。
 
 阶段门：四个原方法拆分前后对照、原测试方法保留、未改源码/资源指纹、真实格式化、Order打包及八模块test-compile、Jar确认三个旧类型及测试夹具不存在、git diff --check和README指纹保持。仅对已删除类型的target class精确备份/清理后重编译，不全量clean。完成标签 `refactor/order-timeout-complete-20261113`；临时index逆补丁还原父树，不动真实工作树展示回退。未验证真实Stock/Product/TC/Nacos、完整商城、进程硬停及性能范围明确保留。
+
+### 31.3 实施结果与调用链
+
+OrderTimeoutMessageListener、OrderTimeoutService/Impl及OrderTimeoutMessageParser已落盘。解析工具89行，事务实现74行；原138行混合实现、旧OrderController及空OrderService已删除。HTTP Controller均独立组合业务接口，两个消息接入适配器分别绑定秒杀与超时队列。测试混合夹具也不再继承生产实现，原SQL/JSON/动作字段在夹具内保留反射和构造注入语义。
+
+实际调用链为：`原TTL队列 → 原DLX/超时队列 → 容器转换/重试 → OrderTimeoutMessageListener → Service原REQUIRED事务 → 获取body/严格UTF-8及原JSON/legacy解析 → 原完整详情/精确身份 → 原状态及DB期限 → CAS恰1行 → 同事务ROLLBACK动作 → 提交 → 监听返回/AUTO确认`。Message入口对String业务是同目标对象直接调用，未增加事务代理层次或锁。消息expireAt只保留原文本资格，不取代数据库期限；CAS=0不补写动作，不调用Stock。
+
+| 验证范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 原公共契约，超时队列源码守卫指向新监听器，移除无用旧源码读取 |
+| Order单测 | 339 | 原337项及新2项监听委托/无继承测试；原七类超时解析矩阵、创建/状态/查询契约继续执行 |
+| OrderLegacyStockIdentityMySqlIT | 18 | 全类原订单身份、状态、缺失期限及String/Message边界 |
+| OrderStateMySqlIT | 3 | 既有状态与库存动作事务规则 |
+| OrderSeckillMessageMySqlRabbitIT | 4 | 实际新超时监听/Service参与装配，秒杀原消费、重试和落单仍通过 |
+| OrderTimeoutMySqlRabbitIT | 4 | 原TTL/DLX真实投递、原事务/CAS/动作原子性、失败重试、DB期限权威及解析拒绝 |
+| ShardingRuntime精确单方法 | 1 | 仅explicitModeUsesProductionMappersAfterBootstrapAndAudit，实际分片与新超时服务代理装配 |
+| 合计 | 394 | 72个类，最终逐类去重0失败、0错误、0跳过 |
+
+真实TTL消息关单后，quoted和裸数字重投保持一个ROLLBACK动作；动作INSERT触发器拒绝时三次尝试全部回滚状态与动作，移除本例触发器后同原消息可关单。待支付NULL/未来DB期限分别三次失败，消息的历史expireAt不能覆盖；PAID/CANCELLED/COMPLETED/OTHER且NULL期限保持无动作。超时队列本身没有二级DLX，失败耗尽沿原拒绝/不重新入队语义；用例停止容器后核对队列空，不虚构其他死信目的地。
+
+本轮还明确区分了原转换器与业务解析边界：application/json非法根字节由原转换器在事务前拒绝，三次失败后不进入Service；text/plain原始非法UTF-8及JSON重复键/多root进入Service后各三次事务回滚、零订单访问。单位装配使用同一原转换器独立验证前置拒绝不调用Service、text/plain保持原Message；真实用例发送四份消息，共九次业务事务回滚。所有最终行为验证均未改转换器、生产事务或重试配置。
+
+新超时IT首轮2通过、1错误、1失败：测试SQL误写action而真实列为action_type；另把转换器前置拒绝错误计为业务事务，等待九次回滚超时。两处仅修正测试/验收描述，首轮XML/日志与两UUID库按门保留；随后2项监听单测和完整4项超时IT通过，最终全部适用回归通过。上一阶段普通恢复首轮异常的未确认原因保持原记录，本轮未改或重新验收该不相关恢复用例。
+
+四个原方法共543个token经明确参数/名称及返回拆分后对照一致，Message事务内委托链单独核对；205份其他Common测试/Order源码资源哈希不变，11个适配测试文件原方法保留。17个变更Java文件完成格式化（大Runtime限改动行）及diff检查。Order打包、八模块test-compile通过，Jar四个新类型与最终class一致；三个旧类型及测试夹具均不存在，新Service无HTTP/鉴权/共享监视器/远端客户端依赖，解析工具没有Spring/Mapper依赖。原冻结故障runner仅编译，不改写或宣称执行其硬停验收。
+
+### 31.4 证据、资源与回退
+
+证据入口 `target/backend-refactor-20261113/order-timeout/verification.json`。保留72份最终XML、首轮失败XML/日志、源码对照、格式化记录、三份精确清理前class备份、Jar检查和16份本轮Runtime native工件。Runtime class-finish为created=deleted=1、errors为空、无需保留失败库，仅一方法实际执行。
+
+MySQL8.0.46七源表逐表精确0行，成功UUID库已清理；两个首轮失败库 `order_timeout_refactor_159b5fa7ccf64894a911a2d54e0da6ef`、`order_timeout_refactor_5d2ba776002647c79a81b068613ec42f` 已只读导出并随新卷保留。Rabbit五队列ready/unacked/consumer均为0；归档时两个容器均healthy，CLI探针调度器限制只存在于本实验override。自有容器/网络已移除，mysql_data/rabbit_data两卷保留；历史资源、失败现场及README原修改均未变，旧pycache不入提交。
+
+方案提交/基线 `9d626e93`，标签 `refactor/order-timeout-baseline-20261113`；完成标签 `refactor/order-timeout-complete-20261113`。临时index验证本轮逆补丁恢复父提交完整树，真实暂存条目、工作树和README保持。
+
+```powershell
+git revert refactor/order-timeout-complete-20261113
+```
+
+实际回退后精确清理四个新增生产类型及OrderTimeoutWiringTest/OrderTimeoutMySqlRabbitIT（含嵌套类）的class，再编译恢复后的旧三个生产类型和夹具；不全量清空target、不回退数据卷。有后续依赖时逆序处理。
+
+Order主业务/消息入口拆分已完成，模块整体尚未结束。下一步先盘点并整理outbox、库存动作、预扣意图恢复和秒杀恢复辅助实现的职责分组，冻结Bean名、定时任务和配置契约后再实施；之后再进入Pay。未执行真实Stock/Product/TC/Nacos、完整商城、进程硬停或性能测试。

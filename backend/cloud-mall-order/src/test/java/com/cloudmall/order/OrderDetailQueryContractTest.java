@@ -10,7 +10,6 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.config.CommonWebConfiguration;
 import com.cloudmall.common.web.GlobalExceptionHandler;
-import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderDetailQueryController;
 import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.domain.vo.OrderPaymentStateVO;
@@ -243,9 +242,7 @@ class OrderDetailQueryContractTest {
     var builder = new Jackson2ObjectMapperBuilder();
     new CommonWebConfiguration().moneyAsString().customize(builder);
     return MockMvcBuilders.standaloneSetup(
-            controller,
-            new OrderController(),
-            new OrderQueryController(mock(OrderQueryService.class)))
+            controller, new OrderQueryController(mock(OrderQueryService.class)))
         .setControllerAdvice(new GlobalExceptionHandler())
         .setMessageConverters(new MappingJackson2HttpMessageConverter(builder.build()))
         .build();

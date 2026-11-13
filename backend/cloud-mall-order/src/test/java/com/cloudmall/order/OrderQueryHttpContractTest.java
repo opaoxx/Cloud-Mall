@@ -10,7 +10,6 @@ import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.config.CommonWebConfiguration;
 import com.cloudmall.common.web.GlobalExceptionHandler;
-import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderQueryController;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.service.OrderQueryService;
@@ -69,9 +68,7 @@ class OrderQueryHttpContractTest {
                 .param("endTime", "end"))
         .andExpect(status().isOk());
     verify(service).list(7L, "PAID", 2, 3, "start", "end");
-    assertFalse(
-        java.util.Arrays.stream(OrderController.class.getMethods())
-            .anyMatch(method -> method.getName().equals("list")));
+    assertEquals(Object.class, OrderQueryController.class.getSuperclass());
   }
 
   @Test
@@ -161,7 +158,7 @@ class OrderQueryHttpContractTest {
   private static MockMvc mvc(OrderQueryService service) {
     var builder = new Jackson2ObjectMapperBuilder();
     new CommonWebConfiguration().moneyAsString().customize(builder);
-    return MockMvcBuilders.standaloneSetup(new OrderQueryController(service), new OrderController())
+    return MockMvcBuilders.standaloneSetup(new OrderQueryController(service))
         .setControllerAdvice(new GlobalExceptionHandler())
         .setMessageConverters(new MappingJackson2HttpMessageConverter(builder.build()))
         .build();

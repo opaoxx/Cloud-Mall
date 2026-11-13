@@ -7,7 +7,6 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.api.PageResult;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
-import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderCreationController;
 import com.cloudmall.order.controller.OrderDetailQueryController;
 import com.cloudmall.order.controller.OrderQueryController;
@@ -18,9 +17,11 @@ import com.cloudmall.order.domain.vo.*;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.OrderSeckillCreationService;
+import com.cloudmall.order.service.OrderTimeoutService;
 import com.cloudmall.order.service.impl.*;
 import com.cloudmall.order.service.impl.OrderQueryServiceImpl;
 import com.cloudmall.order.service.impl.OrderSeckillCreationServiceImpl;
+import com.cloudmall.order.service.impl.OrderTimeoutServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import io.seata.core.context.RootContext;
@@ -1172,7 +1173,8 @@ class OrderShardingRuntimeMySqlIT {
           OrderOutboxDispatcher.class,
           OrderStockActionRecovery.class,
           SeckillMessageRecovery.class,
-          OrderController.class,
+          OrderTimeoutMessageListener.class,
+          OrderTimeoutServiceImpl.class,
           OrderSeckillMessageListener.class,
           OrderSeckillCreationServiceImpl.class,
           OrderStateController.class,
@@ -1271,7 +1273,8 @@ class OrderShardingRuntimeMySqlIT {
       try (Connection actual = physical.getConnection()) {
         assertEquals(fixture.database, actual.getCatalog());
       }
-      assertTrue(AopUtils.isAopProxy(context.getBean(OrderController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderTimeoutMessageListener.class)));
+      assertTrue(AopUtils.isAopProxy(context.getBean(OrderTimeoutService.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderSeckillMessageListener.class)));
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderSeckillCreationService.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderStateController.class)));
@@ -1312,7 +1315,7 @@ class OrderShardingRuntimeMySqlIT {
               orders.getClass().getName(),
               "reliabilityJdbcIdentity",
               true,
-              "controllerSpringProxy",
+              "timeoutServiceSpringProxy",
               true,
               "intentRequiresNewSpringProxy",
               true,

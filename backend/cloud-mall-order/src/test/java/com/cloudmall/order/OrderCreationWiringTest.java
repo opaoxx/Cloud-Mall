@@ -10,7 +10,6 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.config.CommonWebConfiguration;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.web.GlobalExceptionHandler;
-import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderCreationController;
 import com.cloudmall.order.controller.OrderStateController;
 import com.cloudmall.order.domain.po.OrderIdempotencyPO;
@@ -324,7 +323,6 @@ class OrderCreationWiringTest {
           Transactions.class,
           OrderCreationServiceImpl.class,
           OrderCreationController.class,
-          OrderController.class,
           OrderStateController.class,
           OrderStateServiceImpl.class);
       context.registerBean(OrderWriteMonitor.class, () -> monitor);

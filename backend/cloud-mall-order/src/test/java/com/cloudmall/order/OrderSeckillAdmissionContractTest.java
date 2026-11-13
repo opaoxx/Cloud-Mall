@@ -18,7 +18,6 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.web.AuthInterceptor;
 import com.cloudmall.common.web.GlobalExceptionHandler;
 import com.cloudmall.order.config.SeckillSentinelConfiguration;
-import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderSeckillAdmissionController;
 import com.cloudmall.order.domain.dto.SeckillOrderDTO;
 import com.cloudmall.order.feign.StockClient;
@@ -401,7 +400,7 @@ class OrderSeckillAdmissionContractTest {
   }
 
   private static MockMvc mvc(OrderSeckillAdmissionController controller) {
-    return MockMvcBuilders.standaloneSetup(controller, new OrderController())
+    return MockMvcBuilders.standaloneSetup(controller)
         .addInterceptors(new AuthInterceptor())
         .setControllerAdvice(new GlobalExceptionHandler())
         .build();

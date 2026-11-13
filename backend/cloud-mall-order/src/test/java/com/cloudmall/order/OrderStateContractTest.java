@@ -10,7 +10,6 @@ import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.config.CommonWebConfiguration;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.web.GlobalExceptionHandler;
-import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderStateController;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
@@ -210,7 +209,7 @@ class OrderStateContractTest {
   private MockMvc mvc() {
     var builder = new Jackson2ObjectMapperBuilder();
     new CommonWebConfiguration().moneyAsString().customize(builder);
-    return MockMvcBuilders.standaloneSetup(controller, new OrderController())
+    return MockMvcBuilders.standaloneSetup(controller)
         .setControllerAdvice(new GlobalExceptionHandler())
         .setMessageConverters(new MappingJackson2HttpMessageConverter(builder.build()))
         .build();

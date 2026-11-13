@@ -48,7 +48,7 @@ class BackendP1RulesTest {
   @Test
   void paymentAndOrderBindIdempotencyAndPathVariables() throws Exception {
     String payment = source("cloud-mall-pay", "PayServiceImpl.java");
-    String order = source("cloud-mall-order", "OrderServiceImpl.java");
+    String order = source("cloud-mall-order", "OrderTimeoutMessageListener.java");
     assertTrue(payment.contains("payNoFor"));
     assertTrue(payment.contains("Idempotency-Key"));
     assertTrue(
@@ -285,7 +285,6 @@ class BackendP1RulesTest {
                     "web",
                     "GlobalExceptionHandler.java")
                 .normalize());
-    String order = source("cloud-mall-order", "OrderServiceImpl.java");
     assertTrue(handler.contains("MissingRequestHeaderException"));
     assertTrue(handler.contains("COMMON_INVALID_ARGUMENT"));
     assertTrue(

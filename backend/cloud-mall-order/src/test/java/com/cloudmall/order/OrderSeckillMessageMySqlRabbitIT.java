@@ -7,7 +7,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.messaging.SeckillRequestFingerprint;
 import com.cloudmall.order.config.OrderMessagingConfiguration;
 import com.cloudmall.order.config.OrderSeckillMessageListener;
-import com.cloudmall.order.controller.OrderController;
+import com.cloudmall.order.config.OrderTimeoutMessageListener;
 import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.mapper.OrderOutboxMapper;
 import com.cloudmall.order.mapper.OrderSqlMapper;
@@ -16,6 +16,7 @@ import com.cloudmall.order.mapper.SeckillMessageRecoveryMapper;
 import com.cloudmall.order.mapper.SeckillOrderDedupMapper;
 import com.cloudmall.order.service.OrderSeckillCreationService;
 import com.cloudmall.order.service.impl.OrderSeckillCreationServiceImpl;
+import com.cloudmall.order.service.impl.OrderTimeoutServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
@@ -305,7 +306,8 @@ class OrderSeckillMessageMySqlRabbitIT {
             OrderMessagingConfiguration.class,
             OrderSeckillCreationServiceImpl.class,
             OrderSeckillMessageListener.class,
-            OrderController.class);
+            OrderTimeoutMessageListener.class,
+            OrderTimeoutServiceImpl.class);
         context.registerBean(ConnectionFactory.class, () -> connection);
         context.registerBean("rabbitAdmin", RabbitAdmin.class, () -> admin);
         context.registerBean(ProductClient.class, () -> products);

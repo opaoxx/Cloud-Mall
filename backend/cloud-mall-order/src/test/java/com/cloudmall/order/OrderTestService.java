@@ -11,19 +11,29 @@ import com.cloudmall.order.service.impl.OrderCreationServiceImpl;
 import com.cloudmall.order.service.impl.OrderReservationIntentService;
 import com.cloudmall.order.service.impl.OrderSeckillAdmissionServiceImpl;
 import com.cloudmall.order.service.impl.OrderSeckillCreationServiceImpl;
-import com.cloudmall.order.service.impl.OrderServiceImpl;
 import com.cloudmall.order.service.impl.OrderStateServiceImpl;
+import com.cloudmall.order.service.impl.OrderTimeoutServiceImpl;
 import com.cloudmall.order.service.impl.OrderWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.ZoneOffset;
 import java.util.Map;
+import org.springframework.amqp.core.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 旧混合算法矩阵的测试装配，创建调用真实实现；不注册Spring Bean、不进入生产Jar。 旧夹具的外层事务保留在此测试入口，实际生产代理与锁顺序由直接装配生产类的测试验证。 */
-public class OrderTestService extends OrderServiceImpl {
+public class OrderTestService {
+  /** 旧混合矩阵的可替换订单持久层。 */
+  @Autowired private OrderSqlMapper orderSqlMapper;
+
+  /** 旧混合矩阵的可替换JSON配置。 */
+  @Autowired private ObjectMapper mapper;
+
+  /** 旧状态/超时矩阵的动作持久层。 */
+  @Autowired private OrderStockActionMapper orderStockActionMapper;
+
   /** 旧创建/秒杀矩阵可替换的商品事实依赖。 */
   @Autowired private ProductClient products;
 
@@ -68,7 +78,8 @@ public class OrderTestService extends OrderServiceImpl {
       CartClient cart,
       OrderSqlMapper orders,
       ObjectMapper mapper) {
-    super(orders, mapper);
+    this.orderSqlMapper = orders;
+    this.mapper = mapper;
     this.products = products;
     this.stock = stock;
     this.users = users;
@@ -112,6 +123,22 @@ public class OrderTestService extends OrderServiceImpl {
             seckillOrderDedupMapper,
             seckillMessageRecoveryMapper)
         .createFromMessage(event);
+  }
+
+  /** 保留旧矩阵外层事务，实际解析及关单交由生产实现。 */
+  @Transactional
+  public void consumeTimeout(Message message) {
+    timeout().closeFromMessage(message);
+  }
+
+  /** 保留旧String测试入口和事务，不复制关单规则。 */
+  @Transactional
+  public void consumeTimeout(String orderNo) {
+    timeout().closeExpiredOrder(orderNo);
+  }
+
+  private OrderTimeoutServiceImpl timeout() {
+    return new OrderTimeoutServiceImpl(orderSqlMapper, mapper, orderStockActionMapper);
   }
 
   private <T> T field(String name, Class<T> type) {
