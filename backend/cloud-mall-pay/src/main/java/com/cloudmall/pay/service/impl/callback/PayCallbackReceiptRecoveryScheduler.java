@@ -1,4 +1,4 @@
-package com.cloudmall.pay.service.impl;
+package com.cloudmall.pay.service.impl.callback;
 
 import com.cloudmall.pay.domain.po.PayCallbackLogPO;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;

@@ -12,8 +12,8 @@ import static org.mockito.Mockito.when;
 
 import com.cloudmall.pay.domain.po.PayCallbackLogPO;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
-import com.cloudmall.pay.service.impl.PayCallbackReceiptRecoveryScheduler;
-import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptRecoveryScheduler;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;

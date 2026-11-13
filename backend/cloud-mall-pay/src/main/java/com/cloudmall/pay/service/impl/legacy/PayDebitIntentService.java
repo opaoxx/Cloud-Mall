@@ -1,4 +1,4 @@
-package com.cloudmall.pay.service.impl;
+package com.cloudmall.pay.service.impl.legacy;
 
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;

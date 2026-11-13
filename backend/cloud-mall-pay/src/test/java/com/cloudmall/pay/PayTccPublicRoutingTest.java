@@ -1,5 +1,6 @@
 package com.cloudmall.pay;
 
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -21,13 +22,13 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
-import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
-import com.cloudmall.pay.service.impl.PayConsistencyService;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -60,7 +61,7 @@ class PayTccPublicRoutingTest {
     when(tccProvider.getIfAvailable()).thenReturn(tcc);
     var intents = mock(PayDebitIntentMapper.class);
     var monitor = new PayWriteMonitor();
-    var legacyFailure = mock(com.cloudmall.pay.service.impl.PayLegacyFailureService.class);
+    var legacyFailure = mock(com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService.class);
     callbackService =
         new PayCallbackServiceImpl(
             payments,

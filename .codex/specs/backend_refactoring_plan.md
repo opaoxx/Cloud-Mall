@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay五个公开支付入口均已组合委托，旧继承结构已清理，后续盘点辅助组件的职责与命名分组。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分和Legacy/回调收据分组，后续整理TCC只读取证及写编排组件。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 五个公开支付入口已组合委托，旧继承Controller/混合实现/空接口已移除，见第34至38节；辅助组件职责与命名分组待盘点 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理与Legacy/回调收据分组已完成，见第34至39节；TCC只读取证与写编排待分批整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2284,3 +2284,41 @@ git revert refactor/pay-callback-complete-20261113
 独立Compose项目cloud-mall-refactor-pay-legacy-callback-20261113，仅MySQL19958、候选子网10.254.232.0/24，预检后新卷和原三张Pay空源表，不复用历史卷。结束归档后移除自有容器/网络，卷保留。对迁移五类去package/import/注释逐token比较，其余引用适配文件正文必须相同（除新测试/明确夹具扩展）；未涉及后端文件与README指纹保持。Java使用既有Google Java Format，纯引用适配仅整理imports，完整格式化迁移类和新/扩展测试；八模块test-compile、Pay打包、Jar新旧类及git diff --check通过后提交。
 
 证据target/backend-refactor-20261113/pay-legacy-callback，精确备份/清理旧五类型及内部class，不全量clean。完成标签refactor/pay-legacy-callback-complete-20261113，临时index按no-renames清单逆补丁恢复父树。README、两个旧pycache和忽略工件不入提交；Git不回退运行数据。后续优先盘点TCC只读取证分组，再处理剩余写编排，不以本轮分组宣告Pay结束。
+
+### 39.3 实施与验证结果
+
+五类已按清单进入legacy/callback子包，补齐两子包及顶层说明；48类型盘点落盘，impl根包剩43类。五个原类名/Bean名不变，没有兼容副本、新接口或算法拆解。五类去package/import/注释后共7781个token与基线一致；29份引用文件除声明地址及import外正文保持，唯一明确扩展为PayCallbackMySqlIT新增恢复用例及观察模式，其原四个测试方法体保持。1043份其他已跟踪后端文件及README原修改逐字节保持。
+
+实际子包扫描在默认5000ms和覆盖7000ms两个上下文均找到恰五个原Bean。Intent、LegacyFailure、Receipt为事务代理，其ensureIntent/fail/claim/complete/recoverReceived仍恰五个REQUIRES_NEW；Consistency/Scheduler无新声明式事务代理，三个原TransactionTemplate均仍REQUIRES_NEW。注册器恰两项recoverDue固定延迟任务，按Bean身份区分，均使用同一原配置键和当前间隔。测试TaskScheduler不执行任务，数据库/Feign/事务替身零调用。
+
+调用链复盘：`入口 → legacy意图独立提交 → 原租约/远端事实 → 原本地阶段/终态短事务`；`失败入口 → legacy当前读授权 → 原取消/CAS`；`回调入口 → callback收据claim/complete独立事务`；`收据恢复扫描 → 原有界候选/游标 → 另一Bean的recoverReceived代理 → 支付/日志当前锁定读与完成CAS`。上述状态/锁序/租约/单条异常隔离与调用者上下文门保持。仅两类Logger的类别按新包改变，消息、等级和参数不变。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共与源码规则 |
+| Pay原有全部单测 | 646 | 原入口/协议/资金/收据/恢复/指标矩阵，仅类型引用适配 |
+| PayAuxiliaryWiringTest | 1 | 实际扫描两子包、五Bean、事务/三个模板及两调度的默认/覆盖间隔 |
+| PayFailureMySqlIT | 4 | 迁包后真实Legacy失败授权、独立事务及原TCC边界 |
+| PayCallbackMySqlIT | 5 | 原四项及新增实际迁包恢复扫描→Receipt代理→SQL日志完成/重复扫描 |
+| PayLegacyRefundLedgerMySqlIT精确三方法 | 3 | 原终态两写故障回滚、同连接提交/RPC在事务外、调用者事务拒绝 |
+| 合计 | 684 | 75类，0失败、0错误、0跳过 |
+
+基线671项单独归档，不与最终计数叠加。本轮所有测试首次通过。新增恢复实库例先用实际claim留下RECEIVED_SUCCESS，释放原回调锁后由迁包Scheduler扫描并通过真实Receipt事务代理完成为SUCCESS；再次扫描不重复CAS，资金/Order替身零调用。候选查询无事务，收据恢复有独立事务且不持原回调监视器；夹具默认仍保留原四项HTTP回调对锁与事务的严格要求。
+
+原Consistency实库三方法完整执行其既有循环和断言，不把只跑三方法表述为整类大矩阵通过。其原源表指纹前后相同，owned池/源池关闭，原AfterAll确认UUID库删除；其他User/Order行为仍为替身，没有真实资金RPC。本轮没有新增失败数据库或环境问题。
+
+38份Java按约定执行格式化并检查：纯引用文件仅整理import，迁移类/包说明/新测试及明确扩展测试完整格式化，未扩散旧大文件正文排版。八模块test-compile、Pay打包和diff通过；Jar187个Pay生产class与最终classes一致，新五类型位置存在、旧包五类型及内部class无残留，无测试夹具混入。旧五class均先备份后精确移除，未清空target。
+
+### 39.4 证据、回退与后续
+
+方案提交d4a02ae8，基线标签refactor/pay-legacy-callback-baseline-20261113；完成标签refactor/pay-legacy-callback-complete-20261113。证据入口 `target/backend-refactor-20261113/pay-legacy-callback/verification.json`，包含48类盘点/分组、前后XML、源码/引用对照、原生实库事实、精确Legacy三方法与清理日志、格式/Jar及临时index回退证明。
+
+独立MySQL8.0.46的三源表最终0行，Failure四库、Callback五库、原Legacy矩阵一库共10个测试库均删除，自有容器/网络已移除、mysql_data卷保留；默认中间件及历史失败卷均未操作。无新增失败现场，README、两个旧pycache和忽略工件保持不入提交。
+
+```powershell
+git revert refactor/pay-legacy-callback-complete-20261113
+```
+
+临时index按no-renames完整路径清单逆补丁恢复父树，真实暂存内容与README保持。实际回退后精确清理本轮两新子包五类型及新增装配测试class（含内部class），重编译恢复旧路径；不全量clean、不回退运行数据，后续依赖先逆序处理。
+
+下一步以12个TCC只读取证组件为候选，先核验跨类/包可见性、入口/ReadService及条件装配，再冻结最小迁移清单；24个TCC写编排组件继续另行安排。公共入口/shared规则与监视器留在impl顶层。Pay整体尚未收尾，本轮未运行旧M2固定环境、全量Legacy大矩阵、真实TC/User/Order/Stock、全商城或性能验证。

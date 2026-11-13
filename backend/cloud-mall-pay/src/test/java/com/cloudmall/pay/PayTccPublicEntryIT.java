@@ -1,5 +1,6 @@
 package com.cloudmall.pay;
 
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.alibaba.nacos.api.NacosFactory;
@@ -752,7 +753,7 @@ class PayTccPublicEntryIT {
     payment.amount = request.amount;
     payment.status = "PENDING";
     application
-        .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+        .getBean(com.cloudmall.pay.service.impl.legacy.PayDebitIntentService.class)
         .ensureIntent(payment);
     var users = application.getBean(com.cloudmall.pay.feign.UserClient.class);
     assertEquals(
@@ -777,7 +778,7 @@ class PayTccPublicEntryIT {
         30);
     proxies.get("user").dropNextPostBodyForPath("/refunds");
     var consistency =
-        application.getBean(com.cloudmall.pay.service.impl.PayConsistencyService.class);
+        application.getBean(com.cloudmall.pay.service.impl.legacy.PayConsistencyService.class);
     assertEquals("REFUND_PENDING", consistency.process(request.payNo));
     // 只暂停本条意图的恢复时钟，防止后台与响应断言竞争。
     payDb.update(
@@ -898,7 +899,7 @@ class PayTccPublicEntryIT {
               () -> post("/api/payments/" + request.payNo + "/mock-fail", Map.of(), Map.of()));
       assertTrue(snapshotRead.await(10, TimeUnit.SECONDS));
       application
-          .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+          .getBean(com.cloudmall.pay.service.impl.legacy.PayDebitIntentService.class)
           .ensureIntent(legacyPaymentView());
       assertEquals(
           "INIT",
@@ -932,7 +933,7 @@ class PayTccPublicEntryIT {
             return "SUCCESS"
                 .equals(
                     application
-                        .getBean(com.cloudmall.pay.service.impl.PayConsistencyService.class)
+                        .getBean(com.cloudmall.pay.service.impl.legacy.PayConsistencyService.class)
                         .process(request.payNo));
           },
           30);
@@ -963,7 +964,7 @@ class PayTccPublicEntryIT {
                 + " pay_no=?",
             request.payNo);
         application
-            .getBean(com.cloudmall.pay.service.impl.PayConsistencyService.class)
+            .getBean(com.cloudmall.pay.service.impl.legacy.PayConsistencyService.class)
             .process(request.payNo);
       }
     }
@@ -981,7 +982,7 @@ class PayTccPublicEntryIT {
         com.cloudmall.common.error.BizException.class,
         () ->
             application
-                .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+                .getBean(com.cloudmall.pay.service.impl.legacy.PayDebitIntentService.class)
                 .ensureIntent(staleSuccess));
     assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
     assertFunds("100.00", 0, 0);
@@ -1000,7 +1001,7 @@ class PayTccPublicEntryIT {
         com.cloudmall.common.error.BizException.class,
         () ->
             application
-                .getBean(com.cloudmall.pay.service.impl.PayDebitIntentService.class)
+                .getBean(com.cloudmall.pay.service.impl.legacy.PayDebitIntentService.class)
                 .ensureIntent(staleSuccess));
     assertEquals(0, payDb.queryForObject("SELECT COUNT(*) FROM pay_debit_intent", Integer.class));
     assertEquals(

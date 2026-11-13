@@ -1,5 +1,6 @@
 package com.cloudmall.pay;
 
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -17,9 +18,9 @@ import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserClient;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
-import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -57,7 +58,7 @@ class PayLegacyFailureOutcomeTest {
   @BeforeEach
   void prepare() {
     var legacyFailure =
-        new com.cloudmall.pay.service.impl.PayLegacyFailureService(payments, intents, orders);
+        new com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService(payments, intents, orders);
     org.springframework.beans.factory.ObjectProvider<
             com.cloudmall.pay.service.impl.PayTccPaymentService>
         tcc = mock(org.springframework.beans.factory.ObjectProvider.class);
@@ -67,7 +68,7 @@ class PayLegacyFailureOutcomeTest {
                 payments,
                 intents,
                 legacyFailure,
-                mock(com.cloudmall.pay.service.impl.PayConsistencyService.class),
+                mock(com.cloudmall.pay.service.impl.legacy.PayConsistencyService.class),
                 tcc,
                 receipts,
                 com.cloudmall.pay.service.PayProtocolMetrics.noop(),

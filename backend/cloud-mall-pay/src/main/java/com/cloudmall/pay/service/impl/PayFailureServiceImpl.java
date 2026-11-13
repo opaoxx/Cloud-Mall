@@ -6,6 +6,7 @@ import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayFailureService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PayProtocolMetrics.Entry;
+import com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService;
 import com.cloudmall.pay.util.PayDebitModes;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;

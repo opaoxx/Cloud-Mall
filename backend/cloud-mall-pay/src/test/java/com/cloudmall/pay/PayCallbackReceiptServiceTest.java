@@ -15,7 +15,7 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
-import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;

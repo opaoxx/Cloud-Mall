@@ -10,17 +10,19 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.pay.controller.PayCallbackController;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
+import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.mapper.PayCallbackLogMapper;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayCallbackService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
-import com.cloudmall.pay.service.impl.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.PayCallbackServiceImpl;
-import com.cloudmall.pay.service.impl.PayConsistencyService;
-import com.cloudmall.pay.service.impl.PayLegacyFailureService;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptRecoveryScheduler;
+import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
+import com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -205,6 +207,38 @@ class PayCallbackMySqlIT {
     }
   }
 
+  @Test
+  void movedRecoveryScannerCompletesThroughTheActualReceiptProxyWithoutBusinessReplay()
+      throws Exception {
+    try (var fixture = new Fixture("SUCCESS")) {
+      var payment = new PayVO();
+      payment.payNo = "pay-1";
+      payment.orderNo = "order-1";
+      payment.userId = 7L;
+      payment.amount = new BigDecimal("10.00");
+      payment.status = "SUCCESS";
+      var receipts = fixture.context.getBean(PayCallbackReceiptService.class);
+      synchronized (fixture.monitor) {
+        receipts.claim(payment, request(true), "callback-1");
+      }
+      assertEquals("RECEIVED_SUCCESS", fixture.externalLogStatus("callback-1"));
+      fixture.monitorExpected = false;
+      var scheduler = new PayCallbackReceiptRecoveryScheduler(fixture.callbackLogs, receipts);
+      scheduler.recoverDue();
+      assertEquals("SUCCESS", fixture.externalLogStatus("callback-1"));
+      scheduler.recoverDue();
+      assertEquals(
+          1L,
+          fixture.observations.stream()
+              .filter(observation -> observation.get("method").equals("markProcessed"))
+              .count());
+      assertEquals(
+          1, fixture.jdbc.queryForObject("SELECT COUNT(*) FROM pay_callback_log", Integer.class));
+      verifyNoInteractions(fixture.legacy, fixture.orders);
+      fixture.successful = true;
+    }
+  }
+
   private static PayCallbackDTO request(boolean success) {
     var request = new PayCallbackDTO();
     request.payNo = "pay-1";
@@ -244,6 +278,12 @@ class PayCallbackMySqlIT {
 
     /** 原共享监视器。 */
     private final PayWriteMonitor monitor = new PayWriteMonitor();
+
+    /** 默认仍严格要求原回调锁；只有恢复扫描用例明确切换为不持该锁。 */
+    private boolean monitorExpected = true;
+
+    /** 原回调Mapper观察代理，同时供恢复扫描使用。 */
+    private final PayCallbackLogMapper callbackLogs;
 
     /** Legacy成功编排替身。 */
     private final PayConsistencyService legacy = mock(PayConsistencyService.class);
@@ -303,7 +343,7 @@ class PayCallbackMySqlIT {
         factory.setConfiguration(configuration);
         var session = new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
         var records = observe(PayRecordMapper.class, session.getMapper(PayRecordMapper.class));
-        var logs =
+        callbackLogs =
             observe(PayCallbackLogMapper.class, session.getMapper(PayCallbackLogMapper.class));
         context.getEnvironment().setActiveProfiles("pay-callback-mysql-it");
         context
@@ -321,7 +361,7 @@ class PayCallbackMySqlIT {
             PayLegacyFailureService.class);
         var beans = context.getBeanFactory();
         beans.registerSingleton("records", records);
-        beans.registerSingleton("logs", logs);
+        beans.registerSingleton("logs", callbackLogs);
         beans.registerSingleton("intents", new PayDebitIntentMapper(jdbc));
         beans.registerSingleton("legacy", legacy);
         beans.registerSingleton("orders", orders);
@@ -350,7 +390,7 @@ class PayCallbackMySqlIT {
               (proxy, method, arguments) -> {
                 if (method.getDeclaringClass() == Object.class)
                   return method.invoke(actual, arguments);
-                assertTrue(Thread.holdsLock(monitor));
+                assertEquals(monitorExpected, Thread.holdsLock(monitor));
                 boolean active = TransactionSynchronizationManager.isActualTransactionActive();
                 observations.add(
                     Map.of(
@@ -364,7 +404,10 @@ class PayCallbackMySqlIT {
                   assertTrue(active);
                   lockConnections.add(connectionId());
                 }
-                if (type == PayCallbackLogMapper.class) assertTrue(active);
+                if (type == PayCallbackLogMapper.class) {
+                  if (method.getName().equals("findCompletableAfter")) assertFalse(active);
+                  else assertTrue(active);
+                }
                 if (method.getName().equals("selectByPayNo") && rejectNextRead) {
                   rejectNextRead = false;
                   throw new DataAccessResourceFailureException("TEST_READ_AFTER_CALLBACK_COMPLETE");

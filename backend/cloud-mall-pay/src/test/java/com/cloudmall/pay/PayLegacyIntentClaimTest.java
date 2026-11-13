@@ -13,7 +13,7 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
-import com.cloudmall.pay.service.impl.PayDebitIntentService;
+import com.cloudmall.pay.service.impl.legacy.PayDebitIntentService;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
