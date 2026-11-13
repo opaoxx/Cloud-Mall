@@ -2252,3 +2252,35 @@ git revert refactor/pay-callback-complete-20261113
 临时index验证逆补丁恢复父树，真实index及README保持；删除/新增路径按no-renames清单精确核验。实际回退后清理三个新生产类型及两个新增测试类（含内部class）的target残留，再重编译恢复的旧三类型；不全量clean或回退运行数据，后续依赖先逆序处理。README原修改、两个旧pycache及忽略工件不入提交。
 
 下一步盘点Pay辅助组件的职责、命名和包分组，优先识别Legacy恢复、TCC编排/交付/取消、只读取证的边界与Bean/反射引用，再冻结最小迁移清单。五个公开入口已拆分不等于整个Pay模块收尾；旧M2固定矩阵、完整Gateway/TC/User/Order/Stock资金交付和性能本轮未运行。
+
+## 39. Pay辅助职责盘点与Legacy/回调收据分组（2026-11-13）
+
+### 39.1 盘点与本轮范围
+
+基线9339a084，主Agent单独评审/实施。Pay当前service.impl根包有48个生产类型（不计package-info），生产声明无Cm数字类名；问题主要是职责混排，不为已有语义类名再造新名。盘点分为：五个公开入口实现与共享规则/监视器7类；Legacy意图/恢复/失败3类；公开回调收据/恢复2类；TCC执行/收据/交付/取消等24类；本地及外部只读取证12类。后两组有交叉调用、条件Bean与显式DependsOn，后续分别冻结迁移范围，本轮不移动。
+
+| 本轮类型 | 新包 | 业务职责 |
+| --- | --- | --- |
+| PayConsistencyService | service.impl.legacy | 原Legacy一致性恢复、租约处理及三个独立短事务模板 |
+| PayDebitIntentService | service.impl.legacy | 原远端扣款前独立持久意图与锁定载荷核验 |
+| PayLegacyFailureService | service.impl.legacy | 原独立当前读失败授权与取消/CAS |
+| PayCallbackReceiptService | service.impl.callback | 原公开回调claim/complete/recoverReceived独立事务 |
+| PayCallbackReceiptRecoveryScheduler | service.impl.callback | 原有界游标轮转，按已确认支付终态完成回调收据 |
+
+保持原类名及默认Bean名payConsistencyService/payDebitIntentService/payLegacyFailureService/payCallbackReceiptService/payCallbackReceiptRecoveryScheduler；不增加兼容类型/空接口。构造器、成员、方法/注解、SQL/状态机、异常、指标和配置键均保持；只改package/import及必要全限定引用，补充两子包及顶层包说明。Pay启动类的根包扫描覆盖新子包，无需改配置。
+
+五个原REQUIRES_NEW入口（ensureIntent、fail、claim、complete、recoverReceived）保持；Consistency无声明式外层事务，其terminal/stage/retry三个TransactionTemplate仍REQUIRES_NEW且不包含RPC。两处recoverDue仍用同一cloudmall.pay.recovery-interval-ms默认5000ms，扫描50条/游标/迟到CAS/单条异常隔离不变，不新增调度。迁包后Consistency与ReceiptRecoveryScheduler的日志类别跟随新FQN，日志等级/模板/参数不变。
+
+已检查配置、部署脚本及Common守卫，没有这五个旧FQN的非Java运行依赖。适配生产调用方、普通import/通配符装配及测试全限定引用，保留历史日志/规格/runner名称；旧M2固定13307安全门和冻结部署runner不修改或执行。原Java测试只做地址适配，例外是已有PayCallbackMySqlIT补一项真实恢复调用及显式观察模式。
+
+### 39.2 验证、实验与提交策略
+
+先提交本节并建立refactor/pay-legacy-callback-baseline-20261113，运行Common/Pay全部*Test基线。新增PayAuxiliaryWiringTest实际扫描两新子包，核验五个原Bean名/代理、五个REQUIRES_NEW、三个原短事务模板、恰两项调度及默认/覆盖间隔；使用不执行Runnable的TaskScheduler替身，避免调度误触业务。所有数据库/Feign替身在装配检查中零调用。
+
+迁移后运行全部单测、PayFailureMySqlIT全4项、PayCallbackMySqlIT原4项及新增1项实际迁包Scheduler→Receipt.recoverReceived→SQL日志完成/重复扫描，用原成功门保留/清理UUID库。新增用例显式期望无共享监视器，候选查询无事务、收据恢复独立事务；不改变原四项回调测试对共享锁和日志事务的断言。
+
+另只运行既有PayLegacyRefundLedgerMySqlIT三项：terminalPairFailureRollsBackPaymentAfterIntentFinishFault、healthyTerminalPairCommitsOnOneConnectionWithRpcOutside、actualCallerTransactionRemainsUsableWithoutRecoveryEffects，以真实迁包Consistency验证终态两写回滚/提交及调用者事务拒绝；其他数百项和完整资金交付不运行。该原夹具通过cloudmall.pay.mysql.test.url支持独立地址，保持其既有池/源表指纹及AfterAll owned库清理规则，失败日志/XML保留，不宣称该旧夹具会保留失败数据库；不改原清理逻辑。
+
+独立Compose项目cloud-mall-refactor-pay-legacy-callback-20261113，仅MySQL19958、候选子网10.254.232.0/24，预检后新卷和原三张Pay空源表，不复用历史卷。结束归档后移除自有容器/网络，卷保留。对迁移五类去package/import/注释逐token比较，其余引用适配文件正文必须相同（除新测试/明确夹具扩展）；未涉及后端文件与README指纹保持。Java使用既有Google Java Format，纯引用适配仅整理imports，完整格式化迁移类和新/扩展测试；八模块test-compile、Pay打包、Jar新旧类及git diff --check通过后提交。
+
+证据target/backend-refactor-20261113/pay-legacy-callback，精确备份/清理旧五类型及内部class，不全量clean。完成标签refactor/pay-legacy-callback-complete-20261113，临时index按no-renames清单逆补丁恢复父树。README、两个旧pycache和忽略工件不入提交；Git不回退运行数据。后续优先盘点TCC只读取证分组，再处理剩余写编排，不以本轮分组宣告Pay结束。
