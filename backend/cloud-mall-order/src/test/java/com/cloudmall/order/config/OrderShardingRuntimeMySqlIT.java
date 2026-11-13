@@ -11,6 +11,7 @@ import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderCreationController;
 import com.cloudmall.order.controller.OrderDetailQueryController;
 import com.cloudmall.order.controller.OrderQueryController;
+import com.cloudmall.order.controller.OrderStateController;
 import com.cloudmall.order.domain.dto.*;
 import com.cloudmall.order.domain.po.*;
 import com.cloudmall.order.domain.vo.*;
@@ -701,7 +702,13 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(1, page.total);
         assertEquals(normal.orderNo, ((OrderVO) page.items.get(0)).orderNo);
         runtime.probe.operationStarted = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
-        OrderVO cancelled = (OrderVO) controller.cancel(normal.orderNo, null).data;
+        OrderVO cancelled =
+            (OrderVO)
+                runtime
+                    .context
+                    .getBean(OrderStateController.class)
+                    .cancel(normal.orderNo, null)
+                    .data;
         verifyVO(cancelled, "CANCELLED", 2);
       } finally {
         AuthContext.clear();
@@ -1162,6 +1169,8 @@ class OrderShardingRuntimeMySqlIT {
           OrderStockActionRecovery.class,
           SeckillMessageRecovery.class,
           OrderController.class,
+          OrderStateController.class,
+          OrderStateServiceImpl.class,
           OrderCreationController.class,
           OrderCreationServiceImpl.class,
           OrderWriteMonitor.class,
@@ -1257,13 +1266,19 @@ class OrderShardingRuntimeMySqlIT {
         assertEquals(fixture.database, actual.getCatalog());
       }
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderController.class)));
+      assertFalse(AopUtils.isAopProxy(context.getBean(OrderStateController.class)));
+      assertTrue(
+          AopUtils.isAopProxy(
+              context.getBean(com.cloudmall.order.service.OrderStateService.class)));
       assertFalse(AopUtils.isAopProxy(context.getBean(OrderCreationController.class)));
       assertTrue(
           AopUtils.isAopProxy(
               context.getBean(com.cloudmall.order.service.OrderCreationService.class)));
       assertSame(
           context.getBean(OrderWriteMonitor.class),
-          ReflectionTestUtils.getField(context.getBean(OrderController.class), "writeMonitor"));
+          ReflectionTestUtils.getField(
+              context.getBean(com.cloudmall.order.service.OrderStateService.class),
+              "writeMonitor"));
       assertSame(
           context.getBean(OrderWriteMonitor.class),
           ReflectionTestUtils.getField(

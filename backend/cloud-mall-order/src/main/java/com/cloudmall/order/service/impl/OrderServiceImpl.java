@@ -11,7 +11,6 @@ import static com.cloudmall.order.service.impl.OrderWorkflowSupport.now;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.remoteCode;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.timeoutOutbox;
 import static com.cloudmall.order.service.impl.OrderWorkflowSupport.toJson;
-import static com.cloudmall.order.service.impl.OrderWorkflowSupport.ts;
 
 import com.alibaba.csp.sentinel.Entry;
 import com.alibaba.csp.sentinel.slots.block.BlockException;
@@ -56,9 +55,6 @@ import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api")
 public class OrderServiceImpl implements OrderService {
-  /** 与普通创建Service共用的操作监视器；手动构造的隔离实例保有自身监视器。 */
-  @Autowired private OrderWriteMonitor writeMonitor = new OrderWriteMonitor();
-
   /** 保存 stock 的业务状态或配置。 */
   @Autowired private StockClient stock;
 
@@ -101,59 +97,6 @@ public class OrderServiceImpl implements OrderService {
     this.users = users;
     this.orderSqlMapper = orderSqlMapper;
     this.mapper = mapper;
-  }
-
-  @Transactional
-  @PostMapping("/orders/{orderNo}/cancel")
-  /** 执行 cancel 相关操作。 */
-  public ApiResponse<?> cancel(
-      @PathVariable("orderNo") String orderNo,
-      @RequestHeader(value = "X-User-Id", required = false) Long headerUser) {
-    synchronized (writeMonitor) {
-      // 1. 接收并整理 cancel 的业务请求。
-      // 2. 执行 cancel 的核心业务校验与状态处理。
-      // 3. 返回 cancel 的处理结果。
-      OrderVO order = find(orderNo);
-      long userId = headerUser == null ? AuthContext.requireUserId() : headerUser;
-      if (order.userId != userId) throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
-      if ("CANCELLED".equals(order.status)) return ApiResponse.ok(order);
-      if (!"PENDING_PAYMENT".equals(order.status))
-        throw new BizException(ErrorCodes.STATUS, "订单状态不允许取消", 409);
-      if (!setStatus(order, "CANCELLED")) return completedOrConflict(orderNo, "CANCELLED");
-      orderStockActionMapper.insert(id(), orderNo, "ROLLBACK", now().toLocalDateTime());
-      return ApiResponse.ok(find(orderNo));
-    }
-  }
-
-  @Transactional
-  @PostMapping("/orders/{orderNo}/paid")
-  /** 执行 paid 相关操作。 */
-  public ApiResponse<?> paid(@PathVariable("orderNo") String orderNo) {
-    synchronized (writeMonitor) {
-      // 1. 接收并整理 paid 的业务请求。
-      // 2. 执行 paid 的核心业务校验与状态处理。
-      // 3. 返回 paid 的处理结果。
-      OrderVO order = owned(orderNo);
-      if ("PAID".equals(order.status)) return ApiResponse.ok(order);
-      if (!"PENDING_PAYMENT".equals(order.status))
-        throw new BizException(ErrorCodes.STATUS, "订单状态不允许支付", 409);
-      if (!setStatus(order, "PAID")) return completedOrConflict(orderNo, "PAID");
-      orderStockActionMapper.insert(id(), orderNo, "CONFIRM", now().toLocalDateTime());
-      return ApiResponse.ok(find(orderNo));
-    }
-  }
-
-  @PostMapping("/orders/{orderNo}/confirm")
-  /** 执行 confirm 相关操作。 */
-  public ApiResponse<?> confirm(@PathVariable("orderNo") String orderNo) {
-    // 1. 接收并整理 confirm 的业务请求。
-    // 2. 执行 confirm 的核心业务校验与状态处理。
-    // 3. 返回 confirm 的处理结果。
-    OrderVO order = owned(orderNo);
-    if ("COMPLETED".equals(order.status)) return ApiResponse.ok(order);
-    if (!"PAID".equals(order.status)) throw new BizException(ErrorCodes.STATUS, "订单尚未支付", 409);
-    if (!setStatus(order, "COMPLETED")) return completedOrConflict(orderNo, "COMPLETED");
-    return ApiResponse.ok(find(orderNo));
   }
 
   @PostMapping("/seckill/orders")
@@ -444,17 +387,6 @@ public class OrderServiceImpl implements OrderService {
     }
   }
 
-  /** 执行 owned 相关操作。 */
-  private OrderVO owned(String orderNo) {
-    // 1. 接收并整理 owned 的业务请求。
-    // 2. 执行 owned 的核心业务校验与状态处理。
-    // 3. 返回 owned 的处理结果。
-    OrderVO o = find(orderNo);
-    if (!o.userId.equals(AuthContext.requireUserId()))
-      throw new BizException(ErrorCodes.FORBIDDEN, "无权访问此订单", 403);
-    return o;
-  }
-
   /**
    * 消费新JSON envelope或旧String订单号；裸数字正文保持原文本，不转数值标识。
    *
@@ -539,34 +471,13 @@ public class OrderServiceImpl implements OrderService {
     if (now().isBefore(OffsetDateTime.parse(order.expireAt))) {
       throw new BizException(ErrorCodes.STATUS, "订单尚未到超时关单时间", 409);
     }
-    if (setStatus(order, "CANCELLED"))
+    if (OrderStateWriter.transition(orderSqlMapper, order, "CANCELLED"))
       orderStockActionMapper.insert(id(), orderNo, "ROLLBACK", now().toLocalDateTime());
   }
 
   /** 复用原详情读取步骤，沿调用方既有事务执行。 */
   private OrderVO find(String orderNo) {
     return OrderDetailReader.read(orderSqlMapper, mapper, orderNo);
-  }
-
-  /** 按旧状态执行 CAS 迁移，仅影响一行时返回成功。 */
-  private boolean setStatus(OrderVO order, String targetStatus) {
-    // 1. 接收并整理 setStatus 的业务请求。
-    // 2. 执行 setStatus 的核心业务校验与状态处理。
-    // 3. 返回 setStatus 的处理结果。
-    return orderSqlMapper.updateStatus(
-            OrderTableRouting.tableFromOrderNo(order.orderNo),
-            order.orderNo,
-            targetStatus,
-            order.status,
-            ts(now()))
-        == 1;
-  }
-
-  /** 重新读取 CAS 竞争结果，仅目标状态视为幂等成功。 */
-  private ApiResponse<?> completedOrConflict(String orderNo, String targetStatus) {
-    OrderVO currentOrder = find(orderNo);
-    if (targetStatus.equals(currentOrder.status)) return ApiResponse.ok(currentOrder);
-    throw new BizException(ErrorCodes.STATUS, "订单状态已被其他操作更新", 409);
   }
 
 }

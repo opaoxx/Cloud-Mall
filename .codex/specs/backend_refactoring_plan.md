@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理和普通创建Service提取，状态迁移/秒杀/消息职责待继续。最新验证与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock 本轮结构重构；Order已完成Seata演练、查询、Cart清理、普通创建和状态迁移Service提取，秒杀/消息职责待继续。最新验证与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -445,7 +445,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | Product | 核心职责拆分与包结构归组验收通过 | 结果与通过点见第 15 节 |
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
-| Order | 进行中 | Seata演练、查询、Cart清理及普通创建Service切片完成，见第23至27节；状态迁移/秒杀/消息职责待继续 |
+| Order | 进行中 | Seata演练、查询、Cart清理、普通创建及状态迁移切片完成，见第23至28节；秒杀/消息职责待继续 |
 | Pay | 待开始 | Order完成后按既定顺序细化与实施 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
@@ -1582,4 +1582,40 @@ git revert refactor/order-creation-complete-20261112
 
 ### 28.3 实施结果
 
-待实施验证。
+状态迁移已完整落到OrderStateController/Service/Impl，新实现117行；条件更新由OrderStateWriter与原超时消费者共享。旧混合实现从572行减至483行，不再持有状态共享监视器或暴露cancel/paid/confirm。创建与状态两个生产Service持有同一OrderWriteMonitor；剩余消息/秒杀流程没有因此加锁。
+
+调用链复盘：`取消/支付HTTP绑定 → 状态Service原REQUIRED事务 → 共享锁 → 原完整详情/身份/归属 → 目标重放或状态门 → CAS → 成功才写ROLLBACK/CONFIRM动作 → 原详情重读 → 解锁 → 提交 → HTTP包装`。`confirm → 原详情/身份 → PAID/COMPLETED规则 → 同一CAS及竞争重读 → HTTP包装`，不新增事务或锁。超时消费者继续先核对原状态与期限，再直接调用共享CAS和动作Mapper；没有借用HTTP取消的身份/状态规则替代消息处理。
+
+| 验证范围 | 测试数 | 实际覆盖 |
+| --- | ---: | --- |
+| Common单测 | 25 | 既有契约，路径绑定守卫指向新StateController |
+| Order单测 | 326 | 原322项及新增4项状态MVC矩阵；直接生产装配的原5项并发/事务时序测试保留并改用真实StateService |
+| OrderStateMySqlIT | 3 | 真实状态代理，状态/动作原子性、触发器拒绝INSERT时回滚、终态重放、confirm原自动提交及后续读取失败语义 |
+| OrderDetailReadMySqlIT | 1 | 已改为直接生产StateService代理，支付内主表/明细同连接，状态与动作提交 |
+| OrderLegacyStockIdentityMySqlIT | 18 | 原身份、状态和超时边界矩阵 |
+| OrderStockActionStateMySqlIT | 4 | 原动作状态与恢复持久化规则 |
+| ShardingRuntime精确单方法 | 1 | 仅explicitModeUsesProductionMappersAfterBootstrapAndAudit，真实分片装配/创建/取消，监视器与代理身份 |
+| PayOrderStateFeignIT | 1 | 真实Pay OrderClient、原Feign拦截器、本机HTTP及实际Order MVC/Service；SQL为替身 |
+| 合计 | 379 | 69个类，0失败、0错误、0跳过 |
+
+状态MVC验证原路由共存及未新增请求体解析、金额字符串/null/空明细、终态重放、CAS0目标重读与冲突、原明细错误/404优先于401、延迟身份与取消Header优先。实库对支付与取消分别注入动作INSERT失败，原PENDING_PAYMENT及零动作得到保持；confirm仍沿原自动提交，在成功更新后读取失败时不会新加回滚，这是既有语义的保留而非新增行为。
+
+Pay契约使用两个原订单身份分别支付/取消并各重放一次，恰好生成一份对应动作；验证原Header、POST路径、OrderView金额/身份/状态解码。公开OrderVO没有stockActionStatus，实际五参record解码为null，不因四参兼容构造器补成SUCCEEDED。该IT不访问数据库、不注册Nacos或启动完整Order服务；事务与SQL证据由上述独立实库测试提供。
+
+七个方法体（含共享find/owned/CAS）按已声明返回类型、身份来源及委托变化逐token一致，原混合实现其余算法与消息解析保持；其他194份Order原源码/资源哈希不变。五个适配测试文件保留原方法，测试夹具不复制状态业务。13个变更Java文件完成Google Java Format，diff检查通过。Order打包、八模块test-compile通过；Jar四个新生产类型齐全且与最终class一致，无测试夹具，旧状态入口/辅助方法/监视器字段已移除。新Service无AuthContext/ApiResponse/Web绑定字节码依赖。
+
+本轮分组执行全部通过，未复现上一阶段socket异常。Runtime的XML恰一方法；其native class-start中的声明方法数不作运行数。16份本轮native工件及69份报告已归档，实际一个UUID fixture created=deleted、errors为空、无需保留失败库。新实验MySQL8.0.46/19944最终仅余来源库及系统库，七张来源表逐表精确0行，所有本轮UUID库均已清理。自有容器/网络已移除，新mysql_data卷保留；上轮失败卷和现场未触碰。证据为 `target/backend-refactor-20261113/order-state/verification.json` 及同目录；README与起始指纹一致，其原修改和旧pycache不入提交。
+
+未运行真实Stock/Cart HTTP、TC/MQ、完整商城或性能测试。Order剩余秒杀受理与消息处理/Controller继承仍待继续，未宣告模块整体完成。
+
+### 28.4 回退与后续
+
+方案提交/基线 `0ea4975f`，标签 `refactor/order-state-baseline-20261113`；完成标签 `refactor/order-state-complete-20261113`。临时Git index验证逆补丁恢复父提交完整树，实际工作树/index及README原有修改保持。
+
+```powershell
+git revert refactor/order-state-complete-20261113
+```
+
+只回退本轮状态职责迁移，保留创建与之前切片。实际回退后按清单精确清理四个新生产类型和OrderStateContractTest/OrderStateMySqlIT/PayOrderStateFeignIT（含嵌套类）的class残留并编译，不清空target历史证据；已修改的OrderTestService恢复源码后重新编译。Git不回退数据库/忽略工件，有后续依赖时先处理冲突，不使用reset --hard。
+
+下一步拆分秒杀受理入口：冻结Sentinel资源与参数、地址快照、Stock返回包装/错误码透传及无新增事务的边界，再整理秒杀落单和超时消息消费者，最终移除剩余Controller继承和空OrderService。

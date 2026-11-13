@@ -5,13 +5,12 @@ import static org.mockito.Mockito.mock;
 
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.order.controller.OrderDetailQueryController;
-import com.cloudmall.order.feign.CartClient;
-import com.cloudmall.order.feign.ProductClient;
 import com.cloudmall.order.feign.StockClient;
-import com.cloudmall.order.feign.UserClient;
 import com.cloudmall.order.mapper.OrderSqlMapper;
 import com.cloudmall.order.mapper.OrderStockActionMapper;
 import com.cloudmall.order.service.impl.OrderDetailQueryServiceImpl;
+import com.cloudmall.order.service.impl.OrderStateServiceImpl;
+import com.cloudmall.order.service.impl.OrderWriteMonitor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,7 +21,6 @@ import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -64,23 +62,15 @@ class OrderDetailReadMySqlIT {
       orders.active.clear();
       orders.connections.clear();
       orders.expectTransaction = true;
-      var target =
-          new OrderTestService(
-              stock,
-              mock(ProductClient.class),
-              mock(UserClient.class),
-              mock(CartClient.class),
-              orders,
-              json);
-      ReflectionTestUtils.setField(target, "orderStockActionMapper", actions);
+      var target = new OrderStateServiceImpl(orders, json, actions, new OrderWriteMonitor());
       var factory = new ProxyFactory(target);
       factory.setProxyTargetClass(true);
       factory.addAdvice(
           new TransactionInterceptor(
               new DataSourceTransactionManager(dataSource),
               new AnnotationTransactionAttributeSource()));
-      var writeService = (OrderTestService) factory.getProxy();
-      writeService.paid("202610shared");
+      var writeService = (OrderStateServiceImpl) factory.getProxy();
+      writeService.paid("202610shared", AuthContext::requireUserId);
       assertEquals(List.of(true, true, true, true), orders.active);
       assertEquals(1, orders.connections.stream().distinct().count());
       assertFalse(TransactionSynchronizationManager.isActualTransactionActive());

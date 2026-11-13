@@ -12,10 +12,12 @@ import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.web.GlobalExceptionHandler;
 import com.cloudmall.order.controller.OrderController;
 import com.cloudmall.order.controller.OrderCreationController;
+import com.cloudmall.order.controller.OrderStateController;
 import com.cloudmall.order.domain.po.OrderIdempotencyPO;
 import com.cloudmall.order.feign.*;
 import com.cloudmall.order.mapper.*;
 import com.cloudmall.order.service.OrderCreationService;
+import com.cloudmall.order.service.OrderStateService;
 import com.cloudmall.order.service.impl.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -322,7 +324,9 @@ class OrderCreationWiringTest {
           Transactions.class,
           OrderCreationServiceImpl.class,
           OrderCreationController.class,
-          OrderController.class);
+          OrderController.class,
+          OrderStateController.class,
+          OrderStateServiceImpl.class);
       context.registerBean(OrderWriteMonitor.class, () -> monitor);
       context.registerBean("transactionManager", ObservedTransactions.class, () -> transactions);
       context.registerBean(OrderSqlMapper.class, () -> orders);
@@ -348,9 +352,12 @@ class OrderCreationWiringTest {
         throw failure;
       }
       assertTrue(AopUtils.isAopProxy(context.getBean(OrderCreationService.class)));
-      assertTrue(AopUtils.isAopProxy(writes()));
+      assertFalse(AopUtils.isAopProxy(writes()));
+      assertTrue(AopUtils.isAopProxy(context.getBean(OrderStateService.class)));
       assertFalse(AopUtils.isAopProxy(creation()));
-      assertSame(monitor, ReflectionTestUtils.getField(writes(), "writeMonitor"));
+      assertSame(
+          monitor,
+          ReflectionTestUtils.getField(context.getBean(OrderStateService.class), "writeMonitor"));
       assertSame(
           monitor,
           ReflectionTestUtils.getField(
@@ -361,8 +368,8 @@ class OrderCreationWiringTest {
       return context.getBean(OrderCreationController.class);
     }
 
-    private OrderController writes() {
-      return context.getBean(OrderController.class);
+    private OrderStateController writes() {
+      return context.getBean(OrderStateController.class);
     }
 
     /** 释放专属上下文，线程由各用例自行关闭。 */
