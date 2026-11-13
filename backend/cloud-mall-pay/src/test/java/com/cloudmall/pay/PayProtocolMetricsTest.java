@@ -885,7 +885,6 @@ class PayProtocolMetricsTest {
       ReflectionTestUtils.setField(controller, "payConsistencyService", legacy);
       ReflectionTestUtils.setField(controller, "callbackReceipts", callbackReceipt);
       ReflectionTestUtils.setField(controller, "payDebitIntentMapper", intents);
-      ReflectionTestUtils.setField(controller, "debitModeConfiguration", mode);
       ReflectionTestUtils.setField(controller, "callbackToken", "test-token");
       @SuppressWarnings("unchecked")
       ObjectProvider<PayTccPaymentService> provider = mock(ObjectProvider.class);

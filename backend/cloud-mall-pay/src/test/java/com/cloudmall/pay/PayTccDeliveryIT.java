@@ -6,14 +6,15 @@ import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.naming.NamingService;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.pay.config.PayDebitModeConfiguration;
+import com.cloudmall.pay.controller.PayCreationController;
 import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.vo.PayTccDeliveryVO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayTccDeliveryMapper;
+import com.cloudmall.pay.service.PayCreationService;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
-import com.cloudmall.pay.service.impl.PayServiceImpl;
 import com.cloudmall.pay.service.impl.PayTccDeliveryScheduler;
 import com.cloudmall.pay.service.impl.PayTccDeliveryStore;
 import com.cloudmall.pay.service.impl.PayTccRecoveryScheduler;
@@ -798,8 +799,8 @@ class PayTccDeliveryIT {
       atomicity.put("orderFacts", safeCreatedOrder(orderA));
       writeCreationArtifact("order-create-atomicity.json", atomicity);
 
-      // 2. 必须由生产 PayServiceImpl 的 Spring 事务代理和原 Order Feign 创建支付。
-      PayServiceImpl payments = application.getBean(PayServiceImpl.class);
+      // 2. 必须由生产 PayCreationService 的 Spring 事务代理和原 Order Feign 创建支付。
+      PayCreationService payments = application.getBean(PayCreationService.class);
       assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(payments));
       assertCleanCaller();
       PayCreateDTO createPayment = new PayCreateDTO();
@@ -808,7 +809,9 @@ class PayTccDeliveryIT {
       PayVO payment;
       try {
         AuthContext.set(7L, "USER");
-        var response = payments.create("normal-payment-" + UUID.randomUUID(), createPayment);
+        var response =
+            new PayCreationController(payments)
+                .create("normal-payment-" + UUID.randomUUID(), createPayment);
         assertEquals("0", response.code);
         payment = JSON.convertValue(response.data, PayVO.class);
       } finally {

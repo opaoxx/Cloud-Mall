@@ -4,9 +4,7 @@ import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.auth.AuthContext;
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.common.error.ErrorCodes;
-import com.cloudmall.pay.config.PayDebitModeConfiguration;
 import com.cloudmall.pay.domain.dto.PayCallbackDTO;
-import com.cloudmall.pay.domain.dto.PayCreateDTO;
 import com.cloudmall.pay.domain.po.PayDebitIntentPO;
 import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
@@ -19,17 +17,11 @@ import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PayProtocolMetrics.*;
 import com.cloudmall.pay.service.PayService;
 import com.cloudmall.pay.util.PayDebitModes;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 @RequestMapping("/api/payments")
@@ -64,8 +56,8 @@ public class PayServiceImpl implements PayService {
   /** 判断失败回调能否安全取消订单的持久意图 Mapper。 */
   @Autowired private PayDebitIntentMapper payDebitIntentMapper;
 
-  /** 只为新支付单选择协议；既有记录从持久字段核验。 */
-  @Autowired private PayDebitModeConfiguration debitModeConfiguration;
+  /** 生产强制注入共享监视器；直接构造时保持单实例原互斥语义。 */
+  @Autowired private PayWriteMonitor writeMonitor = new PayWriteMonitor();
 
   @Value("${cloudmall.internal.callback-token:cloudmall-local-callback}")
   /** 保存 callbackToken 的业务状态或配置。 */
@@ -89,72 +81,22 @@ public class PayServiceImpl implements PayService {
     this.payCallbackLogMapper = payCallbackLogMapper;
   }
 
-  @Transactional
-  @PostMapping
-  /** 执行 create 相关操作。 */
-  public synchronized ApiResponse<?> create(
-      @RequestHeader("Idempotency-Key") String key, @RequestBody PayCreateDTO req) {
-    // 1. 接收并整理 create 的业务请求。
-    // 2. 执行 create 的核心业务校验与状态处理。
-    // 3. 返回 create 的处理结果。
-    long userId = AuthContext.requireUserId();
-    if (key == null
-        || key.isBlank()
-        || req == null
-        || req.orderNo == null
-        || req.payAmount == null
-        || req.payAmount.signum() <= 0) {
-      throw new BizException(ErrorCodes.INVALID, "支付参数不完整", 400);
-    }
-    String payNo = payNoFor(userId, key);
-    List<PayVO> keyed = findBy("pay_no", payNo);
-    if (!keyed.isEmpty()) {
-      PayVO payment = keyed.get(0);
-      if (!Objects.equals(payment.orderNo, req.orderNo)
-          || !Objects.equals(payment.userId, userId)
-          || payment.amount.compareTo(req.payAmount) != 0) {
-        throw new BizException(ErrorCodes.DUPLICATE, "Idempotency-Key已用于其他支付请求", 409);
-      }
-      return ApiResponse.ok(payment);
-    }
-    OrderClient.OrderView order = order(req.orderNo, userId);
-    if (!Objects.equals(userId, order.userId()))
-      throw new BizException(ErrorCodes.FORBIDDEN, "无权支付此订单", 403);
-    if (!"PENDING_PAYMENT".equals(order.status()))
-      throw new BizException(ErrorCodes.PAY_DONE, "订单不处于待支付状态", 409);
-    if (req.payAmount.compareTo(order.payAmount()) != 0)
-      throw new BizException(ErrorCodes.PAY_MISMATCH, "支付金额与订单应付金额不一致", 409);
-    List<PayVO> old = findBy("order_no", req.orderNo);
-    if (!old.isEmpty()) return ApiResponse.ok(old.get(0));
-    OffsetDateTime now = now();
-    PayRecordPO paymentRecord = new PayRecordPO();
-    paymentRecord.id = id();
-    paymentRecord.payNo = payNo;
-    paymentRecord.orderNo = req.orderNo;
-    paymentRecord.userId = userId;
-    paymentRecord.amount = req.payAmount;
-    paymentRecord.status = "PENDING";
-    paymentRecord.debitMode = debitModeConfiguration.newPaymentMode();
-    paymentRecord.createdAt = now.toLocalDateTime();
-    paymentRecord.updatedAt = now.toLocalDateTime();
-    payRecordMapper.insert(paymentRecord);
-    return ApiResponse.ok(find(payNo));
-  }
-
   @PostMapping("/{payNo}/mock-success")
   /** 执行 success 相关操作。 */
-  public synchronized ApiResponse<?> success(@PathVariable String payNo) {
-    // 1. 接收并整理 success 的业务请求。
-    // 2. 执行 success 的核心业务校验与状态处理。
-    // 3. 返回 success 的处理结果。
-    PayVO payment = owned(payNo);
-    String mode = paymentMode(payNo);
-    metrics.route(PayProtocolMetrics.mode(mode), Entry.MOCK_SUCCESS);
-    if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
-    if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
-      throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
-    String outcome = initiate(payment, mode);
-    return responseForOutcome(payNo, outcome);
+  public ApiResponse<?> success(@PathVariable String payNo) {
+    synchronized (writeMonitor) {
+      // 1. 接收并整理 success 的业务请求。
+      // 2. 执行 success 的核心业务校验与状态处理。
+      // 3. 返回 success 的处理结果。
+      PayVO payment = owned(payNo);
+      String mode = paymentMode(payNo);
+      metrics.route(PayProtocolMetrics.mode(mode), Entry.MOCK_SUCCESS);
+      if ("SUCCESS".equals(payment.status)) return ApiResponse.ok(payment);
+      if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
+        throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
+      String outcome = initiate(payment, mode);
+      return responseForOutcome(payNo, outcome);
+    }
   }
 
   @PostMapping("/{payNo}/mock-fail")
@@ -174,45 +116,47 @@ public class PayServiceImpl implements PayService {
 
   @PostMapping("/callback")
   /** 执行 callback 相关操作。 */
-  public synchronized ApiResponse<?> callback(
+  public ApiResponse<?> callback(
       @RequestHeader(value = "X-Internal-Callback-Token", required = false) String token,
       @RequestBody PayCallbackDTO callback) {
-    // 1. 接收并整理 callback 的业务请求。
-    // 2. 执行 callback 的核心业务校验与状态处理。
-    // 3. 返回 callback 的处理结果。
-    if (!Objects.equals(callbackToken, token))
-      throw new BizException(ErrorCodes.FORBIDDEN, "回调凭证无效", 403);
-    if (callback == null
-        || callback.payNo == null
-        || callback.payNo.isBlank()
-        || callback.amount == null
-        || callback.userId == null) {
-      throw new BizException(ErrorCodes.INVALID, "回调参数不完整", 400);
-    }
-    String callbackId =
-        callback.callbackId == null || callback.callbackId.isBlank()
-            ? callback.payNo
-            : callback.callbackId;
-    PayVO payment = ownedForUser(callback.payNo, callback.userId);
-    String mode = paymentMode(callback.payNo);
-    if (payment.amount.compareTo(callback.amount) != 0)
-      throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
-    metrics.route(PayProtocolMetrics.mode(mode), Entry.CALLBACK);
-    callbackReceipts.claim(payment, callback, callbackId);
-    if (callback.success) {
-      if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
-        throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
-      if (!"SUCCESS".equals(payment.status)) {
-        String outcome = initiate(payment, mode);
-        if (!"SUCCESS".equals(outcome)) return responseForOutcome(payment.payNo, outcome);
+    synchronized (writeMonitor) {
+      // 1. 接收并整理 callback 的业务请求。
+      // 2. 执行 callback 的核心业务校验与状态处理。
+      // 3. 返回 callback 的处理结果。
+      if (!Objects.equals(callbackToken, token))
+        throw new BizException(ErrorCodes.FORBIDDEN, "回调凭证无效", 403);
+      if (callback == null
+          || callback.payNo == null
+          || callback.payNo.isBlank()
+          || callback.amount == null
+          || callback.userId == null) {
+        throw new BizException(ErrorCodes.INVALID, "回调参数不完整", 400);
       }
-    } else if (PayDebitModes.TCC.equals(mode)) {
-      tccEntry().failure(payment);
-    } else {
-      payment = legacyFailureService.fail(payment);
+      String callbackId =
+          callback.callbackId == null || callback.callbackId.isBlank()
+              ? callback.payNo
+              : callback.callbackId;
+      PayVO payment = ownedForUser(callback.payNo, callback.userId);
+      String mode = paymentMode(callback.payNo);
+      if (payment.amount.compareTo(callback.amount) != 0)
+        throw new BizException(ErrorCodes.PAY_MISMATCH, "回调金额不一致", 409);
+      metrics.route(PayProtocolMetrics.mode(mode), Entry.CALLBACK);
+      callbackReceipts.claim(payment, callback, callbackId);
+      if (callback.success) {
+        if ("FAILED".equals(payment.status) || "REFUNDED".equals(payment.status))
+          throw new BizException(ErrorCodes.PAY_DONE, "支付已处理", 409);
+        if (!"SUCCESS".equals(payment.status)) {
+          String outcome = initiate(payment, mode);
+          if (!"SUCCESS".equals(outcome)) return responseForOutcome(payment.payNo, outcome);
+        }
+      } else if (PayDebitModes.TCC.equals(mode)) {
+        tccEntry().failure(payment);
+      } else {
+        payment = legacyFailureService.fail(payment);
+      }
+      callbackReceipts.complete(payment, callback, callbackId);
+      return ApiResponse.ok(find(payment.payNo));
     }
-    callbackReceipts.complete(payment, callback, callbackId);
-    return ApiResponse.ok(find(payment.payNo));
   }
 
   /** 将可恢复中的支付结果映射为明确的 HTTP 业务状态。 */
@@ -252,17 +196,6 @@ public class PayServiceImpl implements PayService {
     PayTccPaymentService entry = tccPaymentService.getIfAvailable();
     if (entry == null) throw PayDebitModes.unavailable();
     return entry;
-  }
-
-  /** 执行 order 相关操作。 */
-  private OrderClient.OrderView order(String orderNo, long userId) {
-    // 1. 接收并整理 order 的业务请求。
-    // 2. 执行 order 的核心业务校验与状态处理。
-    // 3. 返回 order 的处理结果。
-    ApiResponse<OrderClient.OrderView> response = orders.get(orderNo, userId);
-    if (response == null || response.data == null)
-      throw new BizException(ErrorCodes.NOT_FOUND, "订单不存在", 404);
-    return response.data;
   }
 
   /** 执行 owned 相关操作。 */
@@ -322,41 +255,8 @@ public class PayServiceImpl implements PayService {
     throw new IllegalArgumentException("Unsupported payment lookup column: " + column);
   }
 
-  /** 执行 payNoFor 相关操作。 */
-  private static String payNoFor(long userId, String key) {
-    // 1. 接收并整理 payNoFor 的业务请求。
-    // 2. 执行 payNoFor 的核心业务校验与状态处理。
-    // 3. 返回 payNoFor 的处理结果。
-    try {
-      byte[] hash =
-          MessageDigest.getInstance("SHA-256")
-              .digest((userId + ":" + key).getBytes(StandardCharsets.UTF_8));
-      StringBuilder result = new StringBuilder();
-      for (byte value : hash) result.append(String.format("%02x", value));
-      return result.substring(0, 48);
-    } catch (Exception e) {
-      throw new IllegalStateException(e);
-    }
-  }
-
   /** 将支付记录持久化对象转换为响应视图。 */
   private static PayVO toView(PayRecordPO paymentRecord) {
     return com.cloudmall.pay.util.PayRecordViews.toView(paymentRecord);
-  }
-
-  /** 执行 now 相关操作。 */
-  private static OffsetDateTime now() {
-    // 1. 接收并整理 now 的业务请求。
-    // 2. 执行 now 的核心业务校验与状态处理。
-    // 3. 返回 now 的处理结果。
-    return OffsetDateTime.now(ZoneOffset.ofHours(8));
-  }
-
-  /** 执行 id 相关操作。 */
-  private static long id() {
-    // 1. 接收并整理 id 的业务请求。
-    // 2. 执行 id 的核心业务校验与状态处理。
-    // 3. 返回 id 的处理结果。
-    return Math.abs(UUID.randomUUID().getMostSignificantBits());
   }
 }

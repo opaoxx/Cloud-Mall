@@ -47,10 +47,12 @@ class BackendP1RulesTest {
 
   @Test
   void paymentAndOrderBindIdempotencyAndPathVariables() throws Exception {
-    String payment = source("cloud-mall-pay", "PayServiceImpl.java");
+    String payment = source("cloud-mall-pay", "PayCreationServiceImpl.java");
     String order = source("cloud-mall-order", "OrderTimeoutMessageListener.java");
     assertTrue(payment.contains("payNoFor"));
-    assertTrue(payment.contains("Idempotency-Key"));
+    assertTrue(
+        source("cloud-mall-pay", "PayCreationController.java")
+            .contains("@RequestHeader(\"Idempotency-Key\")"));
     assertTrue(
         source("cloud-mall-order", "OrderStateController.java")
             .contains("@PathVariable(\"orderNo\")"));

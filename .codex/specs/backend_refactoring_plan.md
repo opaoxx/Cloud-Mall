@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay首个只读查询切片已完成，后续处理支付创建及共享写锁。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成只读查询、支付创建及共享写锁提取，后续处理成功/失败/回调职责。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 只读支付状态查询已组合委托，见第34节；创建/成功/失败/回调及旧继承入口待后续处理 |
+| Pay | 实施中 | 查询与创建已组合委托，共享写锁保持，见第34至35节；成功/失败/回调及旧继承入口待后续处理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2034,3 +2034,44 @@ create专属order/payNoFor/now/id辅助方法及模式配置依赖迁入创建�
 真实MySQL新用例通过生产Mapper和新事务Service核验创建/幂等重放/LEGACY与TCC持久模式、插入后读取失败整笔回滚，以及同key并发最终至多一行；不把单JVM监视器描述为跨实例幂等保证。独立Compose项目cloud-mall-refactor-pay-creation-20261113，仅mysql，候选宿主19954、子网10.254.236.0/24；先核实无冲突，创建全新卷，按schema.sql复制Pay空源表，测试各自UUID库。失败保留库并归档，成功核对后清理测试库，最终归档后移除自有容器/网络、保留卷，不触碰默认/历史中间件。
 
 运行Common/Pay全部*Test、新MySQL全类及原PayDebitModeM2MySqlIT五个持久模式拒绝方法（不运行其启动子进程/迁移族）；八模块test-compile、Pay打包、Java实际格式化、diff及源码token对照。完整TC/User/Order/Stock资金交付矩阵本轮不运行，PayTccDeliveryIT仅编译适配，不算真实链路通过。证据存target/backend-refactor-20261113/pay-creation；README原修改与两个旧pycache不入提交。实施独立提交及refactor/pay-creation-complete-20261113，临时index逆补丁验证恢复父树；Git不回退运行数据。
+
+实施时核实后的验证调整：原M2五方法在任何建库/连接之前拒绝19954/cloudmall_pay；它的冻结安全门只接受13307/cloudmall_user。该五项标记为本轮环境不适用，不放宽URL门、不转向默认中间件、不把编译或单元结果算作这五项通过。最终验收使用全部单测、实际共享锁/事务测试和新增创建MySQL全类；M2只补新监视器Bean并保持标准编译，持久模式负向实库矩阵保留为验证限制。模式路由业务未修改，原模式/资金单测继续完整执行。
+
+### 35.3 实施与验证结果
+
+新增创建Controller/接口/155行实现及PayWriteMonitor；旧混合实现362→262行，删除create和四个创建专属助手，保留其余写行为。生产创建、成功和回调通过@Autowired共享同一监视器，直接构造旧实现的测试仍有独立对象监视器；没有静态锁、可选注入或新事务装饰。旧PayController/空PayService及旧四参数构造器暂留，待剩余三个写入口迁移后统一清理。
+
+调用链复盘：`MVC头/体绑定 → Controller传身份supplier → Spring REQUIRED开始 → 获取共享监视器 → 身份/参数 → 原key重放 → Order详情/归属/状态/金额 → orderNo重放 → 时间/主键/模式 → INSERT → 原payNo重读 → 释放锁 → Spring提交 → Controller包装响应`。任一业务/Mapper异常沿原默认回滚规则传播，锁在回滚之前释放。成功/回调仍在同一临界区内执行原完整算法，fail与查询无新增锁/事务；不改变Legacy/TCC分流、回调独立提交或恢复状态机。
+
+创建9项契约先对旧实际入口通过，再仅改变装配验证新入口，九项方法体逐token保持。包括原key尾空格和固定48位hash、金额compareTo尺度语义、参数/鉴权先后、键冲突、完整映射、订单错误优先级、非零外层code但非空data的原处理、已有订单支付重放、模式/INSERT/重读异常和HTTP绑定/金额字符串/null。创建411个token及六助手286个token按明确的返回包装/身份supplier/变量改名/映射委托规范化后与基线一致；剩余13个旧方法正文除显式锁外一致。1050份其他已跟踪后端文件与README原修改逐字节保持，6份旧测试仅按本轮归属/装配约定适配。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 原公共规则及创建源码归属守卫 |
+| Pay原有全部单测 | 610 | 原模式/资金/回调/指标及上轮查询测试；只适配必要装配 |
+| PayCreationContractTest | 9 | 新旧入口同一行为矩阵 |
+| PayCreationWiringTest | 2 | 真实Spring代理、线程BLOCKED屏障、共享监视器和事务生命周期 |
+| PayCreationMySqlIT | 3 | 真实MySQL/生产Mapper/创建代理，4个成功UUID库 |
+| 合计 | 649 | 68类，最终0失败、0错误、0跳过 |
+
+基线644项另行归档，不与最终结果累计。装配测试在主线程持锁时看到创建线程事务已经开始、身份supplier尚未调用；成功/回调也等待同一锁，fail/查询在另一线程完成。创建成功提交和未登录回滚均在锁外。实际MySQL验证LEGACY/TCC新支付字段、按键/订单重放不改原行、INSERT已执行后读故障整笔回滚及原键重试；这里的TCC只指新支付模式持久化，没有启动TC、冻结或扣款。
+
+同key四线程实测为3次成功返回同一payNo、1次原唯一键冲突；最终恰一行，全部事务结束后原键重放成功。该冲突由锁外提交窗口与数据库唯一约束处理，符合保留的原行为；没有加自动重试、吞异常或扩大临界区来制造全成功。
+
+首轮新增验证有10项错误，原619项Pay单测通过：装配2项因AopTestUtils泛型推断选中ReflectionTestUtils的Class重载而ClassCast，改为显式Object目标；新实库3项在断言后工件导出时遇LocalDateTime未注册模块，改用测试本地ObjectMapper的已有时间模块。三库未删除，已dump并保留。M2五项为上文URL拒绝，未执行业务；调整验收范围后重跑全部单测和新实库，最终649项通过。生产代码未因这些测试问题改动；初次错误日志/XML和不完整工件仍归档。
+
+14份新增/改动Java通过实际Google Java Format检查，八模块test-compile、Pay打包及git diff --check通过；Jar的180个Pay生产class与最终编译结果一致，新四类型均存在、无测试类混入。PayTccDeliveryIT原完整交付用例仅改真实创建代理调用并通过编译，未执行其资金矩阵；M2五项持久模式负向实库验证仍明确未通过本轮环境门。
+
+### 35.4 证据、资源、回退与后续
+
+方案提交5a5567ab，基线标签refactor/pay-creation-baseline-20261113；实施完成标签refactor/pay-creation-complete-20261113。证据入口 `target/backend-refactor-20261113/pay-creation/verification.json`，包括基线/首轮失败/最终XML、生产及测试前后对照、线程/实库结果、native事实、dump、格式/Jar和临时index回退证明。
+
+仅本轮独立MySQL8.0.46项目：三个Pay空源表最终0行，四个成功UUID库均删除；首轮三个归档失败库各保留一条已提交测试支付，已导出preserved-first-fixtures.sql。自有容器/网络已移除，mysql_data卷保留；默认数据库、历史失败卷及其他项目没有写入。保留库名称与完整源码SHA记入verification.json。
+
+```powershell
+git revert refactor/pay-creation-complete-20261113
+```
+
+临时index验证逆补丁恢复父树且真实index保持；实际回退后按本轮四个新生产类型和三个新测试类（含内部class）精确清理target残留、重编译，不全量clean或回退运行数据。后续依赖须先逆序处理。README原修改、两个旧pycache、bug台账与忽略证据不混入提交。
+
+下一步以模拟支付成功入口为候选，先梳理其与回调共享的持久模式核验、Legacy/TCC分流、结果响应映射及支付记录读取，再冻结拆分范围；沿用本轮共享监视器与原异常/状态事实。尚未完成Pay整个模块，本轮不宣称真实TC/User/Order/Stock资金链、Gateway Bearer或全商城验证通过。

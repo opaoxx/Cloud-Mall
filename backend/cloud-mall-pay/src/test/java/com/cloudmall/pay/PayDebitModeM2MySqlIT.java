@@ -516,6 +516,9 @@ class PayDebitModeM2MySqlIT {
 
   /** 既有业务替身作为已完成单例注册，避免 Spring 对 mock 的原字段另做生产依赖注入。 */
   private static void registerBusinessMocks(AnnotationConfigApplicationContext context) {
+    context
+        .getBeanFactory()
+        .registerSingleton("payWriteMonitor", new com.cloudmall.pay.service.impl.PayWriteMonitor());
     context.getBeanFactory().registerSingleton("users", mock(UserClient.class));
     context.getBeanFactory().registerSingleton("orders", mock(OrderClient.class));
     context.getBeanFactory().registerSingleton("tccPayment", mock(PayTccPaymentService.class));

@@ -123,6 +123,9 @@ class PayProtocolMetricsEndpointTest {
                         beans.registerSingleton("legacyFailureService", fixture.legacyFailure);
                         beans.registerSingleton("tccPaymentService", fixture.publicTcc);
                         beans.registerSingleton("debitModeConfiguration", fixture.mode);
+                        beans.registerSingleton(
+                            "payWriteMonitor",
+                            new com.cloudmall.pay.service.impl.PayWriteMonitor());
                       })
                   .run("--spring.config.name=cm18-protocol-metrics-endpoint-test");
       PayProtocolMetrics metrics = context.getBean(PayProtocolMetrics.class);
