@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product/User/Stock四批47文件规范清单已处理完毕，统一规范总复核仍待执行，尚不宣称整体规范验收完成；详见backend_refactoring_acceptance.md及文末第64节。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product/User/Stock四批47文件规范清单及八模块统一总复核已完成，本次约定的中等深度重构与规范验收通过；真实全商城、额外取消场景和性能继续作为独立范围保留，不自动开启新的重构队列。详见backend_refactoring_acceptance.md及文末第65节。
 
 ## 1. 使用方式与范围
 
@@ -4040,7 +4040,7 @@ git revert refactor/stock-standards-complete-20261114
 
 从673f5392继续，主Agent单独执行。第61–64节四批47文件清单已处理，本阶段在同一源码状态重新检查八模块全部641份生产Java，验收既定中等深度命名/分层/职责目标及已列规范项。默认只更新本方案和验收汇总，不改生产/测试代码、资源/POM/schema或README；若有新失败，先在原bugfix_log记录并界定修正范围，不放宽检查或隐去失败。
 
-沿前次JDK DocTrees检查成员/必需public方法、构造器、接口方法、Bean/定时任务/消费者说明绑定，Google Java Format 1.22.0只读dry-run且跳过长字符串重排；检查非id短名、既有模板说明模式、Cm编号生产类型、Controller继承ServiceImpl、空Service接口、Service HTTP映射、Controller/Service JDBC与SQL字面量候选、DTO/VO/PO后缀嵌套模型。保留已有语义id、Mapper内部JDBC、Feign局部record和表/Bean/消息/指标兼容标识；扫描结果与逐切片行为证据共同支持有限结论，不把扫描称为逐字段全语义证明。
+沿前次JDK DocTrees检查成员/必需public方法、构造器、接口方法、Bean/定时任务/消费者说明绑定，Google Java Format 1.22.0只读dry-run且跳过长字符串重排；检查非id短名、既有模板说明模式、Cm编号生产类型、Controller继承ServiceImpl、空Service接口、Service HTTP映射、Controller/Service JDBC与SQL字面量候选、Controller/Service内DTO/VO/PO后缀嵌套模型，并记录独立domain响应的组合类型。保留已有语义id、Mapper内部JDBC、Feign局部record和表/Bean/消息/指标兼容标识；扫描结果与逐切片行为证据共同支持有限结论，不把扫描称为逐字段全语义证明。
 
 ### 65.2 回归与产物
 
@@ -4053,3 +4053,45 @@ git revert refactor/stock-standards-complete-20261114
 只读复核四批完成标签/提交树/逆补丁及XML、AST证据哈希，并核对第60节以来45个Git内容变化文件均在四批冻结清单内，另两个文件仅历史工作区行尾归一。原失败现场、未知状态、Gateway版本差异和公开取消/全商城/性能限制不改写；历史卷资源状态沿第60节日期表述，不冒充本轮Docker检查。
 
 证据保存到target/backend-refactor-20261114/standards-final-review。只有本轮规范扫描无待办、适用统一测试/八包通过且源码保持，才将本次约定的结构重构与规范清单验收置完成；不自动开启新的真实场景或性能队列。完成后仅提交两份既有Markdown，执行git diff --check和临时index逆补丁恢复方案基线树验证，建立refactor/backend-standards-review-complete-20261114；Git回退只撤销本轮文档结论，不还原之前四批代码或运行数据。
+
+### 65.4 统一扫描与嵌套模型结论校正
+
+八模块641份生产Java全部重新执行DocTrees、类型/短名AST和格式dry-run，必需说明绑定、格式差异、非id短名及既有模板模式均为0待办；96个语义明确id保持。结构共33个Controller、41个非空Service接口，无Cm编号生产类型、Controller继承ServiceImpl、Service HTTP映射、Controller/Service直接JdbcTemplate/NamedParameterJdbcTemplate或指定SQL字面量候选。
+
+首次广义嵌套模型扫描命中Order的domain.vo.StockReservationStatusVO内StockReservationItemVO，汇总工具因此停止。核对源码、StockClient.reservation引用及AGENTS第7节后，确认它是独立响应模型的明细组合，不是Controller/Service内部混合业务模型；该类与JSON字段原样保留。保留首轮脚本和原始1条命中，再在结果中单列“独立domain组合类型，非违规”，违规数为0；没有删除扫描命中或改代码凑零。第60节“没有DTO/VO/PO后缀嵌套模型”的旧概括过宽，本节和最新汇总纠正为准确的层次范围，历史首次扫描记录保留。
+
+### 65.5 本轮统一回归与产物
+
+| 模块 | 当前类数 | 当前测试项 | 结果 |
+| --- | ---: | ---: | --- |
+| Common | 4 | 25 | 0失败/错误/跳过 |
+| Gateway | 5 | 21 | 0失败/错误/跳过 |
+| User | 18 | 284 | 0失败/错误/跳过 |
+| Product | 37 | 361 | 0失败/错误/跳过 |
+| Cart | 13 | 35 | 0失败/错误/跳过 |
+| Order | 65 | 341 | 含指定Stock HTTP/Feign契约IT |
+| Stock | 48 | 209 | 0失败/错误/跳过 |
+| Pay | 77 | 672 | 含指定Order HTTP/Feign契约IT |
+| 合计 | 267 | 1948 | 首次全部通过，0失败/错误/跳过，无遗漏/额外类 |
+
+所有267份XML均晚于本轮开始时间，逐类与日志/冻结测试清单匹配；旧报告不混入本轮。两个HTTP契约使用真实Feign/实际响应类型和受控持久边界，不等于真实商城交易。Product本轮新UUID的测试自有Java子进程自然退出，executorShutdown/executorTerminated/tasksAllDone均true、AMQPConnections=0；Pay一个新指标runId归档。没有业务测试失败或新增测试。
+
+八模块package跳过重复测试首次通过，628个生产class与target/classes及SourceFile逐一对应，无无源旧class或测试helper混入。Gateway当前Surefire classpath仍为3.1.4，与规格3.1.5的既有差异单列保留；ANTLR4.7.2/4.8提示仍出现但测试通过，不擅自升级依赖。
+
+### 65.6 历史复核、源码保持与完成边界
+
+四批第61–64节完成标签/祖先关系/父提交/提交树/逆补丁记录和265个归档文件SHA复核通过，含各批XML及AST证据；85/386/309/234只是四次历史结果，不累计为本轮测试。第60节以来Git内容变化严格为冻结范围45个生产Java，原47文件另两个只发生历史工作区行尾归一；测试/资源/POM/schema/deploy没有变化。当前阶段1123份backend/deploy与README前像全部逐字节保持，本轮仅改两份Markdown及ignored证据。
+
+本次约定的八模块中等深度结构重构、四批规范清单和统一总复核已验收完成，后续没有自动延续的强制重构队列。完整Gateway/前端/真实Product与Cart商城链路、额外公开取消/未决中止真实矩阵及性能仍为独立范围；原失败库、未知状态与缺证结论保持。本轮没有调用Docker、运行实库IT或复核历史卷实时状态，43卷/12项目仅沿第60节日期的历史记录，不当作当前资源计数。
+
+### 65.7 提交与回退
+
+方案提交a85ef6be，基线refactor/backend-standards-review-baseline-20261114；完成标签refactor/backend-standards-review-complete-20261114。证据target/backend-refactor-20261114/standards-final-review/verification.json串联本轮扫描、1条组合类型审阅、267份XML、生命周期/指标、八Jar、四批历史SHA、源保持和回退证明。
+
+只提交本方案与验收汇总两文件。git diff --check及临时index逆补丁恢复方案基线树通过，真实index与README保持后提交：
+
+```powershell
+git revert refactor/backend-standards-review-complete-20261114
+```
+
+该回退只撤销本轮文档验收结论，不撤销此前四批代码，不恢复数据库/缓存/消息或其它运行数据。
