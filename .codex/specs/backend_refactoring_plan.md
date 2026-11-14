@@ -3569,3 +3569,32 @@ git revert refactor/pay-recovery-native-complete-20261114
 只提交本测试与方案；临时index逆补丁恢复父树、真实index/README保持。Git不恢复运行数据库/TC状态，也不删除证据或五保留卷。原bugfix_log记录固定环境原因、装配修正及验证；无关README和旧pycache不入提交。
 
 下一步先审查Order/Stock交付测试的四服务拓扑、Rabbit隔离、Redis生命周期及故障清理，冻结下一有限切片。当前定时恢复结论不替代公开支付成功、Order/Stock交付/退款、完整商城或性能验收，不自动重启历史压测任务。
+
+
+## 58. 四服务交付夹具显式环境与证据来源整理（2026-11-14）
+
+### 58.1 当前范围和执行顺序
+
+从a0c12a50继续，由主Agent单独实施/评审。依据16C交付、16L租约、16N扫描公平性及batch16t247真实建单/预留恢复规格，当前PayTccDeliveryIT是12项而非README旧8项：1真实建单与预留未知恢复、2库存回滚前禁止退款、3禁用用户退款响应丢失与Pay重启、4paid响应丢失、5回滚execution隔离、6租约竞争、7本地事务回滚、8扫描公平、9/10切回Legacy进程、11/12超时消息return与重投。第1项包含真实两分钟年龄门和独立Order helper，不能沿早期8项假定运行。
+
+本阶段只完成真实验证前的夹具环境重构和离线/本机受控HTTP验证，不启动容器、不运行十二项真实交付。业务服务、状态机、SQL、消息/金额/Feign契约和生产配置均保持。后续独立阶段再冻结新Compose五组件六卷、完整53表迁移及12项运行与精确失败收尾；不自动启动历史压测或全矩阵。
+
+### 58.2 已确认环境问题与修改清单
+
+原夹具固定Nacos18848、Rabbit AMQP15673和管理15674，直接docker run/rm临时Redis；父Pay及不同子JVM没有统一传播连接参数。只改业务启动地址仍不够：PayTccTcBranchEvidence固定读取共享cloud-mall-seata，PayTccStageEvidence固定读取Rabbit15674，会使事务与证据来源不一致。
+
+新增测试专用PayTccDeliveryEnvironment，组合既有PayUserTccBridgeEnvironment的MySQL/Nacos/TC/Redis准入规则，不改旧helper。新增必需cloudmall.rabbit.test.port、cloudmall.rabbit.management.test.port和cloudmall.seata.test.container-id（完整64位小写十六进制ID）；解析必须在任何数据库/网络/进程操作之前完成。所有八个直接/派生端口互异，高位loopback规则保持；TC容器ID只作为明确只读来源，实际归属/镜像/端口对应关系必须由下轮Compose前置核验，不能仅靠字符串校验冒充资源归属证明。
+
+统一NamingService、父Pay、替代Pay、协议切换Pay和User/Order/Stock（含Order测试helper）的连接参数；保持原group/vhost、appId、功能开关和故障控制。测试只使用外部已准备Redis，不创建、删除、清空Redis；生命周期归独立Compose runner。保留原数据库/vhost清理门和未决preserve，不扩大失败删库范围。
+
+TC和阶段证据helper新增显式环境重载，交付夹具全部调用新入口；其它调用者继续沿原入口，不改变其历史默认来源。TC日志命令绑定本次容器ID，并将实际目标写入证据模板；原同源时钟、容器身份SHA、INFO解析、时间/大小上限、重读次数及ACK_UNOBSERVED规则保持。Rabbit阶段采集仍只读原vhost/queues两类GET，不消费、purge或重投。
+
+精确允许修改：PayTccDeliveryIT、PayTccTcBranchEvidence、PayTccStageEvidence；新增PayTccDeliveryEnvironment、PayTccDeliveryEnvironmentTest、PayTccDeliveryEvidenceEndpointTest。12个@Test方法保持；业务辅助仅允许显式证据参数和MQ连接目标替换，不能调整断言、延时、退款/paid/建单/清算/故障控制。新增子JVM时区；既有控制凭证不进入新环境摘要。
+
+### 58.3 验证、记录与回退
+
+先提交本节并建立refactor/pay-delivery-environment-baseline-20261114。实施前在原bugfix_log记录现象，保存三文件和README前像、1120份backend/deploy SHA。使用实际google-java-format，仅格式本次Java；对比12个方法及其它辅助的词法标记，格式变化不算业务变化，允许差异必须逐项审计。
+
+新增准入测试验证缺项/非法地址/默认端口/端口碰撞（包含Nacos gRPC）/非法CID/vhost、参数不可变且无重复默认Rabbit配置；受控loopback HTTP测试验证阶段采集使用指定管理端口及只GET所属vhost，不冒充真实Rabbit。运行原bridge环境、TC/Stage evidence、Delivery service/identity/evidence/wiring/scheduler相关定向测试，编译全部Pay测试。之后离线打包User/Pay/Order/Stock四模块及依赖，核生产Jar class与编译输出一致、测试helper未进入Jar。
+
+证据target/backend-refactor-20261114/pay-delivery-environment。记录准确XML方法/计数、编译/打包、源码差异/保留、受控HTTP边界及后续前置清单。diff检查和临时index逆补丁恢复父树、真实index/README保持后提交七文件并建立complete标签。Git只回退源码/方案，不回退数据；本阶段没有创建中间件或执行真实支付，完成环境前置不能表述为四服务链已验收。
