@@ -3272,3 +3272,31 @@ git revert refactor/user-tcc-native-complete-20261114
 结果提交只包含本方案；临时index逆补丁恢复父树且真实index/README保持。回退不恢复已清理测试库、TC运行态或忽略证据，不删除两保留卷。原bugfix_log已记录首轮漏参数的现象、根因、修正及回归结果。
 
 下一步单独整理Pay/User跨进程验收夹具的显式Nacos/TC地址、子进程参数传播和独立资源清单，再冻结发现/Feign派发桥的有限验证；不直接使用旧硬编码环境。User RM本轮通过不代表Pay公开TCC入口、Order/Stock联动、RM进程中断/TC重启、Gateway商城链或性能已验收。
+
+## 54. Pay/User 派发桥显式环境与真实发现回归（2026-11-14）
+
+### 54.1 测试夹具重构范围
+
+从e7dcd8b1继续，由主Agent单独执行，依据batch16_cm18_pay_user_tcc_bridge_review.md及当前代码。PayUserTccBridgeIT的NamingService固定18848，Pay/User应用没有显式传入同一Nacos/TC/Redis参数，无法安全用于独立Compose实例。本轮只重构该测试的环境装配：新增纯测试PayUserTccBridgeEnvironment及其参数拒绝/传播测试，原9个业务方法、事务/故障/断言/重试上限不变；不改生产、API/Feign、固定技术栈或其它历史runner。
+
+环境必填cloudmall.mysql.test.url、cloudmall.nacos.test.address、cloudmall.seata.test.tc、cloudmall.redis.test.port。仅接受127.0.0.1和19000..65535隔离端口，MySQL限定cloudmall_user及可选allowPublicKeyRetrieval=true；拒绝缺省、非loopback、格式不符、服务端口或Nacos HTTP+1000/+1001碰撞/溢出，在任何建库/外部客户端创建前失败。统一生成父Pay/两个子User的Nacos认证/地址、TC地址、Redis配置，子JVM保留Java17 add-opens并显式Asia/Shanghai。内部凭证固定为本测试原有本地值；Pay不需要的Rabbit health关闭并指向未启用端口，防止误触默认broker。
+
+原NamingService使用同一显式Nacos，保留随机cm16_<UUID>分组、两User原随机HTTP端口/代理、稳定User Seata application-id。增加自有子进程PID/端口/环境归属与结束回执；原强制中断测试语义保留，但等待结束必须成功才允许后续清理。原9方法正文逐一核验保持，不通过调整业务期望掩盖回归。
+
+### 54.2 实验资源与验收矩阵
+
+新项目cloud-mall-refactor-pay-user-bridge-20261114，在deploy/experiments/compose.yml上叠加本轮override，仅MySQL8.0.46、Redis7.0、Nacos2.2.0、Seata1.5.2；候选端口19980/19983/19982/19981分别对应MySQL/Redis/NacosHTTP/TC，Nacos gRPC20982/20983，子网10.254.219.0/24。新mysql_data/redis_data/seata_data/nacos_data/nacos_logs五卷，pull_policy=never/restart=no，默认与历史卷不接入。
+
+Nacos沿原standalone、稳定hostname、认证与现有healthcheck.py，使用本轮只读挂载，健康后沿项目既有bootstrap流程在本轮实例建立root/root及原管理角色/权限，随后以root/root核验登录和发现；不关闭鉴权或改默认Nacos。TC file模式与第53节同类装配，显式宿主端口，实际XID前缀按日志记录，不从SEATA_IP猜测。四服务健康/端口/身份与新卷准入后才准备源表。
+
+源库只准备当前schema.sql八张空表：User五表（mall_user/address、ledger、attempt、tcc_debit），Pay三表（record、intent、callback）。原测试创建一User、一Pay UUID库并自建其余派发表/Fence/receive；原九例逐笔快照继续归档。Redis初末16DB为空；Nacos新实例初始没有业务注册，结束原组无User实例，旧服务不注册到本组。
+
+运行原9项：提交及重复派发只GET、回滚、POST响应截断后只读恢复、余额不足保持未知直至取消、双User并发只登记一分支、内部认证/身份与Legacy拒绝、载荷冲突、双Pay并发只消耗一次POST权限、User进程中断/重启与Nacos重选。实际Pay Spring上下文、User启动Jar、Nacos/OpenFeign、TC/RM、MySQL/Redis均独立，TccResponseProxy只注入原响应故障/计数；不代表Pay公开支付入口、双资源receipt、Order/Stock/Gateway或全商城完成。
+
+### 54.3 验证与回退
+
+先提交本节及refactor/pay-user-bridge-baseline-20261114。修改Java用google-java-format；执行新增环境守卫测试和原PayTccBridgeServiceTest、UserTccFeignRetryerTest、UserTccFeignErrorDecoderTest、UserTccStateJsonTest；再以原Java17/Maven离线打包User（skipTests），独立JVM精确运行PayUserTccBridgeIT全9项，add-opens与Asia/Shanghai显式传入。不得合跑其它TC IT污染SDK静态资源。源码/User Jar及原九方法正文对照、最终精确XML/日志均归档target/backend-refactor-20261114/pay-user-bridge。
+
+原夹具仅未决/收尾失败设置preserve；已收敛的普通断言失败仍可能删库，此限制如实记录。失败先写原bugfix_log并保存首轮证据；不改余额或删未知库结案。全部通过后核对八源表指纹、2UUID建删、九笔事实、TC终态、三次自有User进程启动/停止、Redis空库与Nacos清理，归档日志及TC file store后down本轮容器/网络，无-v，五卷保留。
+
+仅暂存三份测试文件与本方案，其他1117份既有backend/deploy及README保持。git diff --check及临时index逆补丁恢复父树、真实index/README保持后建立refactor/pay-user-bridge-complete-20261114。回退测试装配不恢复运行状态、不删除忽略证据或数据卷。
