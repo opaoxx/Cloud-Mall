@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。后续进入跨模块回归范围梳理，尚未宣称真实全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线与两项本机HTTP契约回归，下一步细化独立MySQL/Redis联合验证；尚未宣称真实全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -2956,3 +2956,51 @@ mvn -o package -DskipTests
 后续先盘点并冻结新的MySQL/Redis联合验证切片，候选为Cart十个Redis IT、UserAccountRefactoringIT、ProductRefactoringMySqlIT、StockCoreRefactoringMySqlIT及必要Order/Pay显式实库方法。逐一核对各夹具URL/源DDL/随机库、Redis DB/命名空间、失败保留和清理规则后才执行；不能把旧卷当fresh，也不能同时使用相互冲突的同名系统属性。每阶段使用deploy/experiments/compose.yml新项目和新卷，先归档后移除自有容器/网络，卷默认保留。
 
 MQ/ES、真实TC资金与全商城链条再按依赖顺序单独冻结；固定默认端口/数据库或要求真实Nacos/TC的旧测试，不通过放宽归属/开关守卫临时绕过。性能/JMeter、历史CM21 guardian/启动修复不属于本轮结构回归，未重新纳入前保持历史归档状态。本轮通过只表示统一离线与本机契约基线通过，不表示所有真实跨服务链路完成。
+
+
+### 49.4 统一源码点执行结果
+
+本轮八模块test-compile、根工程测试及八模块package首次通过。实际发现并执行262个原*Test类与2个指定IT类，和冻结源清单逐一对应，无遗漏、无额外IT、无重复统计。最终264类/1933项，0失败、0错误、0跳过；本轮未改业务或测试源码、未修复/掩盖失败。
+
+| 模块 | 测试类 | 测试项 | 本轮实际范围 |
+| --- | ---: | ---: | --- |
+| Common | 4 | 25 | 公共响应、身份/异常和后端源码规则 |
+| Gateway | 5 | 21 | 真实过滤链与请求契约，令牌存储为替身 |
+| User | 18 | 284 | 账号/余额/TCC与只读取证的原单测，持久化/外部叶子受控 |
+| Product | 37 | 361 | 原商品/索引/指标与事务观察测试，含自有子进程生命周期验证 |
+| Cart | 13 | 35 | HTTP/身份优先级、金额/JSON、原条件存储与结算单测 |
+| Order | 65 | 341 | 原单测340，加StockSeckillFactFeignIT 1 |
+| Stock | 48 | 209 | 原库存/秒杀/恢复/响应与配置契约单测 |
+| Pay | 74 | 657 | 原单测656，加PayOrderStateFeignIT 1 |
+| 合计 | 264 | 1933 | 同一源码点新跑结果，不叠加此前682项或其他历史实库矩阵 |
+
+Order→Stock契约使用实际Order Feign、实际Stock响应VO和本机HTTP，核验原路径/调用身份及字段缺失/null，不包含真实Stock数据库处理。Pay→Order使用实际Pay Feign、本机HTTP、实际Order MVC/Service，SQL/库存动作受控；覆盖paid/cancel路径、原身份头、金额及库存动作null。Gateway、Cart等原HTTP/MVC测试继续在各自真实入口与依赖替身边界内执行，不能合称全商城跨进程请求完成。
+
+Product自有Java子进程报告naturalExit=true、alive=false、exit=0，任务及执行器关闭、AMQPConnections=0；process/closed/exit及stdout/stderr均按本轮新UUID归档。Pay Prometheus指标用例的本轮runId及前后输出独立归档。本机HTTP/执行器按原测试finally关闭；本轮无新Docker项目/卷、真实SQL/Redis写入或TC事务，不触碰默认中间件和历史现场。
+
+八模块Jar共628个本模块生产class：Common10、Gateway7、User88、Product110、Cart15、Order123、Stock88、Pay187。逐class核验Jar与target/classes字节一致，并解析class的SourceFile和内部类型名对应现存src/main/java路径；未发现无生产源码对应的旧路径class或测试夹具。Jar哈希及各模块明细归档；这不是重新部署服务。1117个已跟踪backend/deploy文件和README逐字节保持，Git变更仅为本方案，实际产品行为未因本轮验证改变。
+
+### 49.5 后续实库候选的具体输入与边界
+
+本轮只做代码审查，不执行下表实库候选；精确测试路径和源码SHA保存到next-native-candidates.json。下一切片须重新核对并冻结端口/项目/DDL与方法清单。
+
+| 候选 | 现有显式输入 | 关键隔离/清理规则 |
+| --- | --- | --- |
+| Cart十个Redis IT | cloudmall.redis.test.port | loopback、root密码、DB15；逐类核验精确自有cart key及关闭路径 |
+| UserAccountRefactoringIT | cloudmall.user.refactor.mysql.port、cloudmall.user.refactor.redis.port | 自建cm_refactor_user_UUID库，读取原schema.sql；Redis DB15须空，AfterEach只接受auth:token:/balance:debit:前缀；AfterAll在失败后也会删自有库 |
+| ProductRefactoringMySqlIT | cloudmall.product.refactor.mysql.port | 自建cm_refactor_product_UUID库，执行原product DDL段；ES/MQ叶子替身；AfterAll在失败后也会删自有库 |
+| StockCoreRefactoringMySqlIT | cloudmall.mysql.test.url、cloudmall.stock.refactor.redis.port | 裸loopback cloudmall_stock URL；需七张原源表再克隆stock_core_UUID库，Redis DB15及精确key清单；close/部分setup失败会删自有库 |
+
+User、Cart、Stock共享DB15的候选不得并行；每组运行前后核验空库/精确key，不能以FLUSHDB或清理未知key来绕过污染。Stock的cloudmall.mysql.test.url与Order/Pay的同名属性有不同库名/查询参数约束，后续按组顺序运行独立Maven命令，不把多个URL强行混成一次调用。原夹具失败即删库的行为必须如实记录，归档日志、SQL/binlog、源指纹和保留实验卷，不能承诺失败库必然仍在。
+
+后续所称联合验证是同一源码点、同一新隔离资源组下的跨模块数据回归；上述夹具多数远端仍为替身，不自动升级为真实服务间下单/资金链。MQ/ES与TC/Nacos全链另行规划，运行前核对服务默认开关、持久协议与安全归属；不沿用旧固定默认环境执行器，不解除其防误用守卫。
+
+### 49.6 证据与回退
+
+方案提交69df88b0，基线标签`refactor/cross-module-offline-baseline-20261114`，完成标签`refactor/cross-module-offline-complete-20261114`。证据入口`target/backend-refactor-20261114/cross-module-offline/verification.json`，含分模块XML/哈希、冻结/实际测试清单、八Jar对应关系、子进程/指标证据、源码保持与下一实库候选。
+
+```powershell
+git revert refactor/cross-module-offline-complete-20261114
+```
+
+此回退仅撤销本轮结果文档，不改变业务代码、不撤销已经执行的测试或删除忽略证据。临时index逆补丁恢复父树，真实index和README保持；现有README及两个pycache未入提交，未使用clean/reset。原bugfix_log.md记录本轮结果。下一步冻结并执行独立MySQL/Redis联合数据回归；真实TC资金、全商城、MQ/ES与性能仍按各自未验收边界保留。
