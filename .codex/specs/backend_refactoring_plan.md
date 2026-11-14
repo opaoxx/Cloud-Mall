@@ -2783,3 +2783,24 @@ git revert refactor/pay-tcc-cancellation-complete-20261114
 临时index按no-renames精确路径逆补丁恢复父树，真实index及README保持；回退后仅清理迁入七类（含内部类）、迁移测试与新增装配测试class，再重编译恢复旧路径。后续依赖先逆序回退，不全量clean、不回退数据库，忽略证据工件不受Git回退管理。README、旧pycache与忽略工件未入提交。
 
 下一步审查PayTccPaymentService的公开TCC支付/失败编排，冻结其与已分组组件的调用、事务和错误顺序后再调整；随后评估Pay范围收尾。Pay整体仍未验收完成，本轮无真实TC资金全链路、Gateway/Nacos全商城或压测结论。
+
+
+## 47. Pay TCC公开支付与失败编排归组（2026-11-14）
+
+### 47.1 范围与主Agent评审
+
+从11593f01继续，按本会话单Agent约定冻结本切片。PayTccPaymentService整体迁入`service.impl.entry`，补齐类说明中的失败请求职责，类型名和默认Bean名仍为原名。保留同一公开路由，不拆出只有转发行为的Service；已分组的execution/delivery/projection/cancellation继续负责各自事务。原17份引用（4生产、13测试）仅地址/import适配，根包8类减至7类（五个公开用例、无状态共用规则、写监视器）。API/Feign、DTO/VO、SQL、所有状态/错误顺序和可见性均不变。
+
+pay方法无事务注解：终态立即返回；已有execution直接recover，不再订单预检；无execution先检查永久cancel gate再校验当前订单身份/金额/PENDING_PAYMENT，然后execute。COMMITTED只deliver、ROLLEDBACK只project，空执行仍202、空交付仍UNKNOWN，外层仅FeignException转既有202，其它异常保持。failure继续NOT_SUPPORTED：SUCCESS/REFUNDED拒绝、FAILED返回；COMMITTED退款中保留专有202，其余按原窗口委托已提交取消；未决NONE可请求中止后202；ROLLEDBACK必须投影返回FAILED才修改原PayVO；无execution才委托可选取消。取消功能关闭后的保守202、原caller上下文规则、无新增监视器/重试/回读保持。
+
+仍由entry.enabled条件装配并DependsOn原payTccEntryConfiguration；原Receipt配置校验以及Recovery/Delivery调度器依赖保持。cancellations Mapper仍必需，三个取消Service仍@Autowired(required=false)，不把独立取消开关变为入口启用的强依赖。主入口、回调与PayProcessingSupport仅类型引用调整。
+
+### 47.2 验证、实验与提交策略
+
+先提交方案及`refactor/pay-tcc-entry-baseline-20261114`，运行Common/Pay全部*Test基线。新增PayTccEntryWiringTest两项：实际扫描entry并注册原EntryConfiguration，默认无入口、开启原名Bean及事务代理；验证pay不新增事务、failure仍NOT_SUPPORTED，三个可选取消依赖缺失/存在时正确装配；原Receipt validate委托一次。分别缺Receipt/Recovery/Delivery前置依赖时拒绝启动。原配置的三项依赖和业务依赖使用替身，事务管理器为替身，不触发真实TC、Fence清理器或定时任务；事务实际暂停/恢复由原实库用例验证。
+
+PayFailureMySqlIT全4项与PaySuccessMySqlIT全3项原断言保持。Failure包含实际TCC failure的Spring事务代理：入口暂停真实MySQL外层事务，未知异常与FAILED视图返回后恢复原资源/连接，不从旧RR快照重新覆盖视图；资金执行/投影为受控替身，不冒称真实资金。另三项Legacy验证独立提交、当前读拒绝旧快照、故障回滚；Success验证真实持久模式先于终态、ObjectProvider原类型分流、同一监视器、返回时回读及未知结果，TCC资金端仍为替身。其余入口/回调路由、TCC支付/失败状态矩阵由全部原单测覆盖。不运行硬编码默认环境的PayDebitModeM2MySqlIT或四服务TC全链IT。
+
+独立Compose项目`cloud-mall-refactor-pay-tcc-entry-20261114`，候选MySQL19966/10.254.224.0/24，新卷/端口/网络预检。只准备原DDL的pay_record、pay_debit_intent两张空源表；按夹具要求传裸loopback URL，夹具自行补allowPublicKeyRetrieval及timezone。七个UUID库各自记录before-cleanup/finished，成功才删除、失败保留；源表计数/校验和与七对建删事件核验后归档并down本轮容器/网络，卷保留。默认和历史资源不动。
+
+证据`target/backend-refactor-20261114/pay-tcc-entry`。迁移类和引用去package/import/注释逐token对照，其他后端/README按字节保持，非Java运行配置不含旧FQN。迁移类/新测试/包说明完整格式化，其余仅import整理；八模块test-compile、全部单测/新增扫描及7项实库、Pay打包/Jar旧路径和diff检查通过后验收。仅备份并删除原单个class，不全量clean。按精确路径临时index逆补丁恢复父树、真实index/README保持后提交及`refactor/pay-tcc-entry-complete-20261114`；无关README/pycache/忽略工件不入提交。下一步评估Pay范围收尾，尚不宣称Pay整体完成。
