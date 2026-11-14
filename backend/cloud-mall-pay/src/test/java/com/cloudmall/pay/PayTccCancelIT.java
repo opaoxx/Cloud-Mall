@@ -50,7 +50,7 @@ class PayTccCancelIT {
   private static Process gatewayProcess;
   private static Process replacementPay;
   private static java.util.concurrent.atomic.AtomicBoolean cancelRunning;
-  private static com.cloudmall.pay.service.impl.PayTccCancelStore cancelStore;
+  private static com.cloudmall.pay.service.impl.cancellation.PayTccCancelStore cancelStore;
   private static final String TOKEN = "cm16e-cancel-token";
 
   /** 原库只读及各隔离服务数据库。 */
@@ -254,11 +254,11 @@ class PayTccCancelIT {
                     "automaticActionsAllowed",
                     false)),
         StandardOpenOption.CREATE_NEW);
-    cancelStore = application.getBean(com.cloudmall.pay.service.impl.PayTccCancelStore.class);
+    cancelStore = application.getBean(com.cloudmall.pay.service.impl.cancellation.PayTccCancelStore.class);
     cancelRunning =
         (AtomicBoolean)
             ReflectionTestUtils.getField(
-                application.getBean(com.cloudmall.pay.service.impl.PayTccCancelScheduler.class),
+                application.getBean(com.cloudmall.pay.service.impl.cancellation.PayTccCancelScheduler.class),
                 "running");
     startGateway();
     delivery = application.getBean(PayTccDeliveryService.class);
@@ -397,7 +397,7 @@ class PayTccCancelIT {
               return "COMPLETED"
                   .equals(
                       application
-                          .getBean(com.cloudmall.pay.service.impl.PayTccCancelService.class)
+                          .getBean(com.cloudmall.pay.service.impl.cancellation.PayTccCancelService.class)
                           .reconcile(request.payNo));
             },
             70);

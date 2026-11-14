@@ -1,4 +1,4 @@
-package com.cloudmall.pay.service.impl;
+package com.cloudmall.pay.service.impl.cancellation;
 
 import com.cloudmall.pay.domain.po.PayTccCancelPO;
 import com.cloudmall.pay.mapper.PayTccCancelMapper;

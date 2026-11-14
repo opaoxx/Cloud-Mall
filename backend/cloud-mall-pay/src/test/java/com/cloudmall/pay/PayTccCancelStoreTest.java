@@ -19,7 +19,7 @@ import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccDispatchMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
-import com.cloudmall.pay.service.impl.PayTccCancelStore;
+import com.cloudmall.pay.service.impl.cancellation.PayTccCancelStore;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -220,7 +220,7 @@ class PayTccCancelStoreTest {
   @Test
   void reconcileCannotReturnAliasedTerminalFromReadFallback() {
     var orders = mock(com.cloudmall.pay.feign.OrderClient.class);
-    var service = new com.cloudmall.pay.service.impl.PayTccCancelService(store, orders);
+    var service = new com.cloudmall.pay.service.impl.cancellation.PayTccCancelService(store, orders);
     for (String state : List.of("COMPLETED", "CONFLICT")) {
       var row = cancel(state, null);
       row.payNo = "PAY-CANCEL-STORE";
@@ -241,7 +241,7 @@ class PayTccCancelStoreTest {
     org.junit.jupiter.api.Assertions.assertNull(store.claimRecovery("pay-cancel-store", "worker"));
     verify(cancels, never()).selectByPayNo(any());
     var orders = mock(com.cloudmall.pay.feign.OrderClient.class);
-    var service = new com.cloudmall.pay.service.impl.PayTccCancelService(store, orders);
+    var service = new com.cloudmall.pay.service.impl.cancellation.PayTccCancelService(store, orders);
     for (String state :
         List.of("REQUESTED", "ORDER_CANCELLED", "CANCEL_UNKNOWN", "COMPLETED", "CONFLICT")) {
       var row = cancel(state, null);

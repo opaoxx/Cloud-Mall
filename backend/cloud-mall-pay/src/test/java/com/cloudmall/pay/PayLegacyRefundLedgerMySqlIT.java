@@ -9253,7 +9253,7 @@ class PayLegacyRefundLedgerMySqlIT {
     seedOwnedCancelIdentity("COMPLETED", "PAY-1");
     fixture.update("UPDATE pay_record SET status='FAILED'");
     var orders = mock(OrderClient.class);
-    var service = new com.cloudmall.pay.service.impl.PayTccCancelService(store, orders);
+    var service = new com.cloudmall.pay.service.impl.cancellation.PayTccCancelService(store, orders);
     var before = ownedCancelIdentityFacts();
     var returned = new java.util.concurrent.atomic.AtomicReference<String>();
     org.junit.jupiter.api.Assertions.assertAll(
@@ -10005,7 +10005,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 仅Pay/Execution/Cancel/Intent是真实owned Mapper，分支与Fence证据为受控替身。 */
-  private com.cloudmall.pay.service.impl.PayTccAbortStore ownedAbortLedgerStore() {
+  private com.cloudmall.pay.service.impl.cancellation.PayTccAbortStore ownedAbortLedgerStore() {
     ownedCancelRecoveryIdentityStore();
     var configuration = new MybatisConfiguration();
     configuration.setMapUnderscoreToCamelCase(true);
@@ -10036,7 +10036,7 @@ class PayLegacyRefundLedgerMySqlIT {
       when(dispatches.selectByPayNo(any())).thenReturn(dispatch);
       when(receipts.selectByPayNo(any())).thenReturn(receipt);
       when(evidence.classify(any(), any())).thenReturn("TRYING");
-      return new com.cloudmall.pay.service.impl.PayTccAbortStore(
+      return new com.cloudmall.pay.service.impl.cancellation.PayTccAbortStore(
           records,
           session.getMapper(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),
           dispatches,
@@ -10060,8 +10060,8 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 两个实际Store阶段分别进入程序化短事务，受控User GET不在这些事务内。 */
-  private com.cloudmall.pay.service.impl.PayTccAbortService abortLedgerPresenceService(
-      com.cloudmall.pay.service.impl.PayTccAbortStore actualStore, String ledgerVariant) {
+  private com.cloudmall.pay.service.impl.cancellation.PayTccAbortService abortLedgerPresenceService(
+      com.cloudmall.pay.service.impl.cancellation.PayTccAbortStore actualStore, String ledgerVariant) {
     var user = new com.cloudmall.pay.domain.vo.UserTccStateVO();
     user.payNo = "pay-1";
     user.userId = 7L;
@@ -10107,7 +10107,7 @@ class PayLegacyRefundLedgerMySqlIT {
                       .isActualTransactionActive());
               return ApiResponse.ok(decoded);
             });
-    var boundary = mock(com.cloudmall.pay.service.impl.PayTccAbortStore.class);
+    var boundary = mock(com.cloudmall.pay.service.impl.cancellation.PayTccAbortStore.class);
     var transactions =
         new org.springframework.transaction.support.TransactionTemplate(
             new org.springframework.jdbc.datasource.DataSourceTransactionManager(ownedPool));
@@ -10127,7 +10127,7 @@ class PayLegacyRefundLedgerMySqlIT {
             })
         .when(boundary)
         .requestRollback(any(), any());
-    return new com.cloudmall.pay.service.impl.PayTccAbortService(boundary, users, "internal-token");
+    return new com.cloudmall.pay.service.impl.cancellation.PayTccAbortService(boundary, users, "internal-token");
   }
 
   /** 数字0不能被强转为明确no-ledger并授权Pay FAILED投影。 */
@@ -10639,7 +10639,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 克隆原来源表，缺失cancel时用实际Mapper仅建owned表；原库不初始化新业务表。 */
-  private com.cloudmall.pay.service.impl.PayTccCancelStore ownedCancelRecoveryIdentityStore() {
+  private com.cloudmall.pay.service.impl.cancellation.PayTccCancelStore ownedCancelRecoveryIdentityStore() {
     boolean originalCancelExists =
         source.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cloudmall_pay'"
@@ -10665,7 +10665,7 @@ class PayLegacyRefundLedgerMySqlIT {
       cancelRecoveryIdentityMapper =
           session.getMapper(com.cloudmall.pay.mapper.PayTccCancelMapper.class);
       if (!originalCancelExists) cancelRecoveryIdentityMapper.ensureTable();
-      return new com.cloudmall.pay.service.impl.PayTccCancelStore(
+      return new com.cloudmall.pay.service.impl.cancellation.PayTccCancelStore(
           cancelRecoveryIdentityMapper,
           records,
           mock(com.cloudmall.pay.mapper.PayTccExecutionMapper.class),

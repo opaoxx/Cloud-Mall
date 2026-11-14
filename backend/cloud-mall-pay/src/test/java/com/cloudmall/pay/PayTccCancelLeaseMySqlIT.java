@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.cloudmall.pay.mapper.PayTccCancelMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionMapper;
-import com.cloudmall.pay.service.impl.PayTccCancelStore;
+import com.cloudmall.pay.service.impl.cancellation.PayTccCancelStore;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;

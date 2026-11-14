@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复、公开状态投影及交付分组，后续整理取消及TCC公开编排。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复、公开状态投影、交付及取消/中止分组，后续整理TCC公开编排。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复、公开状态投影及交付分组已完成，见第34至45节；取消及TCC公开编排待整理 |
+| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复、公开状态投影、交付及取消/中止分组已完成，见第34至46节；TCC公开编排待整理 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2742,3 +2742,44 @@ CancelStore四个REQUIRES_NEW、普通read；AbortStore两个REQUIRES_NEW/RR；C
 独立Compose项目`cloud-mall-refactor-pay-tcc-cancellation-20261114`，候选MySQL19965/10.254.225.0/24，新卷与端口/网络预检。源库复用前轮已核验的九表DDL文本（非旧库/卷），含execution五恢复列；所有表空且源指纹保持。三个owned测试库按旧夹具AfterAll清理（失败也删），归档精确CREATE/DROP事件、源表与最终schema后才down自有容器/网络，卷保留。默认中间件与历史失败现场不动。
 
 证据`target/backend-refactor-20261114/pay-tcc-cancellation`。源码去package/import/注释逐token对照，其他后端/README逐字节；迁移测试仅发现一次。格式化迁移类/新测试/包说明，外部引用仅整理import；八模块test-compile、全部单测/新扫描与34项精确实库、Pay打包/Jar旧路径检查和diff通过后验收。备份并精确移除七旧生产class（含CancelStore内部类）及迁移测试class，不全量clean。临时index逆补丁恢复父树且真实index/README保持后提交与`refactor/pay-tcc-cancellation-complete-20261114`。README、旧pycache与忽略工件不入提交。
+
+
+### 46.3 实施、调用链与验证结果
+
+七类和原同包测试整体迁入cancellation，public/包内可见性保持。原测试九项断言无改动；十二份引用文件（1生产、11测试）仅地址/import适配。七生产类5280个业务token、迁移测试1879个token与基线等价，总7159；1072份其他已跟踪后端文件及README逐字节保持，79份非Java运行文件无旧FQN。根包现剩8类，只有PayTccPaymentService尚待TCC职责整理。
+
+逐行复核三条调用链及原限制：
+
+- `CancelService.request → claimOrRead独立提交 → reconcile认领随机token → Order读/必要取消/再读 → stage独立事务同时写Pay FAILED和取消COMPLETED → finally finish退避`。订单/库存未证实完成仍202；冲突、响应丢失、终态和ORDER_CANCELLED不退回UNKNOWN均保持。
+- `AbortService.requestRollback(NOT_SUPPORTED) → preparedProof(REQUIRES_NEW/RR) → User GET → requestRollback(REQUIRES_NEW/RR)`。两段都按Pay→execution当前锁核验；Receipt/Fence证据不加反序锁。GET要求同一完整身份、TRYING及明确未记账；只竞争原NONE决议，不夺lease、不覆盖COMMIT、不调用TC或投影FAILED。
+- `CommittedCancelService.request(NOT_SUPPORTED) → Store.request(REQUIRES_NEW) → 正常提交 → 服务抛原202`。Pay→delivery原锁序、COMMITTED永久证据和旧gate保持；READY严格取消、已有paid许可则结果待核验，方向登记保留原lease/attempts/metadata，原交付链负责后续退款或结果确认。
+
+| 最终执行范围 | 测试数 | 实际证据 |
+| --- | ---: | --- |
+| Common全部单测 | 25 | 公共与源码规则 |
+| Pay原有全部单测 | 652 | 原取消/中止、回滚、资金与指标矩阵，含迁移的9项Store测试 |
+| PayTccCancellationWiringTest | 2 | 新包实际扫描、原配置/初始化器、代理/事务元数据、调度及缺依赖/XID门 |
+| PayTccCancelLeaseMySqlIT全类 | 7 | 真Spring Store/MySQL，严格未来lease、旧owner隔离、Pay/cancel共同更新及SQL失败回滚 |
+| PayTccCommittedCancelMySqlIT全类 | 17 | 真Spring Store/MySQL，原20轮并发竞争、方向与metadata保护、失败插入回滚 |
+| PayLegacyRefundLedgerMySqlIT精确十方法 | 10 | 原身份/token矩阵、User字段严格证明、原决议四列写入与其它事实不变 |
+| 合计 | 713 | 79类，0失败、0错误、0跳过；实库34项 |
+
+基线677项另存；八模块编译、全部测试及打包首次通过。本轮无测试失败或生产缺陷修复。新扫描验证默认两个Store、启用七个原名Bean，永久cancel表初始化一次，原CancelConfiguration缺Entry时拒绝；七独立事务/四NOT_SUPPORTED注解、Abort两个RR与普通read保持。5000ms默认和7000ms覆盖均恰一项fixedDelay/initialDelay；调度只登记不执行。实际入口代理使用替身事务管理器，在caller XID下按原错误拒绝且保留caller、零业务交互；不将其等同于真实数据库暂停/恢复证明。
+
+实库Lease全7项和Committed全17项使用关闭Seata/Nacos执行的实际Pay上下文，原两组各十轮并发屏障/超时断言保持。巨型类只运行冻结十方法，不宣称整类通过；Abort部分是实际Mapper加程序化短事务和受控分支/Fence/User证据，验证缺失/null/true等不足证明不改决议、明确false只改变原四列且不覆COMMIT。上述测试不包含真实User资金RPC、TC/RM或完整公开入口依赖装配。
+
+23份Java按完整/仅import范围格式化及检查；Jar187个Pay生产class与classes逐字节一致，七类新路径存在且旧路径/测试无残留。九个旧class（七生产含CancelStore内部类共八个、迁移测试一个）备份后精确移除；迁移测试新FQN仅发现一次、恰九项，未全量clean。源码、构建、Jar及diff检查通过。
+
+### 46.4 证据、回退与后续
+
+方案提交5f5ee58c，基线标签`refactor/pay-tcc-cancellation-baseline-20261114`，完成标签`refactor/pay-tcc-cancellation-complete-20261114`。证据入口`target/backend-refactor-20261114/pay-tcc-cancellation/verification.json`，保存实际commit/tree/标签、前后XML、精确方法清单、迁移测试单次发现、源码/格式/构建/Jar、资源事件及临时index逆补丁证明。
+
+独立MySQL8.0.46九源表最终均0行；三个owned库均已删除，三对CREATE/DROP事件与最终schema集合一致。源指纹检查、应用关闭和巨型类有界池关闭通过。归档后移除本轮自有容器/网络，保留`cloud-mall-refactor-pay-tcc-cancellation-20261114_mysql_data`卷；无新增失败数据库，默认中间件/历史现场不动。原bugfix_log.md已补本轮结果。
+
+```powershell
+git revert refactor/pay-tcc-cancellation-complete-20261114
+```
+
+临时index按no-renames精确路径逆补丁恢复父树，真实index及README保持；回退后仅清理迁入七类（含内部类）、迁移测试与新增装配测试class，再重编译恢复旧路径。后续依赖先逆序回退，不全量clean、不回退数据库，忽略证据工件不受Git回退管理。README、旧pycache与忽略工件未入提交。
+
+下一步审查PayTccPaymentService的公开TCC支付/失败编排，冻结其与已分组组件的调用、事务和错误顺序后再调整；随后评估Pay范围收尾。Pay整体仍未验收完成，本轮无真实TC资金全链路、Gateway/Nacos全商城或压测结论。
