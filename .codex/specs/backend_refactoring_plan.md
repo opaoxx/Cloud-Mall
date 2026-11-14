@@ -3975,3 +3975,25 @@ git revert refactor/user-standards-complete-20261114
 ```
 
 回退只撤销四Java规范变化与两文档，不还原地址DTO原混合行尾，不恢复运行数据或删除证据/卷。
+
+## 64. Stock 十六文件规范收尾（2026-11-14）
+
+### 64.1 冻结范围
+
+从c2c9ff82继续，由当前主Agent单独处理第63节余下Stock清单。精确16文件沿验收汇总§4.1及stock-standards/owned-java.json冻结：config四文件、domain的三个PO/两个VO、两个Mapper和五个Service实现/协作者。只处理9处说明绑定与12文件格式差异；相关成员的分组说明改成准确的逐成员说明，同文件必要类说明一并补齐，不扩展业务重构。
+
+说明范围为两个Nacos listener的receiveConfigInfo、Rabbit JSON converter Bean、StockSqlMapper批处理的setValues/getBatchSize、StockCacheReconciler的SCAN_MAX_MATCHES/redisReplyMaxBytes独立说明及相邻原分组说明、StockConsistencyReconciler的initialize/scheduledAudit注释移到注解前。明确SCAN COUNT只是提示，匹配集合上限保留原不完整扫描异常；Redis耗时/字段字节阈值在返回后校验，不描述成调用中断或网络流量限制。批量绑定仍为Long 0L标STALE、其余标APPLIED，不借补注释调整分支。
+
+不改任何执行语句、标识符、字段/方法可见性、Mapper SQL、Lua、Redis Key、JSON/金额/null、指标/规则名、Bean、AOP表达式、事务/租约/调度或异常语义。Google Java Format 1.22.0跳过长字符串重排，只改冻结文件，允许import排序或删除经核实未使用项；仅行尾变化单独记录，不制造Git内容差异。所有测试源码、其余模块、资源/POM/schema和README保持。
+
+### 64.2 兼容与回归
+
+先记录bugfix_log现象，保存16文件、全部已跟踪backend/deploy及README前像；提交本节并建立refactor/stock-standards-baseline-20261114后实施。完整Javac类型语法树不得对标识符/方法体作归一；所有字面量值/顺序独立比对，覆盖SQL/Lua与阈值。import集合差异单独核实。完成后只读检查Stock全部87生产Java的格式、必需说明、短名与既有模板模式，保留语义明确id。
+
+使用原Stock48类209项和Common四类25项单测，预计52类234项，以本轮新XML为准；不为注释/格式新增测试。八模块离线package跳过重复测试，核验生产/测试编译、Jar与target/classes及SourceFile。既有统一1948与各批85/386/309及实库结果分开，不累计为本轮执行。不开真实中间件、不运行历史IT/性能runner、不操作Docker或卷，不使用全量clean。
+
+### 64.3 文档、证据与回退
+
+证据写入target/backend-refactor-20261114/stock-standards，包括前像、AST/字面量/import、模块扫描、当前XML/八Jar、源保持与剩余清单。通过后更新主方案与验收汇总；若原清单全部处理，仅标记四批清单完成，下一步仍为统一规范总复核，不把本批次等同全库当前检查或全商城/性能验收。
+
+只提交实际有内容差异的冻结Java与两份既有Markdown。git diff --check通过后，临时index逆补丁必须恢复方案基线树，且真实index/README保持；再提交并建立refactor/stock-standards-complete-20261114。Git回退不恢复工作区原行尾或运行数据，不删除证据或卷。
