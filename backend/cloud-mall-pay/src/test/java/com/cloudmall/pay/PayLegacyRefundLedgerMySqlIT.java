@@ -9174,7 +9174,7 @@ class PayLegacyRefundLedgerMySqlIT {
   }
 
   /** 原Execution/Delivery DDL只克隆到owned，真实三Mapper同源，不启应用/TC。 */
-  private com.cloudmall.pay.service.impl.PayTccDeliveryStore ownedDeliveryIdentityStore() {
+  private com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore ownedDeliveryIdentityStore() {
     ownedExecutionObservationStore();
     fixture.execute("DROP TABLE IF EXISTS pay_tcc_delivery");
     fixture.execute(
@@ -9190,7 +9190,7 @@ class PayLegacyRefundLedgerMySqlIT {
       var session = new SqlSessionTemplate(factory.getObject());
       deliveryIdentityMapper =
           session.getMapper(com.cloudmall.pay.mapper.PayTccDeliveryMapper.class);
-      return new com.cloudmall.pay.service.impl.PayTccDeliveryStore(
+      return new com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore(
           deliveryIdentityMapper,
           records,
           executionObservationMapper,

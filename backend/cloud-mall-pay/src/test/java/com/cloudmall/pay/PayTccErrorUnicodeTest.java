@@ -23,7 +23,7 @@ import com.cloudmall.pay.mapper.PayTccExecutionMapper;
 import com.cloudmall.pay.mapper.PayTccExecutionRecoveryMapper;
 import com.cloudmall.pay.mapper.PayTccReceiptMapper;
 import com.cloudmall.pay.service.impl.PayTccCancelStore;
-import com.cloudmall.pay.service.impl.PayTccDeliveryStore;
+import com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore;
 import com.cloudmall.pay.service.impl.execution.PayTccExecutionRecoveryStore;
 import com.cloudmall.pay.service.impl.execution.PayTccExecutionStore;
 import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;

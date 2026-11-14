@@ -8,7 +8,7 @@ import com.alibaba.nacos.api.naming.NamingService;
 import com.cloudmall.pay.domain.dto.PayTccDispatchDTO;
 import com.cloudmall.pay.domain.vo.PayTccDeliveryVO;
 import com.cloudmall.pay.service.PayTccDeliveryService;
-import com.cloudmall.pay.service.impl.PayTccDeliveryScheduler;
+import com.cloudmall.pay.service.impl.delivery.PayTccDeliveryScheduler;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.core.model.GlobalStatus;
 import io.seata.tm.TransactionManagerHolder;

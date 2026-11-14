@@ -24,6 +24,8 @@ import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
 import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.delivery.PayTccDeliveryServiceImpl;
+import com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore;
 import com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl;
 import com.cloudmall.pay.service.impl.execution.PayTccExecutionStore;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;

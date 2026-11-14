@@ -10,7 +10,7 @@ import com.cloudmall.pay.domain.vo.PayTccExecutionVO;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.PayTccTransactionClient;
-import com.cloudmall.pay.service.impl.PayTccDeliveryScheduler;
+import com.cloudmall.pay.service.impl.delivery.PayTccDeliveryScheduler;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.seata.core.context.RootContext;
 import io.seata.core.model.GlobalStatus;
@@ -677,7 +677,7 @@ class PayTccCancelIT {
             .execute(request)
             .state);
     var deliveryStore =
-        application.getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class);
+        application.getBean(com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore.class);
     deliveryStore.ensure(request.payNo);
     assertNotNull(deliveryStore.claim(request.payNo, "prior-delivery"));
     assertTrue(deliveryStore.stage(request.payNo, "prior-delivery", "ORDER_SYNC_UNKNOWN"));
@@ -1429,7 +1429,7 @@ class PayTccCancelIT {
             .execute(request)
             .state);
     var deliveryStore =
-        application.getBean(com.cloudmall.pay.service.impl.PayTccDeliveryStore.class);
+        application.getBean(com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore.class);
     deliveryStore.ensure(request.payNo);
     if (reconcileCancellation) {
       assertNotNull(deliveryStore.claim(request.payNo, "lost-before-paid"));
@@ -1599,11 +1599,11 @@ class PayTccCancelIT {
             .state);
     Object worker = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(delivery);
     var original =
-        (com.cloudmall.pay.service.impl.PayTccDeliveryStore)
+        (com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore)
             ReflectionTestUtils.getField(worker, "store");
     var paused =
         org.mockito.Mockito.mock(
-            com.cloudmall.pay.service.impl.PayTccDeliveryStore.class,
+            com.cloudmall.pay.service.impl.delivery.PayTccDeliveryStore.class,
             org.mockito.AdditionalAnswers.delegatesTo(original));
     CountDownLatch entered = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
