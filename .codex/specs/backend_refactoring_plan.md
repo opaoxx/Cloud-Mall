@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence真实TC回归、Pay/User跨进程派发桥及Pay receipt/User余额双资源有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt及coordinator一次性编排/指定进程恢复的有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3446,3 +3446,52 @@ git revert refactor/pay-receipt-native-complete-20261114
 证据target/backend-refactor-20261114/pay-coordinator-native保存方法/辅助保持、XML/日志、十五笔事实、SDK故障与TC终态、两类原未知状态、两个User/四个Pay启动停止回执、子进程实际参数（控制凭证仅保留原本地受控args文件）、源指纹及User Jar。成功后核对两库建删、八源表保持、Redis初末16DB空/Nacos组无实例，归档TC日志及停止后的file store，再down四容器/网络，无-v，五卷保留。
 
 仅提交PayTccCoordinatorIT与本方案，其它1119份既有backend/deploy及README保持。git diff --check、临时index逆补丁恢复父树且真实index/README保持后建立refactor/pay-coordinator-native-complete-20261114。Git回退不恢复实验数据或删除证据/保留卷。该范围仍不代表公开支付入口、定时自动恢复、Order/Stock交付、商城或性能验收。
+
+### 56.5 本轮结果与未知语义核验
+
+仅PayTccCoordinatorIT改为使用已有显式环境helper；父Pay、NamingService、两User和四次Pay故障子进程启动使用同一隔离地址。Pay保留原@args/classpath、控制凭证和故障屏障，新增时区和不含控制凭证的PID/模式/端口回执；User退出等待必须成功。15个业务方法正文、seed/settle/cleanup、ProbeTransactions、交易/并发/控制请求辅助方法逐段核验保持。PayCoordinatorFaultProcess、环境helper及所有生产代码均未改。
+
+6类82项定向测试、User离线打包与15项真实回归首次全部通过，0失败/错误/跳过；User Jar88个生产class与编译输出一致。旧64/11报告SHA单独核验，不与本轮累加。当前源码确有15方法，未按README旧13项漏跑新增观察窗口；本轮没有新增启动或业务测试失败，也没有调整重试上限、故障屏障或断言。
+
+| 验收组 | 项数 | 本轮结果 |
+| --- | --- | --- |
+| 正常编排、余额不足、User响应丢失 | 3 | 一次claim/begin/POST，明确双资源提交或原XID回滚，不重复资金；公开pay_record保持PENDING |
+| 并发execute/recover | 1 | 原owner独占begin与Try，旧无绑定观察可被拒但不打断合法owner |
+| commit/rollback请求丢失 | 2 | 持久COMMIT/ROLLBACK后只重试原XID同一决议，相反决议被拒 |
+| commit响应丢失 | 1 | 通过永久资源事实判终态，清Fence后不补发第二次commit |
+| begin响应丢失 | 1 | execution保持BEGIN_UNKNOWN/xid=NULL，无receipt/资金，不新begin |
+| 决议前中断/TC超时 | 1 | recover不从TRYING猜COMMIT，decision保持NONE，原短超时TC回滚后可核验ROLLEDBACK |
+| Pay在COMMIT意图后中断/重启 | 1 | 使用原appId/数据库/XID恢复COMMIT，不重复Try或POST |
+| Pay仅持久XID时中断/重启 | 1 | 恢复保持UNKNOWN/NONE，无两端分支或资金，不接管Try权限 |
+| 身份及已有全局/本地事务拒绝 | 1 | 错载荷/上下文在begin前拒绝，后续原载荷执行仍只一次begin |
+| pending begin观察 | 1 | 观察BEGIN_UNKNOWN不剥夺原owner后续绑定/提交权 |
+| NULL XID旧观察与同XID/NONE旧观察 | 2 | 前者明确拒绝跟随新绑定，后者接受原owner合法提交；不改最终execution事实 |
+| 合计 | 15 | 冻结清单与本轮XML精确匹配 |
+
+真实TC共15个全局事务：父Pay begin13次，故障Pay子进程begin2次；两种RM各13分支，共26分支。TC终态为9提交、6回滚，包含原2500ms超时用例。所有XID与十五笔快照的testOnlyKnownXids并集一致，没有第二次begin补造事务。
+
+业务execution快照为9 COMMITTED、4 ROLLEDBACK、1 BEGIN_UNKNOWN和1 UNKNOWN。两条未知的decision均NONE、无receipt/dispatch/资金事实：BEGIN_UNKNOWN的xid仍NULL；UNKNOWN保留原XID。原测试清理层分别结束其已知TC事务，未将XID回填或把业务state写成成功；因此“TC全部结束”不等于“十五笔业务全部恢复”。这两条是负向验收的预期事实，完整原快照已归档，不能称作完整支付成功。另有一条ROLLEDBACK仍保留NONE，来自等待TC超时的原路径。
+
+六个自有子进程均有启动/退出回执：两个User、四个Pay（BEFORE_COMMIT一次、BEFORE_RECEIPT一次、NONE两次）。四个Pay args文件核对同一显式地址、时区及稳定fault-pay appId，原控制凭证只留受控原文件，不在新摘要输出。各次真实RM注册日志、User Nacos注册与终止事实已核验；退出沿原强停方式，不能表述为自然退出。
+
+八张空源表前后DDL/计数/checksum一致，Redis16DB初末为空，Nacos原组最终无User实例。两owned库按原清理门删除，两对CREATE/DROP与最终schema互证；本轮无失败库。普通断言失败但已收敛时原夹具仍可能删库的限制未改；原业务未知快照与测试专用清理依据已明确保留，不假称任意失败都留库。
+
+其它1119份已跟踪backend/deploy及README逐字节保持，默认/历史容器ID、镜像、挂载、启动时间和重启次数保持。单Java格式、适用编译/测试、User打包和diff检查通过。归档日志和停止后的TC sessionStore/root.data后，已移除本轮四容器/网络，保留：
+
+- cloud-mall-refactor-pay-coordinator-20261114_mysql_data
+- cloud-mall-refactor-pay-coordinator-20261114_redis_data
+- cloud-mall-refactor-pay-coordinator-20261114_seata_data
+- cloud-mall-refactor-pay-coordinator-20261114_nacos_data
+- cloud-mall-refactor-pay-coordinator-20261114_nacos_logs
+
+### 56.6 回退与后续
+
+方案提交c451e118，基线标签refactor/pay-coordinator-native-baseline-20261114，完成标签refactor/pay-coordinator-native-complete-20261114。证据入口target/backend-refactor-20261114/pay-coordinator-native/verification.json，包含82/15精确报告、原方法/辅助保持、User Jar、十五笔execution/资源事实、业务两种未知与TC清理区别、TC15全局/26分支、六子进程、源表/两库事件、TC文件存储和资源关闭。
+
+```powershell
+git revert refactor/pay-coordinator-native-complete-20261114
+```
+
+提交仅本测试与方案；临时index逆补丁恢复父树且真实index/README保持。Git回退不恢复运行数据库或TC状态，也不删除证据/五卷。原bugfix_log补充固定环境原因、装配修正及完整验证；README本地修改和旧pycache不入提交。
+
+下一步审查定时自动恢复测试的显式环境、恢复扫描入口与Pay重启参数，冻结新的有限验证范围。本轮手动recover与指定进程窗口通过不替代定时扫描、公开支付入口、Order/Stock交付、完整商城或性能验收。
