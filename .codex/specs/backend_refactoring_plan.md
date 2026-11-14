@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence真实TC回归，以及Pay/User跨进程Nacos/Feign派发桥有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence真实TC回归、Pay/User跨进程派发桥及Pay receipt/User余额双资源有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3372,3 +3372,47 @@ Pay父上下文和两个User子进程使用同一显式MySQL/Nacos/TC/Redis环�
 成功后核验十一笔终态事实、两种真实RM资源/全局事务终态、两个自有User PID退出、两库建删、八源表指纹、Redis初末16DB空及Nacos原组无实例；归档日志和停止后的TC file store，再down本轮容器/网络，无-v，五卷保留。只提交PayReceiptTccIT与本方案，其它1119份既有backend/deploy及README保持。git diff --check及临时index逆补丁恢复父树、真实index/README保持后建立refactor/pay-receipt-native-complete-20261114。Git回退不恢复运行数据库/TC状态或删除证据/保留卷。
 
 本轮不启用coordinator、公开Pay TCC入口、Order/Stock联动、进程故障全矩阵或商城/性能验收；双资源回执与余额一致不自动代表公开订单已经付款成功。
+
+### 55.4 本轮结果与故障验证
+
+本轮仅修改PayReceiptTccIT，复用上一轮环境helper；先读取全部必填隔离属性再建库，同一Nacos/TC/Redis参数传给父Pay与两子User。新增子JVM时区、PID/端口归属与准确退出回执，类说明明确双资源职责。原11方法正文、seed/settle/cleanup及全部交易辅助代码逐段核验保持；生产代码、环境helper、其它原测试和业务断言不变。
+
+4类64项定向测试、User离线打包、11项真实TC测试均首次通过，0失败/错误/跳过；User Jar88个生产class与当前编译输出逐字节一致。上一轮33/9报告仅校验历史SHA，不计为本轮结果。初始化即授本轮Nacos public命名空间权限，未复现上轮注册失败，也未修改共享Nacos或旧失败库。
+
+| 原用例组 | 项数 | 实际观察 |
+| --- | --- | --- |
+| 双资源提交/取消、永久终态与清Fence后重放 | 2 | receipt与User资金分别CONFIRMED/CANCELLED；同XID不同branch；提交只扣10一次，取消冻结归零；公开pay_record保持PENDING |
+| User余额不足 | 1 | User Try未知时receipt仍TRYING；TC取消后原receipt取消、User空回滚无资金副作用 |
+| Pay空Cancel与Try写失败 | 2 | CLAIMED独立事实保留，失败Try的Fence不提交；原TC空取消写永久receipt/Fence，迟到Prepare不能复活 |
+| Pay Confirm/Cancel写失败 | 2 | 原触发器导致回执/Fence共同停在TRYING/TRIED；移除触发器后TC提交/回滚重试线程分别收敛，无半完成Fence |
+| 并发receipt认领 | 1 | 两调用者只登记一个Pay分支，随后唯一User POST与TC提交形成一次资金事实 |
+| User响应丢失 | 1 | 保留TRY_UNKNOWN及原Pay资源，仅GET恢复，无第二POST/Pay分支 |
+| 载荷与XID冲突 | 1 | 拒绝重绑或错误回调，保留原owner；原TC取消后资金不动 |
+| 被拒第二Pay分支 | 1 | 唯一receipt不被抢占；两个Fence分别保留原owner回滚与被拒分支SUSPENDED，安全ACK不操作User |
+| 合计 | 11 | 原生方法清单与XML精确匹配 |
+
+TC实际记录11个全局事务、19个分支（Pay资源cloudmallPayDebitReceipt共12，User资源cloudmallUserBalanceDebit共7），3个全局提交/8个全局回滚覆盖全部begin。部分用例只注册Pay，第二分支拒绝用例多一个Pay branch，不能说每个用例都恰有两个分支。十一笔原生快照分别保存receipt/payFence/dispatch/receive/attempt/funds/ledger/User Fence，receipt终态3 CONFIRMED、8 CANCELLED，User冻结均0，无TRYING残留。
+
+Confirm故障在Pay RM日志返回PhaseTwo_CommitFailed_Retryable，TC RetryCommitting完成同一事务；Cancel故障本轮返回两次PhaseTwo_RollbackFailed_Retryable，TC RetryRollbacking最终成功。归档脚本首次误将提交/回滚统一匹配为TC的fail and will retry文字而停止；实际两类日志格式不同，修正为分别核验RM失败结果、两个TC重试线程终态及同一全局集合后通过。此归档修正未改业务测试、延时或重发交易，原日志保留；真实11项仍为首次通过。
+
+两个User PID均有显式环境、Tomcat/RM/Nacos就绪及停止回执，沿原destroyForcibly收尾，exitCode=1不冒称自然退出。八张空源表前后DDL/计数/checksum一致；Redis16DB初末为空，原Nacos组最终无User实例。两个owned库均按原规则删除，两对CREATE/DROP事件与最终schema一致；本轮无失败库。原夹具普通断言失败后若已收敛仍可能删库的限制保留，没有虚构任意失败都保留现场。
+
+其它1119份已跟踪backend/deploy文件与README按字节保持，旧容器ID/镜像/完整挂载/启动时间/重启次数保持。单Java格式、适用编译/测试、User包及diff检查通过。归档TC日志与停止后的sessionStore/root.data后，已down本轮四容器/网络，五卷保留：
+
+- cloud-mall-refactor-pay-receipt-20261114_mysql_data
+- cloud-mall-refactor-pay-receipt-20261114_redis_data
+- cloud-mall-refactor-pay-receipt-20261114_seata_data
+- cloud-mall-refactor-pay-receipt-20261114_nacos_data
+- cloud-mall-refactor-pay-receipt-20261114_nacos_logs
+
+### 55.5 回退与下一步
+
+方案提交34fd2661，基线标签refactor/pay-receipt-native-baseline-20261114，完成标签refactor/pay-receipt-native-complete-20261114。证据入口target/backend-refactor-20261114/pay-receipt-native/verification.json，包括64/11精确报告、11方法/交易辅助保持、Jar指纹、十一笔双资源事实、TC分支与重试、两子进程回执、八源表/两库事件、TC file store、资源关闭及源码保持。
+
+```powershell
+git revert refactor/pay-receipt-native-complete-20261114
+```
+
+结果只提交本测试与方案；临时index逆补丁恢复父树，真实index/README保持。回退不会恢复已清理数据库/TC运行态或删除忽略证据/保留卷。原bugfix_log已记录固定环境根因、装配修正、归档日志判据修正和实际验证；README本地修改及旧pycache未入提交。
+
+下一步审查Pay coordinator自动全局事务编排验收的显式环境、Pay子进程参数和故障场景，再冻结有限范围。双资源资源级事实通过不代表自动begin/决议恢复、公开支付成功、Order/Stock/Gateway、完整商城或性能已通过。
