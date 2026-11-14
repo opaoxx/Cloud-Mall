@@ -23,8 +23,7 @@ public class StockReservationRequestService {
 
   /** 先提交 INIT 请求；相同订单号的不同 SKU 快照直接拒绝。 */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
-  public String claim(
-      String orderNo, String scene, String itemsSnapshot, String itemsHash) {
+  public String claim(String orderNo, String scene, String itemsSnapshot, String itemsHash) {
     // 1. 数据库唯一订单号约束阻止不同实例并发认领同一请求。
     stockSqlMapper.insertReservationRequest(
         orderNo, scene, itemsSnapshot, itemsHash, OffsetDateTime.now(ZoneOffset.ofHours(8)));

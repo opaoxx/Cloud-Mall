@@ -161,31 +161,57 @@ public class StockSqlMapper {
 
   /** 查询带乐观锁版本的库存行。 */
   public Map<String, Object> findStock(Long skuId) {
-    List<Map<String, Object>> rows = queryForList(
-        "select sku_id,available_quantity,reserved_quantity,sold_quantity,version from stock_sku where sku_id=?",
-        skuId);
+    List<Map<String, Object>> rows =
+        queryForList(
+            "select sku_id,available_quantity,reserved_quantity,sold_quantity,version from stock_sku where sku_id=?",
+            skuId);
     return rows.isEmpty() ? null : rows.get(0);
   }
 
   /** 按库存版本条件更新普通库存。 */
-  public int updateAvailableWithVersion(Long skuId, int quantity, int expectedVersion, OffsetDateTime updatedAt) {
-    return update("update stock_sku set available_quantity=available_quantity-?,reserved_quantity=reserved_quantity+?,version=version+1,updated_at=? where sku_id=? and version=? and available_quantity>=?",
-        quantity, quantity, updatedAt, skuId, expectedVersion, quantity);
+  public int updateAvailableWithVersion(
+      Long skuId, int quantity, int expectedVersion, OffsetDateTime updatedAt) {
+    return update(
+        "update stock_sku set available_quantity=available_quantity-?,reserved_quantity=reserved_quantity+?,version=version+1,updated_at=? where sku_id=? and version=? and available_quantity>=?",
+        quantity,
+        quantity,
+        updatedAt,
+        skuId,
+        expectedVersion,
+        quantity);
   }
 
   /** 按库存版本条件结算预扣库存。 */
-  public int updateSettlementWithVersion(Long skuId, String flowType, int quantity, int expectedVersion, OffsetDateTime updatedAt) {
-    String fields = "CONFIRM".equals(flowType)
-        ? "reserved_quantity=reserved_quantity-?,sold_quantity=sold_quantity+?"
-        : "reserved_quantity=reserved_quantity-?,available_quantity=available_quantity+?";
-    return update("update stock_sku set " + fields + ",version=version+1,updated_at=? where sku_id=? and version=? and reserved_quantity>=?",
-        quantity, quantity, updatedAt, skuId, expectedVersion, quantity);
+  public int updateSettlementWithVersion(
+      Long skuId, String flowType, int quantity, int expectedVersion, OffsetDateTime updatedAt) {
+    String fields =
+        "CONFIRM".equals(flowType)
+            ? "reserved_quantity=reserved_quantity-?,sold_quantity=sold_quantity+?"
+            : "reserved_quantity=reserved_quantity-?,available_quantity=available_quantity+?";
+    return update(
+        "update stock_sku set "
+            + fields
+            + ",version=version+1,updated_at=? where sku_id=? and version=? and reserved_quantity>=?",
+        quantity,
+        quantity,
+        updatedAt,
+        skuId,
+        expectedVersion,
+        quantity);
   }
 
   /** 在库存事实事务内写入缓存修复意图。 */
-  public int insertCacheRepair(long skuId, int targetAvailable, int sourceVersion, OffsetDateTime occurredAt) {
-    return update("insert into stock_cache_repair(id,sku_id,target_available,source_version,status,attempts,next_retry_at,created_at,updated_at) values(?,?,?,?,'PENDING',0,?,?,?) on duplicate key update target_available=values(target_available),status='PENDING',next_retry_at=values(next_retry_at),last_error=null,updated_at=values(updated_at)",
-        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), skuId, targetAvailable, sourceVersion, occurredAt, occurredAt, occurredAt);
+  public int insertCacheRepair(
+      long skuId, int targetAvailable, int sourceVersion, OffsetDateTime occurredAt) {
+    return update(
+        "insert into stock_cache_repair(id,sku_id,target_available,source_version,status,attempts,next_retry_at,created_at,updated_at) values(?,?,?,?,'PENDING',0,?,?,?) on duplicate key update target_available=values(target_available),status='PENDING',next_retry_at=values(next_retry_at),last_error=null,updated_at=values(updated_at)",
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
+        skuId,
+        targetAvailable,
+        sourceVersion,
+        occurredAt,
+        occurredAt,
+        occurredAt);
   }
 
   /** 在 MySQL 内以单条 INSERT SELECT 排队当前库存版本，避免 88,476 次往返。 */
@@ -218,11 +244,9 @@ public class StockSqlMapper {
   /**
    * 为确认存在差异的 SKU 批量创建或唤醒当前版本修复意图。
    *
-   * <p>使用一条 INSERT SELECT 和 JDBC 参数绑定，避免按 SKU 逐条往返；同版本 APPLIED 只有在
-   * 差异复核明确确认缓存不一致时才会被重新唤醒。
+   * <p>使用一条 INSERT SELECT 和 JDBC 参数绑定，避免按 SKU 逐条往返；同版本 APPLIED 只有在 差异复核明确确认缓存不一致时才会被重新唤醒。
    */
-  public int enqueueCacheRepairsForSkuIds(
-      List<Long> skuIds, OffsetDateTime occurredAt) {
+  public int enqueueCacheRepairsForSkuIds(List<Long> skuIds, OffsetDateTime occurredAt) {
     if (skuIds == null || skuIds.isEmpty()) {
       return 0;
     }
@@ -277,18 +301,25 @@ public class StockSqlMapper {
         "UPDATE stock_cache_repair SET status=?,lease_owner=NULL,lease_until=NULL,updated_at=?"
             + " WHERE sku_id=? AND source_version=? AND status='PENDING'",
         new org.springframework.jdbc.core.BatchPreparedStatementSetter() {
+          /**
+           * 按同序库存行和 Redis 结果绑定状态、时间、SKU 与来源版本；Long 0L 标记 STALE，其余结果标记 APPLIED。
+           *
+           * @param statement 当前批量更新语句
+           * @param index 库存行与结果列表共用的下标
+           * @throws java.sql.SQLException JDBC 参数绑定失败时向调用方传播
+           */
           @Override
           public void setValues(java.sql.PreparedStatement statement, int index)
               throws java.sql.SQLException {
             Map<String, Object> stockRow = stockRows.get(index);
             Object outcome = outcomes.get(index);
             statement.setString(1, Long.valueOf(0L).equals(outcome) ? "STALE" : "APPLIED");
-            statement.setTimestamp(
-                2, java.sql.Timestamp.valueOf(updatedAt.toLocalDateTime()));
+            statement.setTimestamp(2, java.sql.Timestamp.valueOf(updatedAt.toLocalDateTime()));
             statement.setLong(3, ((Number) stockRow.get("sku_id")).longValue());
             statement.setInt(4, ((Number) stockRow.get("version")).intValue());
           }
 
+          /** 返回本批库存行数，与按下标读取的 Redis 结果逐项对应。 */
           @Override
           public int getBatchSize() {
             return stockRows.size();
@@ -298,17 +329,42 @@ public class StockSqlMapper {
 
   /** 读取待修复的普通库存投影。 */
   public List<Map<String, Object>> findPendingCacheRepairs(OffsetDateTime now, int limit) {
-    return queryForList("select id,sku_id,target_available,source_version,attempts from stock_cache_repair where status='PENDING' and next_retry_at<=? and (lease_until is null or lease_until<?) order by sku_id,source_version limit ?", now, now, Math.max(1, limit));
+    return queryForList(
+        "select id,sku_id,target_available,source_version,attempts from stock_cache_repair where status='PENDING' and next_retry_at<=? and (lease_until is null or lease_until<?) order by sku_id,source_version limit ?",
+        now,
+        now,
+        Math.max(1, limit));
   }
 
   /** 以数据库租约认领缓存修复记录。 */
-  public int claimCacheRepair(long id, String owner, OffsetDateTime leaseUntil, OffsetDateTime now) {
-    return update("update stock_cache_repair set lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=? where id=? and status='PENDING' and next_retry_at<=? and (lease_until is null or lease_until<?)", owner, leaseUntil, now, id, now, now);
+  public int claimCacheRepair(
+      long id, String owner, OffsetDateTime leaseUntil, OffsetDateTime now) {
+    return update(
+        "update stock_cache_repair set lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=? where id=? and status='PENDING' and next_retry_at<=? and (lease_until is null or lease_until<?)",
+        owner,
+        leaseUntil,
+        now,
+        id,
+        now,
+        now);
   }
 
   /** 标记缓存修复结果。 */
-  public int finishCacheRepair(long id, String owner, String status, String error, OffsetDateTime nextRetry, OffsetDateTime now) {
-    return update("update stock_cache_repair set status=?,last_error=?,next_retry_at=?,lease_owner=null,lease_until=null,updated_at=? where id=? and status='PENDING' and lease_owner=?", status, error, nextRetry, now, id, owner);
+  public int finishCacheRepair(
+      long id,
+      String owner,
+      String status,
+      String error,
+      OffsetDateTime nextRetry,
+      OffsetDateTime now) {
+    return update(
+        "update stock_cache_repair set status=?,last_error=?,next_retry_at=?,lease_owner=null,lease_until=null,updated_at=? where id=? and status='PENDING' and lease_owner=?",
+        status,
+        error,
+        nextRetry,
+        now,
+        id,
+        owner);
   }
 
   /** 查询库存候选汇总并保留原订单字节身份及非法原行计数，不过滤隐藏异常。 */
@@ -416,9 +472,9 @@ public class StockSqlMapper {
   /**
    * Atomically claims a settlement flow and applies its stock mutation.
    *
-   * <p>The flow row is inserted first with its unique idempotency key. A duplicate claim is
-   * treated as an already completed operation. Both statements run in the caller's transaction,
-   * so a failed stock update rolls the flow claim back as well.
+   * <p>The flow row is inserted first with its unique idempotency key. A duplicate claim is treated
+   * as an already completed operation. Both statements run in the caller's transaction, so a failed
+   * stock update rolls the flow claim back as well.
    */
   public int settleQuantity(
       Long skuId,
@@ -544,10 +600,12 @@ public class StockSqlMapper {
 
   /** 按用户和幂等键锁定全局秒杀受理记录。 */
   public Map<String, Object> findSeckillByUserKeyForUpdate(long userId, String idempotencyKey) {
-    List<Map<String, Object>> rows = queryForList(
-        "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash"
-            + " FROM seckill_reservation WHERE user_id=? AND idempotency_key=? FOR UPDATE",
-        userId, idempotencyKey);
+    List<Map<String, Object>> rows =
+        queryForList(
+            "SELECT activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash"
+                + " FROM seckill_reservation WHERE user_id=? AND idempotency_key=? FOR UPDATE",
+            userId,
+            idempotencyKey);
     return rows.isEmpty() ? null : rows.get(0);
   }
 
@@ -563,9 +621,10 @@ public class StockSqlMapper {
 
   /** 查询订单对应的秒杀 outbox 投递状态。 */
   public Map<String, Object> findSeckillOutboxByOrderNo(String orderNo) {
-    List<Map<String, Object>> rows = queryForList(
-        "SELECT event_id,status,payload,request_hash FROM seckill_order_outbox WHERE order_no=?",
-        orderNo);
+    List<Map<String, Object>> rows =
+        queryForList(
+            "SELECT event_id,status,payload,request_hash FROM seckill_order_outbox WHERE order_no=?",
+            orderNo);
     return rows.isEmpty() ? null : rows.get(0);
   }
 
@@ -606,13 +665,27 @@ public class StockSqlMapper {
 
   /** 首次受理前持久化完整请求载荷和哈希。 */
   public int saveSeckillPending(
-      long activityId, long skuId, long userId, String orderNo, String idempotencyKey,
-      String requestPayload, String requestHash, OffsetDateTime occurredAt) {
+      long activityId,
+      long skuId,
+      long userId,
+      String orderNo,
+      String idempotencyKey,
+      String requestPayload,
+      String requestHash,
+      OffsetDateTime occurredAt) {
     return update(
         "INSERT INTO seckill_reservation(id,activity_id,sku_id,user_id,order_no,idempotency_key,status,request_payload,request_hash,created_at,updated_at)"
             + " VALUES(?,?,?,?,?,?, 'PENDING',?,?,?,?)",
-        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), activityId, skuId, userId,
-        orderNo, idempotencyKey, requestPayload, requestHash, occurredAt, occurredAt);
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
+        activityId,
+        skuId,
+        userId,
+        orderNo,
+        idempotencyKey,
+        requestPayload,
+        requestHash,
+        occurredAt,
+        occurredAt);
   }
 
   /**
@@ -693,18 +766,37 @@ public class StockSqlMapper {
     return update(
         "INSERT INTO seckill_order_outbox(id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts,next_retry_at,created_at,updated_at)"
             + " VALUES(?,?,?,?,?,?, 'PENDING',0,?,?,?) ON DUPLICATE KEY UPDATE event_id=VALUES(event_id)",
-        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), eventId,
-        orderNo, idempotencyKey, payload, requestHash, occurredAt, occurredAt, occurredAt);
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
+        eventId,
+        orderNo,
+        idempotencyKey,
+        payload,
+        requestHash,
+        occurredAt,
+        occurredAt,
+        occurredAt);
   }
 
   /** 进程在 Lua 后崩溃时补齐同一事件的 outbox。 */
   public int insertSeckillOutboxIfAbsent(
-      String eventId, String orderNo, String idempotencyKey, String payload, String requestHash, OffsetDateTime occurredAt) {
+      String eventId,
+      String orderNo,
+      String idempotencyKey,
+      String payload,
+      String requestHash,
+      OffsetDateTime occurredAt) {
     return update(
         "INSERT IGNORE INTO seckill_order_outbox(id,event_id,order_no,idempotency_key,payload,request_hash,status,attempts,next_retry_at,created_at,updated_at)"
             + " VALUES(?,?,?,?,?,?, 'PENDING',0,?,?,?)",
-        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()), eventId,
-        orderNo, idempotencyKey, payload, requestHash, occurredAt, occurredAt, occurredAt);
+        Math.abs(java.util.UUID.randomUUID().getMostSignificantBits()),
+        eventId,
+        orderNo,
+        idempotencyKey,
+        payload,
+        requestHash,
+        occurredAt,
+        occurredAt,
+        occurredAt);
   }
 
   /** 读取可投递的秒杀 outbox；负计数在 LIMIT 前排除，保留原事实待核验。 */

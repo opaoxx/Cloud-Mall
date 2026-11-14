@@ -1,6 +1,5 @@
 package com.cloudmall.stock.service.impl.seckill;
 
-
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.domain.po.SeckillQuotaSettlementPO;
 import com.cloudmall.stock.domain.vo.StockActionResultVO;

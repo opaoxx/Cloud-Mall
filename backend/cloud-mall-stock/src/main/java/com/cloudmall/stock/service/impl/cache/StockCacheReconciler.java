@@ -63,9 +63,10 @@ public class StockCacheReconciler {
               + " else out[#out+1]=''; out[#out+1]=''; end end; return out")
           .getBytes(StandardCharsets.UTF_8);
 
-  /** Redis 游标扫描的每次提示数量和单轮匹配上限。 */
+  /** Redis SCAN 每次迭代的 COUNT 提示，不保证实际返回数量。 */
   private static final int SCAN_COUNT = 1000;
 
+  /** 单次扫描的匹配键集合上限；达到上限后仍有数据则判定扫描未完成。 */
   private static final int SCAN_MAX_MATCHES = 10000;
 
   /** 每轮修复的最大行数，避免单次任务长期占用调度线程。 */
@@ -92,10 +93,11 @@ public class StockCacheReconciler {
   @Value("${cloudmall.stock.cache-startup-max-ms:60000}")
   private long startupMaxMillis = 60000L;
 
-  /** 单批只读 Lua 的耗时和返回字节上限，阻止大批次阻塞 Redis。 */
+  /** 单批只读 Lua 返回后的耗时校验阈值，运行时最低按 100 毫秒检查。 */
   @Value("${cloudmall.stock.cache-redis-batch-max-ms:2000}")
   private long redisBatchMaxMillis = 2000L;
 
+  /** 单批只读 Lua 结果字段的累计字节校验阈值，运行时最低按 3000 字节检查。 */
   @Value("${cloudmall.stock.cache-redis-reply-max-bytes:256000}")
   private long redisReplyMaxBytes = 256000L;
 

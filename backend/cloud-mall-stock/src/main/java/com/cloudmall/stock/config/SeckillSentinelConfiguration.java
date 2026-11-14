@@ -66,16 +66,19 @@ public class SeckillSentinelConfiguration {
   private volatile boolean subscribed;
 
   /** Nacos 新完整快照到达后先校验再发布到 Sentinel。 */
-  private final AbstractListener flowListener = new AbstractListener() {
-    @Override
-    public void receiveConfigInfo(String content) {
-      applyFlowRules(content);
-    }
-  };
+  private final AbstractListener flowListener =
+      new AbstractListener() {
+        /** 将下发快照交给原流控规则校验器；空白、非法或不完整内容保留最近有效规则。 */
+        @Override
+        public void receiveConfigInfo(String content) {
+          applyFlowRules(content);
+        }
+      };
 
   /** 构造时先安装保守本地规则，避免配置订阅前存在保护空窗。 */
   public SeckillSentinelConfiguration() {
-    if (FlowRuleManager.getRules().stream().noneMatch(rule -> RESOURCE.equals(rule.getResource()))) {
+    if (FlowRuleManager.getRules().stream()
+        .noneMatch(rule -> RESOURCE.equals(rule.getResource()))) {
       replaceOwnRule(defaultRule(200.0));
     }
   }
@@ -104,13 +107,16 @@ public class SeckillSentinelConfiguration {
         properties.setProperty("password", nacosPassword);
         configService = NacosFactory.createConfigService(properties);
       }
-      String content = configService.getConfigAndSignListener(
-          FLOW_DATA_ID, ruleGroup, 3000L, flowListener);
+      String content =
+          configService.getConfigAndSignListener(FLOW_DATA_ID, ruleGroup, 3000L, flowListener);
       subscribed = true;
       applyFlowRules(content);
     } catch (Exception unavailable) {
-      log.warn("Stock Sentinel Nacos 规则订阅失败，dataId={}，group={}，保留当前规则并重试",
-          FLOW_DATA_ID, ruleGroup, unavailable);
+      log.warn(
+          "Stock Sentinel Nacos 规则订阅失败，dataId={}，group={}，保留当前规则并重试",
+          FLOW_DATA_ID,
+          ruleGroup,
+          unavailable);
     }
   }
 
@@ -123,44 +129,58 @@ public class SeckillSentinelConfiguration {
   /** 拒绝非法或不完整规则，只将有效目标快照替换进全局规则管理器。 */
   public synchronized boolean applyFlowRules(String content) {
     if (content == null || content.isBlank()) {
-      log.warn("Stock Sentinel Nacos flow 规则为空，dataId={}，group={}，保留最近有效规则",
-          FLOW_DATA_ID, ruleGroup);
+      log.warn(
+          "Stock Sentinel Nacos flow 规则为空，dataId={}，group={}，保留最近有效规则", FLOW_DATA_ID, ruleGroup);
       return false;
     }
     try {
-      ObjectMapper mapper = new ObjectMapper()
-          .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true);
+      ObjectMapper mapper =
+          new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true);
       List<FlowRule> incoming = mapper.readValue(content, new TypeReference<>() {});
       if (incoming == null || incoming.size() != 1 || !validRule(incoming.get(0))) {
-        log.warn("Stock Sentinel Nacos flow 规则无效，dataId={}，group={}，保留最近有效规则",
-            FLOW_DATA_ID, ruleGroup);
+        log.warn(
+            "Stock Sentinel Nacos flow 规则无效，dataId={}，group={}，保留最近有效规则", FLOW_DATA_ID, ruleGroup);
         return false;
       }
       replaceOwnRule(incoming.get(0));
-      log.info("Stock Sentinel flow 规则已刷新，dataId={}，group={}，instanceQps={}",
-          FLOW_DATA_ID, ruleGroup, incoming.get(0).getCount());
+      log.info(
+          "Stock Sentinel flow 规则已刷新，dataId={}，group={}，instanceQps={}",
+          FLOW_DATA_ID,
+          ruleGroup,
+          incoming.get(0).getCount());
       return true;
     } catch (Exception invalidRules) {
-      log.warn("Stock Sentinel Nacos flow 规则无法解析，dataId={}，group={}，保留最近有效规则",
-          FLOW_DATA_ID, ruleGroup, invalidRules);
+      log.warn(
+          "Stock Sentinel Nacos flow 规则无法解析，dataId={}，group={}，保留最近有效规则",
+          FLOW_DATA_ID,
+          ruleGroup,
+          invalidRules);
       return false;
     }
   }
 
   /** 只允许当前明确支持的 QPS 直接拒绝规则，拒绝潜在危险的其他模式。 */
   private static boolean validRule(FlowRule rule) {
-    return rule != null && RESOURCE.equals(rule.getResource())
-        && Double.isFinite(rule.getCount()) && rule.getCount() > 0
-        && rule.getGrade() == 1 && rule.getStrategy() == 0
-        && rule.getControlBehavior() == 0 && rule.getWarmUpPeriodSec() >= 0
-        && rule.getMaxQueueingTimeMs() >= 0 && !rule.isClusterMode()
+    return rule != null
+        && RESOURCE.equals(rule.getResource())
+        && Double.isFinite(rule.getCount())
+        && rule.getCount() > 0
+        && rule.getGrade() == 1
+        && rule.getStrategy() == 0
+        && rule.getControlBehavior() == 0
+        && rule.getWarmUpPeriodSec() >= 0
+        && rule.getMaxQueueingTimeMs() >= 0
+        && !rule.isClusterMode()
         && "default".equals(rule.getLimitApp());
   }
 
   /** 替换本服务资源时保留同 JVM 中所有其它 Sentinel 资源。 */
   private static synchronized void replaceOwnRule(FlowRule replacement) {
-    List<FlowRule> retained = new ArrayList<>(FlowRuleManager.getRules().stream()
-        .filter(rule -> !RESOURCE.equals(rule.getResource())).toList());
+    List<FlowRule> retained =
+        new ArrayList<>(
+            FlowRuleManager.getRules().stream()
+                .filter(rule -> !RESOURCE.equals(rule.getResource()))
+                .toList());
     retained.add(replacement);
     FlowRuleManager.loadRules(retained);
   }
@@ -181,14 +201,20 @@ public class SeckillSentinelConfiguration {
     try {
       if (subscribed) service.removeListener(FLOW_DATA_ID, ruleGroup, flowListener);
     } catch (Exception removalFailure) {
-      log.warn("Stock Sentinel Nacos listener 移除失败，dataId={}，group={}",
-          FLOW_DATA_ID, ruleGroup, removalFailure);
+      log.warn(
+          "Stock Sentinel Nacos listener 移除失败，dataId={}，group={}",
+          FLOW_DATA_ID,
+          ruleGroup,
+          removalFailure);
     }
     try {
       service.shutDown();
     } catch (Exception shutdownFailure) {
-      log.warn("Stock Sentinel Nacos 客户端关闭失败，dataId={}，group={}",
-          FLOW_DATA_ID, ruleGroup, shutdownFailure);
+      log.warn(
+          "Stock Sentinel Nacos 客户端关闭失败，dataId={}，group={}",
+          FLOW_DATA_ID,
+          ruleGroup,
+          shutdownFailure);
     }
   }
 
@@ -199,7 +225,16 @@ public class SeckillSentinelConfiguration {
 
   /** 不记录请求载荷地统计已被阻断的库存预扣。 */
   public static void recordBlock() {
-    Metrics.counter("sentinel.block", "service", "stock", "resource", RESOURCE,
-        "rule_type", "flow", "status", "429").increment();
+    Metrics.counter(
+            "sentinel.block",
+            "service",
+            "stock",
+            "resource",
+            RESOURCE,
+            "rule_type",
+            "flow",
+            "status",
+            "429")
+        .increment();
   }
 }

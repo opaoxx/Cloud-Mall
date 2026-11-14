@@ -114,6 +114,7 @@ public class StockDependencySentinelConfiguration {
   /** 统一处理 Nacos 首次下发和后续刷新。 */
   private final AbstractListener listener =
       new AbstractListener() {
+        /** 校验并应用下发的依赖熔断规则完整快照；校验失败时保留当前规则。 */
         @Override
         public void receiveConfigInfo(String content) {
           applyRules(content);

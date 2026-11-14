@@ -6,8 +6,10 @@ import java.util.List;
 public class StockReservationVO {
   /** 订单号。 */
   public String orderNo;
+
   /** 预扣状态。 */
   public String status;
+
   /** SKU 明细状态。 */
   public List<StockReservationItemVO> items;
 

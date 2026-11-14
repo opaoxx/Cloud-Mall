@@ -123,8 +123,8 @@ public class StockConsistencyReconciler {
     this.auditStateMapper = auditStateMapper;
   }
 
-  @PostConstruct
   /** 初始化持久审计状态与既有秒杀恢复，初始化不计业务熔断样本。 */
+  @PostConstruct
   public void initialize() {
     StockDependencyGuard.initialize(this::initializeStorage);
   }
@@ -149,8 +149,8 @@ public class StockConsistencyReconciler {
     }
   }
 
-  @Scheduled(fixedDelayString = "${cloudmall.stock.consistency-interval-ms:30000}")
   /** 在可续租的互斥窗口中执行有界审计，失去租约后停止后续操作。 */
+  @Scheduled(fixedDelayString = "${cloudmall.stock.consistency-interval-ms:30000}")
   public void scheduledAudit() {
     // 1. 获取原互斥租约，失败或被其他实例持有时不启动核对。
     String token = UUID.randomUUID().toString();

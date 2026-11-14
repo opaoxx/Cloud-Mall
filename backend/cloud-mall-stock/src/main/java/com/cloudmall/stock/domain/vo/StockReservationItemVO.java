@@ -4,8 +4,10 @@ package com.cloudmall.stock.domain.vo;
 public class StockReservationItemVO {
   /** SKU 主键。 */
   public Long skuId;
+
   /** 原始预扣数量。 */
   public int quantity;
+
   /** 当前结算状态。 */
   public String status;
 

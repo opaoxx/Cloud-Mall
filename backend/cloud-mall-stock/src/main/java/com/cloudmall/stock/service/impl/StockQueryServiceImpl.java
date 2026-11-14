@@ -1,6 +1,5 @@
 package com.cloudmall.stock.service.impl;
 
-
 import com.cloudmall.stock.domain.vo.StockQuantityVO;
 import com.cloudmall.stock.domain.vo.StockReservationVO;
 import com.cloudmall.stock.mapper.StockSqlMapper;

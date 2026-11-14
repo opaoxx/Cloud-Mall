@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product/User已完成规范收尾，Stock仍有16个文件待处理，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第63节。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product/User/Stock四批47文件规范清单已处理完毕，统一规范总复核仍待执行，尚不宣称整体规范验收完成；详见backend_refactoring_acceptance.md及文末第64节。
 
 ## 1. 使用方式与范围
 
@@ -3997,3 +3997,39 @@ git revert refactor/user-standards-complete-20261114
 证据写入target/backend-refactor-20261114/stock-standards，包括前像、AST/字面量/import、模块扫描、当前XML/八Jar、源保持与剩余清单。通过后更新主方案与验收汇总；若原清单全部处理，仅标记四批清单完成，下一步仍为统一规范总复核，不把本批次等同全库当前检查或全商城/性能验收。
 
 只提交实际有内容差异的冻结Java与两份既有Markdown。git diff --check通过后，临时index逆补丁必须恢复方案基线树，且真实index/README保持；再提交并建立refactor/stock-standards-complete-20261114。Git回退不恢复工作区原行尾或运行数据，不删除证据或卷。
+
+### 64.4 实施与逐项语义核对
+
+清单16文件均形成Git内容差异，没有仅行尾变化的文件。补齐两个Nacos监听回调、Rabbit JSON converter Bean、Mapper批处理两个回调及两个独立字段的7处说明；两个审计入口的既有JavaDoc移到注解前。StockMessagingConfiguration同文件补类职责说明。StockCacheReconciler原两条分组说明分别改为独立含义：SCAN_COUNT只是COUNT提示，SCAN_MAX_MATCHES是匹配集合上限；Redis耗时和返回字段字节在Lua返回后校验，分别保留原Math.max(100L, ...)与Math.max(3000L, ...)约束，不是中断Redis执行。
+
+原12个格式文件统一空行、参数换行、注解布局和缩进；未新增或删除import。十六文件完整Javac package/type语法树直接相等，不对任何标识符、条件或方法体归一；import集合相等，833个字面量逐项保持值及顺序，覆盖SQL、Lua、配置键、规则名、AOP表达式、状态/错误消息和阈值。长SQL/Lua字符串没有重排。Stock全87生产Java的必需说明、非id短名、既有模板模式和格式检查0待办，13处语义明确id保持。
+
+核心调用链复盘：Nacos监听回调只委托原applyFlowRules/applyRules，校验空白/完整快照后替换自有资源规则，保留其它资源及无效快照下最近有效规则；Rabbit Bean仍调用原默认构造器。StockSqlMapper.finishInitialCacheRepairs按同一下标绑定库存行和Redis结果，Long 0L记STALE，其余记APPLIED，原时间转换、SKU/版本条件及批次数不变；说明没有把未知结果改成新判定。
+
+缓存校准仍先准备持久表、扫描旧预扣，再有界读取MySQL/Redis并写修复意图；扫描不完整和返回后超限仍走原异常/重扫。周期审计保持原20秒Redis租约与每5秒续期，按普通审计→受理恢复→秒杀核对运行；guard在原位置校验租约，finally取消续期、关闭执行器并按token释放，释放失败仍等待TTL。初始化排除业务熔断样本、AOP位置与未知结果处理均未改。
+
+### 64.5 本轮测试、打包与保留边界
+
+| 本轮实际执行 | 类数 | 测试项 | 结果 |
+| --- | ---: | ---: | --- |
+| Common原全部单测 | 4 | 25 | 首次0失败/错误/跳过 |
+| Stock原全部单测 | 48 | 209 | 首次0失败/错误/跳过；现有库存/缓存修复/一致性审计/熔断/秒杀与契约用例 |
+| 合计 | 52 | 234 | 当前日志与52份新XML逐一对应；不叠加旧测试 |
+
+八模块离线package跳过重复测试通过，628个本模块生产class与target/classes及SourceFile逐一核验，Stock其中88个。1107份其它已跟踪backend/deploy与README前像逐字节保持，全部测试源码、资源/POM/schema及其它模块未改。第63节归档309项XML SHA只读复核通过，仅作历史证据；业务测试首次通过，没有新增真实中间件、旧IT、压测、Docker或卷操作。
+
+提交前归档prepare首次停止：复用脚本调整提交路径数6→18时，文本替换误将class总数628改为1828。保存首轮脚本/报错后只修正工具的class数量断言，再核验原52份XML、628class、源保持与18路径；未修改业务代码、测试断言或重跑测试，未绕过真实Jar逐class检查。
+
+### 64.6 清单状态、提交与回退
+
+第60节原47文件已完成四批整理：Common5、Product21、User5、Stock16；其中Product启动类与User地址DTO仅工作区行尾归一，45文件有Git内容差异。原60处说明绑定（Product34/User17/Stock9）、34格式文件、7处非id短名和23条模板说明均按批记录处理，Common十二错误码等同文件补充说明也已留痕。不同维度不能相加为独立缺陷数。下一步是统一源码状态的规范总复核，当前不把分批结果称为新的全库扫描或完整商城验收。
+
+方案提交3275970d，基线refactor/stock-standards-baseline-20261114，完成标签refactor/stock-standards-complete-20261114。证据target/backend-refactor-20261114/stock-standards/verification.json包含16前像、AST/833字面量/import、87文件规范检查、52份XML、八Jar、源保持及原清单零剩余记录。
+
+提交16个Java与本方案/验收汇总两Markdown，共18文件。git diff --check及临时index逆补丁恢复方案基线树验证后提交；真实index和README保持。
+
+```powershell
+git revert refactor/stock-standards-complete-20261114
+```
+
+回退只撤销本批16Java规范变化与两文档，不恢复运行数据或删除证据/卷。

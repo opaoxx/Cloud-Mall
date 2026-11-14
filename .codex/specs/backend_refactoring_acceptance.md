@@ -1,18 +1,18 @@
 # 后端重构验收汇总与剩余工作
 
-核验日期：2026-11-14。第60节统一验收源码起点：`5798b822`；最新进度为第63节User规范收尾，方案基线`b1d71cc7`。责任人：当前会话主 Agent，单 Agent 执行。
+核验日期：2026-11-14。第60节统一验收源码起点：`5798b822`；最新进度为第64节Stock规范收尾，方案基线`3275970d`。责任人：当前会话主 Agent，单 Agent 执行。
 
 本报告以[重构方案第60节](backend_refactoring_plan.md)为基线，按后续阶段更新当前状态；不覆盖原停工边界，也不改写历史实验结论。
 
 ## 1. 当前判断
 
-**八模块的中等深度结构目标已经达到；Common、Product、User规范收尾已完成，Stock仍需小范围收尾，不能宣称全部完成。**
+**八模块的中等深度结构目标已经达到；Common、Product、User、Stock四批规范清单已全部处理，统一规范总复核仍待执行。**
 
-- 第60节统一执行267类1948项，第61节12类85项，第62节41类386项，第63节User/Common共22类309项，各次分别0失败/错误/跳过，不相加计数。第63节八模块package通过，628个生产class与编译输出及现存SourceFile逐一核验。
-- 641份生产Java（含package-info）中，33个Controller采用独立职责，41个Service接口均非空。当前扫描未发现Cm编号生产类型、Controller继承ServiceImpl、Service HTTP映射、Controller/Service直接JDBC、指定SQL字面量候选或DTO/VO/PO后缀嵌套模型。
-- 结构扫描不等于逐字段语义证明；HTTP/事务/消息兼容仍依据已有行为测试与逐切片记录。第49至60节间13个变动文件全部位于src/test；第61/62/63节分别整理Common5、Product21、User5文件，均经完整AST及常量对照。Product启动类、User地址DTO仅工作区行尾统一，两批分别20、4文件形成Git内容差异。配置/SQL未改。
-- 当前剩余Stock的9处必需入口/成员JavaDoc绑定问题、12个格式不一致文件；已列出的非id短名和模板化说明均已处理，去重剩余16个文件。这些数量单位不同且相互重叠，不能相加为缺陷总数。
-- 第60节为只读验收；第61/62/63节完成Common/Product/User规范整理，没有修改测试源码或运行新的真实中间件测试。
+- 第60节统一执行267类1948项，第61节12类85项，第62节41类386项，第63节22类309项，第64节Stock/Common共52类234项，各次分别0失败/错误/跳过，不相加计数。第64节八模块package通过，628个生产class与编译输出及现存SourceFile逐一核验。
+- 第60节641份生产Java（含package-info）结构扫描中，33个Controller采用独立职责，41个Service接口均非空；未发现Cm编号生产类型、Controller继承ServiceImpl、Service HTTP映射、Controller/Service直接JDBC、指定SQL字面量候选或DTO/VO/PO后缀嵌套模型。四批规范整理不改变结构，后续仍需在统一源码状态总复核。
+- 结构扫描不等于逐字段语义证明；HTTP/事务/消息兼容仍依据已有行为测试与逐切片记录。第49至60节间13个变动文件全部位于src/test；第61–64节分别整理Common5、Product21、User5、Stock16文件，均经完整AST及常量对照。Product启动类、User地址DTO仅工作区行尾统一；47个清单文件中45个形成Git内容差异。配置资源/SQL未改。
+- 原清单的说明绑定、格式、非id短名和模板化说明已分批处理，剩余文件0；本轮Stock87文件扫描通过。这是原清单处理结果，不等于本轮重新执行了全库规范扫描。
+- 第60节为只读验收；第61–64节完成四模块规范整理，没有修改测试源码或运行新的真实中间件测试。
 
 ## 2. 模块职责与第60节统一测试基线
 
@@ -25,7 +25,7 @@
 | Cart | Controller → CartService/Impl → CartStorage；结算VO独立 | 24 / 1 / 1 | 13 / 35 | 第60节扫描通过 | `refactor/cart-complete-20261104` / `9eab801a` |
 | Product | 查询/管理/分类/活动服务；index、metrics、search分组 | 102 / 1 / 5 | 37 / 361 | 第62节规范检查通过 | 结构`refactor/product-complete-20261104` / `e345bb4d`；规范`refactor/product-standards-complete-20261114` |
 | User | 账号/资料/地址、扣款/退款、TCC/Fence及只读取证分离 | 100 / 7 / 8 | 18 / 284 | 第63节规范检查通过 | 结构`refactor/user-complete-20261104` / `418cd0d0`；规范`refactor/user-standards-complete-20261114` |
-| Stock | 查询/预留/扣减/事实、cache、seckill、metrics及Seata演练分离 | 87 / 3 / 6 | 48 / 209 | 待规范收尾 | `refactor/stock-complete-20261104` / `ef53b37d` |
+| Stock | 查询/预留/扣减/事实、cache、seckill、metrics及Seata演练分离 | 87 / 3 / 6 | 48 / 209 | 第64节规范检查通过 | 结构`refactor/stock-complete-20261104` / `ef53b37d`；规范`refactor/stock-standards-complete-20261114` |
 | Order | 创建/查询/状态、秒杀接收/落单、超时/出站消息、恢复与分片分离 | 117 / 6 / 10 | 65 / 341 | 第60节扫描通过 | `refactor/order-complete-20261113` / `458efb7c` |
 | Pay | 查询/创建/成功/失败/回调五用例，Legacy和TCC各职责分组 | 187 / 15 / 11 | 77 / 672 | 第60节扫描通过 | `refactor/pay-complete-20261114` / `3f5d069c` |
 
@@ -35,7 +35,7 @@
 
 ## 3. 实库与真实链路证据的分层结论
 
-下表是此前实际运行、在第60节校验成功XML SHA/标签/提交可达性后的结果，**没有在第61/62/63节重跑，也不与1948、85、386或309项累加**。源代码迁移阶段曾做的其它局部实验仍在原章节，不把此表称为所有历史实验索引。
+下表是此前实际运行、在第60节校验成功XML SHA/标签/提交可达性后的结果，**没有在第61–64节重跑，也不与1948、85、386、309或234项累加**。源代码迁移阶段曾做的其它局部实验仍在原章节，不把此表称为所有历史实验索引。
 
 | 阶段 | 已验证范围 | 原测试项数 | 不能推导的结论 |
 | --- | --- | ---: | --- |
@@ -53,19 +53,19 @@
 
 §59成功轮包含14笔支付（12 TCC、2 LEGACY）、13次扣款和6次退款，12 TC全局/24分支；1条ROLLEDBACK负例公开支付仍PENDING，这是原验收边界。31份Stage保持EVIDENCE_INCOMPLETE；MQ专项验证不声称拥有broker ACK历史。以上负向/缺证状态不能在汇总中改成成功。
 
-## 4. 必须完成的规范收尾
+## 4. 规范清单处理结果与待执行总复核
 
-原模块“结构完成”不覆盖本次新发现的规范缺口。第60节只读审计采用同一JDK DocTrees/语法树与google-java-format 1.22.0；第61节Common17文件、第62节Product102文件、第63节User100文件再次检查通过；Stock字节保持，待办沿原结果。所有入口/成员检查排除record隐式生成方法，匿名类的显式public方法仍纳入。
+原模块“结构完成”不覆盖后续发现的规范缺口。第60节只读审计采用同一JDK DocTrees/语法树与google-java-format 1.22.0；第61节Common17文件、第62节Product102文件、第63节User100文件、第64节Stock87文件分别再次检查通过。下表为各批处理后的原清单剩余数，待统一总复核。所有入口/成员检查排除record隐式生成方法，匿名类的显式public方法仍纳入。
 
 | 模块 | JavaDoc绑定问题 | dry-run格式文件 | 非id短名 | 模板化说明 | 去重文件 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Common（第61节完成） | 0 | 0 | 0 | 0 | 0 |
 | Product（第62节完成） | 0 | 0 | 0 | 0 | 0 |
 | User（第63节完成） | 0 | 0 | 0 | 0 | 0 |
-| Stock | 9 | 12 | 0 | 0 | 16 |
+| Stock（第64节完成） | 0 | 0 | 0 | 0 | 0 |
 | Cart/Gateway/Order/Pay | 0 | 0 | 0 | 0 | 0 |
 
-第60节原60处说明绑定问题中，Product34处已在第62节处理，User17处已在第63节处理。当前Stock9处中2处是任务入口的注释位置问题，另7处需独立说明（部分有上层或分组说明），不能说9处全部无注释。Product四文件的23条模板化说明及同方法空泛步骤已替换，原本地ACK返回/未知结果语义保持。扫描仍不代替逐段说明的语义复核。
+第60节原60处说明绑定问题已分批处理：Product34处、User17处、Stock9处。Stock包含2处任务注释位置与7处独立说明，不能把原9处全部称为无注释；本批还将相邻分组说明分别写明SCAN提示/集合上限和返回后耗时/字段字节校验。Product四文件的23条模板说明及同方法空泛步骤已替换，本地ACK返回/未知结果语义保持。扫描仍不代替逐段说明的语义复核。
 
 第60节103个短声明中96个id保留原主键/查询/传输语义；Common一处与Product六处非id短名均已完成语义改名。Product102文件现只剩40个语义明确id，没有新的非id短名命中。没有发现Cm编号生产类型；冻结测试、工具、表或消息中的编号不是本次类名重构遗漏。
 
@@ -74,13 +74,13 @@
 1. **Common（第61节已完成）**：四个格式文件与AuthInterceptor的ex，共五文件；补充ErrorCodes十二个常量的准确独立说明。异常处理顺序、JSON/ThreadLocal和全部错误码值保持。Common25项、Cart HTTP8项、Order/Stock指纹消费者52项，共85项通过；完整AST规范化只允许未使用形参改名。
 2. **Product（第62节已完成）**：二十一文件全部复核，20个形成Git内容变化、启动类仅统一混合行尾。补说明/注释位置/六处局部命名/格式，完整AST和841个字面量保持；Product361与Common25共386项及八包通过，不重开历史CM21实验。
 3. **User（第63节已完成）**：五文件复核，移动两个PO的16字段说明、补BalanceTccDebitVO.from映射说明、删除BalanceOperationVO未使用import，地址DTO仅行尾归一。完整AST及28字面量保持，User284/Common25共309项和八包通过。
-4. **Stock（下一步）**：十六文件，补监听/批处理入口与成组成员的独立说明、修正两个任务注释位置并统一格式。SQL、Redis Lua、指标/规则名、调度/租约与边界不变；执行相关模块回归。
+4. **Stock（第64节已完成）**：十六文件，补监听/批处理入口和成员说明、修正两个任务注释位置并统一格式。完整AST/import集合及833字面量保持，Stock209/Common25共234项和八包通过；SQL/Lua、规则/指标、调度/租约未变。
 
-剩余Stock批次完成后再做一次规范总复核；只有实际零待办且适用测试通过才把“规范收尾”置完成。每批都先冻结文件/差异范围，不能把本清单当作一次性全库格式化授权。
+下一步在四批完成后的统一源码状态做规范总复核，核对分层/命名/说明/格式及适用回归，再给出整体结论；当前只标记原清单处理完成。若发现新问题，先记录与界定范围，不能把总复核当作全库无边界格式化授权。
 
 ### 4.1 文件级清单
 
-以下为当前状态清单，Common/Product/User已完成项保留对照但不计入剩余16文件；“说明”是AST声明数，“模板”是匹配行数，格式列只列dry-run命中。名称对应完整可点击源码路径，后续改动后需更新行号/状态。
+以下保留四批47文件的处理对照，原清单剩余0；Product启动类与User地址DTO仅工作区行尾归一，其余45文件有Git内容差异。“说明”是AST声明数，“模板”是匹配行数，不可相加为独立缺陷数量。统一规范总复核尚未执行。
 
 #### cloud-mall-common（第61节已完成）
 
@@ -129,26 +129,26 @@
 | [domain/vo/BalanceOperationVO.java](../../backend/cloud-mall-user/src/main/java/com/cloudmall/user/domain/vo/BalanceOperationVO.java) | 0 | 通过 | 0 | 0 |
 | [domain/vo/BalanceTccDebitVO.java](../../backend/cloud-mall-user/src/main/java/com/cloudmall/user/domain/vo/BalanceTccDebitVO.java) | 0 | 通过 | 0 | 0 |
 
-#### cloud-mall-stock
+#### cloud-mall-stock（第64节已完成）
 
 | 文件 | 说明 | 格式 | 短名 | 模板 |
 | --- | ---: | --- | ---: | ---: |
-| [config/SeckillSentinelConfiguration.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/SeckillSentinelConfiguration.java) | 1 | 待处理 | 0 | 0 |
-| [config/StockDependencyAspect.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/StockDependencyAspect.java) | 0 | 待处理 | 0 | 0 |
-| [config/StockDependencySentinelConfiguration.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/StockDependencySentinelConfiguration.java) | 1 | — | 0 | 0 |
-| [config/StockMessagingConfiguration.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/StockMessagingConfiguration.java) | 1 | — | 0 | 0 |
-| [domain/po/SeckillOrderOutboxPO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/po/SeckillOrderOutboxPO.java) | 0 | 待处理 | 0 | 0 |
-| [domain/po/StockCacheRepairPO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/po/StockCacheRepairPO.java) | 0 | 待处理 | 0 | 0 |
-| [domain/po/StockReservationRequestPO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/po/StockReservationRequestPO.java) | 0 | 待处理 | 0 | 0 |
-| [domain/vo/StockReservationItemVO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/vo/StockReservationItemVO.java) | 0 | 待处理 | 0 | 0 |
-| [domain/vo/StockReservationVO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/vo/StockReservationVO.java) | 0 | 待处理 | 0 | 0 |
-| [mapper/StockConsistencyAuditStateMapper.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/mapper/StockConsistencyAuditStateMapper.java) | 0 | 待处理 | 0 | 0 |
-| [mapper/StockSqlMapper.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/mapper/StockSqlMapper.java) | 2 | 待处理 | 0 | 0 |
-| [service/impl/StockQueryServiceImpl.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/StockQueryServiceImpl.java) | 0 | 待处理 | 0 | 0 |
-| [service/impl/StockReservationRequestService.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/StockReservationRequestService.java) | 0 | 待处理 | 0 | 0 |
-| [service/impl/cache/StockCacheReconciler.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/cache/StockCacheReconciler.java) | 2 | — | 0 | 0 |
-| [service/impl/cache/StockConsistencyReconciler.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/cache/StockConsistencyReconciler.java) | 2 | — | 0 | 0 |
-| [service/impl/seckill/SeckillQuotaSettlementService.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/seckill/SeckillQuotaSettlementService.java) | 0 | 待处理 | 0 | 0 |
+| [config/SeckillSentinelConfiguration.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/SeckillSentinelConfiguration.java) | 0 | 通过 | 0 | 0 |
+| [config/StockDependencyAspect.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/StockDependencyAspect.java) | 0 | 通过 | 0 | 0 |
+| [config/StockDependencySentinelConfiguration.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/StockDependencySentinelConfiguration.java) | 0 | 通过 | 0 | 0 |
+| [config/StockMessagingConfiguration.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/config/StockMessagingConfiguration.java) | 0 | 通过 | 0 | 0 |
+| [domain/po/SeckillOrderOutboxPO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/po/SeckillOrderOutboxPO.java) | 0 | 通过 | 0 | 0 |
+| [domain/po/StockCacheRepairPO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/po/StockCacheRepairPO.java) | 0 | 通过 | 0 | 0 |
+| [domain/po/StockReservationRequestPO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/po/StockReservationRequestPO.java) | 0 | 通过 | 0 | 0 |
+| [domain/vo/StockReservationItemVO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/vo/StockReservationItemVO.java) | 0 | 通过 | 0 | 0 |
+| [domain/vo/StockReservationVO.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/domain/vo/StockReservationVO.java) | 0 | 通过 | 0 | 0 |
+| [mapper/StockConsistencyAuditStateMapper.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/mapper/StockConsistencyAuditStateMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/StockSqlMapper.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/mapper/StockSqlMapper.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/StockQueryServiceImpl.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/StockQueryServiceImpl.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/StockReservationRequestService.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/StockReservationRequestService.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/cache/StockCacheReconciler.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/cache/StockCacheReconciler.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/cache/StockConsistencyReconciler.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/cache/StockConsistencyReconciler.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/seckill/SeckillQuotaSettlementService.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/seckill/SeckillQuotaSettlementService.java) | 0 | 通过 | 0 | 0 |
 
 ### 4.2 已完成的短名更正
 
@@ -197,7 +197,7 @@ git revert refactor/backend-acceptance-complete-20261114
 - `jar-check.json`：八Jar共628生产class，编译字节/SourceFile对应。
 - `retained-experiment-resources.json`：上述12项目43卷只读检查。
 
-ignored证据保留在当前工作区；Git版本化本报告、主方案和各阶段明确修改的源码。后续会话先读本报告、第63节及实际Git状态，从Stock十六文件规范收尾继续。
+ignored证据保留在当前工作区；Git版本化本报告、主方案和各阶段明确修改的源码。后续会话先读本报告、第64节及实际Git状态，从统一规范总复核继续。
 
 
 ### 7.1 第61节增量结果与回退
@@ -235,4 +235,16 @@ User五文件完成，四个形成Git内容差异：两个PO的16字段说明移
 
 ```powershell
 git revert refactor/user-standards-complete-20261114
+```
+
+### 7.4 第64节增量结果与回退
+
+Stock16文件全部完成并形成Git内容差异，处理9处说明绑定和12个格式文件；两个分组说明改为各字段准确含义。原20秒审计租约/5秒续期、SCAN COUNT提示/集合上限、Redis返回后阈值、批量Long 0L→STALE/其它→APPLIED及全部SQL/Lua不变。
+
+16完整AST直接相等，无标识符/方法体归一，import集合与833字面量值/顺序保持；Stock87文件说明/格式/非id短名检查通过，13个语义id保留。本轮52类234项（Stock209/Common25）首次通过，八包628生产class验证通过；1107其它backend/deploy与README保持，不改测试、不运行新的真实中间件回归。提交前归档脚本复制时误改class预期数628为1828，已留痕修正工具并重新核验；业务测试无失败。
+
+原47文件规范清单现为0剩余，下一步统一规范总复核，仍保留完整商城/性能及既有真实场景的验收边界。证据`target/backend-refactor-20261114/stock-standards/verification.json`，基线`refactor/stock-standards-baseline-20261114`。完成标签回退16Java与两文档，不恢复运行数据：
+
+```powershell
+git revert refactor/stock-standards-complete-20261114
 ```

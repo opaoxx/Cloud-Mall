@@ -1,6 +1,5 @@
 package com.cloudmall.stock.config;
 
-
 import com.cloudmall.common.error.BizException;
 import com.cloudmall.stock.util.StockDependencyGuard;
 import org.aspectj.lang.ProceedingJoinPoint;
