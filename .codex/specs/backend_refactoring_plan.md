@@ -2840,3 +2840,24 @@ git revert refactor/pay-tcc-entry-complete-20261114
 临时index精确no-renames路径逆补丁恢复父树，真实index/README保持。实际回退后只清理迁入entry单类和新增装配测试class（含内部类），重编译恢复原类路径；后续依赖先逆序回退，不全量clean、不回退数据库。README、旧pycache及忽略工件未入提交。
 
 下一步对Pay模块做范围收尾复核：核对包职责、命名/注释/格式与旧引用清单，确认公开API/Feign/持久化/调度/事务兼容证据和剩余限制，再形成Pay本轮结构验收记录。当前只完成公开编排归组，尚未宣称Pay整体收尾或真实TC资金全链验收。
+
+
+## 48. Pay模块结构收尾与兼容复核（2026-11-14）
+
+### 48.1 范围、缺口与主Agent评审
+
+从d0da1593继续，由主Agent按本会话单Agent约定完成Pay收尾。第34至47节十四切片已经覆盖公开查询/成功/创建/失败/回调、旧继承入口清理及辅助职责归组。187份生产Java（含包说明）中无Cm编号生产类型、旧PayController/PayServiceImpl/空PayService，无Controller/Service内JdbcTemplate或SQL。JDK语法树短变量检查仅发现八个PO的语义明确id主键字段，保持数据库/JSON既有命名。
+
+必需JavaDoc初检发现39项：FeignAuthConfiguration.authHeaders的说明写在@Bean之后，JDK未将其识别为方法JavaDoc且原说明泛化；PayProtocolMetrics的34个有限枚举值、PayRecoveryLog.OrderStage的4个枚举值缺独立说明。本轮补准含义与正确位置，为OrderClient/UserClient五个局部record补参数说明并补配置/Feign类型职责说明。全Pay生产Java执行既有Google Java Format，跳过长字符串重排。只允许注释、排版、import顺序与未使用import整理，不改业务token、变量/字段名、注解、SQL、配置、依赖和测试源码，不新增镜像实现的测试。
+
+现有Feign局部不可变record继续保留在客户端内，业务Controller/ServiceImpl无嵌套DTO/VO/PO；九份PO保留表映射，PayDebitIntentMapper继续封装既有JDBC意图/恢复SQL，其余Mapper保留原MyBatis契约。结构收尾不等于全面ORM替换，也不更名冻结工具、表/Bean/日志/指标标签及历史CM标识。原查询鉴权顺序、创建/成功/回调共享监视器、创建事务先于锁/晚于解锁提交、独立意图/回执事务、TCC单向决议/证据/租约及未知结果边界以逐切片记录为准。
+
+### 48.2 验证、证据与回退策略
+
+先提交本节并建立`refactor/pay-closeout-baseline-20261114`。上一源码点688项/79类XML逐份SHA、最终路径指纹及HEAD已核验，作为历史基线单独归档，不与本轮新测试累加。当前187份生产Java去注释和规范化import后逐token必须与基线一致；其余后端（含测试、资源、POM）及README按字节保持。JDK语法树复查必需入口/非record成员文档缺口为零，record参数说明按源码核验，隐式生成构造/accessor不当作手写入口计数。
+
+本轮新跑Common/Pay全部现有*Test，加PayOrderStateFeignIT全1项：实际Pay Feign、本机HTTP与实际Order MVC/Service协作，SQL/库存动作受控替身。先八模块test-compile准备Order class，再运行以上测试、Pay打包、187文件全格式检查、旧类型/旧包/路由/PO/服务接口/SQL分层盘点、Jar与git diff检查。纯注释排版不重复此前实库矩阵，不创建Docker/数据库资源，不访问默认中间件/历史失败卷；本机HTTP夹具按原测试关闭。
+
+证据`target/backend-refactor-20261114/pay-closeout`。完成后建立`refactor/pay-closeout-complete-20261114`和同源码点`refactor/pay-complete-20261114`，保存十四切片逆序回退索引与实际SHA。临时index逆补丁恢复父树且真实index/README保持；实际回退只撤销本轮说明/排版后重编译，不全量clean/reset，不回退运行数据。无关README、pycache及忽略工件不入提交。
+
+收尾完成口径为已约定的Pay中等深度结构重构；各阶段原实库/本机HTTP/替身测试的边界分别保留，不扩张为真实TC资金全链、全商城、性能或生产可用性验收。后续按总方案进入跨模块回归范围梳理，再冻结所需服务、环境与证据，不自动恢复历史CM21维护队列。
