@@ -20,8 +20,32 @@ frontend/*.tsbuildinfo
 *.md
 !/README.md
 /docs/
-.codex/runtime/
+.codex/
+.agents/
 .playwright-cli/
+
+# Tests, load tests and isolated experiments retained only on this machine
+backend/**/src/test/
+backend/loadtest/
+frontend/**/*.test.ts
+frontend/**/*.test.tsx
+frontend/**/*.spec.ts
+frontend/**/*.spec.tsx
+frontend/vitest.config.ts
+deploy/experiments/
+deploy/nacos/test_healthcheck.py
+deploy/test_service_protocol.py
+
+# Machine-specific diagnostics retained only on this machine
+deploy/check-local-ports.ps1
+deploy/service-protocol.ps1
+deploy/repair-windows-tcp-range.ps1
+deploy/trace-tcp-registry-writes.ps1
+
+# Local browser captures and Python bytecode
+output/
+__pycache__/
+*.py[cod]
 
 # Build and test reports
 **/surefire-reports/
@@ -34,12 +58,6 @@ frontend/*.tsbuildinfo
 !**/.env.example
 *.log
 *.cp
-
-# Generated local performance-test output; keep reusable JMX plans and reports tracked
-.codex/runtime/jmeter-*/
-.codex/runtime/*-logs/
-.codex/runtime/*-regression/
-.codex/runtime/*.jtl
 
 # OS files
 Thumbs.db
