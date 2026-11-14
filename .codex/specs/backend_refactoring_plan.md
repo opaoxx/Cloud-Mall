@@ -2663,3 +2663,23 @@ git revert refactor/pay-tcc-projection-complete-20261113
 临时index按no-renames精确路径逆补丁恢复父树，真实index及README保持。实际回退后仅清理projection迁入两类型及新增实库测试class（含内部class），重编译恢复旧路径；不全量clean、不回退数据库，后续依赖先逆序回退。README、两个旧pycache和忽略工件不入提交。
 
 下一步检查交付三组件及其同包测试的可见性，再整理交付/取消与TCC公开编排。Pay整体尚未收尾，本轮无真实User资金RPC、TC/RM、Gateway/Nacos全链或性能结论。
+
+## 45. Pay TCC交付与有界扫描分组（2026-11-14）
+
+### 45.1 范围与兼容基线
+
+从db9b9df4继续，主Agent按本会话单Agent约定评审、实施、验证。将PayTccDeliveryServiceImpl、PayTccDeliveryStore、PayTccDeliveryScheduler迁入`service.impl.delivery`，原同包PayTccDeliverySchedulerTest一起移动，保留包内预算常量及LongSupplier构造器，不扩大public可见性。原10项调度测试正文保持；其它12份引用文件仅地址/import适配。根包18类减至15类，余8个TCC写组件另行整理。
+
+Store仍为无条件@Service，ensure/claim/stage/finish四个REQUIRES_NEW、proof的REQUIRED/readOnly/RR及普通read不变；Service/Scheduler仍按delivery.enabled条件装配，无新增外层事务。原DeliveryConfiguration/EntryConfiguration只适配类型，DependsOn执行表初始化器与交付配置、同一个默认5000ms interval/initialDelay、配置校验不变。Scheduler两个阶段分别最多20条，共享10秒启动预算并轮换先后，AtomicBoolean重入门和单调时钟保持；不能误改成整轮20条或强杀在途RPC。Scheduler Logger类别随新FQN变化，消息/等级保持。
+
+调用链仍为ensure持久意图→claim独立租约→同库proof→User当前状态/账本→原Order事实→带token的stage→原RPC及读回→finally finish。Pay和delivery同事务更新，过期/被接管worker不写本地终态或覆盖新租约；READY不等于交付许可，固定refund:payNo、取消/重协调/退款方向和未知结果都保持。不新增重试、退款、API、状态、SQL或User/Order动作，也不把本地lease当作远端RPC撤回机制。
+
+### 45.2 验证、实验与提交策略
+
+先提交本节及`refactor/pay-tcc-delivery-baseline-20261114`，运行Common/Pay全部*Test基线。新增PayTccDeliveryWiringTest两项，实际扫描新包并注册原DeliveryConfiguration/ExecutionTableInitializer：默认仅Store，开启时原三类型；验证四个独立事务/一个RR证明、原Bean名、5000/7000ms一项调度、Service caller XID拒绝及缺coordinator前置依赖拒绝。调度替身提供标准Clock，只登记不执行Runnable；TC/Evidence/Feign/Mapper为替身，不称真实资金或完整TC配置启动。原同包调度测试保持确定性时钟、两阶段/轮换/预算/重入/异常断言；清除旧测试class后防止重复计数。
+
+实库运行PayTccDeliveryRecoveryMySqlIT全7项：真实Pay NONE上下文关闭Seata/Nacos/TCC执行与调度，验证坏XID过滤、租约到期/旧owner、合法stage、delivery CAS故障时支付一起回滚。PayTccCommittedCancelMySqlIT仅4项：requestAndClaimCompetitionHasNoDeadlockAndProtectsWinner、requestAndOldStageCompetitionHasNoDeadlockAndProtectsDirection、acceptedCancellationRetainsValidOwnerForRefundOnlyStage、reconciliationStageAllowsSuccessOrRefundButNeverOldUnknown，保留原并发屏障及断言。PayLegacyRefundLedgerMySqlIT仅4项：deliveryInvalidLeaseTokensCannotMutateAnyFacts、validDeliveryLeaseTokensKeepAllExistingWrites、deliveryIdentityRejectsAliasesAcrossEveryState、canonicalDeliveryIdentityKeepsEnsureClaimAndReadSemantics。三旧夹具的源表指纹、关闭及AfterAll删除规则保持（失败也删）；不跑完整取消大矩阵或固定环境真实TC交付IT。
+
+独立Compose项目`cloud-mall-refactor-pay-tcc-delivery-20261114`，候选MySQL19964/10.254.226.0/24，新卷及源表预检后运行。原Pay三表及原Mapper的dispatch/receipt/execution/Fence/cancel/delivery，共九张空源表；execution恢复列按原固定定义准备。显式loopback URL带allowPublicKeyRetrieval；不访问默认数据库或历史卷。成功归档并检查精确schema/事件集合后才down自有容器/网络，卷保留。
+
+证据`target/backend-refactor-20261114/pay-tcc-delivery`。三个生产类、迁移测试及引用正文去package/import/注释逐token对照，其余后端/README按字节保持。原引用只整理import；完整格式化迁移类/包说明/新测试，八模块test-compile、全部单测/新装配及15项指定实库、Pay打包/Jar旧路径检查与diff通过。备份并精确删除旧三生产class及旧调度测试class（含内部class），不全量clean。临时index逆补丁恢复父树验证后提交及`refactor/pay-tcc-delivery-complete-20261114`，README、旧pycache及忽略工件不入提交。后续取消组件另行处理，Pay仍未整体收尾。
