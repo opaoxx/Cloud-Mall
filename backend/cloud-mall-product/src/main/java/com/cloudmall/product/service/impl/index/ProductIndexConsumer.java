@@ -31,16 +31,16 @@ public class ProductIndexConsumer {
   @org.springframework.beans.factory.annotation.Value("${cloudmall.product.metrics.enabled:false}")
   private boolean metricsEnabled;
 
-  /** 执行 getLogger 相关操作。 */
+  /** 记录索引消费失败及其原 eventId、traceId 和事件类型。 */
   private static final Logger log = LoggerFactory.getLogger(ProductIndexConsumer.class);
 
-  /** 保存 objectMapper 的业务状态或配置。 */
+  /** 解析消息原字节为 JSON 信封，不依赖消息类型头反序列化业务对象。 */
   private final ObjectMapper objectMapper;
 
-  /** 保存 loader 的业务状态或配置。 */
+  /** 在写入索引之前读取当前 MySQL 商品及可选在线指标快照。 */
   private final ProductIndexDocumentLoader loader;
 
-  /** 保存 writer 的业务状态或配置。 */
+  /** 按当前模式应用商品投影或删除，并保留版本冲突处理契约。 */
   private final ProductIndexWriter writer;
 
   /** 持久化消费 ACK，避免 Rabbit ACK 与 ES 写入状态脱节。 */
@@ -162,12 +162,18 @@ public class ProductIndexConsumer {
     return result.toString();
   }
 
+  /**
+   * 校验信封后以当前商品事实更新索引，保留终态去重、版本判定和消费状态记录顺序。
+   *
+   * @param body 原消息 JSON 字节
+   * @throws Exception 原解析、事实读取、索引写入或状态持久化失败时向监听容器传播
+   */
   @RabbitListener(
       queues = ProductMessagingConfiguration.PRODUCT_INDEX_QUEUE,
       containerFactory = ProductMessagingConfiguration.PRODUCT_INDEX_CONTAINER_FACTORY,
       autoStartup = "${cloudmall.product.index.consumer-enabled:true}")
-  /** 执行 consume 相关操作。 */
   public void consume(byte[] body) throws Exception {
+    // 1. 校验事件身份/时间/类型，类别事件仍直接忽略，指标模式另核版本。
     JsonNode event = objectMapper.readTree(body);
     EventEnvelope envelope = validateEnvelope(event);
     String eventId = envelope.eventId;
@@ -175,10 +181,12 @@ public class ProductIndexConsumer {
     String eventType = envelope.eventType;
     if (eventType.startsWith("CATEGORY_")) return;
     if (metricsEnabled) validateV2(event, envelope);
+    // 2. 以原追踪标识执行终态去重和当前商品事实读取。
     MDC.put("traceId", traceId);
     try {
       if (consumptionService.isTerminal(eventId)) return;
       long productId = envelope.businessId;
+      // 3. 根据当前商品是否存在及其版本应用投影或删除，随后记录原消费结果。
       if (eventType.contains("DELETED")) {
         loader
             .load(productId)
@@ -217,10 +225,16 @@ public class ProductIndexConsumer {
                 if (metricsEnabled) envelope.appliedVersion = envelope.productVersion;
                 record(envelope, "APPLIED", null);
               });
-    } catch (Exception e) {
-      record(envelope, "RETRY", e.getMessage());
-      log.error("商品索引消费失败，eventId={}，traceId={}，eventType={}", eventId, traceId, eventType, e);
-      throw e;
+    } catch (Exception consumptionFailure) {
+      // 4. 保持记录 RETRY、写失败日志和重抛的原顺序，finally 清除追踪上下文。
+      record(envelope, "RETRY", consumptionFailure.getMessage());
+      log.error(
+          "商品索引消费失败，eventId={}，traceId={}，eventType={}",
+          eventId,
+          traceId,
+          eventType,
+          consumptionFailure);
+      throw consumptionFailure;
     } finally {
       MDC.remove("traceId");
     }
@@ -241,8 +255,8 @@ public class ProductIndexConsumer {
   private void invokeUpsert(ProductIndexDocument document, String eventId, String traceId) {
     try {
       writer.upsert(document);
-    } catch (Exception e) {
-      throw new ProductIndexException("upsert", eventId, traceId, e);
+    } catch (Exception writeFailure) {
+      throw new ProductIndexException("upsert", eventId, traceId, writeFailure);
     }
   }
 
@@ -251,8 +265,8 @@ public class ProductIndexConsumer {
     try {
       if (metricsEnabled) writer.delete(productId, eventVersion);
       else writer.delete(productId);
-    } catch (Exception e) {
-      throw new ProductIndexException("delete", eventId, traceId, e);
+    } catch (Exception deleteFailure) {
+      throw new ProductIndexException("delete", eventId, traceId, deleteFailure);
     }
   }
 
@@ -265,8 +279,8 @@ public class ProductIndexConsumer {
     String occurredAt = requiredText(event, "occurredAt");
     try {
       OffsetDateTime.parse(occurredAt);
-    } catch (Exception e) {
-      throw new IllegalArgumentException("商品事件 occurredAt 格式无效", e);
+    } catch (Exception invalidTimestamp) {
+      throw new IllegalArgumentException("商品事件 occurredAt 格式无效", invalidTimestamp);
     }
     if (!eventType.startsWith("PRODUCT_")
         && !eventType.startsWith("CATEGORY_")
@@ -319,14 +333,14 @@ public class ProductIndexConsumer {
     return value.asLong();
   }
 
-  /** 执行 requiredText 相关操作。 */
+  /** 按原 asText 转换读取字段，缺失或转换后为空白时拒绝信封。 */
   private static String requiredText(JsonNode event, String field) {
     String value = event.path(field).asText(null);
     if (value == null || value.isBlank()) throw new IllegalArgumentException("商品事件缺少 " + field);
     return value;
   }
 
-  /** 执行 requiredId 相关操作。 */
+  /** 要求字段为 JSON 整数且转换后的 long 为正数，否则拒绝业务主键。 */
   private static long requiredId(JsonNode event, String field) {
     JsonNode value = event.get(field);
     if (value == null || !value.isIntegralNumber() || value.asLong() <= 0) {
@@ -336,16 +350,16 @@ public class ProductIndexConsumer {
   }
 
   private static final class EventEnvelope {
-    /** 保存 eventId 的业务状态或配置。 */
+    /** 消费去重和持久结果关联使用的原事件标识。 */
     private final String eventId;
 
-    /** 保存 eventType 的业务状态或配置。 */
+    /** 已通过允许类型校验的事件类型，用于选择商品更新或删除路径。 */
     private final String eventType;
 
-    /** 保存 traceId 的业务状态或配置。 */
+    /** 贯穿本次消费日志、MDC及异常上下文的原追踪标识。 */
     private final String traceId;
 
-    /** 保存 businessId 的业务状态或配置。 */
+    /** 按事件类型校验得到的商品或分类主键。 */
     private final long businessId;
 
     /** 原消息声明的商品版本。 */
@@ -354,12 +368,9 @@ public class ProductIndexConsumer {
     /** 实际应用的投影版本，-1表示尚未形成应用结果。 */
     private long appliedVersion = -1L;
 
-    /** 执行 EventEnvelope 相关操作。 */
+    /** 保存已校验的不可变事件身份和声明版本，实际应用版本仍从未知值开始。 */
     private EventEnvelope(
         String eventId, String eventType, String traceId, long businessId, long productVersion) {
-      // 1. 接收并整理 EventEnvelope 的业务请求。
-      // 2. 执行 EventEnvelope 的核心业务校验与状态处理。
-      // 3. 返回 EventEnvelope 的处理结果。
       this.eventId = eventId;
       this.eventType = eventType;
       this.traceId = traceId;

@@ -11,8 +11,13 @@ public interface ProductIndexWriter {
   /** 兼容历史缺失商品事实的索引删除事件。 */
   void delete(long productId) throws Exception;
 
-  /** Version-aware deletion is mandatory for V2; legacy implementations retain their original behavior. */
-  default void delete(long productId,long eventVersion) throws Exception { delete(productId); }
+  /**
+   * Version-aware deletion is mandatory for V2; legacy implementations retain their original
+   * behavior.
+   */
+  default void delete(long productId, long eventVersion) throws Exception {
+    delete(productId);
+  }
 
   /** 将有界商品事实批次幂等投影到 ES，部分失败时抛出异常供游标重试。 */
   void upsertBatch(List<ProductIndexDocument> documents) throws Exception;

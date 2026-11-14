@@ -1,6 +1,5 @@
 package com.cloudmall.product.service.impl.index;
 
-
 import com.cloudmall.product.domain.po.ProductIndexDocument;
 import com.cloudmall.product.service.ProductIndexWriter;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,13 +37,13 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
   @org.springframework.beans.factory.annotation.Autowired(required = false)
   private com.cloudmall.product.service.impl.metrics.ProductMetricService metrics;
 
-  /** 保存 client 的业务状态或配置。 */
+  /** 执行索引准备、版本化写入、读取及兼容删除的 ES 客户端。 */
   private final RestHighLevelClient client;
 
-  /** 保存 objectMapper 的业务状态或配置。 */
+  /** 编解码索引内容、映射元数据和可信版本核验结果。 */
   private final ObjectMapper objectMapper;
 
-  /** 保存 indexName 的业务状态或配置。 */
+  /** 当前配置指向的物理商品索引名，所有读写和版本核验使用同一目标。 */
   private final String indexName;
 
   /** 创建 ElasticsearchProductIndexWriter 实例。 */
@@ -57,8 +56,8 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
     this.indexName = indexName;
   }
 
-  @Override
   /** 使用 MySQL 商品版本阻止旧事件与重建批次倒序覆盖新文档。 */
+  @Override
   public void upsert(ProductIndexDocument document) throws Exception {
     if (metricsEnabled) {
       ensureIndex();
@@ -419,18 +418,18 @@ public class ElasticsearchProductIndexWriter implements ProductIndexWriter {
       throw new IllegalStateException("METRIC_INDEX_MAPPING_INVALID");
   }
 
+  /** 兼容模式按商品主键删除，404按幂等完成处理；指标模式拒绝缺少可信版本的删除。 */
   @Override
-  /** 执行 delete 相关操作。 */
   public void delete(long productId) throws Exception {
+    // 1. 指标模式必须走带可信版本的删除入口。
     if (metricsEnabled) throw new IllegalStateException("CONTENT_DELETE_VERSION_UNPROVEN");
-    // 1. 接收并整理 delete 的业务请求。
-    // 2. 执行 delete 的核心业务校验与状态处理。
-    // 3. 返回 delete 的处理结果。
+    // 2. 兼容模式对当前索引中的原商品文档执行删除。
     try {
       client.delete(
           new DeleteRequest(indexName, String.valueOf(productId)), RequestOptions.DEFAULT);
-    } catch (ElasticsearchStatusException e) {
-      if (e.status() != RestStatus.NOT_FOUND) throw e;
+    } catch (ElasticsearchStatusException deleteFailure) {
+      // 3. 仅忽略文档或索引不存在的结果，其它 ES 状态异常原样传播。
+      if (deleteFailure.status() != RestStatus.NOT_FOUND) throw deleteFailure;
       // DELETE is idempotent: a missing document is already in the desired state.
     }
   }

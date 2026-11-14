@@ -21,11 +21,19 @@ public class ProductSqlMapper {
   /** Spring JDBC 执行器。 */
   private final JdbcTemplate jdbcTemplate;
 
-  /** 各阶段 JDBC 耗时，区别主查询与附属 SKU/参数读取。 */
+  /** 商品总数查询的 JDBC 耗时，包含成功与失败调用。 */
   private final Timer productCountTimer;
+
+  /** 商品列表及排序查询的 JDBC 耗时。 */
   private final Timer productListTimer;
+
+  /** 商品详情主记录查询的 JDBC 耗时。 */
   private final Timer productDetailTimer;
+
+  /** 商品附属 SKU 查询的 JDBC 耗时。 */
   private final Timer productSkuTimer;
+
+  /** 商品参数列表查询的 JDBC 耗时。 */
   private final Timer productParameterTimer;
 
   /** 创建商品 SQL Mapper。 */
@@ -35,7 +43,8 @@ public class ProductSqlMapper {
     this.productListTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "list");
     this.productDetailTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "detail");
     this.productSkuTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "sku");
-    this.productParameterTimer = meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "parameter");
+    this.productParameterTimer =
+        meterRegistry.timer("cloudmall.product.read.jdbc", "stage", "parameter");
   }
 
   /** 同时记录成功和失败的查询耗时，不改变原异常传播。 */
@@ -130,8 +139,11 @@ public class ProductSqlMapper {
     StringBuilder condition = new StringBuilder(" where 1=1");
     List<Object> arguments = new java.util.ArrayList<>();
     appendProductConditions(condition, arguments, keyword, categoryId, status);
-    return timed(productCountTimer, () -> queryForObject(
-        "select count(*) from product" + condition, arguments.toArray(), Long.class));
+    return timed(
+        productCountTimer,
+        () ->
+            queryForObject(
+                "select count(*) from product" + condition, arguments.toArray(), Long.class));
   }
 
   /** 分页查询商品。 */
@@ -143,16 +155,22 @@ public class ProductSqlMapper {
     arguments.add(offset);
     arguments.add(pageSize);
     String orderBy = productOrderBy(sort);
-    String hotStatJoin = "hot".equals(sort) || "sales".equals(sort)
-        ? " left join product_hot_stat hot on hot.product_id=p.id" : "";
-    return timed(productListTimer, () -> queryForList(
-        "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status"
-            + " from product p" + hotStatJoin
-            + condition
-            + " order by "
-            + orderBy
-            + " limit ?,?",
-        arguments.toArray()));
+    String hotStatJoin =
+        "hot".equals(sort) || "sales".equals(sort)
+            ? " left join product_hot_stat hot on hot.product_id=p.id"
+            : "";
+    return timed(
+        productListTimer,
+        () ->
+            queryForList(
+                "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status"
+                    + " from product p"
+                    + hotStatJoin
+                    + condition
+                    + " order by "
+                    + orderBy
+                    + " limit ?,?",
+                arguments.toArray()));
   }
 
   /** 按 ES 当前页 ID 批量读取商品事实，避免把索引投影直接当作业务响应。 */
@@ -160,9 +178,15 @@ public class ProductSqlMapper {
     if (productIds == null || productIds.isEmpty()) return List.of();
     if (productIds.size() > 100) throw new IllegalArgumentException("商品事实批量查询最多 100 条");
     String placeholders = String.join(",", java.util.Collections.nCopies(productIds.size(), "?"));
-    return timed(productListTimer, () -> queryForList(
-        "select id,category_id,name,main_image,description,price,status,version,updated_at"
-            + " from product where id in (" + placeholders + ")", productIds.toArray()));
+    return timed(
+        productListTimer,
+        () ->
+            queryForList(
+                "select id,category_id,name,main_image,description,price,status,version,updated_at"
+                    + " from product where id in ("
+                    + placeholders
+                    + ")",
+                productIds.toArray()));
   }
 
   /** 将公开排序参数映射为固定 SQL 片段，避免把请求参数拼入 SQL。 */
@@ -280,9 +304,12 @@ public class ProductSqlMapper {
 
   /** 查询商品基础信息。 */
   public List<Map<String, Object>> findProduct(Long productId) {
-    return timed(productDetailTimer, () -> queryForList(
-        "select id,category_id,name,main_image,description,price,status from product where id=?",
-        productId));
+    return timed(
+        productDetailTimer,
+        () ->
+            queryForList(
+                "select id,category_id,name,main_image,description,price,status from product where id=?",
+                productId));
   }
 
   /** 判断商品分类是否存在。 */
@@ -293,18 +320,24 @@ public class ProductSqlMapper {
 
   /** 查询商品 SKU 列表。 */
   public List<Map<String, Object>> findSkus(Long productId) {
-    return timed(productSkuTimer, () -> queryForList(
-        "select id,product_id,sku_code,spec_json,price,status from product_sku where product_id=?"
-            + " order by id",
-        productId));
+    return timed(
+        productSkuTimer,
+        () ->
+            queryForList(
+                "select id,product_id,sku_code,spec_json,price,status from product_sku where product_id=?"
+                    + " order by id",
+                productId));
   }
 
   /** 查询商品参数列表。 */
   public List<Map<String, Object>> findParameters(Long productId) {
-    return timed(productParameterTimer, () -> queryForList(
-        "select id,product_id,param_name,param_value,sort_no from product_parameter where"
-            + " product_id=? order by sort_no,id",
-        productId));
+    return timed(
+        productParameterTimer,
+        () ->
+            queryForList(
+                "select id,product_id,param_name,param_value,sort_no from product_parameter where"
+                    + " product_id=? order by sort_no,id",
+                productId));
   }
 
   /** 新增或更新 SKU。 */
@@ -371,11 +404,30 @@ public class ProductSqlMapper {
       arguments.add(status);
     }
   }
-  /** ONLINE ranks real confirmed sales and exact online scores, preserving the legacy SQL unchanged. */
-  public List<Map<String,Object>> findProductsOnline(String keyword,Long categoryId,Integer status,int offset,int pageSize,String sort){
-    StringBuilder condition=new StringBuilder(" where 1=1");List<Object> arguments=new java.util.ArrayList<>();appendProductConditions(condition,arguments,keyword,categoryId,status);arguments.add(offset);arguments.add(pageSize);
-    String order="sales".equals(sort)?"coalesce(m.sold_count,0) desc,p.updated_at desc,p.id desc":"coalesce(m.hot_score,0) desc,p.updated_at desc,p.id desc";
-    return timed(productListTimer,()->queryForList("select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status from product p left join product_online_stat m on m.product_id=p.id"+condition+" order by "+order+" limit ?,?",arguments.toArray()));
-  }
 
+  /**
+   * ONLINE ranks real confirmed sales and exact online scores, preserving the legacy SQL unchanged.
+   */
+  public List<Map<String, Object>> findProductsOnline(
+      String keyword, Long categoryId, Integer status, int offset, int pageSize, String sort) {
+    StringBuilder condition = new StringBuilder(" where 1=1");
+    List<Object> arguments = new java.util.ArrayList<>();
+    appendProductConditions(condition, arguments, keyword, categoryId, status);
+    arguments.add(offset);
+    arguments.add(pageSize);
+    String order =
+        "sales".equals(sort)
+            ? "coalesce(m.sold_count,0) desc,p.updated_at desc,p.id desc"
+            : "coalesce(m.hot_score,0) desc,p.updated_at desc,p.id desc";
+    return timed(
+        productListTimer,
+        () ->
+            queryForList(
+                "select p.id,p.category_id,p.name,p.main_image,p.description,p.price,p.status from product p left join product_online_stat m on m.product_id=p.id"
+                    + condition
+                    + " order by "
+                    + order
+                    + " limit ?,?",
+                arguments.toArray()));
+  }
 }

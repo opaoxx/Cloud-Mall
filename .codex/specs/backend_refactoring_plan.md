@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common已完成规范收尾，Product/User/Stock仍有42个文件待处理，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第61节。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product已完成规范收尾，User/Stock仍有21个文件待处理，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第62节。
 
 ## 1. 使用方式与范围
 
@@ -3880,3 +3880,42 @@ Google Java Format使用原1.22.0并跳过长字符串重排，修改后只读�
 实施前后维护原bugfix_log。证据target/backend-refactor-20261114/product-standards包含前像、六符号白名单、AST/字面量/格式/文档检查、当前XML/Jar、源码保持及回退证明。完成后更新主方案和验收汇总，Product21完成后剩User5/Stock16共21文件；第60节原始清单和历史结论不回写。
 
 只提交21Java及两Markdown。适用测试/打包和git diff --check通过，临时index逆补丁恢复方案基线树且真实index/README保持后提交，建立refactor/product-standards-complete-20261114。Git回退不恢复运行数据，不删除证据/卷；不把本次规范收尾当作新增真实索引或完整商城验收。
+
+
+### 62.4 实施与语义对照
+
+21个清单文件全部完成核验，20个形成Git内容差异。ProductApplication.java原工作区混合LF/CRLF，格式工具仅统一行尾；其规范化Git blob前后完全相同，不为凑文件数增加无关代码改动。该文件的原字节/新字节与行尾等价证明已归档，Git内容回退不恢复原混合行尾。
+
+补齐/修正34处必需说明绑定，包括三个注解后的JavaDoc；六处局部短名按冻结作用域更名，23条模板说明及同方法空泛步骤替换为实际职责。说明覆盖原JSON/原字节转换、持久化交换机/队列与十秒DLQ延迟、三次本地尝试、Mapper的持久事实与计时器、当前商品快照、版本化写入及兼容删除。ProductMetricConsumer三个枚举的说明明确区分ACK调用返回、暂停流程及未知结算，不把本地结果解释为broker确认。
+
+完整Javac语法树核对21文件的package/type与import集合；只允许六个作用域内标识符更名，import仅排序且集合保持，无删除。841个字面量逐项核对值和顺序一致，覆盖SQL、ES脚本、消息/指标/错误常量、配置开关和数值上限。方法体、注解、修饰符、字段/返回类型、异常包装与日志/重抛顺序均通过归一对照。所有40个语义明确id保留，未机械更名PO/JSON/SQL字段。
+
+Product全部102份生产Java完成DocTrees、短名及格式检查：必需说明绑定缺口0、非id短名0、格式差异0，已列泛化模板/空泛步骤匹配0。原16个格式文件中包含工作区行尾归一的启动类，不能把“16个格式问题”理解为必须新增16个Git内容差异。本轮没有新增测试或改变断言，没有修正业务算法或生产故障。
+
+### 62.5 回归、打包与调用链复盘
+
+| 本轮实际执行 | 类数 | 测试项 | 结果 |
+| --- | ---: | ---: | --- |
+| Common原全部单测 | 4 | 25 | 0失败/错误/跳过，公共及后端源码契约保持 |
+| Product原全部单测 | 37 | 361 | 0失败/错误/跳过，商品/索引/消息/指标/生命周期等既有行为保护 |
+| 合计 | 41 | 386 | 首次全通过；不叠加旧85/1948或历史实库数量 |
+
+Product原生命周期测试本轮新UUID下的自有Java子进程naturalExit=true，执行器/任务关闭，AMQPConnections=0；完整closed/process/退出证据另存，不是多Agent或真实Rabbit集成。八模块离线package（跳过重复测试）通过，依赖方生产与测试源码编译完成。628个本模块生产class与target/classes及现存SourceFile逐一匹配，Product其中110个class；没有测试helper或无源旧class混入Jar。本轮没有业务测试失败或归档工具失败。
+
+核心调用链按源码逐行复盘：商品本地事务写outbox → dispatcher按原50条/30秒租期认领 → 发送不可变信封及原eventId → 原5秒confirm/return判断 → 写PUBLISHED与60秒消费回执期限或原退避；不是把publish confirm当消费完成。索引Consumer校验信封 → 终态去重 → Loader在原只读RR事务读当前事实 → Writer按原版本协议应用 → 记录APPLIED/STALE或原RETRY/日志/异常。监听容器原字节转换/三次尝试/DLQ、死信手动ACK和证据失败重投保持。兼容delete仍只忽略404，指标模式仍拒绝无可信版本删除；指标消费者ACK_CALL_RETURNED仍不代表broker历史确认。
+
+1102份其他已跟踪backend/deploy与README前像逐字节保持；所有测试/配置/POM/schema与其它服务未改。第61节85项归档XML SHA核验通过，只作旧证据。没有执行真实MySQL/Redis/Rabbit/ES/Nacos/TC、历史IT/压测或Docker/卷操作，不使用全量clean。
+
+### 62.6 清单、提交与回退
+
+验收汇总按第62节更新：Common/Product已完成，剩User5/Stock16共21文件；必需说明绑定26处（18处位置、8处独立说明）、格式14文件、已列非id短名与模板说明0。第60/61节原清单与通过范围按历史保存，当前386与旧85/1948分开呈现。下一步为User五文件的PO注释位置、VO映射说明和格式收尾。
+
+方案提交9cd0d669，基线refactor/product-standards-baseline-20261114，完成标签refactor/product-standards-complete-20261114。证据target/backend-refactor-20261114/product-standards/verification.json包含21文件前像、六作用域白名单、AST/841字面量、102文件检查、41份XML、生命周期/八Jar、源保持及剩余清单。
+
+实际提交20个具有内容差异的Java和本方案、验收汇总两Markdown，共22文件；启动类仅工作区行尾归一，不产生提交路径。git diff --check与临时index逆补丁恢复方案基线树、真实index/README保持后提交。
+
+```powershell
+git revert refactor/product-standards-complete-20261114
+```
+
+回退只撤销该20文件规范变化与两文档，不还原工作区原混合行尾、不恢复运行数据，也不删除历史证据或卷。Product本批规范完成不改变真实索引/商城/性能的既有验收边界。

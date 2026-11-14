@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 @SuppressWarnings("deprecation")
 @Configuration
 public class ElasticsearchConfiguration {
+  /** 根据配置地址创建 ES 高级客户端，由 Spring 在销毁 Bean 时关闭底层连接。 */
   @Bean(destroyMethod = "close")
   RestHighLevelClient restHighLevelClient(
       @Value("${cloudmall.product.elasticsearch.url:http://localhost:9200}") String url) {

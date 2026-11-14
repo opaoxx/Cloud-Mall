@@ -10,10 +10,11 @@ import org.apache.ibatis.annotations.Select;
 @Mapper
 public interface ProductHotStatMapper extends BaseMapper<ProductHotStatPO> {
   /** 只读汇总热度来源和最近更新时间，不改写历史指标。 */
-  @Select("SELECT COUNT(*) total_count,"
-      + "COALESCE(SUM(source_type='LEGACY_IMPORT'),0) legacy_count,"
-      + "COALESCE(SUM(source_type='UNKNOWN'),0) unknown_count,"
-      + "MAX(CASE WHEN source_type='LEGACY_IMPORT' THEN updated_at END)"
-      + " latest_legacy_update FROM product_hot_stat")
+  @Select(
+      "SELECT COUNT(*) total_count,"
+          + "COALESCE(SUM(source_type='LEGACY_IMPORT'),0) legacy_count,"
+          + "COALESCE(SUM(source_type='UNKNOWN'),0) unknown_count,"
+          + "MAX(CASE WHEN source_type='LEGACY_IMPORT' THEN updated_at END)"
+          + " latest_legacy_update FROM product_hot_stat")
   Map<String, Object> summarizeSources();
 }

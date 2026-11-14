@@ -31,11 +31,11 @@ public class ProductIndexOutboxDispatcher {
   /** 当前派发实例领取租约的唯一标识。 */
   private final String owner = "product-index-" + UUID.randomUUID();
 
-  /** 注入原事件存储、消息投递与JSON依赖。 */
   /** 是否允许投递索引 outbox，缺省保持现有自动投递。 */
   @Value("${cloudmall.product.index.dispatch-enabled:true}")
   private boolean dispatchEnabled;
 
+  /** 注入持久事件和投递依赖，并为当前 RabbitTemplate 设置原 JSON 转换器。 */
   public ProductIndexOutboxDispatcher(
       ProductIndexOutboxMapper mapper, RabbitTemplate rabbitTemplate, ObjectMapper objectMapper) {
     this.mapper = mapper;
@@ -44,12 +44,15 @@ public class ProductIndexOutboxDispatcher {
     this.rabbitTemplate.setMessageConverter(new Jackson2JsonMessageConverter(objectMapper));
   }
 
+  /** 有界认领原事件，等待 publisher confirm/return 后记录投递或退避，消费回执另行核验。 */
   @Scheduled(fixedDelayString = "${cloudmall.product.index.outbox-dispatch-ms:1000}")
   public void dispatch() {
+    // 1. 开关允许时按原批量和租期认领到期事件。
     if (!dispatchEnabled) return;
     OffsetDateTime now = OffsetDateTime.now();
     List<ProductIndexOutbox> events = mapper.claimDue(owner, 50, now, now.plusSeconds(30));
     for (ProductIndexOutbox event : events) {
+      // 2. 使用原 eventId 和不可变信封投递，等待有界确认并检查 return。
       CorrelationData correlationData = new CorrelationData(event.eventId());
       try {
         rabbitTemplate.convertAndSend(
@@ -72,6 +75,7 @@ public class ProductIndexOutboxDispatcher {
               event.id(), owner, "RabbitMQ returned message", nextAttempt(event.attempts()));
           continue;
         }
+        // 3. 发布成功后保留消费回执截止时间，未知或失败则沿原策略退避。
         mapper.markPublished(
             event.id(), owner, now, now.plusSeconds(60), nextAttempt(event.attempts()));
       } catch (Exception exception) {

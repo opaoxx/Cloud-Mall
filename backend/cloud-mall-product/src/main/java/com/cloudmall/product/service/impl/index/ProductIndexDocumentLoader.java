@@ -18,27 +18,23 @@ public class ProductIndexDocumentLoader {
   /** 商品索引事实数据 Mapper。 */
   private final ProductIndexMapper productIndexMapper;
 
-  /** 创建 ProductIndexDocumentLoader 实例。 */
+  /** 注入当前商品事实 Mapper，读取模式仍由原配置开关决定。 */
   public ProductIndexDocumentLoader(ProductIndexMapper productIndexMapper) {
-    // 1. 接收并整理 ProductIndexDocumentLoader 的业务请求。
-    // 2. 执行 ProductIndexDocumentLoader 的核心业务校验与状态处理。
-    // 3. 返回 ProductIndexDocumentLoader 的处理结果。
     this.productIndexMapper = productIndexMapper;
   }
 
-  /** 执行 load 相关操作。 */
+  /** 在原只读 RR 事务内读取当前商品快照；无记录返回空，不使用事件旧内容替代数据库事实。 */
   @org.springframework.transaction.annotation.Transactional(
       readOnly = true,
       isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ,
       timeout = 5)
   public Optional<ProductIndexDocument> load(long productId) {
-    // 1. 接收并整理 load 的业务请求。
-    // 2. 执行 load 的核心业务校验与状态处理。
-    // 3. 返回 load 的处理结果。
+    // 1. 按原开关选择普通内容或带在线指标的事实查询。
     List<Map<String, Object>> sources =
         metricsEnabled
             ? productIndexMapper.selectOnlineSource(productId)
             : productIndexMapper.selectIndexSource(productId);
+    // 2. 只映射首条当前事实，字段、金额、时间与空结果语义保持。
     return sources.stream().findFirst().map(ProductIndexDocumentLoader::toDocument);
   }
 

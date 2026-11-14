@@ -21,19 +21,66 @@ public record ProductIndexDocument(
     String metricSourceRef,
     ProductOnlineStatPO onlineStat) {
   /** Preserve the original fourteen-field legacy constructor and its untouched history values. */
-  public ProductIndexDocument(long id,long categoryId,String name,String mainImage,String description,
-      BigDecimal price,int status,long version,LocalDateTime updatedAt,long viewCount,long searchCount,
-      BigDecimal hotScore,String metricSourceType,String metricSourceRef) {
-    this(id,categoryId,name,mainImage,description,price,status,version,updatedAt,viewCount,searchCount,
-        hotScore,metricSourceType,metricSourceRef,null);
+  public ProductIndexDocument(
+      long id,
+      long categoryId,
+      String name,
+      String mainImage,
+      String description,
+      BigDecimal price,
+      int status,
+      long version,
+      LocalDateTime updatedAt,
+      long viewCount,
+      long searchCount,
+      BigDecimal hotScore,
+      String metricSourceType,
+      String metricSourceRef) {
+    this(
+        id,
+        categoryId,
+        name,
+        mainImage,
+        description,
+        price,
+        status,
+        version,
+        updatedAt,
+        viewCount,
+        searchCount,
+        hotScore,
+        metricSourceType,
+        metricSourceRef,
+        null);
   }
+
   /** 兼容既有测试调用；运行时投影必须由 Mapper 提供完整排序字段。 */
-  public ProductIndexDocument(long id, long categoryId, String name, String mainImage,
-      String description, BigDecimal price, int status, long version) {
-    this(id, categoryId, name, mainImage, description, price, status, version,
-        LocalDateTime.of(1970, 1, 1, 0, 0), 0L, 0L, BigDecimal.ZERO,
-        "UNKNOWN", null);
+  public ProductIndexDocument(
+      long id,
+      long categoryId,
+      String name,
+      String mainImage,
+      String description,
+      BigDecimal price,
+      int status,
+      long version) {
+    this(
+        id,
+        categoryId,
+        name,
+        mainImage,
+        description,
+        price,
+        status,
+        version,
+        LocalDateTime.of(1970, 1, 1, 0, 0),
+        0L,
+        0L,
+        BigDecimal.ZERO,
+        "UNKNOWN",
+        null);
   }
+
   /** 兼容早期调用方的七字段构造，运行时事实请使用数据库版本。 */
   public ProductIndexDocument(
       long id,

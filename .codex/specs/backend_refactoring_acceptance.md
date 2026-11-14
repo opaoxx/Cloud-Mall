@@ -1,18 +1,18 @@
 # 后端重构验收汇总与剩余工作
 
-核验日期：2026-11-14。第60节统一验收源码起点：`5798b822`；最新进度为第61节Common规范收尾，方案基线`e853c0c9`。责任人：当前会话主 Agent，单 Agent 执行。
+核验日期：2026-11-14。第60节统一验收源码起点：`5798b822`；最新进度为第62节Product规范收尾，方案基线`9cd0d669`。责任人：当前会话主 Agent，单 Agent 执行。
 
 本报告以[重构方案第60节](backend_refactoring_plan.md)为基线，按后续阶段更新当前状态；不覆盖原停工边界，也不改写历史实验结论。
 
 ## 1. 当前判断
 
-**八模块的中等深度结构目标已经达到；Common规范收尾已完成，整体规范验收尚有三个模块的小范围收尾，不能宣称全部完成。**
+**八模块的中等深度结构目标已经达到；Common、Product规范收尾已完成，整体规范验收尚有两个模块的小范围收尾，不能宣称全部完成。**
 
-- 第60节统一执行267类、1948项测试；第61节新执行12类、85项定向测试，两次分别0失败/错误/跳过，不相加计数。第61节八模块package通过，628个生产class与编译输出及现存SourceFile逐一核验。
+- 第60节统一执行267类1948项，第61节定向执行12类85项，第62节执行Product/Common共41类386项，各次分别0失败/错误/跳过，不相加计数。第62节八模块package通过，628个生产class与编译输出及现存SourceFile逐一核验。
 - 641份生产Java（含package-info）中，33个Controller采用独立职责，41个Service接口均非空。当前扫描未发现Cm编号生产类型、Controller继承ServiceImpl、Service HTTP映射、Controller/Service直接JDBC、指定SQL字面量候选或DTO/VO/PO后缀嵌套模型。
-- 结构扫描不等于逐字段语义证明；HTTP/事务/消息兼容仍依据已有行为测试与逐切片记录。第49至60节间13个变动文件全部位于src/test；第61节仅Common五个文件的说明/格式/未使用形参名变化，经完整AST与常量契约对照确认。配置/SQL未改。
-- 当前剩余60处必需入口/成员JavaDoc绑定问题、30个格式不一致文件、6个非id短变量/形参、23条明确模板化说明；去重涉及42个文件。这些数量单位不同且相互重叠，不能相加为缺陷总数。
-- 第60节只新增/更新Markdown和验收证据；第61节已完成Common五文件规范修改，未改测试源码或运行真实中间件测试。
+- 结构扫描不等于逐字段语义证明；HTTP/事务/消息兼容仍依据已有行为测试与逐切片记录。第49至60节间13个变动文件全部位于src/test；第61节Common五文件、第62节Product清单21文件仅作说明/格式/局部命名整理，均经完整AST及常量对照；Product启动类只有工作区行尾统一，20文件形成Git内容差异。配置/SQL未改。
+- 当前剩余26处必需入口/成员JavaDoc绑定问题、14个格式不一致文件；已列出的非id短名和模板化说明均已处理，去重剩余21个文件。这些数量单位不同且相互重叠，不能相加为缺陷总数。
+- 第60节为只读验收；第61/62节完成Common/Product规范整理，没有修改测试源码或运行新的真实中间件测试。
 
 ## 2. 模块职责与第60节统一测试基线
 
@@ -23,7 +23,7 @@
 | Common | 响应、异常、身份、消息指纹等跨模块基础能力；不承载服务业务 | 17 / 0 / 0 | 4 / 25 | 第61节规范检查通过 | `refactor/common-standards-complete-20261114`（规范收尾） |
 | Gateway | filter鉴权/请求链，util路径策略，config规则解析与发布 | 7 / 0 / 0 | 5 / 21 | 第60节扫描通过 | `refactor/gateway-complete-20261104` / `faaecef2` |
 | Cart | Controller → CartService/Impl → CartStorage；结算VO独立 | 24 / 1 / 1 | 13 / 35 | 第60节扫描通过 | `refactor/cart-complete-20261104` / `9eab801a` |
-| Product | 查询/管理/分类/活动服务；index、metrics、search分组 | 102 / 1 / 5 | 37 / 361 | 待规范收尾 | `refactor/product-complete-20261104` / `e345bb4d` |
+| Product | 查询/管理/分类/活动服务；index、metrics、search分组 | 102 / 1 / 5 | 37 / 361 | 第62节规范检查通过 | 结构`refactor/product-complete-20261104` / `e345bb4d`；规范`refactor/product-standards-complete-20261114` |
 | User | 账号/资料/地址、扣款/退款、TCC/Fence及只读取证分离 | 100 / 7 / 8 | 18 / 284 | 待规范收尾 | `refactor/user-complete-20261104` / `418cd0d0` |
 | Stock | 查询/预留/扣减/事实、cache、seckill、metrics及Seata演练分离 | 87 / 3 / 6 | 48 / 209 | 待规范收尾 | `refactor/stock-complete-20261104` / `ef53b37d` |
 | Order | 创建/查询/状态、秒杀接收/落单、超时/出站消息、恢复与分片分离 | 117 / 6 / 10 | 65 / 341 | 第60节扫描通过 | `refactor/order-complete-20261113` / `458efb7c` |
@@ -35,7 +35,7 @@
 
 ## 3. 实库与真实链路证据的分层结论
 
-下表是此前实际运行、在第60节校验成功XML SHA/标签/提交可达性后的结果，**没有在第61节重跑，也不与1948或85项累加**。源代码迁移阶段曾做的其它局部实验仍在原章节，不把此表称为所有历史实验索引。
+下表是此前实际运行、在第60节校验成功XML SHA/标签/提交可达性后的结果，**没有在第61/62节重跑，也不与1948、85或386项累加**。源代码迁移阶段曾做的其它局部实验仍在原章节，不把此表称为所有历史实验索引。
 
 | 阶段 | 已验证范围 | 原测试项数 | 不能推导的结论 |
 | --- | --- | ---: | --- |
@@ -55,32 +55,32 @@
 
 ## 4. 必须完成的规范收尾
 
-原模块“结构完成”不覆盖本次新发现的规范缺口。第60节只读审计采用同一JDK DocTrees/语法树与google-java-format 1.22.0；第61节修改后对Common17文件再次检查通过，其余模块字节保持，待办沿原结果。所有入口/成员检查排除record隐式生成方法，匿名类的显式public方法仍纳入。
+原模块“结构完成”不覆盖本次新发现的规范缺口。第60节只读审计采用同一JDK DocTrees/语法树与google-java-format 1.22.0；第61节Common17文件、第62节Product102文件再次检查通过；User/Stock字节保持，待办沿原结果。所有入口/成员检查排除record隐式生成方法，匿名类的显式public方法仍纳入。
 
 | 模块 | JavaDoc绑定问题 | dry-run格式文件 | 非id短名 | 模板化说明 | 去重文件 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Common（第61节完成） | 0 | 0 | 0 | 0 | 0 |
-| Product | 34 | 16 | 6 | 23 | 21 |
+| Product（第62节完成） | 0 | 0 | 0 | 0 | 0 |
 | User | 17 | 2 | 0 | 0 | 5 |
 | Stock | 9 | 12 | 0 | 0 | 16 |
 | Cart/Gateway/Order/Pay | 0 | 0 | 0 | 0 | 0 |
 
-60处中，21处已有说明但放在注解之后，JDK没有绑定到成员：User两个PO的16字段、Product upsert/delete/consume三个方法、Stock initialize/scheduledAudit两个入口。其余39处需要补全独立入口/成员说明，其中部分匿名回调或成组字段已有上层说明，不能说60处都完全没有注释。23条模板化说明来自Product四个文件，与部分JavaDoc问题重叠。扫描不能代替对每段注释内容的逐行语义复核。
+第60节原60处说明绑定问题中，Product34处已在第62节处理，包含三个注解后的JavaDoc。当前26处中18处是User两个PO的16字段和Stock两个入口的注释位置问题，另8处需独立说明（部分有上层或分组说明），不能说26处全部无注释。Product四文件的23条模板化说明及同方法空泛步骤已替换，原本地ACK返回/未知结果语义保持。扫描仍不代替逐段说明的语义复核。
 
-第60节103个两字符以内声明中，96个id为已有主键/查询/传输语义，保留PO/JSON/SQL字段；7处ex/e/rs中Common的ex已改为exception，剩余Product六处，见附表。没有发现Cm编号生产类型；冻结测试、工具、表或消息中的编号不是本次类名重构遗漏。
+第60节103个短声明中96个id保留原主键/查询/传输语义；Common一处与Product六处非id短名均已完成语义改名。Product102文件现只剩40个语义明确id，没有新的非id短名命中。没有发现Cm编号生产类型；冻结测试、工具、表或消息中的编号不是本次类名重构遗漏。
 
 后续顺序与通过门：
 
 1. **Common（第61节已完成）**：四个格式文件与AuthInterceptor的ex，共五文件；补充ErrorCodes十二个常量的准确独立说明。异常处理顺序、JSON/ThreadLocal和全部错误码值保持。Common25项、Cart HTTP8项、Order/Stock指纹消费者52项，共85项通过；完整AST规范化只允许未使用形参改名。
-2. **Product（下一步）**：二十一文件，补Bean/Mapper/回调说明、修正注解顺序、替换模板化描述、六处局部短名并统一格式。SQL/Lua/消息键、重试、确认、Bean名和算法不变；现有单测/契约加源码语义核验，不为注释排版重开历史CM21实验。
-3. **User**：五文件，调整两个PO注释位置、补BalanceTccDebitVO.from说明和两个文件格式。映射注解、字段、null/金额保持；执行相关表示/资金契约。
+2. **Product（第62节已完成）**：二十一文件全部复核，20个形成Git内容变化、启动类仅统一混合行尾。补说明/注释位置/六处局部命名/格式，完整AST和841个字面量保持；Product361与Common25共386项及八包通过，不重开历史CM21实验。
+3. **User（下一步）**：五文件，调整两个PO注释位置、补BalanceTccDebitVO.from说明和两个文件格式。映射注解、字段、null/金额保持；执行相关表示/资金契约。
 4. **Stock**：十六文件，补监听/批处理入口与成组成员的独立说明、修正两个任务注释位置并统一格式。SQL、Redis Lua、指标/规则名、调度/租约与边界不变；执行相关模块回归。
 
-剩余三批完成后再做一次规范总复核；只有实际零待办且适用测试通过才把“规范收尾”置完成。每批都先冻结文件/差异范围，不能把本清单当作一次性全库格式化授权。
+剩余两批完成后再做一次规范总复核；只有实际零待办且适用测试通过才把“规范收尾”置完成。每批都先冻结文件/差异范围，不能把本清单当作一次性全库格式化授权。
 
 ### 4.1 文件级清单
 
-以下为当前状态清单，Common已完成项保留对照但不计入剩余42文件；“说明”是AST声明数，“模板”是匹配行数，格式列只列dry-run命中。名称对应完整可点击源码路径，后续改动后需更新行号/状态。
+以下为当前状态清单，Common/Product已完成项保留对照但不计入剩余21文件；“说明”是AST声明数，“模板”是匹配行数，格式列只列dry-run命中。名称对应完整可点击源码路径，后续改动后需更新行号/状态。
 
 #### cloud-mall-common（第61节已完成）
 
@@ -92,31 +92,32 @@
 | [web/AuthInterceptor.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/AuthInterceptor.java) | 0 | 通过 | 0 | 0 |
 | [web/GlobalExceptionHandler.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/GlobalExceptionHandler.java) | 0 | 已完成 | 0 | 0 |
 
-#### cloud-mall-product
+#### cloud-mall-product（第62节已完成）
 
 | 文件 | 说明 | 格式 | 短名 | 模板 |
 | --- | ---: | --- | ---: | ---: |
-| [ProductApplication.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/ProductApplication.java) | 0 | 待处理 | 0 | 0 |
-| [config/ElasticsearchConfiguration.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ElasticsearchConfiguration.java) | 1 | — | 0 | 0 |
-| [config/ProductIndexFeatureConfiguration.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ProductIndexFeatureConfiguration.java) | 0 | 待处理 | 0 | 0 |
-| [config/ProductMessagingConfiguration.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ProductMessagingConfiguration.java) | 12 | 待处理 | 0 | 6 |
-| [config/ProductReadExceptionHandler.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ProductReadExceptionHandler.java) | 0 | 待处理 | 0 | 0 |
-| [domain/po/ProductIndexDocument.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/domain/po/ProductIndexDocument.java) | 0 | 待处理 | 0 | 0 |
-| [domain/po/ProductSearchHit.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/domain/po/ProductSearchHit.java) | 0 | 待处理 | 0 | 0 |
-| [domain/vo/HotStatVO.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/domain/vo/HotStatVO.java) | 0 | 待处理 | 0 | 0 |
-| [mapper/ProductHotStatMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductHotStatMapper.java) | 0 | 待处理 | 0 | 0 |
-| [mapper/ProductIndexConsumptionMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexConsumptionMapper.java) | 4 | 待处理 | 0 | 0 |
-| [mapper/ProductIndexDeadLetterMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexDeadLetterMapper.java) | 2 | 待处理 | 0 | 0 |
-| [mapper/ProductIndexMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexMapper.java) | 0 | 待处理 | 0 | 0 |
-| [mapper/ProductIndexOutboxMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexOutboxMapper.java) | 3 | 待处理 | 1 | 0 |
-| [mapper/ProductIndexRebuildMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexRebuildMapper.java) | 0 | 待处理 | 0 | 0 |
-| [mapper/ProductSqlMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductSqlMapper.java) | 4 | 待处理 | 0 | 0 |
-| [service/ProductIndexWriter.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/ProductIndexWriter.java) | 0 | 待处理 | 0 | 0 |
-| [service/impl/index/ElasticsearchProductIndexWriter.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ElasticsearchProductIndexWriter.java) | 2 | 待处理 | 1 | 4 |
-| [service/impl/index/ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 1 | — | 4 | 12 |
-| [service/impl/index/ProductIndexDocumentLoader.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexDocumentLoader.java) | 0 | — | 0 | 1 |
-| [service/impl/index/ProductIndexOutboxDispatcher.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexOutboxDispatcher.java) | 2 | — | 0 | 0 |
-| [service/impl/metrics/ProductMetricConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/metrics/ProductMetricConsumer.java) | 3 | — | 0 | 0 |
+| [ProductApplication.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/ProductApplication.java) | 0 | 通过 | 0 | 0 |
+| [config/ElasticsearchConfiguration.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ElasticsearchConfiguration.java) | 0 | 通过 | 0 | 0 |
+| [config/ProductIndexFeatureConfiguration.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ProductIndexFeatureConfiguration.java) | 0 | 通过 | 0 | 0 |
+| [config/ProductMessagingConfiguration.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ProductMessagingConfiguration.java) | 0 | 通过 | 0 | 0 |
+| [config/ProductReadExceptionHandler.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/config/ProductReadExceptionHandler.java) | 0 | 通过 | 0 | 0 |
+| [domain/po/ProductIndexDocument.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/domain/po/ProductIndexDocument.java) | 0 | 通过 | 0 | 0 |
+| [domain/po/ProductSearchHit.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/domain/po/ProductSearchHit.java) | 0 | 通过 | 0 | 0 |
+| [domain/vo/HotStatVO.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/domain/vo/HotStatVO.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductHotStatMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductHotStatMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductIndexConsumptionMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexConsumptionMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductIndexDeadLetterMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexDeadLetterMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductIndexMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductIndexOutboxMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexOutboxMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductIndexRebuildMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexRebuildMapper.java) | 0 | 通过 | 0 | 0 |
+| [mapper/ProductSqlMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductSqlMapper.java) | 0 | 通过 | 0 | 0 |
+| [service/ProductIndexWriter.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/ProductIndexWriter.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/index/ElasticsearchProductIndexWriter.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ElasticsearchProductIndexWriter.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/index/ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/index/ProductIndexDocumentLoader.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexDocumentLoader.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/index/ProductIndexOutboxDispatcher.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexOutboxDispatcher.java) | 0 | 通过 | 0 | 0 |
+| [service/impl/metrics/ProductMetricConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/metrics/ProductMetricConsumer.java) | 0 | 通过 | 0 | 0 |
+
 
 #### cloud-mall-user
 
@@ -149,16 +150,9 @@
 | [service/impl/cache/StockConsistencyReconciler.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/cache/StockConsistencyReconciler.java) | 2 | — | 0 | 0 |
 | [service/impl/seckill/SeckillQuotaSettlementService.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/seckill/SeckillQuotaSettlementService.java) | 0 | 待处理 | 0 | 0 |
 
-### 4.2 剩余六个短名定位
+### 4.2 已完成的短名更正
 
-| 文件 | 当前行 | 声明 |
-| --- | ---: | --- |
-| [ProductIndexOutboxMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexOutboxMapper.java) | 34 | `LAMBDA_EXPRESSION:null:rs` |
-| [ElasticsearchProductIndexWriter.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ElasticsearchProductIndexWriter.java) | 432 | `CATCH:ElasticsearchStatusException:e` |
-| [ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 220 | `CATCH:Exception:e` |
-| [ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 244 | `CATCH:Exception:e` |
-| [ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 254 | `CATCH:Exception:e` |
-| [ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 268 | `CATCH:Exception:e` |
+Common的ex→exception已在第61节完成。第62节Product完成六处：Outbox Mapper的rs→resultSet；ES兼容删除e→deleteFailure；Consumer的消费/写入/删除/日期解析异常分别改为consumptionFailure/writeFailure/deleteFailure/invalidTimestamp。仅改各自作用域内标识符，异常类型、包装、日志和重抛顺序保持；原行号和允许变化明细保留于阶段证据。
 
 ## 5. 额外真实场景与原有风险
 
@@ -203,7 +197,7 @@ git revert refactor/backend-acceptance-complete-20261114
 - `jar-check.json`：八Jar共628生产class，编译字节/SourceFile对应。
 - `retained-experiment-resources.json`：上述12项目43卷只读检查。
 
-ignored证据保留在当前工作区；Git版本化本报告、主方案和各阶段明确修改的源码。后续会话先读本报告、第61节及实际Git状态，从Product二十一文件规范收尾继续。
+ignored证据保留在当前工作区；Git版本化本报告、主方案和各阶段明确修改的源码。后续会话先读本报告、第62节及实际Git状态，从User五文件规范收尾继续。
 
 
 ### 7.1 第61节增量结果与回退
@@ -216,4 +210,17 @@ Common五文件已完成；完整AST对照排除注释后，仅afterCompletion�
 
 ```powershell
 git revert refactor/common-standards-complete-20261114
+```
+
+
+### 7.2 第62节增量结果与回退
+
+Product21文件全部完成；其中ProductApplication仅将混合行尾统一为CRLF，规范化Git blob前后相同，其余20文件形成内容差异。完整Javac语法树只允许六个作用域内局部更名，import集合保持；841个字面量的值与顺序一致，覆盖SQL/ES脚本、消息/指标/错误常量。34处说明绑定、16个格式差异、六短名、23条模板说明处理后，Product全102文件检查通过，40处原id保留。
+
+本轮41类386项（Product361/Common25）首次通过，八模块package及628生产class检查通过；原Product生命周期测试的自有Java子进程自然退出、执行器关闭、AMQPConnections=0。没有改测试源码、运行真实中间件或叠加旧85/1948项。
+
+证据`target/backend-refactor-20261114/product-standards/verification.json`；方案基线`refactor/product-standards-baseline-20261114`，完成标签`refactor/product-standards-complete-20261114`。精确回退20个有内容差异的Java与两份文档；Git不还原工作区原混合行尾或运行数据：
+
+```powershell
+git revert refactor/product-standards-complete-20261114
 ```

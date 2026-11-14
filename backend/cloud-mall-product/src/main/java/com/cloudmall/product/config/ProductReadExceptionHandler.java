@@ -42,8 +42,11 @@ public class ProductReadExceptionHandler {
         && failure instanceof com.cloudmall.common.error.BizException metricFailure
         && "PRODUCT_METRICS_UNAVAILABLE".equals(metricFailure.getCode())
         && metricFailure.getHttpStatus() == 503) {
-      return ResponseEntity.status(503).cacheControl(CacheControl.noStore())
-          .body(ApiResponse.error("PRODUCT_METRICS_UNAVAILABLE", "Product metrics could not be registered"));
+      return ResponseEntity.status(503)
+          .cacheControl(CacheControl.noStore())
+          .body(
+              ApiResponse.error(
+                  "PRODUCT_METRICS_UNAVAILABLE", "Product metrics could not be registered"));
     }
 
     // 1. 分类完整 cause 链；事务包装、通信中断和未知实现错误保持各自含义。

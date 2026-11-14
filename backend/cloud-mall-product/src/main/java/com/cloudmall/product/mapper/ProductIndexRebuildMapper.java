@@ -91,9 +91,7 @@ public interface ProductIndexRebuildMapper extends BaseMapper<ProductIndexRebuil
           + "last_error=NULL,lease_owner=NULL,lease_until=NULL,updated_at=#{now}"
           + " WHERE job_id=#{jobId} AND lease_owner=#{owner}")
   int restartClaimedAfterIndexLoss(
-      @Param("jobId") String jobId,
-      @Param("owner") String owner,
-      @Param("now") LocalDateTime now);
+      @Param("jobId") String jobId, @Param("owner") String owner, @Param("now") LocalDateTime now);
 
   /** 已完成任务若发现目标索引丢失或文档不足则重新启动。 */
   @Update(
@@ -102,6 +100,5 @@ public interface ProductIndexRebuildMapper extends BaseMapper<ProductIndexRebuil
           + "last_error=NULL,lease_owner=NULL,lease_until=NULL,updated_at=#{now}"
           + " WHERE job_id=#{jobId} AND status='COMPLETED'"
           + " AND (lease_until IS NULL OR lease_until<#{now})")
-  int restartCompleted(
-      @Param("jobId") String jobId, @Param("now") LocalDateTime now);
+  int restartCompleted(@Param("jobId") String jobId, @Param("now") LocalDateTime now);
 }

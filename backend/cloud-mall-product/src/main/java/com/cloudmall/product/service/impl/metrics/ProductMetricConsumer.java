@@ -99,8 +99,11 @@ public class ProductMetricConsumer {
 
   /** Local single-delivery outcome, never a broker confirmation. */
   private enum Disposition {
+    /** 原 delivery tag 的 ACK 调用已返回，不代表拥有 broker 端确认历史。 */
     ACK_CALL_RETURNED,
+    /** 当前处理触发了监听暂停流程，等待原生命周期协调继续处理。 */
     PAUSED,
+    /** 批内应用或结算结果无法确认，停止本批后续处理并保留安全失败。 */
     UNKNOWN
   }
 
