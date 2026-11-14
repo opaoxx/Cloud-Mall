@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线与两项本机HTTP契约回归，下一步细化独立MySQL/Redis联合验证；尚未宣称真实全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约及Cart/User/Product/Stock独立MySQL/Redis联合数据回归；下一步细化Order/Pay持久事务与消息验证，尚未宣称真实全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3033,3 +3033,39 @@ MySQL仅预建cloudmall_stock七张空源表：stock_sku、stock_flow、stock_re
 上一源码点已完成八模块编译/1933离线/八Jar检查且本轮源码无改动，不重复全矩阵或引入映射实现的新测试；各组Maven按标准布局自行编译。只在有修复时新增适用编译/单测/契约回归。13类方法须与冻结清单一致、无失败/错误/跳过，1117个backend/deploy文件及README字节保持。证据目录`target/backend-refactor-20261114/cross-module-data`，每组日志/XML/前后资源分开保存，不覆盖首轮失败记录。
 
 通过后记录实际数据与验证限制，建立`refactor/cross-module-data-complete-20261114`；临时index逆补丁恢复父树，真实index/README保持。此阶段若仅更新文档，Git回退只撤文档，不回退MySQL/Redis运行事实；忽略证据和两个保留卷不受Git管理。后续Order/Pay持久事务/消息及真实TC/Nacos链继续另行冻结，不把55项数据回归当作全商城或性能验收。
+
+
+### 50.4 实际验证结果与资源归档
+
+四组按冻结顺序首次通过：13类55项，0失败、0错误、0跳过。每类实际方法名与selection.json完全一致，没有执行其他IT或把Common历史XML混入计数；生产、测试与配置均未修改。上一源码点的1933项/264类报告SHA核验结果独立保存，不与本轮55项累加为一次验证。
+
+| 顺序 | 范围 | 测试项 | 本轮实际证明 |
+| --- | --- | ---: | --- |
+| 1 | Cart十个Redis IT | 42 | 真Redis/Lua、并发数量与checked、原JSON比较清理、Hash/商品身份/价格/数量校验和TTL |
+| 2 | UserAccountRefactoringIT | 4 | 真MySQL/Redis、账号登录/资料/退出与Token TTL、鉴权错误顺序、地址归属和默认值、余额提交/回滚/重放/退款 |
+| 3 | ProductRefactoringMySqlIT | 5 | 真MySQL及Spring事务、商品CRUD与outbox版本共同提交、插入/更新失败回滚、分类默认值、活动时间及DB成功早于Redis失败 |
+| 4 | StockCoreRefactoringMySqlIT | 4 | 真MySQL/Redis、六请求竞争最后一件库存、预扣重放/拒绝/故障边界、提交后标记清理及外层回滚保留、Lua秒杀受理/outbox幂等 |
+| 合计 | 13个现有显式IT类 | 55 | 四个独立Maven调用串行执行，真实数据操作仅进入新实验资源 |
+
+Cart日志记录42个不同自有cart key均经owner条件删除；每组前后和最终Redis所有16个DB均为空。User/Product各自表内写入、故障注入与断言在随机owned库完成；Stock四个用例各用一个stock_core_UUID库。实际User1、Product1、Stock4共六个owned库全部删除，六对CREATE/DROP事件与User/Product输出的UUID、最终schema清单互证，没有新增失败数据库。七张Stock源表最终均0行，SHOW CREATE TABLE与checksum逐项和初始相同。
+
+实际资源版本为MySQL8.0.46、Redis7.0.15；启动前核验新项目/新卷、IPAM与端口，核对渲染配置后仅启动mysql/redis，宿主19967的MySQL握手与19968的Redis认证/PING通过。原镜像ID/标签归属检查、十份initial/before/after/final快照、两个容器inspect/log、binlog建删事件和各组XML均归档。归档门通过后才down本轮容器/网络（不带-v），保留以下两卷：
+
+- `cloud-mall-refactor-native-data-20261114_mysql_data`
+- `cloud-mall-refactor-native-data-20261114_redis_data`
+
+本轮无失败修复、无临时放宽测试保护条件；四组Maven按标准布局完成适用编译和测试，未重复上一轮整仓1933测试或八Jar打包。1117份已跟踪backend/deploy文件及README逐字节保持；历史/default资源未动。原夹具失败后也删库的限制仍成立，不能将本轮成功结果解释为后续失败现场必然保留。
+
+### 50.5 通过口径、回退与后续
+
+本轮通过说明四个模块在同一源码点、新隔离MySQL/Redis资源组下的持久化/事务/Lua契约回归通过。Product Redis故障为受控替身，Cart商品与各模块远端依赖仍按原夹具替换；并未启动实际Cart→Product、Order→Stock、Pay→User全服务链，也未验证真实MQ/ES、Nacos/Gateway、TC/RM资金或性能。
+
+方案提交d11c3373，基线标签`refactor/cross-module-data-baseline-20261114`，完成标签`refactor/cross-module-data-complete-20261114`。证据入口`target/backend-refactor-20261114/cross-module-data/verification.json`，保存精确选择/方法、四组报告/日志、前后资源/事件、两个保留卷、源码保持和逆补丁证明。
+
+```powershell
+git revert refactor/cross-module-data-complete-20261114
+```
+
+本轮Git结果提交仅含方案记录，回退不撤销已运行测试或恢复MySQL/Redis数据。临时index逆补丁恢复父树，真实index/README保持，未使用clean/reset；忽略工件与保留卷不受Git回退管理，旧pycache和README未入提交。原bugfix_log.md已补完整结果。
+
+下一步核对并冻结Order/Pay持久事务与消息回归清单，明确订单分片源表、支付意图/回执、Rabbit拓扑和各夹具URL/失败清理规则，再使用新的独立资源执行。真实TC资金与全商城全链仍单独规划，不从本轮55项数据验证推导完成。
