@@ -3346,3 +3346,29 @@ git revert refactor/pay-user-bridge-complete-20261114
 仅提交三份测试与本方案；临时index逆补丁恢复父树，真实index/README保持。Git回退不恢复运行数据或删除证据/五卷；原bugfix_log持续记录固定环境问题、Nacos授权修正、归档日志判据修正及实际回归结果。旧README本地修改、pycache及忽略产物均未入提交。
 
 下一步按同样方式审查Pay receipt双资源测试的环境/失败现场与必要源表，冻结独立的Pay/User双资源TC范围。派发桥九项通过不替代Pay receipt/coordinator、公开支付入口、Order/Stock联动、完整TC故障矩阵或商城验收；不自动启动历史CM21或压测。
+
+## 55. Pay receipt / User 余额双资源真实 TC 回归（2026-11-14）
+
+### 55.1 范围与兼容边界
+
+从8c1148dd继续，主Agent单独执行，依据batch16b1_cm18_pay_receipt_review.md及当前service.impl.receipt实现。本轮只修改PayReceiptTccIT的环境装配、类职责说明和子进程退出证据；直接复用第54节PayUserTccBridgeEnvironment，不复制地址解析器、不修改该helper或生产代码。原完整11个@Test正文和交易辅助方法保持，只有setup/startUser/stopUser接入显式地址、Asia/Shanghai及准确PID退出核验。
+
+原调用顺序保持：PayTccReceiptService.prepare→Bridge.prepare独立dispatch锚点→Store.claim独立CLAIMED→唯一winner通过LocalTCC代理注册Pay branch；随后测试以原XID调用Bridge.dispatch→真实Nacos/Feign/User Try注册User branch。TC统一决议两个资源；Pay官方Fence与receipt共享同一裸DataSource/本地REQUIRED事务，User官方Fence与原余额事务共同推进。Pay receipt自身不调用User或Order，不把receipt CONFIRMED改写为公开支付SUCCESS。
+
+冻结原11方法：双资源提交及清Fence后重放；双资源取消及防复活；User余额不足回滚原Pay receipt；Pay空Cancel永久tombstone；Pay Try失败整体回滚后空取消；Confirm/Cancel写失败时Fence不得先提交、TC修复后重试；并发receipt prepare只登记一次；User响应丢失不覆盖Pay资源或二次POST；载荷/XID冲突拒绝重绑；被拒第二Pay分支只安全ACK、不触碰永久owner。部分重复/迟到调用仍按原夹具使用raw适配器；初始双资源决议和故障重试必须通过真实TC。
+
+### 55.2 独立资源与现场规则
+
+新项目cloud-mall-refactor-pay-receipt-20261114，基于deploy/experiments/compose.yml和本轮独立override，仅MySQL8.0.46、Redis7.0、Nacos2.2.0、Seata1.5.2；端口19984/19987/19986/19985分别为MySQL/Redis/NacosHTTP/TC，Nacos gRPC20986/20987，子网10.254.218.0/24。新mysql_data/redis_data/seata_data/nacos_data/nacos_logs五卷，pull_policy=never/restart=no；不接入第54节保留失败库或任何历史/default卷。
+
+Nacos保持认证、稳定hostname及原healthcheck.py，初始化即向本轮root/cloudmall_admin授既有空命名空间及public:*:*的rw权限，避免重复第54节已定位的启动缺口；共享bootstrap不改。TC保持file配置和存储，实际XID地址按日志记录。先核对新项目/卷、镜像/端口/IPAM、健康及认证，再准备当前schema.sql的八张空源表（User五、Pay三）。原夹具克隆到两个cm16b1_<UUID>库，原初始化器创建receipt/dispatch/Fence等表。
+
+Pay父上下文和两个User子进程使用同一显式MySQL/Nacos/TC/Redis环境，Java17 add-opens及Asia/Shanghai齐全；禁用无关Rabbit health并指向未启用端口。测试退出前原规则等待TC终态、User冻结归零及Pay无TRYING receipt，十一笔原始快照保存receipt/payFence和User资金事实。未决/收尾失败保留库；普通断言失败但之后已收敛仍可能删库，保留该原限制。失败先记bugfix_log和归档，不删库或改账本掩错。
+
+### 55.3 验证与回退
+
+先提交本节及refactor/pay-receipt-native-baseline-20261114。修改单Java执行google-java-format；定向运行PayUserTccBridgeEnvironmentTest、PayTccBridgeServiceTest、PayTccReceiptServiceTest、PayTccExecutionEvidenceTest。离线构建User启动包并核Jar/class一致；新独立JVM精确运行PayReceiptTccIT全11方法，不与其它TC IT合跑。原11方法及其余交易辅助方法逐段保持，证据归档target/backend-refactor-20261114/pay-receipt-native，旧33/9结果不累加或冒本轮回归。
+
+成功后核验十一笔终态事实、两种真实RM资源/全局事务终态、两个自有User PID退出、两库建删、八源表指纹、Redis初末16DB空及Nacos原组无实例；归档日志和停止后的TC file store，再down本轮容器/网络，无-v，五卷保留。只提交PayReceiptTccIT与本方案，其它1119份既有backend/deploy及README保持。git diff --check及临时index逆补丁恢复父树、真实index/README保持后建立refactor/pay-receipt-native-complete-20261114。Git回退不恢复运行数据库/TC状态或删除证据/保留卷。
+
+本轮不启用coordinator、公开Pay TCC入口、Order/Stock联动、进程故障全矩阵或商城/性能验收；双资源回执与余额一致不自动代表公开订单已经付款成功。
