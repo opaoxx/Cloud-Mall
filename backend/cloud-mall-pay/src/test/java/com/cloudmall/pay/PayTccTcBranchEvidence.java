@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
 
 /** 只读观察固定 TC 原生 INFO；不以全局提交推断单支提交 ACK。 */
 final class PayTccTcBranchEvidence {
-  /** 只允许读取该既有共享容器，绝不修改其配置或生命周期。 */
+  /** 旧调用者的只读来源保持；交付夹具通过显式重载传入本轮完整容器 ID。 */
   private static final String CONTAINER = "cloud-mall-seata";
 
   /** 与评审冻结的字节/行上限一致；命中上限不接受部分成功。 */
@@ -83,6 +83,46 @@ final class PayTccTcBranchEvidence {
       Window window,
       Path anchorArtifact)
       throws Exception {
+    return capture(CONTAINER, artifacts, phase, xid, payBranch, userBranch, window, anchorArtifact);
+  }
+
+  /**
+   * 从本轮明确的 TC 容器读取原生事实，保留原窗口和解析规则。
+   *
+   * @return 不可覆盖的证据文件
+   * @throws Exception 输入非法或证据保存失败时抛出
+   */
+  public static Path capture(
+      PayTccDeliveryEnvironment environment,
+      Path artifacts,
+      String phase,
+      String xid,
+      long payBranch,
+      long userBranch,
+      Window window,
+      Path anchorArtifact)
+      throws Exception {
+    return capture(
+        environment.tcContainerId(),
+        artifacts,
+        phase,
+        xid,
+        payBranch,
+        userBranch,
+        window,
+        anchorArtifact);
+  }
+
+  private static Path capture(
+      String container,
+      Path artifacts,
+      String phase,
+      String xid,
+      long payBranch,
+      long userBranch,
+      Window window,
+      Path anchorArtifact)
+      throws Exception {
     // 1. 固定原始开始窗口；仅完整读取后的缺证可短时重读，不补任何 TC 动作。
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
     Map<String, Object> anchor = anchorReference(artifacts, anchorArtifact, window);
@@ -92,6 +132,7 @@ final class PayTccTcBranchEvidence {
     while (true) {
       Path attempt =
           captureOnce(
+              container,
               artifacts,
               phase,
               xid,
@@ -134,6 +175,7 @@ final class PayTccTcBranchEvidence {
 
   /** 单次观察只写一个独立包；外层重读保留相同 start 并推进实际 end。 */
   private static Path captureOnce(
+      String container,
       Path artifacts,
       String phase,
       String xid,
@@ -152,7 +194,7 @@ final class PayTccTcBranchEvidence {
     require(payBranch > 0 && userBranch > 0 && payBranch != userBranch, "branches invalid");
     Instant hostCaptureStartedAt = Instant.now();
     Map<String, Object> anchorBefore = anchorReference(artifacts, anchorArtifact, window);
-    Window endWindow = markWindowStart();
+    Window endWindow = markWindowStart(container);
     String clockStatus = clockStatus(window, endWindow, previousEnd);
     boolean anchorValid =
         "OK".equals(anchor.get("status"))
@@ -173,9 +215,9 @@ final class PayTccTcBranchEvidence {
                     endWindow.sourceTime,
                     "--tail",
                     Integer.toString(LINE_BOUND),
-                    CONTAINER))
+                    container))
             : new Read(new byte[0], new byte[0], "NOT_READ");
-    Read after = inspect();
+    Read after = inspect(container);
     Map<String, Object> anchorAfter = anchorReference(artifacts, anchorArtifact, window);
     String sourceStatus =
         !"OK".equals(anchor.get("status"))
@@ -199,7 +241,7 @@ final class PayTccTcBranchEvidence {
       sourceStatus = facts.get("status").toString();
     Map<String, Object> source = new LinkedHashMap<>();
     source.put("status", sourceStatus);
-    source.put("container", CONTAINER);
+    source.put("container", container);
     source.put("containerIdentitySha256", endWindow.tcIdentitySha256);
     source.put(
         "identityStable",
@@ -216,7 +258,7 @@ final class PayTccTcBranchEvidence {
     }
     source.put(
         "commandTemplate",
-        "docker logs --timestamps --since UTC --until UTC --tail 5000 cloud-mall-seata");
+        "docker logs --timestamps --since UTC --until UTC --tail 5000 " + container);
     source.put("stdoutBytes", logs.stdout.length);
     source.put("stdoutSha256", sha256(logs.stdout));
     source.put("stderrBytes", logs.stderr.length);
@@ -253,11 +295,20 @@ final class PayTccTcBranchEvidence {
    * @return 只含双时钟审计、状态与身份指纹的不可变锚点；失败不回退到主机时间
    */
   public static Window markWindowStart() {
+    return markWindowStart(CONTAINER);
+  }
+
+  /** 读取本轮 TC 容器的身份与同源 Docker 时钟，不回退到共享容器。 */
+  public static Window markWindowStart(PayTccDeliveryEnvironment environment) {
+    return markWindowStart(environment.tcContainerId());
+  }
+
+  private static Window markWindowStart(String container) {
     String hostStart = Instant.now().toString();
     long started = System.nanoTime();
-    Read before = inspect();
+    Read before = inspect(container);
     Read clock = read(List.of("docker", "info", "--format", "{{.SystemTime}}|{{.ID}}"));
-    Read after = inspect();
+    Read after = inspect(container);
     String sourceTime = null, daemon = null;
     String status =
         !"OK".equals(before.status) || !"OK".equals(clock.status) || !"OK".equals(after.status)
@@ -569,10 +620,10 @@ final class PayTccTcBranchEvidence {
     return result;
   }
 
-  private static Read inspect() {
+  private static Read inspect(String container) {
     return read(
         List.of(
-            "docker", "inspect", "--format", "{{.Id}} {{.Config.Image}} {{.Image}}", CONTAINER));
+            "docker", "inspect", "--format", "{{.Id}} {{.Config.Image}} {{.Image}}", container));
   }
 
   private static boolean validContainer(byte[] raw) {

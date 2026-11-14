@@ -145,6 +145,73 @@ final class PayTccStageEvidence {
       Map<String, Object> processes,
       Map<String, Object> verifiedAssertions)
       throws Exception {
+    return capture(
+        13307,
+        15674,
+        artifacts,
+        batch,
+        phase,
+        payNo,
+        orderNo,
+        userId,
+        skuId,
+        month,
+        databases,
+        processes,
+        verifiedAssertions);
+  }
+
+  /**
+   * 从明确的 Rabbit 管理入口采集本轮 vhost 元数据；数据库和资金采集语义保持。
+   *
+   * @return 不可覆盖的阶段证据文件
+   * @throws Exception 输入非法或证据保存失败时抛出
+   */
+  public static Path capture(
+      PayTccDeliveryEnvironment environment,
+      Path artifacts,
+      String batch,
+      String phase,
+      String payNo,
+      String orderNo,
+      long userId,
+      long skuId,
+      String month,
+      Map<String, JdbcTemplate> databases,
+      Map<String, Object> processes,
+      Map<String, Object> verifiedAssertions)
+      throws Exception {
+    return capture(
+        environment.mysqlPort(),
+        environment.rabbitManagementPort(),
+        artifacts,
+        batch,
+        phase,
+        payNo,
+        orderNo,
+        userId,
+        skuId,
+        month,
+        databases,
+        processes,
+        verifiedAssertions);
+  }
+
+  private static Path capture(
+      int mysqlPort,
+      int rabbitManagementPort,
+      Path artifacts,
+      String batch,
+      String phase,
+      String payNo,
+      String orderNo,
+      long userId,
+      long skuId,
+      String month,
+      Map<String, JdbcTemplate> databases,
+      Map<String, Object> processes,
+      Map<String, Object> verifiedAssertions)
+      throws Exception {
     // 1. 先验证全部来源归属，禁止以 collector 读取原业务库或任意表。
     require(batch != null && batch.matches("cm16c_[0-9a-f]{32}"), "fixture runId invalid");
     require(phase != null && phase.matches("[A-Za-z0-9_-]{1,64}"), "phase invalid");
@@ -158,7 +225,8 @@ final class PayTccStageEvidence {
         "capture maps required");
     Map<String, SourceBinding> bindings = new LinkedHashMap<>();
     for (String service : List.of("pay", "user", "order", "stock"))
-      bindings.put(service, sourceBinding(databases.get(service), batch + "_" + service));
+      bindings.put(
+          service, sourceBinding(databases.get(service), batch + "_" + service, mysqlPort));
 
     // 2. 静态意图全部合法之后才连接；每源初始一次，失败源本次不再重读。
     long captureStartedNanos = System.nanoTime();
@@ -224,7 +292,7 @@ final class PayTccStageEvidence {
 
     // 3. TC 仅查询已核对的原 execution XID；MQ 元数据不证明逐 event 交付。
     sources.put("tc", tcSnapshot(originalXid, missing));
-    sources.put("mq", mqSnapshot(batch, missing));
+    sources.put("mq", mqSnapshot(batch, missing, rabbitManagementPort));
     Map<String, Object> payAfter =
         "UNAVAILABLE".equals(pay.get("status"))
             ? null
@@ -339,6 +407,12 @@ final class PayTccStageEvidence {
 
   /** 仅解析固定 MySQL 协议、回环目标、精确 catalog 与有限参数，不连接也不打印 URL。 */
   private static SourceBinding sourceBinding(JdbcTemplate database, String expected) {
+    return sourceBinding(database, expected, 13307);
+  }
+
+  /** 精确绑定该轮 MySQL 端口，保留 catalog、凭据和有限连接选项的原校验。 */
+  private static SourceBinding sourceBinding(
+      JdbcTemplate database, String expected, int mysqlPort) {
     require(
         database != null && expected.matches("cm16c_[0-9a-f]{32}_(pay|user|order|stock)"),
         "source required");
@@ -369,7 +443,7 @@ final class PayTccStageEvidence {
     require(
         "mysql".equals(parsed.getScheme())
             && ("localhost".equals(parsed.getHost()) || "127.0.0.1".equals(parsed.getHost()))
-            && parsed.getPort() == 13307
+            && parsed.getPort() == mysqlPort
             && parsed.getUserInfo() == null
             && parsed.getFragment() == null
             && ("/" + expected).equals(parsed.getRawPath()),
@@ -673,8 +747,8 @@ final class PayTccStageEvidence {
     return result;
   }
 
-  private static Map<String, Object> mqSnapshot(String batch, List<String> missing)
-      throws Exception {
+  private static Map<String, Object> mqSnapshot(
+      String batch, List<String> missing, int rabbitManagementPort) throws Exception {
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("source", "RABBIT_MANAGEMENT_METADATA_GET");
     result.put("scope", "VHOST_QUEUE_AGGREGATE");
@@ -682,11 +756,14 @@ final class PayTccStageEvidence {
     result.put("vhost", batch);
     result.put("captureStartedAt", now());
     try {
-      Map<?, ?> vhost = JSON.readValue(rabbitGet("/api/vhosts/" + batch), Map.class);
+      Map<?, ?> vhost =
+          JSON.readValue(rabbitGet("/api/vhosts/" + batch, rabbitManagementPort), Map.class);
       require(batch.equals(vhost.get("name")), "Rabbit vhost does not belong to fixture");
       Object value =
           JSON.readValue(
-              rabbitGet("/api/queues/" + batch + "?page=1&page_size=100&pagination=true"),
+              rabbitGet(
+                  "/api/queues/" + batch + "?page=1&page_size=100&pagination=true",
+                  rabbitManagementPort),
               Object.class);
       List<?> queues;
       if (value instanceof Map<?, ?> page) {
@@ -725,9 +802,9 @@ final class PayTccStageEvidence {
     return result;
   }
 
-  private static String rabbitGet(String path) throws Exception {
+  private static String rabbitGet(String path, int rabbitManagementPort) throws Exception {
     HttpRequest request =
-        HttpRequest.newBuilder(URI.create("http://127.0.0.1:15674" + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + rabbitManagementPort + path))
             .timeout(Duration.ofSeconds(5))
             .header(
                 "Authorization",

@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境及证据来源前置整理已完成离线验证；完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3598,3 +3598,44 @@ TC和阶段证据helper新增显式环境重载，交付夹具全部调用新入
 新增准入测试验证缺项/非法地址/默认端口/端口碰撞（包含Nacos gRPC）/非法CID/vhost、参数不可变且无重复默认Rabbit配置；受控loopback HTTP测试验证阶段采集使用指定管理端口及只GET所属vhost，不冒充真实Rabbit。运行原bridge环境、TC/Stage evidence、Delivery service/identity/evidence/wiring/scheduler相关定向测试，编译全部Pay测试。之后离线打包User/Pay/Order/Stock四模块及依赖，核生产Jar class与编译输出一致、测试helper未进入Jar。
 
 证据target/backend-refactor-20261114/pay-delivery-environment。记录准确XML方法/计数、编译/打包、源码差异/保留、受控HTTP边界及后续前置清单。diff检查和临时index逆补丁恢复父树、真实index/README保持后提交七文件并建立complete标签。Git只回退源码/方案，不回退数据；本阶段没有创建中间件或执行真实支付，完成环境前置不能表述为四服务链已验收。
+
+58.2实施前置补充：Stage sourceBinding还有固定MySQL13307校验。显式capture必须同时传入本轮准确MySQL端口，所有四源仍逐个核对精确catalog/凭据/URL选项；旧capture和原两参数sourceBinding保持13307，不放宽为任意端口。新增离线准入反例后重新跑定向组/四包；初次78项与包证据单独保留，不与最终数量累加。
+
+
+### 58.4 本轮结果与调用链复盘
+
+本阶段新增一个不可变测试环境对象和两个测试类，修改交付IT及两个只读证据helper；共六个测试Java文件，生产代码/配置未改。环境对象先组合原bridge准入，再检查Rabbit两端口与其余六端口互斥和TC完整CID；setup第一条语句即解析配置，任何缺项在建库前拒绝。父Pay及替代/协议Pay经payArguments使用同一环境，三服务和Order helper经startService使用同一环境；原Nacos group、Rabbit vhost、appId、功能开关和控制凭证语义保持。
+
+调用链为：System properties → PayTccDeliveryEnvironment.read → setup/进程启动；同一个environment → TC markWindowStart/capture与Stage capture。TC读本轮完整容器ID，Stage的四个owned数据库必须匹配本轮精确MySQL端口和catalog，Rabbit写入/发布与只读管理采集分别使用同一组AMQP/management端口。旧collector入口仍绑定原13307/15674及共享TC，不将其它历史夹具悄悄切换到本轮实验。新的fixture.json记录Redis/Rabbit端口和TC CID，不记录控制凭证。Redis的docker run/inspect/rm入口已从该IT移除，后续只由Compose runner归档/停止，并保留卷。
+
+最后源码复核发现Stage原MySQL13307守卫未随显式入口传递，已在真实运行之前补齐精确端口参数。保留旧两参数sourceBinding和旧capture的13307约束；新增测试证明本轮20000可解析、其它端口或错误catalog拒绝、旧入口仍拒绝高位地址，整个测试不打开数据库连接。没有把守卫改成接受任意端口。
+
+| 本轮最终验证 | 数量 | 结果与边界 |
+| --- | --- | --- |
+| Delivery环境、证据端点、原bridge环境 | 7+3+5=15 | 缺项/地址/端口碰撞/CID/vhost拒绝、不可变参数、2项受控HTTP和1项无连接数据库来源验证；不是中间件集成 |
+| TC/Stage证据原单测 | 8+10=18 | 原可信日志解析、只读来源/金额/未知与不完整证据语义保持 |
+| Delivery service/identity/evidence/wiring/scheduler | 18+7+9+2+10=46 | 原交付、租约/身份、证据、装配与扫描单测 |
+| 合计 | 10类79项 | 最终0失败/错误/跳过；此前78项绿轮单独归档，不累加为157项 |
+| User/Pay/Order/Stock离线package | 4个业务Jar | User88/Pay187/Order123/Stock88，共486生产class与各自target/classes逐字节一致；所有测试helper未进入Jar |
+
+四服务package使用-DskipTests，只证明编译/测试源码编译/打包；不能把四包当四服务运行成功。此次没有执行PayTccDeliveryIT十二项，没有启动中间件、Seata事务或支付/退款，也没有操作默认或历史Docker资源。
+
+JDK Javac AST比对确认12个原@Test规范正文完全一致；三个既有文件共142个方法规范文本保持。六个业务辅助只增加environment或替换AMQP目标，八个collector实现仅传递来源参数/旧默认包装，逐段去除明确参数变更后正文一致；其余七处IT变更均为setup/cleanup/启动/HTTP参数，原settle、断言、等待/回退年龄门和故障注入保持。全部1120份原跟踪backend/deploy中只改变上述三个既有测试文件，其余1117份和README前像保持。
+
+实施脚本首轮因同样JVM选项实际三处而前置拒绝，限定两处缺时区的启动段后完成；AST归档两次误判根因是Windows Javac输出CRLF，读回确认并统一换行后完成，不是业务测试失败。相关首轮测试/打包、前像、最终XML、方法/源码/Jar审计保留；原bugfix_log记录原因、修正与结果。六Java格式与git diff --check通过。
+
+### 58.5 回退与下一阶段前置
+
+方案提交e61ad81b，基线refactor/pay-delivery-environment-baseline-20261114，完成标签refactor/pay-delivery-environment-complete-20261114。证据入口target/backend-refactor-20261114/pay-delivery-environment/verification.json。仅提交六Java与本方案；临时index逆补丁必须恢复本基线树，真实index/README保持。回退命令：
+
+```powershell
+git revert refactor/pay-delivery-environment-complete-20261114
+```
+
+下轮从此检查点开展有限真实交付回归，先冻结资源和清理范围再执行：
+
+1. 新Compose项目部署MySQL/Redis/Rabbit/Nacos/Seata五组件六新卷，核镜像、健康、root/root、本机端口、IPAM和TC容器完整ID与TC地址实际对应；Nacos空/public命名权限沿前轮已验方案。参数字符串合法不等于实例独占或CID与端口一致，必须用实际Compose事实核对。
+2. 必需显式属性为cloudmall.mysql.test.url、cloudmall.nacos.test.address、cloudmall.seata.test.tc、cloudmall.redis.test.port、cloudmall.rabbit.test.port、cloudmall.rabbit.management.test.port、cloudmall.seata.test.container-id。四服务Jar与Order测试helper均重新核同源；source schema/启动迁移和原53表断言按当前月份实际核定，不能为过关删表或放宽断言。
+3. 复核12项完整顺序及第1项原两分钟年龄门、MQ helper、Legacy切换、只读TC/Stage采集。定时器、故障注入、消息信封/键/确认和UNKNOWN保护保持；本轮仅离线79项不替代这些真实行为。
+4. 原夹具仍有“普通断言失败但随后已收敛可能删库”的历史限制，不能宣称任意失败都保库。运行前审清setup部分失败与所有自有子进程/代理的有限退出，保存每项资金/库存/TC状态及首个失败证据；未知业务不靠手工改账或删库清场。
+5. 成功后核四owned库、原vhost、Redis精确键/空库、Nacos实例、子进程及源指纹；归档MySQL/Rabbit/Redis/TC原生证据和停止后的TC file store，再down本轮容器/网络，无-v保留六卷。完整商城、全部历史风险与性能仍需另定范围。

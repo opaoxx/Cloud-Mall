@@ -53,11 +53,11 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-/** 真实四服务交付：独立库、发现组、Rabbit vhost 和独立临时 Redis。 */
+/** 真实四服务交付：独立库、发现组、Rabbit vhost 和外部准备的独占 Redis。 */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PayTccDeliveryIT {
   /** 所有夹具的独立命名前缀。 */
-  private static String batch, month, payUrl, redisContainer;
+  private static String batch, month, payUrl;
 
   /** 原库只读及各隔离服务数据库。 */
   private static JdbcTemplate source, payDb, userDb, orderDb, stockDb;
@@ -89,8 +89,8 @@ class PayTccDeliveryIT {
   private static final Map<String, Integer> ports = new LinkedHashMap<>();
   private static final Map<String, TccResponseProxy> proxies = new LinkedHashMap<>();
 
-  /** 本测试临时 Redis 的随机宿主机端口。 */
-  private static int redisPort;
+  /** 在任何外部操作前完成校验的本轮连接和证据来源。 */
+  private static PayTccDeliveryEnvironment environment;
 
   /** HTTP 控制与业务请求，不替代 Pay 的真实 Feign 客户端。 */
   private static final HttpClient HTTP =
@@ -180,9 +180,8 @@ class PayTccDeliveryIT {
 
   @BeforeAll
   static void setup() throws Exception {
-    String sourceUrl = System.getProperty("cloudmall.mysql.test.url");
-    if (sourceUrl == null || !sourceUrl.matches("jdbc:mysql://[^/]+/cloudmall_user(\\?.*)?"))
-      throw new IllegalStateException("需要 cloudmall_user 测试 URL");
+    environment = PayTccDeliveryEnvironment.read(System.getProperties());
+    String sourceUrl = environment.mysqlUrl();
     source = jdbc(sourceUrl);
     originalChecksums = checksums();
     batch = "cm16c_" + UUID.randomUUID().toString().replace("-", "");
@@ -211,28 +210,13 @@ class PayTccDeliveryIT {
     orderDb = jdbc(urls.get("order"));
     stockDb = jdbc(urls.get("stock"));
     payUrl = urls.get("pay");
-    redisContainer = batch + "-redis";
-    docker(
-        "run",
-        "-d",
-        "--name",
-        redisContainer,
-        "--label",
-        "cloudmall.test=" + batch,
-        "-p",
-        "127.0.0.1::6379",
-        "redis:7.0",
-        "redis-server",
-        "--requirepass",
-        "root");
-    redisPort = Integer.parseInt(docker("port", redisContainer, "6379").trim().split(":")[1]);
     rabbit("PUT", "/api/vhosts/" + batch, Map.of());
     rabbit(
         "PUT",
         "/api/permissions/" + batch + "/root",
         Map.of("configure", ".*", "write", ".*", "read", ".*"));
     Properties properties = new Properties();
-    properties.put("serverAddr", "127.0.0.1:18848");
+    properties.put("serverAddr", environment.nacosAddress());
     properties.put("username", "root");
     properties.put("password", "root");
     naming = NacosFactory.createNamingService(properties);
@@ -244,8 +228,14 @@ class PayTccDeliveryIT {
                 batch,
                 "databases",
                 urls.keySet().stream().map(name -> batch + "_" + name).toList(),
-                "redis",
-                redisContainer,
+                "redisPort",
+                environment.redisPort(),
+                "rabbitPort",
+                environment.rabbitPort(),
+                "rabbitManagementPort",
+                environment.rabbitManagementPort(),
+                "tcContainerId",
+                environment.tcContainerId(),
                 "rabbitVhost",
                 batch)));
     startService("user");
@@ -305,7 +295,7 @@ class PayTccDeliveryIT {
   @BeforeEach
   void seed(TestInfo testInfo) throws Exception {
     Assumptions.assumeFalse(preserve);
-    tcWindowStartedAt = PayTccTcBranchEvidence.markWindowStart();
+    tcWindowStartedAt = PayTccTcBranchEvidence.markWindowStart(environment);
     tcWindowAnchorArtifact = artifacts.resolve("tc-window-anchor-" + UUID.randomUUID() + ".json");
     Files.writeString(
         tcWindowAnchorArtifact,
@@ -549,13 +539,6 @@ class PayTccDeliveryIT {
       for (String service : urls.keySet())
         source.execute("DROP DATABASE IF EXISTS " + batch + "_" + service);
       rabbit("DELETE", "/api/vhosts/" + batch, null);
-      if (batch.equals(
-          JSON.readTree(docker("inspect", redisContainer))
-              .get(0)
-              .path("Config")
-              .path("Labels")
-              .path("cloudmall.test")
-              .asText())) docker("rm", "-f", redisContainer);
     }
     assertFalse(preserve, "保留未决交付现场: " + artifacts);
   }
@@ -1400,6 +1383,7 @@ class PayTccDeliveryIT {
             "SELECT mode FROM balance_debit_attempt WHERE pay_no=?", String.class, request.payNo));
     Path evidence =
         PayTccTcBranchEvidence.capture(
+            environment,
             artifacts,
             "NORMAL_CREATE_ORIGINAL_COMMIT",
             xid,
@@ -1420,6 +1404,7 @@ class PayTccDeliveryIT {
     assertEquals(53, before.values().stream().mapToInt(value -> ((List<?>) value).size()).sum());
     Path artifact =
         PayTccStageEvidence.capture(
+            environment,
             artifacts,
             batch,
             phase,
@@ -1928,7 +1913,8 @@ class PayTccDeliveryIT {
         new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
     begins.start();
     sdkLogger.addAppender(begins);
-    CachingConnectionFactory broker = new CachingConnectionFactory("127.0.0.1", 15673);
+    CachingConnectionFactory broker =
+        new CachingConnectionFactory("127.0.0.1", environment.rabbitPort());
     broker.setUsername("root");
     broker.setPassword("root");
     broker.setVirtualHost(batch);
@@ -1945,6 +1931,7 @@ class PayTccDeliveryIT {
       xids.add(xid);
       mqArtifacts.add(
           PayTccTcBranchEvidence.capture(
+              environment,
               artifacts,
               "mq-commit",
               xid,
@@ -2911,6 +2898,7 @@ class PayTccDeliveryIT {
     assertOrderAndStock(legacyOrder, legacySku, false);
     assertFunds(refund ? "90.00" : "80.00", 2, refund ? 1 : 0);
     PayTccStageEvidence.capture(
+        environment,
         artifacts,
         batch,
         "NEW_LEGACY_PAID",
@@ -3035,6 +3023,7 @@ class PayTccDeliveryIT {
           default -> phase;
         };
     return PayTccStageEvidence.capture(
+        environment,
         artifacts,
         batch,
         phaseRole,
@@ -3095,7 +3084,6 @@ class PayTccDeliveryIT {
             "--spring.main.web-application-type=servlet",
             "--server.address=127.0.0.1",
             "--server.port=" + protocolPort,
-            "--spring.rabbitmq.virtual-host=" + batch,
             "--seata.application-id=" + batch + "-protocol-pay",
             "--cloudmall.pay.tcc-entry.enabled=true",
             "--cloudmall.pay.tcc-recovery.enabled=true",
@@ -3307,23 +3295,25 @@ class PayTccDeliveryIT {
   }
 
   private static String[] payArguments(boolean replacement) {
-    return new String[] {
-      "--spring.main.web-application-type=none",
-      "--spring.datasource.url=" + payUrl,
-      "--spring.cloud.nacos.discovery.group=" + batch,
-      "--spring.cloud.nacos.discovery.register-enabled=false",
-      "--spring.cloud.loadbalancer.cache.enabled=false",
-      "--cloudmall.pay.recovery-interval-ms=86400000",
-      "--seata.enabled=true",
-      "--seata.application-id=" + batch + (replacement ? "-replacement" : "-pay"),
-      "--seata.enable-auto-data-source-proxy=false",
-      "--cloudmall.pay.tcc-bridge.enabled=true",
-      "--cloudmall.pay.tcc-receipt.enabled=true",
-      "--cloudmall.pay.tcc-coordinator.enabled=true",
-      "--cloudmall.pay.tcc-coordinator.timeout-ms=120000",
-      "--cloudmall.pay.tcc-delivery.enabled=true",
-      "--cloudmall.pay.tcc-delivery.interval-ms=200"
-    };
+    List<String> arguments = new ArrayList<>(environment.applicationArguments(batch));
+    arguments.addAll(
+        List.of(
+            "--spring.main.web-application-type=none",
+            "--spring.datasource.url=" + payUrl,
+            "--spring.cloud.nacos.discovery.group=" + batch,
+            "--spring.cloud.nacos.discovery.register-enabled=false",
+            "--spring.cloud.loadbalancer.cache.enabled=false",
+            "--cloudmall.pay.recovery-interval-ms=86400000",
+            "--seata.enabled=true",
+            "--seata.application-id=" + batch + (replacement ? "-replacement" : "-pay"),
+            "--seata.enable-auto-data-source-proxy=false",
+            "--cloudmall.pay.tcc-bridge.enabled=true",
+            "--cloudmall.pay.tcc-receipt.enabled=true",
+            "--cloudmall.pay.tcc-coordinator.enabled=true",
+            "--cloudmall.pay.tcc-coordinator.timeout-ms=120000",
+            "--cloudmall.pay.tcc-delivery.enabled=true",
+            "--cloudmall.pay.tcc-delivery.interval-ms=200"));
+    return arguments.toArray(String[]::new);
   }
 
   private void startReplacementPay() throws Exception {
@@ -3332,6 +3322,7 @@ class PayTccDeliveryIT {
             List.of(
                 javaExecutable(),
                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "-Duser.timezone=Asia/Shanghai",
                 "-Xmx256m",
                 "-jar",
                 Path.of("target", "cloud-mall-pay-0.1.0-SNAPSHOT.jar")
@@ -3370,6 +3361,7 @@ class PayTccDeliveryIT {
             List.of(
                 javaExecutable(),
                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "-Duser.timezone=Asia/Shanghai",
                 "-Xmx256m",
                 "-jar",
                 Path.of(
@@ -3384,10 +3376,9 @@ class PayTccDeliveryIT {
                 "--spring.cloud.nacos.discovery.group=" + batch,
                 "--spring.cloud.nacos.discovery.ip=127.0.0.1",
                 "--spring.cloud.nacos.discovery.port=" + proxy.port(),
-                "--spring.rabbitmq.virtual-host=" + batch,
-                "--spring.redis.port=" + redisPort,
                 "--spring.cloud.sentinel.eager=false",
                 "--seata.enable-auto-data-source-proxy=false"));
+    command.addAll(environment.applicationArguments(batch));
     if (!observerArguments.isEmpty()) {
       if (!"order".equals(service)) throw new IllegalArgumentException("观察器只允许Order fixture");
       int launchIndex = command.indexOf("-jar");
@@ -3519,7 +3510,8 @@ class PayTccDeliveryIT {
 
   private static void rabbit(String method, String path, Object body) throws Exception {
     HttpRequest.Builder request =
-        HttpRequest.newBuilder(URI.create("http://127.0.0.1:15674" + path))
+        HttpRequest.newBuilder(
+                URI.create("http://127.0.0.1:" + environment.rabbitManagementPort() + path))
             .version(HttpClient.Version.HTTP_1_1)
             .timeout(Duration.ofSeconds(10))
             .header(
@@ -3538,18 +3530,6 @@ class PayTccDeliveryIT {
     assertTrue(
         response.statusCode() < 300 || ("DELETE".equals(method) && response.statusCode() == 404),
         response.body());
-  }
-
-  private static String docker(String... arguments) throws Exception {
-    List<String> command = new ArrayList<>();
-    command.add("docker");
-    command.addAll(List.of(arguments));
-    Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
-    String output =
-        new String(
-            process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-    assertEquals(0, process.waitFor(), output);
-    return output;
   }
 
   private static String javaExecutable() {
