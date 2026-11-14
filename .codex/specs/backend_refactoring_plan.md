@@ -3799,3 +3799,24 @@ git revert refactor/backend-acceptance-complete-20261114
 ```
 
 该回退只撤销本次文档汇总，不撤销模块实现，也不更改数据库/缓存/消息/TC、失败现场或保留卷。本阶段“完成”仅指验收矩阵/当前统一验证和剩余任务定位完成；整个规范收尾仍待上述四个批次，不能使用此标签宣称全项目完成。
+
+
+## 61. Common 五文件规范收尾（2026-11-14）
+
+### 61.1 范围与实施前核对
+
+从e5b9aedb继续，主Agent单独执行第60节明确的首个规范批次。只改Common的AuthContext、ErrorCodes、SeckillRequestFingerprint、web/AuthInterceptor、GlobalExceptionHandler五个生产Java及本方案/验收汇总；测试源码、其它模块、配置/POM、SQL、README和历史证据不改。
+
+AuthContext、SeckillRequestFingerprint、GlobalExceptionHandler按现有Google Java Format整理空格/换行/import。AuthInterceptor.afterCompletion的Exception ex未被方法体读取，改为Exception exception；参数类型/位置、Override方法描述符、原无条件AuthContext.clear不变。ErrorCodes原十二个常量共用“保存INVALID对应的内部状态或配置”泛化说明，本轮在同一文件拆成逐常量准确说明；所有名称、修饰符、顺序和字符串值保持。该补充在实施前明确，不仅依赖上一轮固定模板匹配结果。
+
+不改变ThreadLocal角色缺省/清理、登录与管理员校验顺序、401/403、429/503 no-store、参数绑定异常及500日志/错误响应、秒杀指纹v1分隔字节/规范JSON/SHA-256/事件前缀。常量说明和声明排版不新增错误码或改变已有用法；完整语法树规范化对照仅允许未使用异常形参改名。无需修改API/Feign/数据库契约或新增镜像实现的测试。
+
+### 61.2 验证与提交
+
+先保存五文件/README前像和全部1123份backend/deploy指纹，提交本节并建立refactor/common-standards-baseline-20261114。实施前记录原bugfix_log的四格式差异、短名及错误码说明问题，修复后在同条补结果。
+
+五文件格式化后复核Common全部17生产Java：DocTrees必需说明、语法树短名、格式dry-run；前后完整Javac语法树只允许AuthInterceptor异常形参ex→exception，十二错误码值另列清单核对。运行原Common四类25项、CartHttpContractTest及实际调用指纹的Order/Stock七类现有单测（SeckillAddressPropagationTest、SeckillProductIdentityTest、SeckillMessageRecoveryTest、SeckillReliabilityTest、SeckillOutboxRecoveryRaceTest、SeckillEventTimeResolverTest、RedisOutageSeckillTest）；按实际XML类/方法统计，不把上一阶段1948项当本轮新执行结果。
+
+完成八模块离线package（跳过重复测试）验证依赖方源码/测试编译与打包。无真实MySQL/Redis/Rabbit/TC实验，不操作Docker/保留卷，不全量clean。证据target/backend-refactor-20261114/common-standards保留AST/格式、定向XML、源码保持与Common Jar检查。更新验收汇总为Common本批完成，剩余Product21/User5/Stock16共42文件；第60节原始47文件快照保留历史语境。
+
+精确提交五Java和两Markdown。git diff --check与临时index逆补丁恢复方案基线树且真实index/README保持后，建立refactor/common-standards-complete-20261114。该标签仅完成Common规范批次，不宣称剩余三个模块、完整商城或历史性能事项完成。
