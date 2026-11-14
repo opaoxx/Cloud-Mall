@@ -3727,3 +3727,28 @@ git revert refactor/pay-delivery-native-complete-20261114
 回退只恢复源码/方案，不执行任何资金清算，也不恢复或删除数据库、TC、证据和12卷。原bugfix_log已补根因、红绿回归、两轮真实结果、外部环境变化和归档事实。
 
 下一步汇总本轮逐模块重构的全局验收矩阵，逐项区分结构目标已完成、当前真实覆盖和剩余取消/公开入口风险；只对结构调整直接影响且尚缺证的部分冻结最小补验，不自动重跑全部历史IT或开启性能维护任务。
+
+
+## 60. 全局验收矩阵与剩余工作收敛（2026-11-14）
+
+### 60.1 冻结范围与实施判断
+
+从5798b822继续，主Agent单独完成本轮汇总。第13至48节已经完成八模块中等深度结构任务，第49至59节补充了离线、实库/消息/索引、TCC与四服务交付的分层验证。当前先核源码和证据，再判断收尾，不用历史报告数量推断所有场景已完成。
+
+本阶段只更新本方案，并新增可独立阅读的.codex/specs/backend_refactoring_acceptance.md：逐模块职责与迁移/最近通过点、当前统一离线结果、既有实库证据及限制、规范保留项、失败现场/回退边界、必要剩余工作。生产/测试Java、配置/POM、SQL、部署脚本、README及两份只读参考文档不改；不运行Docker或旧真实IT/压测，不重启历史实验。
+
+### 60.2 当前源码与验证范围
+
+已盘点265个*Test类，另沿第49节明确选择StockSeckillFactFeignIT和PayOrderStateFeignIT两个本机HTTP契约类，预期267类。第49节后只有13个测试文件新增或修改，生产源码/资源/POM/数据库/部署配置没有变化；当前统一测试用于纳入新增环境准入与端口重检修正。一次根工程离线test和package（package跳过重复测试）按实际XML统计，不把第49节1933或第59节79/12叠加为本轮计数；预计1948项，最终以实际报告为准。
+
+使用已核JDK17/Maven3.9.16，原add-opens/Asia-Shanghai参数；不执行clean，保留target历史证据。核八Jar与编译class字节/SourceFile，并保存Product原测试自有子JVM正常退出和Pay指标新runId证据。Java子进程是原测试运行资源，不是多Agent。
+
+对八模块生产Java进行只读结构清单及JDK语法树检查：语义类名、Controller继承/职责、非空Service、Controller/Service直接JDBC/SQL、嵌套模型、必需JavaDoc/成员说明和短变量；Google Java Format仅dry-run，不批量改代码。规范扫描命中必须复核真实含义与既有兼容保留规则，不将文本匹配自动当业务Bug，也不把未检查项写成全绿。
+
+### 60.3 历史证据、剩余项与回退
+
+逐组校验第49至59节verification、成功XML SHA和Git标签/提交可达；区分本轮新执行与过去已执行并本轮复核。只读取现存隔离资源metadata，核有记录的实验容器/网络已移除、卷保留；不要求其他会话/项目的全机状态不变，不挂载旧失败卷或清算首轮未交付样本。
+
+重点裁定：哪些结构目标已完成、哪些规范项仍需小范围收尾、取消/公开失败入口已有何种层级证据，真实Gateway/Product/Cart全链和性能为何不属于当前通过口径。第59节首轮四失败库及12卷、旧bridge失败库、保守UNKNOWN/EVIDENCE_INCOMPLETE均保留来源；不因汇总删除证据或改写旧风险状态。
+
+证据target/backend-refactor-20261114/refactoring-acceptance。先提交本节并建立refactor/backend-acceptance-baseline-20261114；最终仅提交本方案与验收汇总Markdown，临时index逆补丁恢复基线树且真实index/README不变后建立refactor/backend-acceptance-complete-20261114。发现真实缺陷先在原bugfix_log记录，再冻结最小修正范围，不在汇总中隐去失败。
