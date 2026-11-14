@@ -90,7 +90,32 @@ DWORD `MaxUserPort=15000`，两族 UDP 则为默认范围。这个低位 TCP 配
 修复或更改已启用的注册表审计。后续宿主客户端应使用 `19411`；Docker 网络内仍用
 `http://zipkin:9411`。
 
-本机目前按用户后续授权**先追踪写入者，暂不应用 TCP 修复**。2026-10-24 03:02（+08:00）
+**2026-11-10 更新：系统 TCP 配置已恢复，人工重启及本次容器回归通过。**
+本次 Prometheus 9090/Elasticsearch 9200 分别命中系统排除段 9003–9102/9103–9202，
+Docker 日志明确报 forbidden。正常退出 Docker Desktop 后，已备份并移除确认的
+DWORD `MaxUserPort=15000`，将两族 TCP 动态范围持久设为 49152 起、16384 个端口；
+即时读回通过，UDP 和原审计规则保持。用户于17:43重启Windows后，两族TCP仍为
+49152/16384，MaxUserPort未重新出现，原9003–9202等低位排除段已消失，新的动态
+保留段落在高位。用户启动完整容器组后，12个常驻容器全部healthy、bootstrap退出0；
+端口及MySQL/Redis两地址协议检查通过，Prometheus/ES/Grafana/Kibana/Zipkin/Nginx
+六个宿主HTTP端点均200。13个容器ID/镜像/挂载和9个named volume身份与修复前一致。
+审计重启后仍verified true/mask1，原写入者未知，不宣称未来永久不复发。
+
+本次开机自动恢复只运行了先前的8个容器；此前已经停止的ES/Prometheus/Grafana/
+Kibana在用户17:46手动启动组之前没有新的应用日志，仍保留11月9日停止时间。
+该现象与本项目 `restart: unless-stopped` 保留停态的行为一致：
+[已停止容器不会随daemon重启自动恢复](https://docs.docker.com/engine/containers/start-containers-automatically/)。
+没有捕获其历史内部manual-stop标志，不把推断写成读取过该标志；未发现本次开机
+新的端口拒绝证据，也不为验证而再次重启。需要启动完整现有组时，可在项目根目录
+直接执行 `docker compose start`；本次不改变重启策略。重启后证据在
+`target/docker-postreboot-20261110/`，Docker events早期启动记录已超出当前缓冲，
+时间线依据独立容器日志、inspect和修复前快照，不拿健康检查exec事件冒充启动证据。
+本次备份为 `target/docker-tcp-repair-20261110-173928-68538733d52c45b0bca098c103d758ab/`，
+执行与验证回执在 `target/docker-repair-apply-20261110/`。审计事件 3141793 为
+2026-11-10 17:39:28（+08:00）本次授权删除，不能用于指认历史写入者。
+Security 日志目前仅保留到 11 月 7 日，之前监测期有留存缺口；原写入来源仍未知。
+
+2026-10-24 当时按用户授权**先追踪写入者，尚未应用 TCP 修复**。2026-10-24 03:02（+08:00）
 已启用 Registry 成功审计，并给实际 `ControlSet001\Services\Tcpip\Parameters`
 本键添加 Everyone / SetValue / Success 审计规则，不继承到子键；`MaxUserPort` 仍为
 DWORD 15000。该规则会审计本键的其他值写入，读取时才筛选 MaxUserPort；全局成功
@@ -119,7 +144,8 @@ Disable 仅去掉本次自增规则、恢复原 Registry 成功位；若策略�
 ControlSet 已漂移则拒绝自动处理，不覆盖其他修改。部分应用失败也需保留现场，
 不能宣称自动回退已实机验证。审计启用已读回，不代表已捕获写入者或 Docker 故障闭环。
 
-下列 TCP 恢复工具适用于另行决定修复时，**本次监测没有执行它**。工具默认只读；
+下列 TCP 恢复工具在 10 月 24 日监测阶段未执行，11 月 10 日实际应用结果见上。
+工具默认只读；再次运行 `-Apply` 前须先检查当前状态，不为验证而重复应用。
 保存工作、正常退出 Docker Desktop 后，
 在**管理员 PowerShell** 显式应用：
 
@@ -147,8 +173,9 @@ Invoke-WebRequest http://127.0.0.1:19411/health -UseBasicParsing
 
 还须核对 12 个常驻容器健康、`MaxUserPort` 未重新出现、两族 TCP 为默认范围且 UDP
 与备份一致。已有排除段可能保留到重启后，应用脚本成功不代表端口立即释放。
-本次已恢复 Kibana/Grafana（healthy、HTTP 200），系统恢复尚待管理员执行及重启回归，
-不能宣称已经永久解决。若配置再次被写回，应根据前后审计定位写入者。
+历史单次恢复中 Kibana/Grafana 曾 healthy、HTTP 200；11 月 10 日已完成系统配置应用，
+本次重启后的容器和协议回归已通过，不宣称已经永久解决。
+若配置再次被写回，应根据前后审计定位写入者。
 需要人工回退时，从该次 `before.json` 按原存在状态、类型和值只恢复 `MaxUserPort`，
 并按两族原 TCP 输出恢复范围，再安排人工重启；本次观测为 DWORD 15000、TCP
 1024 起/13977 个。未获取独立 persistent 范围输出，不声称备份能还原未知的原覆盖状态。
