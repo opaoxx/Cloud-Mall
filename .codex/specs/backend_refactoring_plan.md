@@ -3143,3 +3143,34 @@ git revert refactor/order-pay-transactions-complete-20261114
 Git结果提交仅含方案记录，回退不恢复运行数据库/消息、忽略覆盖配置或证据。临时index逆补丁恢复父树，真实index/README保持；旧pycache与README未入提交，未clean/reset。原bugfix_log.md记录启动问题修复前现象、根因、局部方案及实际验证。
 
 下一步先梳理商品MQ/ES同步与真实服务链的现有入口和隔离要求，冻结新的有限验证范围；不直接启动历史CM21压测/guardian流水线，不把旧固定环境或未验证TC链当作本轮已完成。
+
+## 52. Product 常规索引真实 MySQL/Rabbit/ES 有限回归（2026-11-14）
+
+### 52.1 范围与调用链冻结
+
+从e66d95a6继续，由主Agent单独执行。现有ProductRefactoringMySqlIT已覆盖管理入口与outbox同事务，但MQ/ES为替身；原ProductOnlineMetricsPipelineIT同时涉及CM21指标控制、负载和历史实验，不直接运行或改写。新增标准Maven测试ProductIndexSynchronizationIT，仅验证metrics.enabled=false的常规内容索引，不改生产源码、依赖、原消息/SQL/搜索配置与历史runner。
+
+原调用链为事务中ProductIndexOutboxService.append → 原OutboxMapper → 原Dispatcher确认/returned → 原ProductMessagingConfiguration主队列 → 原Consumer → 真实MyBatis IndexMapper/Loader当前事实 → 原ElasticsearchProductIndexWriter → 原ConsumptionService事务内消费记录与outbox确认。死信沿原三次消费重试、原文落库/手工ACK与原DlqReplayer核对outbox后重放。沿用原两交换机、三队列、路由键及10秒死信证据重试TTL。
+
+新增4个明确用例：
+
+1. 事务回滚不留下事实/outbox；提交后真实发布，核对JSON/messageId和确认截止时间；消费当前事实、重复事件不重复记录、旧事件STALE及下架可见性；通过真实关键词搜索适配器检查索引查询结果。这里从事务/outbox seam进入，管理HTTP的结论仍独立引用第50节。
+2. 真实ES external_gte单条/有界Bulk拒绝旧商品版本覆盖；已有内部版本且缺少可信productVersion的409必须报错，不能伪装成功。
+3. 仅将本例自有索引设为write block触发真实ES写失败，核对三次消费尝试、RETRY及完整DLQ原文；恢复写入后原replayer发布同一事件并形成消费终态/outbox确认，不改重试参数。
+4. 非JSON旧格式字节与主键不一致JSON通过真实队列，验证完整字节/摘要隔离；原replayer拒绝无可信outbox的JSON，不应用ES、不反序列化旧Java字节。
+
+原消费/加载事务代理、Mapper SQL、Rabbit监听工厂与ES适配器全部实际执行。仅调度时钟入口受控，逐次调用原dispatcher/replayer，不测试周期时序；不启动重建任务、在线指标、Redis、Nacos、TC或商城HTTP链，不把这4项解释为所有历史索引场景通过。常规物理删除与V2 tombstone差异不在本轮改变。
+
+### 52.2 隔离与失败现场
+
+新Compose项目cloud-mall-refactor-product-index-20261114，仅启动deploy/experiments/compose.yml的mysql/rabbit/es；新三卷、候选端口19972/19973/19974/19975（MySQL/AMQP/管理HTTP/ES）、子网10.254.221.0/24。先确认项目/卷不存在、bind/IPAM、镜像ID和渲染配置，pull_policy=never、restart=no。依据第51节测时，本轮独立override预设Rabbit健康探测timeout=10s，共享Compose保持。
+
+测试显式要求隔离高位端口、实验runId、预先核验的MySQL server_uuid及ES cluster.name，拒绝缺省环境。每例创建UUID数据库与索引；仅从当前schema.sql提取product、product_hot_stat、product_index_outbox、product_index_consumption、product_index_dlq_quarantine五表DDL，不需要源库/历史模板。broker独占，沿原默认vhost和原拓扑，每例前后检查空队列。初始不自动消费，首例读取实际发布消息验证envelope后原样投回；随后启动原监听器。
+
+成功才归档SQL/ES/消息事实并清理该例已成功创建的精确UUID库/索引；任何失败关闭连接/消费者，保留库、索引及队列，不purge、不按前缀批量删除。全部通过后核对四库四索引建删、源代码保持、三队列ready/unacked/consumer=0及连接0，归档容器日志和binlog，再down本轮容器/网络而不带-v，三个新数据卷保留。
+
+### 52.3 验证、提交与回退
+
+先提交本节并建立refactor/product-index-sync-baseline-20261114。新增Java执行google-java-format；离线编译并精确运行ProductIndexSynchronizationIT，另跑Common/Product现有*Test回归；核对真实执行方法、0失败/跳过以及报告时间，旧1933/55/29结果不累加。证据统一归档target/backend-refactor-20261114/product-index-sync。
+
+仅暂存新测试和本方案。原1117份backend/deploy及README按字节保持，保留已有README和两个pycache工作树变化。结果提交前git diff --check，临时index逆补丁恢复父树且真实index/README保持；完成标签refactor/product-index-sync-complete-20261114。回退只撤销测试/记录，不还原运行数据或忽略证据。测试新增缺陷/实验失败先在原bugfix_log记录，再最小修复并保留首轮证据。
