@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，但Common/Product/User/Stock仍有47个文件的规范收尾，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第60节。
 
 ## 1. 使用方式与范围
 
@@ -3735,7 +3735,7 @@ git revert refactor/pay-delivery-native-complete-20261114
 
 从5798b822继续，主Agent单独完成本轮汇总。第13至48节已经完成八模块中等深度结构任务，第49至59节补充了离线、实库/消息/索引、TCC与四服务交付的分层验证。当前先核源码和证据，再判断收尾，不用历史报告数量推断所有场景已完成。
 
-本阶段只更新本方案，并新增可独立阅读的.codex/specs/backend_refactoring_acceptance.md：逐模块职责与迁移/最近通过点、当前统一离线结果、既有实库证据及限制、规范保留项、失败现场/回退边界、必要剩余工作。生产/测试Java、配置/POM、SQL、部署脚本、README及两份只读参考文档不改；不运行Docker或旧真实IT/压测，不重启历史实验。
+本阶段只更新本方案，并新增可独立阅读的.codex/specs/backend_refactoring_acceptance.md：逐模块职责与迁移/最近通过点、当前统一离线结果、既有实库证据及限制、规范保留项、失败现场/回退边界、必要剩余工作。生产/测试Java、配置/POM、SQL、部署脚本、README及两份只读参考文档不改；不启动或变更Docker实验，不运行旧真实IT/压测，不重启历史实验。
 
 ### 60.2 当前源码与验证范围
 
@@ -3752,3 +3752,50 @@ git revert refactor/pay-delivery-native-complete-20261114
 重点裁定：哪些结构目标已完成、哪些规范项仍需小范围收尾、取消/公开失败入口已有何种层级证据，真实Gateway/Product/Cart全链和性能为何不属于当前通过口径。第59节首轮四失败库及12卷、旧bridge失败库、保守UNKNOWN/EVIDENCE_INCOMPLETE均保留来源；不因汇总删除证据或改写旧风险状态。
 
 证据target/backend-refactor-20261114/refactoring-acceptance。先提交本节并建立refactor/backend-acceptance-baseline-20261114；最终仅提交本方案与验收汇总Markdown，临时index逆补丁恢复基线树且真实index/README不变后建立refactor/backend-acceptance-complete-20261114。发现真实缺陷先在原bugfix_log记录，再冻结最小修正范围，不在汇总中隐去失败。
+
+
+### 60.4 当前统一验证与历史证据复核
+
+本轮未改Java/配置。当前265个*Test及两个指定本机HTTP契约IT逐类匹配冻结清单，最终267类1948项，0失败/错误/跳过；无遗漏、额外IT或旧报告混入。各模块Common25、Gateway21、User284、Product361、Cart35、Order341、Stock209、Pay672。相较第49节1933，新增15项均来自三组测试环境/证据准入测试；不是业务功能增量。本轮没有重跑真实SQL/Redis/MQ/ES/Nacos/TC实验。
+
+根工程test和package首次通过；package跳过重复测试。八Jar共628个本模块生产class，逐个与target/classes及现存src/main/java的SourceFile/内部类型对应，无测试helper或无源旧class。Product原测试自有子JVM自然退出，任务/执行器关闭、AMQPConnections=0；Pay指标runId证据单独归档。构建保留既有ANTLR4.7.2/4.8提示，不把提示当失败或擅自改依赖。
+
+复核12组历史verification/成功XML SHA及Git完成标签、提交可达/树和历史逆补丁记录：第46/47两组取消/公开入口局部验证，以及第49至59主要离线/真实组。第46的34项MySQL、第47的7项本地事务是各组713/688的子集，不能重复计数。本轮只校验历史报告，没有把它们相加为一次新回归。校验脚本首次因Windows反斜杠manifest键查找失败，仅在新工具中规范化路径后通过，旧证据字节未改。
+
+只读核对这些证据关联的12个实验项目，容器/网络均无残留，43个记录中的命名卷仍存在；这是指定集合，不是全部历史或整机卷数。没有挂载/重启/删除卷，也未要求其它会话/项目保持全机静态。第54首轮两库、第59首轮四库/未交付样本与两轮12卷原记录保持。
+
+### 60.5 结构通过与规范待办分开判定
+
+641份生产Java含包说明，33个Controller、41个Service接口。类型/继承/注解及限定源码扫描没有Cm编号生产类型、Controller继承ServiceImpl、空Service接口、Service HTTP映射、Controller/Service直接JDBC或指定SQL字面量候选，也没有DTO/VO/PO后缀嵌套模型。Mapper内现有JDBC、Feign局部record、表/Bean/消息/指标的cm18/cm21标识按既有兼容规则保留。这是结构检查，不替代完整语义/端到端证明。
+
+全641文件执行只读JavaDoc/短名AST检查和Google Java Format dry-run后，不能将“结构完成”误记成“规范全部完成”：
+
+| 模块 | 必需说明绑定项 | 格式文件 | 非id短名 | 模板化说明行 | 去重待办文件 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Common | 0 | 4 | 1 | 0 | 5 |
+| Product | 34 | 16 | 6 | 23 | 21 |
+| User | 17 | 2 | 0 | 0 | 5 |
+| Stock | 9 | 12 | 0 | 0 | 16 |
+| Cart/Gateway/Order/Pay | 0 | 0 | 0 | 0 | 0 |
+
+60个AST说明项中21个已有JavaDoc但放在注解后，另39个需补独立说明（部分已在匿名类/成组字段上层说明），不是60个完全无注释。模板初筛16条，再核明确的“执行X相关操作”补7条，最终23条、四个Product文件，去重文件总量由初步46修正为47。103个短声明中96个id保留其主键/查询/传输语义，另7个ex/e/rs需语义命名；禁止机械改动PO/JSON/SQL字段。数量单位不同且有重叠，不相加为缺陷总数。完整逐文件列表、原行号及分类已写入新增backend_refactoring_acceptance.md与reviewed-followup-inventory.json。
+
+这些是当前发现、仍待修正的规范问题，不是本轮新引入的运行回归。第49节后backend/deploy变更恰13个测试文件，生产/配置/schema/部署没有变动；本轮1123份原跟踪backend/deploy及README前像全部保持。四模块规范项未通过收尾，不在本轮修改Java或把dry-run返回1记作格式通过。
+
+### 60.6 剩余工作与有限收尾顺序
+
+新增汇总文档独立列出模块职责/检查点、当前1948项、分层历史证据、47文件规范清单、取消/公开入口限制、失败现场和精确回退边界。下一步先Common五文件：AuthContext、ErrorCodes、SeckillRequestFingerprint、GlobalExceptionHandler仅格式/import，AuthInterceptor仅异常形参ex语义命名；预先冻结差异，保HTTP/JSON/鉴权/异常顺序，执行Common及适用契约后独立提交。随后Product21、User5、Stock16按模块分别收尾，不一次性全库重排。
+
+实际取消/公开失败并非完全无证据：本轮已有对应单测，§46有34项局部MySQL、§47有7项本地事务/代理；但它们不替代真实User/TC的完整公开取消链。旧PayTccCancelIT仍固定地址/自建Redis及RM代理SHA准入，不能原样连接默认环境；若后续要声明该全链验收，另定最小隔离方案，不绕过pin或自动运行旧大矩阵。Gateway/Product/Cart全商城与性能亦列为独立范围，不延长本次规范任务队列。
+
+本轮classpath再确认Gateway3.1.4与规格3.1.5既有差异，作为独立规格/依赖核对事项保留，不升级。Stage EVIDENCE_INCOMPLETE、BEGIN_UNKNOWN/UNKNOWN及§59回滚负例PENDING、首轮未交付样本均不改写。
+
+### 60.7 本阶段回退
+
+方案提交53d41be1，基线refactor/backend-acceptance-baseline-20261114，完成标签refactor/backend-acceptance-complete-20261114。本阶段只提交backend_refactoring_plan.md与新增backend_refactoring_acceptance.md；临时index逆补丁恢复方案基线树且真实index/README不变。证据target/backend-refactor-20261114/refactoring-acceptance/verification.json。
+
+```powershell
+git revert refactor/backend-acceptance-complete-20261114
+```
+
+该回退只撤销本次文档汇总，不撤销模块实现，也不更改数据库/缓存/消息/TC、失败现场或保留卷。本阶段“完成”仅指验收矩阵/当前统一验证和剩余任务定位完成；整个规范收尾仍待上述四个批次，不能使用此标签宣称全项目完成。
