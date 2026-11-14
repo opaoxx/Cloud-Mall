@@ -25,7 +25,10 @@ public class AuthInterceptor implements HandlerInterceptor {
   /** 在请求完成后清理认证上下文。 */
   @Override
   public void afterCompletion(
-      HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
+      HttpServletRequest request,
+      HttpServletResponse response,
+      Object handler,
+      Exception exception) {
     AuthContext.clear();
   }
 }

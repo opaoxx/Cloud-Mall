@@ -107,8 +107,7 @@ public final class SeckillRequestFingerprint {
 
   /** 同一库存受理订单在投递和重放时保持固定事件号。 */
   public static String eventId(String orderNo) {
-    if (orderNo == null || orderNo.isBlank())
-      throw new IllegalArgumentException("秒杀订单号不能为空");
+    if (orderNo == null || orderNo.isBlank()) throw new IllegalArgumentException("秒杀订单号不能为空");
     return "seckill-order:" + orderNo;
   }
 }

@@ -1,41 +1,41 @@
 # 后端重构验收汇总与剩余工作
 
-核验日期：2026-11-14。源码起点：`5798b822`；本轮方案基线：`53d41be1`。责任人：当前会话主 Agent，单 Agent 执行。
+核验日期：2026-11-14。第60节统一验收源码起点：`5798b822`；最新进度为第61节Common规范收尾，方案基线`e853c0c9`。责任人：当前会话主 Agent，单 Agent 执行。
 
-本报告对应[重构方案第60节](backend_refactoring_plan.md)，不覆盖原停工边界，也不改写历史实验结论。
+本报告以[重构方案第60节](backend_refactoring_plan.md)为基线，按后续阶段更新当前状态；不覆盖原停工边界，也不改写历史实验结论。
 
 ## 1. 当前判断
 
-**八模块的中等深度结构目标已经达到；整体规范验收尚有四个模块的小范围收尾，不能宣称全部完成。**
+**八模块的中等深度结构目标已经达到；Common规范收尾已完成，整体规范验收尚有三个模块的小范围收尾，不能宣称全部完成。**
 
-- 当前源码新执行267类、1948项测试，0失败/错误/跳过；八模块package通过，628个生产class与编译输出及现存SourceFile逐一核验。
+- 第60节统一执行267类、1948项测试；第61节新执行12类、85项定向测试，两次分别0失败/错误/跳过，不相加计数。第61节八模块package通过，628个生产class与编译输出及现存SourceFile逐一核验。
 - 641份生产Java（含package-info）中，33个Controller采用独立职责，41个Service接口均非空。当前扫描未发现Cm编号生产类型、Controller继承ServiceImpl、Service HTTP映射、Controller/Service直接JDBC、指定SQL字面量候选或DTO/VO/PO后缀嵌套模型。
-- 结构扫描不等于逐字段语义证明；HTTP/事务/消息兼容仍依据已有行为测试与逐切片记录。源码/配置/SQL自第49节以来没有生产变更，之后13个变动文件全部位于src/test。
-- 当前发现60处必需入口/成员JavaDoc绑定问题、34个格式不一致文件、7个非id短变量/形参、23条明确模板化说明；去重涉及47个文件。这些数量单位不同且相互重叠，不能相加为缺陷总数。
-- 本轮只新增/更新Markdown和ignored验收证据，没有修复或格式化Java，也没有运行真实中间件测试。
+- 结构扫描不等于逐字段语义证明；HTTP/事务/消息兼容仍依据已有行为测试与逐切片记录。第49至60节间13个变动文件全部位于src/test；第61节仅Common五个文件的说明/格式/未使用形参名变化，经完整AST与常量契约对照确认。配置/SQL未改。
+- 当前剩余60处必需入口/成员JavaDoc绑定问题、30个格式不一致文件、6个非id短变量/形参、23条明确模板化说明；去重涉及42个文件。这些数量单位不同且相互重叠，不能相加为缺陷总数。
+- 第60节只新增/更新Markdown和验收证据；第61节已完成Common五文件规范修改，未改测试源码或运行真实中间件测试。
 
-## 2. 模块职责与当前统一测试
+## 2. 模块职责与第60节统一测试基线
 
 下表“完成”仅指本轮约定的命名、分层和职责整理。生产Java数包含包说明，不能等同Jar class数。
 
-| 模块 | 已形成的职责边界 | Java / Controller / Service接口 | 当前测试类/项 | 规范结论 | 结构检查点 |
+| 模块 | 已形成的职责边界 | Java / Controller / Service接口 | 第60节测试类/项 | 规范结论 | 结构检查点 |
 | --- | --- | --- | --- | --- | --- |
-| Common | 响应、异常、身份、消息指纹等跨模块基础能力；不承载服务业务 | 17 / 0 / 0 | 4 / 25 | 待规范收尾 | 无独立业务拆分完成标签；按公共契约联测 |
-| Gateway | filter鉴权/请求链，util路径策略，config规则解析与发布 | 7 / 0 / 0 | 5 / 21 | 通过本轮扫描 | `refactor/gateway-complete-20261104` / `faaecef2` |
-| Cart | Controller → CartService/Impl → CartStorage；结算VO独立 | 24 / 1 / 1 | 13 / 35 | 通过本轮扫描 | `refactor/cart-complete-20261104` / `9eab801a` |
+| Common | 响应、异常、身份、消息指纹等跨模块基础能力；不承载服务业务 | 17 / 0 / 0 | 4 / 25 | 第61节规范检查通过 | `refactor/common-standards-complete-20261114`（规范收尾） |
+| Gateway | filter鉴权/请求链，util路径策略，config规则解析与发布 | 7 / 0 / 0 | 5 / 21 | 第60节扫描通过 | `refactor/gateway-complete-20261104` / `faaecef2` |
+| Cart | Controller → CartService/Impl → CartStorage；结算VO独立 | 24 / 1 / 1 | 13 / 35 | 第60节扫描通过 | `refactor/cart-complete-20261104` / `9eab801a` |
 | Product | 查询/管理/分类/活动服务；index、metrics、search分组 | 102 / 1 / 5 | 37 / 361 | 待规范收尾 | `refactor/product-complete-20261104` / `e345bb4d` |
 | User | 账号/资料/地址、扣款/退款、TCC/Fence及只读取证分离 | 100 / 7 / 8 | 18 / 284 | 待规范收尾 | `refactor/user-complete-20261104` / `418cd0d0` |
 | Stock | 查询/预留/扣减/事实、cache、seckill、metrics及Seata演练分离 | 87 / 3 / 6 | 48 / 209 | 待规范收尾 | `refactor/stock-complete-20261104` / `ef53b37d` |
-| Order | 创建/查询/状态、秒杀接收/落单、超时/出站消息、恢复与分片分离 | 117 / 6 / 10 | 65 / 341 | 通过本轮扫描 | `refactor/order-complete-20261113` / `458efb7c` |
-| Pay | 查询/创建/成功/失败/回调五用例，Legacy和TCC各职责分组 | 187 / 15 / 11 | 77 / 672 | 通过本轮扫描 | `refactor/pay-complete-20261114` / `3f5d069c` |
+| Order | 创建/查询/状态、秒杀接收/落单、超时/出站消息、恢复与分片分离 | 117 / 6 / 10 | 65 / 341 | 第60节扫描通过 | `refactor/order-complete-20261113` / `458efb7c` |
+| Pay | 查询/创建/成功/失败/回调五用例，Legacy和TCC各职责分组 | 187 / 15 / 11 | 77 / 672 | 第60节扫描通过 | `refactor/pay-complete-20261114` / `3f5d069c` |
 
-共267类/1948项；其中265个*Test类，另含Order的StockSeckillFactFeignIT和Pay的PayOrderStateFeignIT。两个IT通过本机HTTP使用真实Feign/响应类型，但持久化边界受控，不能称真实商城链路。Product原生命周期单测产生一个自有Java子进程，已验证naturalExit/执行器关闭/AMQPConnections=0；这不涉及多Agent。
+上表为第60节267类/1948项统一基线；其中265个*Test类，另含Order的StockSeckillFactFeignIT和Pay的PayOrderStateFeignIT。两个IT通过本机HTTP使用真实Feign/响应类型，但持久化边界受控，不能称真实商城链路。Product原生命周期单测产生一个自有Java子进程，已验证naturalExit/执行器关闭/AMQPConnections=0；这不涉及多Agent。
 
 调用链索引：Cart见方案§13、Gateway§14、Product§15、User§16–18、Stock§19–22、Order§23–33、Pay§34–48。动态分片与元数据/恢复SQL仍封装在Mapper；这是保留既有实现，不是全面ORM替换。Feign内局部record以及表、Bean、消息/指标中的cm18/cm21兼容标识继续保留。
 
 ## 3. 实库与真实链路证据的分层结论
 
-下表是此前实际运行、本轮校验成功XML SHA/标签/提交可达性后的结果，**没有在本轮重跑，也不与1948项累加**。源代码迁移阶段曾做的其它局部实验仍在原章节，不把此表称为所有历史实验索引。
+下表是此前实际运行、在第60节校验成功XML SHA/标签/提交可达性后的结果，**没有在第61节重跑，也不与1948或85项累加**。源代码迁移阶段曾做的其它局部实验仍在原章节，不把此表称为所有历史实验索引。
 
 | 阶段 | 已验证范围 | 原测试项数 | 不能推导的结论 |
 | --- | --- | ---: | --- |
@@ -55,11 +55,11 @@
 
 ## 4. 必须完成的规范收尾
 
-原模块“结构完成”不覆盖本次新发现的规范缺口。只读审计采用同一JDK DocTrees/语法树与google-java-format 1.22.0，未改任何文件。所有入口/成员检查排除record隐式生成方法，匿名类的显式public方法仍纳入。
+原模块“结构完成”不覆盖本次新发现的规范缺口。第60节只读审计采用同一JDK DocTrees/语法树与google-java-format 1.22.0；第61节修改后对Common17文件再次检查通过，其余模块字节保持，待办沿原结果。所有入口/成员检查排除record隐式生成方法，匿名类的显式public方法仍纳入。
 
 | 模块 | JavaDoc绑定问题 | dry-run格式文件 | 非id短名 | 模板化说明 | 去重文件 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Common | 0 | 4 | 1 | 0 | 5 |
+| Common（第61节完成） | 0 | 0 | 0 | 0 | 0 |
 | Product | 34 | 16 | 6 | 23 | 21 |
 | User | 17 | 2 | 0 | 0 | 5 |
 | Stock | 9 | 12 | 0 | 0 | 16 |
@@ -67,30 +67,30 @@
 
 60处中，21处已有说明但放在注解之后，JDK没有绑定到成员：User两个PO的16字段、Product upsert/delete/consume三个方法、Stock initialize/scheduledAudit两个入口。其余39处需要补全独立入口/成员说明，其中部分匿名回调或成组字段已有上层说明，不能说60处都完全没有注释。23条模板化说明来自Product四个文件，与部分JavaDoc问题重叠。扫描不能代替对每段注释内容的逐行语义复核。
 
-103个两字符以内声明中，96个id为已有主键/查询/传输语义；它们不因长度被自动改名，尤其不得改PO/JSON/SQL字段。另7处ex/e/rs需要语义命名，见附表。没有发现Cm编号生产类型；冻结测试、工具、表或消息中的编号不是本次类名重构遗漏。
+第60节103个两字符以内声明中，96个id为已有主键/查询/传输语义，保留PO/JSON/SQL字段；7处ex/e/rs中Common的ex已改为exception，剩余Product六处，见附表。没有发现Cm编号生产类型；冻结测试、工具、表或消息中的编号不是本次类名重构遗漏。
 
 后续顺序与通过门：
 
-1. **Common（下一步）**：四个格式文件与AuthInterceptor的ex，共五文件。仅排版/import及异常形参语义命名；保持异常处理顺序、JSON和认证上下文。执行Common25项及受影响契约，记录逐token/符号归一差异和独立回退点。
-2. **Product**：二十一文件，补Bean/Mapper/回调说明、修正注解顺序、替换模板化描述、六处局部短名并统一格式。SQL/Lua/消息键、重试、确认、Bean名和算法不变；现有单测/契约加源码语义核验，不为注释排版重开历史CM21实验。
+1. **Common（第61节已完成）**：四个格式文件与AuthInterceptor的ex，共五文件；补充ErrorCodes十二个常量的准确独立说明。异常处理顺序、JSON/ThreadLocal和全部错误码值保持。Common25项、Cart HTTP8项、Order/Stock指纹消费者52项，共85项通过；完整AST规范化只允许未使用形参改名。
+2. **Product（下一步）**：二十一文件，补Bean/Mapper/回调说明、修正注解顺序、替换模板化描述、六处局部短名并统一格式。SQL/Lua/消息键、重试、确认、Bean名和算法不变；现有单测/契约加源码语义核验，不为注释排版重开历史CM21实验。
 3. **User**：五文件，调整两个PO注释位置、补BalanceTccDebitVO.from说明和两个文件格式。映射注解、字段、null/金额保持；执行相关表示/资金契约。
 4. **Stock**：十六文件，补监听/批处理入口与成组成员的独立说明、修正两个任务注释位置并统一格式。SQL、Redis Lua、指标/规则名、调度/租约与边界不变；执行相关模块回归。
 
-四批完成后再做一次规范总复核；只有实际零待办且适用测试通过才把“规范收尾”置完成。每批都先冻结文件/差异范围，不能把本清单当作一次性全库格式化授权。
+剩余三批完成后再做一次规范总复核；只有实际零待办且适用测试通过才把“规范收尾”置完成。每批都先冻结文件/差异范围，不能把本清单当作一次性全库格式化授权。
 
 ### 4.1 文件级清单
 
-以下为当前源码快照；“说明”是AST声明数，“模板”是匹配行数，格式列只列dry-run命中。名称对应完整可点击源码路径，后续改动后需更新行号/状态。
+以下为当前状态清单，Common已完成项保留对照但不计入剩余42文件；“说明”是AST声明数，“模板”是匹配行数，格式列只列dry-run命中。名称对应完整可点击源码路径，后续改动后需更新行号/状态。
 
-#### cloud-mall-common
+#### cloud-mall-common（第61节已完成）
 
 | 文件 | 说明 | 格式 | 短名 | 模板 |
 | --- | ---: | --- | ---: | ---: |
-| [auth/AuthContext.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/auth/AuthContext.java) | 0 | 待处理 | 0 | 0 |
-| [error/ErrorCodes.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/error/ErrorCodes.java) | 0 | 待处理 | 0 | 0 |
-| [messaging/SeckillRequestFingerprint.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/messaging/SeckillRequestFingerprint.java) | 0 | 待处理 | 0 | 0 |
-| [web/AuthInterceptor.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/AuthInterceptor.java) | 0 | — | 1 | 0 |
-| [web/GlobalExceptionHandler.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/GlobalExceptionHandler.java) | 0 | 待处理 | 0 | 0 |
+| [auth/AuthContext.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/auth/AuthContext.java) | 0 | 已完成 | 0 | 0 |
+| [error/ErrorCodes.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/error/ErrorCodes.java) | 0 | 已完成 | 0 | 0 |
+| [messaging/SeckillRequestFingerprint.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/messaging/SeckillRequestFingerprint.java) | 0 | 已完成 | 0 | 0 |
+| [web/AuthInterceptor.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/AuthInterceptor.java) | 0 | 通过 | 0 | 0 |
+| [web/GlobalExceptionHandler.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/GlobalExceptionHandler.java) | 0 | 已完成 | 0 | 0 |
 
 #### cloud-mall-product
 
@@ -149,11 +149,10 @@
 | [service/impl/cache/StockConsistencyReconciler.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/cache/StockConsistencyReconciler.java) | 2 | — | 0 | 0 |
 | [service/impl/seckill/SeckillQuotaSettlementService.java](../../backend/cloud-mall-stock/src/main/java/com/cloudmall/stock/service/impl/seckill/SeckillQuotaSettlementService.java) | 0 | 待处理 | 0 | 0 |
 
-### 4.2 七个短名定位
+### 4.2 剩余六个短名定位
 
 | 文件 | 当前行 | 声明 |
 | --- | ---: | --- |
-| [AuthInterceptor.java](../../backend/cloud-mall-common/src/main/java/com/cloudmall/common/web/AuthInterceptor.java) | 28 | `METHOD:Exception:ex` |
 | [ProductIndexOutboxMapper.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/mapper/ProductIndexOutboxMapper.java) | 34 | `LAMBDA_EXPRESSION:null:rs` |
 | [ElasticsearchProductIndexWriter.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ElasticsearchProductIndexWriter.java) | 432 | `CATCH:ElasticsearchStatusException:e` |
 | [ProductIndexConsumer.java](../../backend/cloud-mall-product/src/main/java/com/cloudmall/product/service/impl/index/ProductIndexConsumer.java) | 220 | `CATCH:Exception:e` |
@@ -167,16 +166,16 @@
 
 | 事项 | 当前证据/限制 | 启动条件 |
 | --- | --- | --- |
-| 公开TCC主动取消、未决中止的真实链路 | 本轮单测包含取消/入口/投影；§46有34项局部MySQL，§47有7项入口本地事务。四服务delivery不覆盖完整取消矩阵 | 若要声明公开取消全链通过，先评审有限场景和新隔离环境，再运行 |
+| 公开TCC主动取消、未决中止的真实链路 | 第60节统一单测包含取消/入口/投影；§46有34项局部MySQL，§47有7项入口本地事务。四服务delivery不覆盖完整取消矩阵 | 若要声明公开取消全链通过，先评审有限场景和新隔离环境，再运行 |
 | 旧PayTccCancelIT复用 | 仍有固定Nacos/TC地址、自建Redis、旧TC证据默认入口和RmTcLinkProxy源码/class固定SHA准入 | 不原样启动；先核当前构建pin和隔离/资源生命周期，不删除或绕过pin检查 |
-| Gateway与真实Product/Cart的全商城请求 | 本轮Gateway/Feign为实际入口+受控依赖，§59的Product/Cart为只读替身 | 作为独立全商城验收制定数据、登录、路由及清理范围 |
-| Gateway版本差异 | 本轮Surefire classpath读回spring-cloud-gateway-server **3.1.4**，规格写3.1.5；属既有差异 | 单独核对BOM/规格决策，本轮不升级依赖 |
+| Gateway与真实Product/Cart的全商城请求 | 第60节Gateway/Feign为实际入口+受控依赖，§59的Product/Cart为只读替身 | 作为独立全商城验收制定数据、登录、路由及清理范围 |
+| Gateway版本差异 | 第60节Surefire classpath读回spring-cloud-gateway-server **3.1.4**，规格写3.1.5；属既有差异 | 单独核对BOM/规格决策，本轮不升级依赖 |
 | Sharding解析器版本提示 | 统一测试出现既有ANTLR4.7.2/4.8提示，测试通过 | 记录兼容观察，不把提示误称当前失败或擅自换栈 |
 | 全故障/性能/CM21遗留 | 有限回归不覆盖每个网络/崩溃窗口；历史NO-GO/UNKNOWN不因当前通过消失 | 明确的新任务与范围；不自动重启历史维护或性能runner |
 
 ## 6. 失败现场与资源保留
 
-本轮只读核对本表覆盖的12个实验项目：容器/网络均无残留，43个记录中的命名卷仍存在。这个数量仅是本报告选取的§46/47/50–59实验集合，**不是整机或整个重构所有历史卷的总量**；没有创建、启动、挂载或删除任何卷。
+第60节只读核对本表覆盖的12个实验项目：容器/网络均无残留，43个记录中的命名卷仍存在。这个数量仅是本报告选取的§46/47/50–59实验集合，**不是整机或整个重构所有历史卷的总量**；没有创建、启动、挂载或删除任何卷。
 
 - §54 Nacos授权首轮失败的两owned库仍保留于该实验MySQL卷；不因后续桥接测试通过删除。
 - §59首轮四库仍保留：TCC已提交、余额90/冻结0，Pay PENDING、Order PENDING_PAYMENT、库存9/1/0，尚未交付；第二轮12项通过没有清算或改写此样本。首轮/第二轮共12卷保留。
@@ -189,19 +188,32 @@
 
 阶段完成标签只定位那个提交，不等于一条revert撤销整个模块。Order完整切片逆序索引见方案§33.4，Pay见§48.4，其余见对应模块章节。已存在后续依赖时先核改动、保存无关工作树、按逆序处理并重编译；不得用reset --hard、全量clean或删除历史证据演示回退。
 
-本轮方案基线为`refactor/backend-acceptance-baseline-20261114`，本轮汇总完成标签为`refactor/backend-acceptance-complete-20261114`。它只覆盖两份Markdown，回退不触及Java或任何运行数据：
+第60节方案基线为`refactor/backend-acceptance-baseline-20261114`，汇总完成标签为`refactor/backend-acceptance-complete-20261114`。它只覆盖两份Markdown，回退不触及Java或任何运行数据：
 
 ```powershell
 git revert refactor/backend-acceptance-complete-20261114
 ```
 
-本轮证据位于`target/backend-refactor-20261114/refactoring-acceptance/`：
+第60节证据位于`target/backend-refactor-20261114/refactoring-acceptance/`：
 
 - `verification.json`：提交、测试、规范待办与逆补丁入口。
-- `final-summary.json`、`final-reports/`：本轮267类1948项及SHA，未混入旧Surefire XML。
+- `final-summary.json`、`final-reports/`：第60节267类1948项及SHA，未混入旧Surefire XML。
 - `historical-evidence-check.json`：12组历史报告SHA/标签/提交树核对；只复核，不冒充新执行。
-- `structural-inventory.json`、`reviewed-followup-inventory.json`、各模块TSV/format输出：641文件结构和46文件规范清单。
+- `structural-inventory.json`、`reviewed-followup-inventory.json`、各模块TSV/format输出：641文件结构和第60节原始47文件规范清单。
 - `jar-check.json`：八Jar共628生产class，编译字节/SourceFile对应。
 - `retained-experiment-resources.json`：上述12项目43卷只读检查。
 
-ignored证据保留在当前工作区；Git只版本化本报告和主方案。后续会话先读本报告、第60节及实际Git状态，再从Common五文件规范收尾继续。
+ignored证据保留在当前工作区；Git版本化本报告、主方案和各阶段明确修改的源码。后续会话先读本报告、第61节及实际Git状态，从Product二十一文件规范收尾继续。
+
+
+### 7.1 第61节增量结果与回退
+
+Common五文件已完成；完整AST对照排除注释后，仅afterCompletion的未使用Exception ex改为exception，ErrorCodes十二字段的名称/修饰符/顺序/字符串值保持。Common17文件必需说明绑定/短名/格式检查通过，1118份其它backend/deploy与README保持。
+
+第61节12类85项（Common25、Cart8、Order25、Stock27）和八模块package通过。证据`target/backend-refactor-20261114/common-standards/verification.json`包含XML、AST、十二错误码契约、源码保持与八Jar检查；未重跑1948项或真实中间件。
+
+方案基线`refactor/common-standards-baseline-20261114`，完成标签`refactor/common-standards-complete-20261114`；精确回退五Java与两份文档，Git不回退运行数据：
+
+```powershell
+git revert refactor/common-standards-complete-20261114
+```

@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，但Common/Product/User/Stock仍有47个文件的规范收尾，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第60节。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common已完成规范收尾，Product/User/Stock仍有42个文件待处理，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第61节。
 
 ## 1. 使用方式与范围
 
@@ -3820,3 +3820,38 @@ AuthContext、SeckillRequestFingerprint、GlobalExceptionHandler按现有Google 
 完成八模块离线package（跳过重复测试）验证依赖方源码/测试编译与打包。无真实MySQL/Redis/Rabbit/TC实验，不操作Docker/保留卷，不全量clean。证据target/backend-refactor-20261114/common-standards保留AST/格式、定向XML、源码保持与Common Jar检查。更新验收汇总为Common本批完成，剩余Product21/User5/Stock16共42文件；第60节原始47文件快照保留历史语境。
 
 精确提交五Java和两Markdown。git diff --check与临时index逆补丁恢复方案基线树且真实index/README保持后，建立refactor/common-standards-complete-20261114。该标签仅完成Common规范批次，不宣称剩余三个模块、完整商城或历史性能事项完成。
+
+
+### 61.3 实施与验证结果
+
+五文件规范收尾完成。AuthContext清除多余空格；SeckillRequestFingerprint及GlobalExceptionHandler统一换行；AuthInterceptor.afterCompletion将未使用Exception ex改为exception；ErrorCodes十二常量独立声明并逐条补准确含义，原名称/修饰符/声明顺序/字符串值全部保持。没有增加测试、修改测试断言或变更生产业务分支。
+
+完整Javac规范语法树对照覆盖五文件的package/import/type。去掉编译单元DocTable后，唯一允许的符号差异为上述未使用形参改名；十二常量名称/顺序/值独立逐项核验。AST工具首轮误将Javadoc变化纳入代码比较，第二次形参计数误匹配NumberFormatException后缀，均保存原差异并按实际语法边界纠正；这两次是归档工具问题，业务测试没有失败或重跑。没有通过删除业务token或放宽断言规避差异。
+
+Common全部17份生产Java通过必需说明绑定、短名和Google Java Format dry-run；四个格式差异及一个短名均已消除。ErrorCodes原泛化说明在同一既定文件内一并补全，初始清单无需增加文件。
+
+| 本轮现有回归 | 类数 | 测试项 | 范围 |
+| --- | ---: | ---: | --- |
+| Common全部单测 | 4 | 25 | 响应/身份、后端源码规则、429/503禁止缓存、地址规范化与指纹协议 |
+| CartHttpContractTest | 1 | 8 | 实际MVC/Interceptor/Service入口的身份、绑定、错误/null/金额响应 |
+| Order指纹消费者 | 3 | 25 | 地址传播、商品身份、消息恢复的原指纹与冲突行为 |
+| Stock指纹消费者 | 4 | 27 | 可靠性、出站竞态、事件时间和Redis不可用的原处理 |
+| 合计 | 12 | 85 | 首次0失败/错误/跳过，不包含真实中间件，也不叠加第60节1948项 |
+
+八模块离线package通过，依赖方生产/测试源码完成编译；package跳过重复测试。八Jar628个本模块生产class均与target/classes字节及现存SourceFile对应，Common其中10个class，没有测试helper或无源旧class。实际Maven3.9.16使用Microsoft JDK17.0.20，日志归档；没有全量clean或Docker/数据库/缓存/消息/TC操作。
+
+逐行复盘的调用关系保持：AuthInterceptor.preHandle按X-User-Id/X-User-Role建立原ThreadLocal上下文，原401拒绝与默认角色不变；afterCompletion仍只执行AuthContext.clear。AuthContext.requireAdmin仍先验证登录再校验ADMIN。GlobalExceptionHandler沿原Biz/校验/缺头/未分类异常映射，429/503 no-store与500日志/requestId/traceId保持。SeckillRequestFingerprint仍按原地址校验/递归排序/数值规范化生成v1 UTF-8 SHA-256和seckill-order事件前缀，Order/Stock调用者未改。
+
+其余1118份原跟踪backend/deploy、所有测试源码和README前像逐字节保持。上一轮1948份测试项所属的267份XML已按SHA复核，只作历史证据，不称本轮重新运行。原bugfix_log已补问题、原因、修正与85项回归结果。
+
+### 61.4 清单更新与回退
+
+验收汇总按当前状态更新：Common五文件已完成，不再计入剩余；Product21、User5、Stock16共42文件仍OPEN。剩余JavaDoc绑定60处、格式30文件、非id短名6处、Product模板化说明23行；各单位重叠不累加。第60节47文件原始快照保留于Git和原证据，报告明确1948项属于第60节、85项属于第61节。
+
+方案提交e853c0c9，基线refactor/common-standards-baseline-20261114，完成标签refactor/common-standards-complete-20261114。证据target/backend-refactor-20261114/common-standards/verification.json及AST/错误码/定向XML/源保持/八Jar/剩余清单。精确提交五Java和本方案、验收汇总两Markdown；临时index逆补丁恢复方案基线树并核真实index/README保持。
+
+```powershell
+git revert refactor/common-standards-complete-20261114
+```
+
+该回退只撤销Common本批规范修改及配套记录，不回退运行数据或删除历史证据/卷。下一步先冻结Product21文件的说明、局部短名和格式收尾，沿同样的语义对照/适用回归/回退流程；完整商城及历史性能范围仍单独保留。

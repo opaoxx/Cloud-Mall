@@ -44,9 +44,8 @@ public class GlobalExceptionHandler {
   @ExceptionHandler(Exception.class)
   public ResponseEntity<ApiResponse<Object>> other(Exception exception) {
     ApiResponse<Object> response = ApiResponse.error("COMMON_INTERNAL_ERROR", "服务内部错误");
-    log.error("未分类服务端异常，requestId={}，traceId={}",
-        response.requestId, MDC.get("traceId"), exception);
-    return ResponseEntity.internalServerError()
-        .body(response);
+    log.error(
+        "未分类服务端异常，requestId={}，traceId={}", response.requestId, MDC.get("traceId"), exception);
+    return ResponseEntity.internalServerError().body(response);
   }
 }
