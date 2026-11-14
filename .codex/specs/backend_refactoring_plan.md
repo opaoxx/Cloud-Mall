@@ -3919,3 +3919,25 @@ git revert refactor/product-standards-complete-20261114
 ```
 
 回退只撤销该20文件规范变化与两文档，不还原工作区原混合行尾、不恢复运行数据，也不删除历史证据或卷。Product本批规范完成不改变真实索引/商城/性能的既有验收边界。
+
+## 63. User 五文件规范收尾（2026-11-14）
+
+### 63.1 冻结范围
+
+从c4bd761a继续，第62节剩余清单先处理User五文件，当前会话仍由主Agent单独执行。精确范围为domain/po/BalanceDebitAttemptPO.java、domain/po/BalanceTccDebitPO.java、domain/vo/BalanceTccDebitVO.java、domain/dto/AddressRequestDTO.java及domain/vo/BalanceOperationVO.java。
+
+将两个PO的16处既有字段JavaDoc移动到@TableField之前；为BalanceTccDebitVO.from补准确映射说明，明确参数非null、XID为null时保留null，否则截取最多前8位，其余状态/操作键/支付号/分支号直接映射。只统一这些文件的排版和未使用import，不修改任何业务语句、变量名、字段/注解、表映射、校验消息、金额字符串或异常语义；格式工具若只改变工作区混合行尾，按实际Git内容差异提交，不制造额外改动。
+
+### 63.2 兼容与验证
+
+先保存五文件前像、全部已跟踪backend/deploy指纹及README前像，记录bugfix_log现象；提交本节并建立refactor/user-standards-baseline-20261114，然后实施。完整Javac语法树排除注释对照，不允许标识符或方法体归一；import只允许排序/删除未使用项，单独保存差异；所有字面量值和顺序保持。
+
+Google Java Format 1.22.0继续跳过长字符串重排，仅修改冻结五文件，完成后对User全部100生产Java只读检查格式、DocTrees绑定与短名，语义明确id保留。沿既有Common/User的*Test类执行，预计22类309项（Common25/User284），以本轮XML为准；不为注释/格式新增测试。随后八模块离线package跳过重复测试，核对Jar与编译输出及SourceFile，不使用clean。
+
+所有测试源码、资源/POM、SQL schema及其它模块保持，不运行历史实库IT、压测、Docker或卷操作。旧1948/85/386和历史实库报告只作既有证据，不叠加为本轮测试数。
+
+### 63.3 归档与回退
+
+证据写入target/backend-refactor-20261114/user-standards，包含前像、AST/字面量/import、全模块规范扫描、当前测试XML、八Jar、源保持和剩余清单。通过后更新本方案与验收汇总：User五文件完成后，Stock十六文件的9处说明绑定和12个格式文件仍待收尾；整体规范验收仍未完成。
+
+只提交实际有Git内容差异的冻结Java及两份既有Markdown。通过git diff --check后，用临时index验证逆补丁恢复方案基线树且真实index/README保持，再建立refactor/user-standards-complete-20261114。Git回退不恢复原工作区混合行尾或运行数据，不删除证据或卷。
