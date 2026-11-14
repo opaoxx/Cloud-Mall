@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归，以及Product常规内容索引有限MySQL/Rabbit/ES同步回归。真实服务链与TC资金仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归，以及User LocalTCC/官方Fence的真实TC有限回归。Pay/User跨进程发现派发与完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3237,3 +3237,38 @@ git revert refactor/product-index-sync-complete-20261114
 先提交本节并建立refactor/user-tcc-native-baseline-20261114。使用原Java17/Maven，精确选择-o -pl backend/cloud-mall-user -am test -Dtest=BalanceTccFenceSeataIT，surefire.failIfNoSpecifiedTests=false，串行完整6方法，无假成功跳过。源码无变化时不重复此前离线1933或Product386，编译由本次Maven完成。
 
 证据target/backend-refactor-20261114/user-tcc-native包含源码/方法清单、显式执行命令、源DDL/前后指纹、镜像与资源准入、精确6项XML/日志、TC真实分支/全局终态、owned建删事件、TC文件存储及关闭结果。1118份既有backend/deploy文件与README逐字节保持；结果仅更新本方案，提交前git diff --check，临时index逆补丁恢复父树并保持真实index/README。完成标签refactor/user-tcc-native-complete-20261114；Git回退不恢复运行数据库或删除忽略证据/保留卷。实验失败先记录原bugfix_log，再定位最小必要修正。
+
+53.3执行前置修正：首轮命令漏带README已明确要求的JDK17参数--add-opens=java.base/java.lang=ALL-UNNAMED，Seata1.5.2/CGLIB在GlobalTransactionScanner初始化阶段抛InaccessibleObjectException；6个业务方法尚未执行，Surefire为1个类级error。保留首轮日志/XML/命令与资源后，仅在本轮argLine补该参数，其他地址/方法/断言不变。原夹具已自动删除首轮启动失败UUID库，TC无业务事务；第二轮创建另一UUID，源五表保持。不能把后续通过写成首次启动通过。
+
+### 53.4 本轮结果与真实调用证据
+
+补齐README已有的Java17参数后，原BalanceTccFenceSeataIT完整6项全部通过，0失败/错误/跳过；初始启动失败单独归档，不能记为首轮全过。最终命令与首轮逐参数对照，唯一新增是--add-opens=java.base/java.lang=ALL-UNNAMED。没有改生产、测试、依赖、共享Compose、测试超时或断言。前一轮Product386/4报告SHA本轮核验但没有重跑，不计入本次6项。
+
+| 原测试方法 | 本轮实际验证 |
+| --- | --- |
+| realTcCommitProducesOneLedgerAndReplaysSurviveFenceCleanup | 真实Try冻结10；TC提交后余额90、冻结0、唯一DEBIT账本、Fence=2；重复提交/迟到回滚及Fence清理后重放保持原资金 |
+| realTcRollbackReleasesFreezeOnce | TC回滚后余额100、冻结0、0账本、Fence=3；重复回滚与相反提交不重复释放，Fence清理后仍幂等 |
+| realTcEmptyRollbackWritesPermanentTombstoneAndBlocksDelayedPrepare | 真实注册未Try分支后TC空回滚；Fence=4、永久CANCELLED且无TCC冻结行；清Fence后迟到原分支Try仍被拒 |
+| emptyCancelFailureRollsBackFenceAndTcRetryFinishesAfterRepair | 插入触发器使首次取消失败，Fence/attempt均0、资金不动；移除本例触发器后TC RetryRollbacking线程自动完成，永久取消与Fence=4一致 |
+| repeatedTryCannotCreateASecondFundingBranchAndBothRollbacksConverge | 同请求第二Try分支被拒，没有第二次冻结；两个分支回滚收敛，单attempt、两Fence、余额100/冻结0/0账本 |
+| insufficientFundsRollBackTryFenceAndRealTcCancellationLeavesNoFreeze | 101扣款大于100余额时Try整体回滚，原无Fence/attempt；随后真实TC取消形成终态，无冻结或账本 |
+
+TC日志与客户端日志互证：实际Seata客户端/服务器均1.5.2，唯一User RM资源cloudmallUserBalanceDebit，6个全局事务、7个注册分支，1个全局提交与5个全局回滚终态覆盖全部已begin事务。受控取消故障有明确“fail and will retry”，随后同分支由RetryRollbacking线程成功清算；不存在仅以Docker healthy代替业务结论。实际UserApplication完成启动，使用重构后的service.impl.tcc资源，Hikari与TM/RM连接正常关闭。
+
+本轮file客户端实际连接127.0.0.1:19977；虽然容器配置包含SEATA_IP=127.0.0.1，实际XID中的TC前缀是容器IP，不能从环境变量推导其生效地址。本次注册、决议与回调全部通过；将该实际差异保存在tc-transactions.json，未为“统一显示”更改TC或XID，更不将此有限结果扩写为跨容器/重启后的地址稳定性验收。
+
+原夹具两轮共创建并删除2个UUID库：首轮初始化失败1个、第二轮成功6项共用1个。binlog两对CREATE/DROP与最终schema核对一致；五张空源表DDL/计数/checksum始终相同。原测试逐例会重置owned事实，因此归档的是实际断言结果、真实TC日志和建删事件，没有虚构逐例删除前快照或宣称任意失败都保留数据库。
+
+本轮核验1118份既有backend/deploy文件及README字节保持，既有容器ID/镜像/完整挂载/启动时间/重启次数保持。源码无变化，本次Maven已完成适用编译，未重复全仓离线或打包。归档日志后正常停止自有TC，复制其sessionStore/root.data及摘要，再down本轮容器/网络；保留cloud-mall-refactor-user-tcc-20261114_mysql_data和cloud-mall-refactor-user-tcc-20261114_seata_data两卷，未清理历史/default资源。
+
+### 53.5 回退与后续有限任务
+
+方案提交a63a1f92，基线标签refactor/user-tcc-native-baseline-20261114，完成标签refactor/user-tcc-native-complete-20261114。证据入口target/backend-refactor-20261114/user-tcc-native/verification.json，包含首轮类级启动失败、修正前后命令、6方法XML、6全局/7分支及重试事实、两库建删、五源表指纹、TC文件存储、资源关闭与源码保持。
+
+```powershell
+git revert refactor/user-tcc-native-complete-20261114
+```
+
+结果提交只包含本方案；临时index逆补丁恢复父树且真实index/README保持。回退不恢复已清理测试库、TC运行态或忽略证据，不删除两保留卷。原bugfix_log已记录首轮漏参数的现象、根因、修正及回归结果。
+
+下一步单独整理Pay/User跨进程验收夹具的显式Nacos/TC地址、子进程参数传播和独立资源清单，再冻结发现/Feign派发桥的有限验证；不直接使用旧硬编码环境。User RM本轮通过不代表Pay公开TCC入口、Order/Stock联动、RM进程中断/TC重启、Gateway商城链或性能已验收。
