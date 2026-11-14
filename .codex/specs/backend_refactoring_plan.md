@@ -3211,3 +3211,29 @@ git revert refactor/product-index-sync-complete-20261114
 提交仅含本方案和新增测试；临时index逆补丁恢复父树，真实index与README保持。回退不会还原已清理的测试库/索引，也不会删除忽略证据或三个保留卷。Java测试全部通过，脚本首轮问题与修正保留，不宣称整个实验过程零失败。
 
 当前已验证常规内容索引的上述四个有限路径。CM21在线指标、全量重建/周期恢复、confirm丢失等完整故障矩阵、Nacos/Gateway真实服务、真实TC/RM资金与商城全链仍未因此获得验收。下一步先盘点现有真实服务/TC最小启动与验收入口，冻结独立资源和有限链路，避免重启旧压测或无界扩展历史维护任务。
+
+## 53. User LocalTCC / 官方 Fence 真实 TC 有限回归（2026-11-14）
+
+### 53.1 入口盘点与范围冻结
+
+从1e8ceac3继续，主Agent单独执行。检查当前真实链路入口：BalanceTccFenceSeataIT可显式指定MySQL与TC，实际UserApplication/NONE上下文加载原LocalTCC资源；BalanceTccRmFailureIT包含子JVM中断/链路故障，后置；PayUserTccBridgeIT仍硬编码127.0.0.1:18848及部分TC缺省环境，且启动两个User进程/代理，不直接跑到默认中间件。本轮选择最小、已有独立地址入口的User LocalTCC切片，不新增资金行为或修改旧测试守卫。
+
+依据batch15_cm18_user_local_tcc_fence_review.md与当前BalanceTccResourceConfiguration，沿用useTCCFence=false、显式官方Fence与业务callback共享同一裸DataSource/本地REQUIRED事务。真实TM向TC begin，原代理注册User分支并Try；TC通过已注册RM网络连接调用Confirm/Cancel。冻结BalanceTccFenceSeataIT完整6方法：真实提交及Fence清理后重放；真实回滚只释放一次；空回滚永久tombstone/阻断迟到Try；取消插入失败时Fence/业务共同回滚且TC重试恢复；重复Try第二分支被拒而全部回滚收敛；余额不足无残余冻结。
+
+部分重放和迟到Try沿原测试直接调用原适配器；初始决议与清算通过真实TC/RM。6项不覆盖Pay/Order/Stock、Nacos/Feign/Gateway、User HTTP入口、RM崩溃恢复、TC重启或全支付链。所有原分支/锁/状态/账本断言保持，未知状态不能推断成功。
+
+### 53.2 独立资源与清理边界
+
+新项目cloud-mall-refactor-user-tcc-20261114，在deploy/experiments/compose.yml基础上通过本轮独立override仅启动mysql及新增seata服务；MySQL19976、TC19977、子网10.254.220.0/24，新mysql_data/seata_data卷。MySQL沿原8.0.46；TC复用已存在的seataio/seata-server:1.5.2镜像ID，file注册/config/store、restart=no、pull_policy=never。TC显式SEATA_IP=127.0.0.1与SEATA_PORT=19977，容器同端口映射，回调走RM已建立连接；不发布控制台7091。镜像ParameterParser/ContainerHelper字节码已只读核验环境变量解析，保存到本轮证据目录，不依赖猜测旧默认TC地址。
+
+启动前检查项目/卷不存在、端口bind/IPAM、镜像ID与渲染配置。TC健康检查本容器19977，只有健康及宿主TCP可达后运行；真实协议通过最终TM/RM验收，不把TCP探测当事务通过。新源库cloudmall_user仅准备当前schema.sql的五张空表mall_user、user_address、balance_ledger、balance_debit_attempt、balance_tcc_debit；不复制旧业务数据。原夹具创建一个cm15_tcc_it_<UUID>并克隆五表，原初始化器在owned库生成Fence/receive及本地admin。
+
+原夹具每例清理本例库的旧事实，AfterEach等待冻结归零及真实TC终态，无法收敛设置preserveFixture并保留库。该守卫不等于“任何断言失败都保留”：若断言失败但后续已收敛，原AfterAll仍可能删库；本轮明确保留此原语义，不用删除后的现场冒充逐例快照。失败立即保存Maven/XML/TC日志和剩余库，禁止外部扫前缀删库或直接改余额结案。成功以本轮六项断言、TC全局/分支日志、UUID建删事件和源表指纹互证。
+
+显式传入cloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:19976/cloudmall_user?allowPublicKeyRetrieval=true、cloudmall.seata.test.tc=127.0.0.1:19977、Asia/Shanghai JVM时区。原Nacos发现/注册关闭；Redis与Nacos地址额外指向已核对未监听的19978/19979且禁Redis health，防止意外读取默认服务。本轮不启动Redis/Nacos/Rabbit。成功归档TC日志及file sessionStore后，再down本轮两容器/网络（无-v），保留两个卷；默认与历史资源保持。
+
+### 53.3 执行、证据与回退
+
+先提交本节并建立refactor/user-tcc-native-baseline-20261114。使用原Java17/Maven，精确选择-o -pl backend/cloud-mall-user -am test -Dtest=BalanceTccFenceSeataIT，surefire.failIfNoSpecifiedTests=false，串行完整6方法，无假成功跳过。源码无变化时不重复此前离线1933或Product386，编译由本次Maven完成。
+
+证据target/backend-refactor-20261114/user-tcc-native包含源码/方法清单、显式执行命令、源DDL/前后指纹、镜像与资源准入、精确6项XML/日志、TC真实分支/全局终态、owned建删事件、TC文件存储及关闭结果。1118份既有backend/deploy文件与README逐字节保持；结果仅更新本方案，提交前git diff --check，临时index逆补丁恢复父树并保持真实index/README。完成标签refactor/user-tcc-native-complete-20261114；Git回退不恢复运行数据库或删除忽略证据/保留卷。实验失败先记录原bugfix_log，再定位最小必要修正。
