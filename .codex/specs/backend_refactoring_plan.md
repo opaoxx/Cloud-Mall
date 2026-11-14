@@ -3495,3 +3495,35 @@ git revert refactor/pay-coordinator-native-complete-20261114
 提交仅本测试与方案；临时index逆补丁恢复父树且真实index/README保持。Git回退不恢复运行数据库或TC状态，也不删除证据/五卷。原bugfix_log补充固定环境原因、装配修正及完整验证；README本地修改和旧pycache不入提交。
 
 下一步审查定时自动恢复测试的显式环境、恢复扫描入口与Pay重启参数，冻结新的有限验证范围。本轮手动recover与指定进程窗口通过不替代定时扫描、公开支付入口、Order/Stock交付、完整商城或性能验收。
+
+## 57. Pay 定时自动恢复与重启发现有限回归（2026-11-14）
+
+### 57.1 修改与验证范围
+
+从befdba2b继续，主Agent单独执行，依据batch16b3_cm18_tcc_recovery_scan_review.md及当前execution包恢复扫描实现。PayTccRecoveryAutomaticIT仍有固定Nacos地址和未传递的父子中间件参数；本轮只改该IT的setup/startPay/killPay/startUser/stopUser，复用既有PayUserTccBridgeEnvironment，建库前核验地址，统一NamingService、父Pay、两User及两次Pay子进程的环境/Asia/Shanghai。保留Pay原classpath/@args、控制认证、availablePort和原强停语义，补PID/恢复开关/模式/退出回执，不输出控制凭证。
+
+原5个@Test正文、seed/settle/cleanup、due、finished、ProbeTransactions和其它交易/控制辅助全部保持；不改环境helper、PayCoordinatorFaultProcess、生产Scheduler/RecoveryStore/Mapper或原200ms测试调度间隔。扫描器仍按原真实@Scheduled运行，不用手动recover代替自动路径；原SQL租约、两阶段共享批量/启动预算和不可转移begin/Try权限不变。
+
+### 57.2 五场景及证据边界
+
+1. COMMIT请求在SDK边界丢失后，只通过原扫描器找到到期记录，恢复同XID/同决议并释放租约；不手动调用recover。
+2. 余额不足且ROLLBACK请求丢失后，扫描器完成原取消，没有新Try/POST。
+3. decision=NONE的原分支仅被观察为UNKNOWN，余额仍冻结且无新决议；之后测试明确调用原TC rollback，再由扫描器核对ROLLEDBACK/NONE。该显式rollback属于测试控制，不能报告为扫描器自行决定取消。
+4. begin响应丢失的execution保持BEGIN_UNKNOWN/xid=NULL/恢复尝试0；同例另建原canary支付，证明合法COMMIT_REQUESTED仍可被扫描，不被未知记录挤占。本例含两个真实begin，不能把5方法误当5全局事务。
+5. 父扫描器按原running标志暂时阻断；Pay子进程在COMMIT意图后被强停，新同appId进程启用原恢复调度自动发现并提交，不发/recover控制请求或第二User POST。
+
+原due只将owned execution.next_recovery_at提前，不改状态/XID/决议；因此验证到期调度与真实恢复，不验证完整30秒初始等待或所有退避墙钟时间。原清理层根据testOnlyKnownXids结束TC，不回填BEGIN_UNKNOWN业务XID；业务未知与实验TC清理分开报告。未决/收尾失败保留库；普通断言失败但随后已收敛仍可能删库，此限制不变。
+
+### 57.3 独立资源与前置
+
+新项目cloud-mall-refactor-pay-recovery-20261114，基于deploy/experiments/compose.yml及本轮override启动MySQL8.0.46、Redis7.0、Nacos2.2.0、Seata1.5.2；候选MySQL19992、TC19993、NacosHTTP19994及gRPC20994/20995、Redis19995，子网10.254.216.0/24。新mysql_data/redis_data/seata_data/nacos_data/nacos_logs五卷，pull_policy=never/restart=no；Nacos保持认证、稳定hostname和原healthcheck，初始化root/root及空/public命名权限；TC file模式，实际XID前缀按日志核对。
+
+先核对项目/卷不存在、镜像/端口/IPAM/健康/认证；仅从当前schema.sql创建User五表、Pay三表八个空源表，原夹具克隆到两cm16b3_auto_<UUID>库。父子显式MySQL/Nacos/TC/Redis与Java17 add-opens一致，无关Rabbit指向未启用端口且禁health，不连接默认broker。默认/历史资源、上轮保留卷和旧失败库不动。
+
+### 57.4 检查、归档与回退
+
+先提交本节并建立refactor/pay-recovery-native-baseline-20261114。修改单Java执行google-java-format；定向运行PayUserTccBridgeEnvironmentTest、PayTccRecoverySchedulerTest、PayTccRecoveryFailureTest、PayTccExecutionWiringTest、PayTccRollbackProjectionSchedulerTest。离线打包User并核88个class，然后新独立JVM精确运行PayTccRecoveryAutomaticIT全5项，不合跑其它TC类。以前的82/15或SQL租约14项不能当本轮新执行结果。
+
+证据target/backend-refactor-20261114/pay-recovery-native保存5方法/辅助保持、定向及原生XML/日志、五例完整execution/资源快照（共六execution）、恢复attempt/token释放与未知不扫描、原生子进程参数及四个PID回执、TC终态、源指纹和User Jar。成功后核验两库建删、八源表保持、Redis初末16DB空及Nacos组无实例，归档日志与停止后的TC file store，再down四容器/网络，无-v，五卷保留。
+
+只提交PayTccRecoveryAutomaticIT与本方案，其它1119份backend/deploy及README保持。git diff --check、临时index逆补丁恢复父树且真实index/README保持后建立refactor/pay-recovery-native-complete-20261114。失败先在原bugfix_log写现象并保留首轮证据，再定位最小必要修正，不改业务断言或盲目重发交易。Git回退不恢复运行数据或删除证据/保留卷；本轮不代表公开支付入口、Order/Stock交付、恢复每个窗口的独立崩溃矩阵、商城或性能验收。
