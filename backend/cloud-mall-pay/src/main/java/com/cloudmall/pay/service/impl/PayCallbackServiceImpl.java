@@ -10,6 +10,7 @@ import com.cloudmall.pay.service.PayCallbackService;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PayProtocolMetrics.Entry;
 import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
 import com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService;
 import com.cloudmall.pay.util.PayDebitModes;

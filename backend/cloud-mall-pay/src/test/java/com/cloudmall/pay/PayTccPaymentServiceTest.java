@@ -20,7 +20,7 @@ import com.cloudmall.pay.feign.OrderClient;
 import com.cloudmall.pay.feign.UserTccClient;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
-import com.cloudmall.pay.service.impl.PayTccPaymentService;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore;
 import com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService;
 import java.math.BigDecimal;

@@ -60,7 +60,7 @@ class PayLegacyFailureOutcomeTest {
     var legacyFailure =
         new com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService(payments, intents, orders);
     org.springframework.beans.factory.ObjectProvider<
-            com.cloudmall.pay.service.impl.PayTccPaymentService>
+            com.cloudmall.pay.service.impl.entry.PayTccPaymentService>
         tcc = mock(org.springframework.beans.factory.ObjectProvider.class);
     service =
         new PayCallbackController(

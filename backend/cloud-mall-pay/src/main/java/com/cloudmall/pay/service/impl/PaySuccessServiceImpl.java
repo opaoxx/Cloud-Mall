@@ -8,6 +8,7 @@ import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PayProtocolMetrics.Entry;
 import com.cloudmall.pay.service.PaySuccessService;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
 import java.util.function.LongSupplier;
 import org.springframework.beans.factory.ObjectProvider;

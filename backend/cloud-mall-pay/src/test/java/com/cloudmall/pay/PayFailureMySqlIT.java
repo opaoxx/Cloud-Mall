@@ -18,7 +18,7 @@ import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.PayTccCoordinatorService;
 import com.cloudmall.pay.service.PayTccDeliveryService;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
-import com.cloudmall.pay.service.impl.PayTccPaymentService;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService;
 import com.cloudmall.pay.service.impl.projection.PayTccPublicStateStore;
 import com.cloudmall.pay.service.impl.projection.PayTccRollbackProjectionService;

@@ -19,6 +19,7 @@ import com.cloudmall.pay.service.impl.PaySuccessServiceImpl;
 import com.cloudmall.pay.service.impl.PayWriteMonitor;
 import com.cloudmall.pay.service.impl.callback.PayCallbackReceiptService;
 import com.cloudmall.pay.service.impl.delivery.PayTccDeliveryServiceImpl;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.execution.PayTccCoordinatorServiceImpl;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
 import com.cloudmall.pay.service.impl.receipt.PayTccExecutionEvidence;
@@ -496,7 +497,7 @@ class PayProtocolMetricsEndpointTest {
         PayProtocolMetricsTest.Fixture fixture,
         PayProtocolMetrics metrics,
         org.springframework.beans.factory.ObjectProvider<
-                com.cloudmall.pay.service.impl.PayTccPaymentService>
+                com.cloudmall.pay.service.impl.entry.PayTccPaymentService>
             tcc,
         PayWriteMonitor writeMonitor) {
       return new PaySuccessServiceImpl(

@@ -1,4 +1,4 @@
-package com.cloudmall.pay.service.impl;
+package com.cloudmall.pay.service.impl.entry;
 
 import com.cloudmall.common.api.ApiResponse;
 import com.cloudmall.common.error.BizException;
@@ -27,7 +27,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-/** 公开成功请求的持久 TCC 路由，不依赖 Legacy 一致性服务。 */
+/** 公开支付与失败请求的持久 TCC 路由，按原资金事实委托执行、交付、投影和取消。 */
 @Service
 @ConditionalOnProperty(name = "cloudmall.pay.tcc-entry.enabled", havingValue = "true")
 @DependsOn("payTccEntryConfiguration")

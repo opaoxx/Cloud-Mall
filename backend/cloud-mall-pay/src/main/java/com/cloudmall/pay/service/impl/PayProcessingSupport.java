@@ -7,6 +7,7 @@ import com.cloudmall.pay.domain.po.PayRecordPO;
 import com.cloudmall.pay.domain.vo.PayVO;
 import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.legacy.PayConsistencyService;
 import com.cloudmall.pay.util.PayDebitModes;
 import com.cloudmall.pay.util.PayRecordViews;

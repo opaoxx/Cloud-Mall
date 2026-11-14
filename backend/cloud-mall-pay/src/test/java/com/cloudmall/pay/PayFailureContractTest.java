@@ -20,7 +20,7 @@ import com.cloudmall.pay.mapper.PayDebitIntentMapper;
 import com.cloudmall.pay.mapper.PayRecordMapper;
 import com.cloudmall.pay.service.PayProtocolMetrics;
 import com.cloudmall.pay.service.impl.PayFailureServiceImpl;
-import com.cloudmall.pay.service.impl.PayTccPaymentService;
+import com.cloudmall.pay.service.impl.entry.PayTccPaymentService;
 import com.cloudmall.pay.service.impl.legacy.PayLegacyFailureService;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
