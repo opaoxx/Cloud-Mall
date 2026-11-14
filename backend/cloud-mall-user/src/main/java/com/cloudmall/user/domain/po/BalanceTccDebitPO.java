@@ -12,27 +12,27 @@ public class BalanceTccDebitPO {
   /** 冻结事实主键。 */
   @TableId public Long id;
 
-  @TableField("operation_key")
   /** TCC 操作键。 */
+  @TableField("operation_key")
   public String operationKey;
 
   /** XID。 */
   public String xid;
 
-  @TableField("branch_id")
   /** 分支标识。 */
+  @TableField("branch_id")
   public Long branchId;
 
-  @TableField("user_id")
   /** 用户主键。 */
+  @TableField("user_id")
   public Long userId;
 
-  @TableField("pay_no")
   /** 支付号。 */
+  @TableField("pay_no")
   public String payNo;
 
-  @TableField("order_no")
   /** 订单号。 */
+  @TableField("order_no")
   public String orderNo;
 
   /** 冻结金额。 */
@@ -41,19 +41,19 @@ public class BalanceTccDebitPO {
   /** 冻结状态。 */
   public String state;
 
-  @TableField("balance_before")
   /** 冻结前余额。 */
+  @TableField("balance_before")
   public BigDecimal balanceBefore;
 
-  @TableField("balance_after_try")
   /** Try 后余额。 */
+  @TableField("balance_after_try")
   public BigDecimal balanceAfterTry;
 
-  @TableField("created_at")
   /** 创建时间。 */
+  @TableField("created_at")
   public LocalDateTime createdAt;
 
-  @TableField("updated_at")
   /** 更新时间。 */
+  @TableField("updated_at")
   public LocalDateTime updatedAt;
 }

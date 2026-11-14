@@ -1,7 +1,6 @@
 package com.cloudmall.user.domain.vo;
 
 import com.cloudmall.user.domain.po.BalanceLedgerPO;
-import java.math.BigDecimal;
 
 /** 余额账本操作查询结果。 */
 public class BalanceOperationVO {

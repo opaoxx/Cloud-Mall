@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product已完成规范收尾，User/Stock仍有21个文件待处理，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第62节。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。全局复核确认结构目标已达到，Common/Product/User已完成规范收尾，Stock仍有16个文件待处理，尚不宣称全部规范通过；详见backend_refactoring_acceptance.md及文末第63节。
 
 ## 1. 使用方式与范围
 
@@ -3941,3 +3941,37 @@ Google Java Format 1.22.0继续跳过长字符串重排，仅修改冻结五文�
 证据写入target/backend-refactor-20261114/user-standards，包含前像、AST/字面量/import、全模块规范扫描、当前测试XML、八Jar、源保持和剩余清单。通过后更新本方案与验收汇总：User五文件完成后，Stock十六文件的9处说明绑定和12个格式文件仍待收尾；整体规范验收仍未完成。
 
 只提交实际有Git内容差异的冻结Java及两份既有Markdown。通过git diff --check后，用临时index验证逆补丁恢复方案基线树且真实index/README保持，再建立refactor/user-standards-complete-20261114。Git回退不恢复原工作区混合行尾或运行数据，不删除证据或卷。
+
+### 63.4 实施、语义对照与调用链
+
+五文件全部完成，其中四个形成Git内容差异。BalanceDebitAttemptPO的7处、BalanceTccDebitPO的9处既有字段说明移到@TableField之前，使DocTrees正确绑定；字段类型、顺序、表名和列名注解不变。BalanceTccDebitVO.from补标准JavaDoc，明确参数非null、XID为null保留null、否则最多取前8位；没有添加空对象兜底、校验或状态推断。BalanceOperationVO仅删除未使用的BigDecimal import，金额仍调用ledger.amount.toPlainString()；AddressRequestDTO仅统一工作区混合行尾，校验正则、提示语和规范化Git blob保持，无Git内容差异。
+
+逐行复盘：原TCC Service完成载荷/归属校验、认领与冻结后，将BalanceTccDebitPO交给from直接投影；重放路径沿原一致性核验后投影。空取消路径只有归属记录时，view(attempt)构造仅含状态/操作键/支付号/XID/分支号的临时PO后调用from，因此JavaDoc准确称“数据对象”，不保证每个输入都有持久冻结行。账本查询沿原退款集合、金额与membership核验后调用BalanceOperationVO.from，转换本身不查库或修改资金。上述Service、Mapper及事务代码均未改。
+
+五文件完整Javac package/type语法树逐字一致，没有任何标识符或方法体归一；28个字面量值和顺序一致，含两个表名、列名、地址校验消息/正则及XID截取上限。import唯一差异为未使用BigDecimal，确认类型树没有引用。User全100生产Java的必需说明绑定、非id短名、已列模板说明和格式检查均为0待办，7个语义明确id保留。
+
+首次归档脚本把Javac import列表的空白分隔行误算为删除的import，按原bugfix_log先记录并保留首轮脚本/结果；只过滤import清单空白行后核验唯一未使用import删除，不忽略类型树或修改业务断言。此为审计工具失败，不是业务测试失败。剩余清单的分类计数由当前条目重新计算，原第60节分类数单独保留，历史证据文件不回写。
+
+### 63.5 本轮验证与边界
+
+| 本轮实际执行 | 类数 | 测试项 | 结果 |
+| --- | ---: | ---: | --- |
+| Common原全部单测 | 4 | 25 | 首次0失败/错误/跳过 |
+| User原全部单测 | 18 | 284 | 首次0失败/错误/跳过，地址校验、资金/TCC/证据等既有用例 |
+| 合计 | 22 | 309 | 当前日志与22份新XML逐一对应；不叠加旧1948/85/386 |
+
+八模块离线package跳过重复测试成功，生产与测试源码编译通过；628个生产class与编译输出/SourceFile逐一匹配，User其中88个。五清单文件外1118份已跟踪backend/deploy及README逐字节保持，所有测试源码、资源/POM、schema和其它模块未改。第62节归档386项XML SHA只读复核通过，仅作历史证据。未运行真实中间件、历史IT、压测、Docker或卷操作，不扩大为完整资金链验收。
+
+### 63.6 剩余清单、提交与回退
+
+Common/Product/User规范批次已完成，剩Stock十六文件：9处说明绑定（2处注释位置、7处独立说明）及12个格式文件，数量互有重叠；已列非id短名/模板说明0。下一步先冻结Stock范围再实施，之后另做规范总复核，当前仍不宣称整体规范验收完成。
+
+方案提交b1d71cc7，基线refactor/user-standards-baseline-20261114，完成标签refactor/user-standards-complete-20261114。证据target/backend-refactor-20261114/user-standards/verification.json包含五文件前像、AST/28字面量/import、100文件规范检查、22份XML、八Jar、源保持与剩余清单。
+
+实际提交四个有内容差异的Java和本方案/验收汇总两Markdown，共六文件。git diff --check及临时index逆补丁恢复方案基线树验证后提交；真实index与README保持，不使用真实工作树演示回退。
+
+```powershell
+git revert refactor/user-standards-complete-20261114
+```
+
+回退只撤销四Java规范变化与两文档，不还原地址DTO原混合行尾，不恢复运行数据或删除证据/卷。
