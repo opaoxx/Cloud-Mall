@@ -3004,3 +3004,32 @@ git revert refactor/cross-module-offline-complete-20261114
 ```
 
 此回退仅撤销本轮结果文档，不改变业务代码、不撤销已经执行的测试或删除忽略证据。临时index逆补丁恢复父树，真实index和README保持；现有README及两个pycache未入提交，未使用clean/reset。原bugfix_log.md记录本轮结果。下一步冻结并执行独立MySQL/Redis联合数据回归；真实TC资金、全商城、MQ/ES与性能仍按各自未验收边界保留。
+
+
+## 50. 独立MySQL/Redis联合数据回归（2026-11-14）
+
+### 50.1 冻结范围与主Agent评审
+
+从4048bada继续，主Agent单独执行。上一统一离线1933项/264类XML SHA和最终文档路径已核验，作为独立历史基线，本轮不重复累加。新执行四组13类55项现有显式IT，严格串行：Cart十个Redis IT共42项；UserAccountRefactoringIT全4项；ProductRefactoringMySqlIT全5项；StockCoreRefactoringMySqlIT全4项。精确类/方法及源码SHA落在本轮selection.json，不使用全库*IT通配符，不修改原断言或资源保护条件。
+
+Cart核对真实Lua比较写删、数量并发、checked与清理快照、非法Hash/商品身份/价格及TTL；每例先用NX式Lua及owner字段占有随机cart key，AfterEach仅在owner值仍相同时删除。User使用真实账号/地址/余额Mapper和Spring事务、真实Redis token/余额标记，核验登录TTL、鉴权顺序、地址归属、扣款/退款的提交回滚与重放。Product使用真实本地事务/SQL核验CRUD与outbox版本、写失败回滚、分类/活动时间和DB提交早于Redis失败，Redis/ES/MQ边界为替身。Stock使用真实SQL/Redis及原HTTP/Service代理验证最后一件库存并发防超卖、预扣重放/拒绝/回滚、提交后标记清理及真实Lua秒杀受理/outbox幂等。
+
+本轮不改生产、测试、POM或运行配置；出现失败先在原bugfix_log.md记录现象、归档首轮证据后定位，再冻结最小修复，不跳过失败宣告通过。User/Cart/Stock共享DB15，组间必须空库检查通过才继续；不得FLUSHDB或清理未知key。联合指同一源码点与新隔离资源组的多个模块数据回归，不等于真实远端服务串成下单/支付链。
+
+### 50.2 新资源、源表与清理边界
+
+新Compose项目`cloud-mall-refactor-native-data-20261114`，基于deploy/experiments/compose.yml的cm21 profile仅启动mysql/redis，候选端口19967/19968、子网10.254.223.0/24，统一root/root。启动前核对项目容器/网络/两个命名卷均不存在、loopback bind和IPAM不冲突、本地镜像ID及渲染配置；保持pull_policy: never/restart: no，不启动默认中间件或挂载历史卷。
+
+MySQL仅预建cloudmall_stock七张空源表：stock_sku、stock_flow、stock_reservation_request、stock_cache_repair、seckill_reservation、seckill_order_outbox、seckill_quota_settlement，DDL逐条取自当前backend/database/schema.sql，不执行整份默认数据库/演示数据初始化。User/Product各自从原SQL创建UUID owned库；Stock每例克隆七源表到stock_core_UUID库。预计6个owned库（User1、Product1、Stock4），必须以实际CREATE/DROP事件、剩余schema及测试报告互证。源表前后DDL/计数/checksum保持。
+
+每组开始/结束归档SQL schema列表、源表指纹、Redis各DB大小/INFO及DB15空库结果；只在本项目两个容器label身份吻合时操作。Cart遵循原owner条件清理；User AfterEach仅允许auth:token:/balance:debit:前缀并要求DB15清空；Stock只清自己的key清单。User/Product/Stock原夹具失败后也可能删除自有库，保留日志/binlog和实验卷，不能承诺失败库仍存在。
+
+最终成功后归档两个容器inspect/log、精确建删库事件、源表及Redis检查，再down本轮容器/网络（不带-v），保留mysql_data/redis_data卷；归档或测试失败时不自动进行后续组/资源清理，也不动默认/history资源。若未知key/库残留，先记录调查，不以清空绕过验收。
+
+### 50.3 执行与证据策略
+
+先提交本节及`refactor/cross-module-data-baseline-20261114`。使用原Java17/Maven，按Cart→User→Product→Stock顺序，各组单独`-o -pl backend/cloud-mall-<模块> -am test`，使用精确类选择器与surefire.failIfNoSpecifiedTests=false、user.timezone=Asia/Shanghai；只统计本轮显式IT，不计未选择的Common旧XML。Cart显式cloudmall.redis.test.port=19968；User显式cloudmall.user.refactor.mysql.port=19967与cloudmall.user.refactor.redis.port=19968；Product显式cloudmall.product.refactor.mysql.port=19967；Stock使用裸cloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:19967/cloudmall_stock和cloudmall.stock.refactor.redis.port=19968。原夹具自行补JDBC参数，避免命令行&转义。
+
+上一源码点已完成八模块编译/1933离线/八Jar检查且本轮源码无改动，不重复全矩阵或引入映射实现的新测试；各组Maven按标准布局自行编译。只在有修复时新增适用编译/单测/契约回归。13类方法须与冻结清单一致、无失败/错误/跳过，1117个backend/deploy文件及README字节保持。证据目录`target/backend-refactor-20261114/cross-module-data`，每组日志/XML/前后资源分开保存，不覆盖首轮失败记录。
+
+通过后记录实际数据与验证限制，建立`refactor/cross-module-data-complete-20261114`；临时index逆补丁恢复父树，真实index/README保持。此阶段若仅更新文档，Git回退只撤文档，不回退MySQL/Redis运行事实；忽略证据和两个保留卷不受Git管理。后续Order/Pay持久事务/消息及真实TC/Nacos链继续另行冻结，不把55项数据回归当作全商城或性能验收。
