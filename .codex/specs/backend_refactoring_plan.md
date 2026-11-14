@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归，以及Order/Pay持久事务与真实Rabbit消息回归；商品MQ/ES同步和真实服务链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归，以及Product常规内容索引有限MySQL/Rabbit/ES同步回归。真实服务链与TC资金仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3174,3 +3174,40 @@ Git结果提交仅含方案记录，回退不恢复运行数据库/消息、忽�
 先提交本节并建立refactor/product-index-sync-baseline-20261114。新增Java执行google-java-format；离线编译并精确运行ProductIndexSynchronizationIT，另跑Common/Product现有*Test回归；核对真实执行方法、0失败/跳过以及报告时间，旧1933/55/29结果不累加。证据统一归档target/backend-refactor-20261114/product-index-sync。
 
 仅暂存新测试和本方案。原1117份backend/deploy及README按字节保持，保留已有README和两个pycache工作树变化。结果提交前git diff --check，临时index逆补丁恢复父树且真实index/README保持；完成标签refactor/product-index-sync-complete-20261114。回退只撤销测试/记录，不还原运行数据或忽略证据。测试新增缺陷/实验失败先在原bugfix_log记录，再最小修复并保留首轮证据。
+
+### 52.4 实际验证结果
+
+新增ProductIndexSynchronizationIT编译及4方法首次全过，0失败/错误/跳过。另一次独立Common/Product离线回归41类386项（Common25、Product361）首次全过，原生命周期测试的自有Java子进程退出/关闭证据已归档。两次执行各有精确方法清单、XML、日志及SHA，不与此前1933/55/29相加为单次全链验证。生产源码、依赖和原测试未改；新增文件只承载本轮原生集成测试。
+
+| 方法 | 实际观察 |
+| --- | --- |
+| committedEventsKeepEnvelopeReplayCurrentFactsAndVisibility | 事实/outbox共同回滚；真实broker JSON与messageId匹配原outbox；发布后ACK截止时间存在，消费后清空；重复事件attempts仍1；旧事件读取当前version3并记录STALE；version4下架后status=1搜索0条、无status过滤1条 |
+| externalVersionsRejectOldSingleAndBulkWritesAndUntrustedConflicts | 原ES writer单条和Bulk的旧写均保留version5、ES外部版本6及新内容；内部版本文档缺productVersion时，两路径都报错而非吞掉409 |
+| blockedElasticsearchRetriesThenReplaysOriginalDeadLetter | 自有索引write block下真实失败3次，消费RETRY/attempts=3、原文/长度/SHA已持久化；解除阻断后原replayer同eventId重放，APPLIED/attempts=4、隔离记录REPLAYED、单条outbox确认完成 |
+| invalidMessagesKeepOriginalBytesAndCannotBeBlindlyReplayed | 原始Java格式前缀测试字节及主键不一致JSON经过原主队列/死信；完整原文/SHA保持；JSON因无可信outbox标记unverifiable-envelope，非JSON保留dead-letter；0消费事实、0outbox、0ES文档 |
+
+真实Spring代理负责Loader只读事务与Consumption记录/ACK事务；真实MyBatis/JDBC、原三次重试工厂、两监听器、原路由与ES7.17客户端均执行。只有TaskScheduler为不触发周期任务的替身，原dispatcher/replayer逐轮显式调用。搜索验证停留在真实关键词适配器，不把它扩写为完整HTTP分页/权限/最终MySQL页校验验收。
+
+资源实际为MySQL8.0.46、RabbitMQ3.11.28、Elasticsearch7.17.0，runId为refactor-product-index-20261114-0b30033e。4份started/before-cleanup/finished均成功；四对MySQL建删binlog事件、ES四组创建/删除原生日志、最终无业务schema/index互证。原三队列/两交换机/三路由及TTL参数精确核对，最终ready/unacked/consumer均0且AMQP连接0；无purge。ES原生.geoip_databases系统索引UUID与33文档保持，未删除或关闭其内建功能。
+
+实验脚本有三处准入/归档修正，均与首次Java测试结果区分：Docker默认网络IPAM.Config为null，改为按无子网处理后继续核验真实子网；新ES自动创建GeoIP系统索引，归档首个快照后改为核对其身份和业务索引为空；旧容器Mounts原按数组顺序比较，复查完整挂载字段相同，改为保存原始inspect并按Destination比较完整对象。第三处首个失败数组未保存，不能追溯当时顺序；最终完整字段核验通过。没有修改原生产保护或删除断言绕过业务失败。三处现象/方案/结果已写入原bugfix_log。
+
+全部证据归档后，已移除本轮三个容器及网络，保留三个卷：
+
+- cloud-mall-refactor-product-index-20261114_mysql_data
+- cloud-mall-refactor-product-index-20261114_rabbit_data
+- cloud-mall-refactor-product-index-20261114_es_data
+
+原1117份backend/deploy文件与README逐字节保持；原容器ID、镜像、启动时间、重启次数及完整挂载保持。本轮只新增一份测试，未复跑八模块打包或更改业务代码。格式检查、适用编译、两组回归及git diff --check通过。
+
+### 52.5 回退与下一步
+
+方案提交e958afc9，基线标签refactor/product-index-sync-baseline-20261114，完成标签refactor/product-index-sync-complete-20261114。证据入口target/backend-refactor-20261114/product-index-sync/verification.json；测试位于backend/cloud-mall-product/src/test/java/com/cloudmall/product/ProductIndexSynchronizationIT.java，显式系统属性及实际命令归档native-command.json，不能无参数连接默认环境。
+
+```powershell
+git revert refactor/product-index-sync-complete-20261114
+```
+
+提交仅含本方案和新增测试；临时index逆补丁恢复父树，真实index与README保持。回退不会还原已清理的测试库/索引，也不会删除忽略证据或三个保留卷。Java测试全部通过，脚本首轮问题与修正保留，不宣称整个实验过程零失败。
+
+当前已验证常规内容索引的上述四个有限路径。CM21在线指标、全量重建/周期恢复、confirm丢失等完整故障矩阵、Nacos/Gateway真实服务、真实TC/RM资金与商城全链仍未因此获得验收。下一步先盘点现有真实服务/TC最小启动与验收入口，冻结独立资源和有限链路，避免重启旧压测或无界扩展历史维护任务。
