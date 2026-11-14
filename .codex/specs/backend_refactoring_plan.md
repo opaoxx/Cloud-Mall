@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt及coordinator一次性编排/指定进程恢复的有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3527,3 +3527,45 @@ git revert refactor/pay-coordinator-native-complete-20261114
 证据target/backend-refactor-20261114/pay-recovery-native保存5方法/辅助保持、定向及原生XML/日志、五例完整execution/资源快照（共六execution）、恢复attempt/token释放与未知不扫描、原生子进程参数及四个PID回执、TC终态、源指纹和User Jar。成功后核验两库建删、八源表保持、Redis初末16DB空及Nacos组无实例，归档日志与停止后的TC file store，再down四容器/网络，无-v，五卷保留。
 
 只提交PayTccRecoveryAutomaticIT与本方案，其它1119份backend/deploy及README保持。git diff --check、临时index逆补丁恢复父树且真实index/README保持后建立refactor/pay-recovery-native-complete-20261114。失败先在原bugfix_log写现象并保留首轮证据，再定位最小必要修正，不改业务断言或盲目重发交易。Git回退不恢复运行数据或删除证据/保留卷；本轮不代表公开支付入口、Order/Stock交付、恢复每个窗口的独立崩溃矩阵、商城或性能验收。
+
+### 57.5 本轮结果与自动动作边界
+
+本轮只修改PayTccRecoveryAutomaticIT的环境/进程装配与职责说明，复用上一轮helper，父Pay、NamingService、两User与两Pay子进程地址一致。增加显式时区、PID/恢复开关/故障模式/准确退出回执；Pay控制凭证仍仅留原受控args文件。5方法正文、seed/settle/cleanup、due/finished、Probe及交易控制辅助逐段保持，生产Scheduler/Store/Mapper、FaultProcess和helper未改。
+
+5类27项定向测试、User离线打包及5项真实自动恢复首次全过，0失败/错误/跳过；User Jar88个生产class逐字节匹配编译输出。旧82/15报告仅校验SHA，不计本轮。实际使用原@Scheduled与200ms测试间隔，没有以手工recover替代自动恢复，没有新增启动或业务测试失败。
+
+| 原方法 | 本轮实际结果 |
+| --- | --- |
+| scheduledCommitUsesOriginalDecisionWithoutManualRecover | 原COMMIT RPC丢失后nextRecoveryAt仍符合初始延后检查；仅提前到期时间，扫描一次恢复同XID COMMITTED、attempts=1、租约清空、1次begin/POST |
+| scheduledRollbackSettlesInsufficientFundsWithoutNewTry | 原ROLLBACK RPC丢失后扫描恢复ROLLEDBACK/ROLLBACK，余额100、冻结0、0账本，没有新Try |
+| decisionNoneIsObservedWithoutAutomaticDecision | 第一轮只观察UNKNOWN/NONE，冻结仍10；测试随后明确请求原TC取消，扫描再核对ROLLEDBACK/NONE，未自行选择回滚 |
+| unknownBeginDoesNotOccupyAutomaticRecoveryWindow | 原BEGIN_UNKNOWN/xid=NULL/attempts=0保持；同例canary记录被扫描提交，一次User POST、唯一账本，无未知记录抢占窗口 |
+| restartedPayAutomaticallyFindsDurableCommitIntent | 父扫描器被原running门暂时阻断；第一Pay子进程recovery=false停在COMMIT屏障后被杀，第二进程recovery=true由定时任务完成原XID，无/recover控制调用或第二POST |
+
+五例产生六条execution、六个真实全局事务，其中父Pay begin5次、故障子Pay begin1次；Pay/User各5分支共10个，TC终态3提交/3回滚。五份原生快照共六execution：3 COMMITTED、2 ROLLEDBACK、1 BEGIN_UNKNOWN；六行最终都无恢复owner/lease，五条可恢复记录均有attempt。NONE场景至少两次观察后形成ROLLEDBACK，但decision仍NONE；取消指令来自测试，不是扫描器擅自决议。
+
+BEGIN_UNKNOWN的xid仍NULL、恢复attempts仍0、该支付无receipt/dispatch/资金事实；同例的账本属于已提交canary，不能把同用户余额变化归因于未知支付。测试掌握但未写回业务的原XID仅供清理，TC取消后execution仍BEGIN_UNKNOWN。因此不能把六笔TC结束表述为六条业务全部恢复。
+
+四个自有子进程均有启动/停止回执：两User、两Pay；Pay模式/开关分别BEFORE_COMMIT+false和NONE+true，同一fault-pay appId/库/环境。新Pay日志有真实RM提交成功，原5方法无手工/recover调用；父扫描器阻断/恢复逻辑保持。退出沿原destroyForcibly方式，不冒称自然退出。
+
+八空源表前后DDL/计数/checksum一致，Redis16DB初末为空、Nacos原组无User实例。两owned库删除与两对CREATE/DROP互证；本轮无失败库。原夹具未决保留、普通断言失败但已收敛可能删库的限制保持。提前调度时间只用于本轮夹具，不证明完整30秒初始等待/全部退避墙钟时间；租约过期每个窗口和全流程崩溃矩阵不在本次结论中。
+
+其它1119份已跟踪backend/deploy与README字节保持，默认/历史容器身份、镜像、挂载、启动时间和重启次数保持。单Java格式、编译/定向/原生测试、User包与diff检查通过。归档日志与停止后的TC sessionStore/root.data后，已down本轮四容器/网络，五卷保留：
+
+- cloud-mall-refactor-pay-recovery-20261114_mysql_data
+- cloud-mall-refactor-pay-recovery-20261114_redis_data
+- cloud-mall-refactor-pay-recovery-20261114_seata_data
+- cloud-mall-refactor-pay-recovery-20261114_nacos_data
+- cloud-mall-refactor-pay-recovery-20261114_nacos_logs
+
+### 57.6 回退与后续
+
+方案提交9515ba30，基线标签refactor/pay-recovery-native-baseline-20261114，完成标签refactor/pay-recovery-native-complete-20261114。证据入口target/backend-refactor-20261114/pay-recovery-native/verification.json，含27/5报告、原5方法与辅助保持、六execution/六TC全局/十分支、未知/canary及NONE控制边界、四子进程与恢复开关、源指纹/两库事件、User Jar、TC文件存储及资源关闭。
+
+```powershell
+git revert refactor/pay-recovery-native-complete-20261114
+```
+
+只提交本测试与方案；临时index逆补丁恢复父树、真实index/README保持。Git不恢复运行数据库/TC状态，也不删除证据或五保留卷。原bugfix_log记录固定环境原因、装配修正及验证；无关README和旧pycache不入提交。
+
+下一步先审查Order/Stock交付测试的四服务拓扑、Rabbit隔离、Redis生命周期及故障清理，冻结下一有限切片。当前定时恢复结论不替代公开支付成功、Order/Stock交付/退款、完整商城或性能验收，不自动重启历史压测任务。
