@@ -37,9 +37,13 @@ public final class PayRecoveryLog {
 
   /** 订单证据失败发生在原方法的哪个观察/校验阶段，不标注未证实的远端原因。 */
   public enum OrderStage {
+    /** 调用原订单RPC阶段抛出异常，未取得可校验响应。 */
     RPC,
+    /** 已返回响应，正在校验信封及数据是否存在。 */
     RESPONSE,
+    /** 响应数据存在，正在核验订单号、用户和金额。 */
     IDENTITY,
+    /** 身份金额已核验，正在检查订单状态是否属于原允许集合。 */
     STATUS
   }
 

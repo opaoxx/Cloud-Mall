@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 
+/** 原订单身份查询、支付状态读取及幂等支付/取消动作的跨服务契约。 */
 @FeignClient(name = "cloud-mall-order")
 public interface OrderClient {
   /** 查询订单归属与金额，供创建支付记录使用。 */
@@ -30,11 +31,18 @@ public interface OrderClient {
   ApiResponse<OrderView> cancel(
       @PathVariable("orderNo") String orderNo, @RequestHeader("X-User-Id") Long userId);
 
-  /** 支付恢复需要订单状态以及对应库存动作是否已经完成。 */
+  /**
+   * 支付恢复使用的订单事实；库存动作缺失不能自动解释为完成。
+   *
+   * @param orderNo 原订单号
+   * @param status 原订单状态
+   * @param payAmount 订单应付金额，按BigDecimal数值语义核验
+   * @param userId 订单所属用户
+   * @param stockActionStatus 订单对应的库存动作状态，响应缺失时保持null
+   */
   record OrderView(
-      String orderNo, String status, BigDecimal payAmount, Long userId,
-      String stockActionStatus) {
-    /** 兼容只查询公开订单的调用与既有测试夹具。 */
+      String orderNo, String status, BigDecimal payAmount, Long userId, String stockActionStatus) {
+    /** 兼容四参数构造调用，显式使用原SUCCEEDED默认值；远端JSON缺失字段仍保留null。 */
     public OrderView(String orderNo, String status, BigDecimal payAmount, Long userId) {
       this(orderNo, status, payAmount, userId, "SUCCEEDED");
     }

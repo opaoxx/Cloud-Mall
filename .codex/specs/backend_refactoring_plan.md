@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order 本轮结构重构；Pay已完成公开入口拆分、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复、公开状态投影、交付、取消/中止及TCC公开编排分组，后续评估Pay范围收尾。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。后续进入跨模块回归范围梳理，尚未宣称真实全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -446,7 +446,7 @@ git revert --no-edit $cartFinalCommit a5d1020e622bd01fd599095c629a35bb9046b0dd c
 | User | 已完成本轮结构重构 | 账号/资金拆分、TCC/Fence及只读取证归组完成，真实TC/RM与取证链回归通过 |
 | Stock | 已完成 | 本轮四个切片及模块验收完成，见第19至22节；不代表全链路或历史性能事项闭合 |
 | Order | 本轮结构完成 | 演练命名、主业务/消息、辅助分组与规范收尾完成，见第23至33节；全商城验收不在此完成口径 |
-| Pay | 实施中 | 公开入口拆分、旧继承清理、Legacy/回调日志、TCC只读取证、派发桥、资源回执、执行协调/恢复、公开状态投影、交付、取消/中止及TCC公开编排分组已完成，见第34至47节；待Pay范围收尾复核 |
+| Pay | 本轮结构重构完成 | 五公开用例、旧继承清理、辅助/TCC职责分组及收尾复核完成，见第34至48节；真实TC资金/全商城/性能验证范围单独保留 |
 
 本次核心代码已逐段复盘。HTTP 入口负责绑定、读取身份与统一响应，Service 负责业务规则，CartStorage 负责原 JSON、Redis 原子操作和存储错误映射，ProductClient 使用独立传输 DTO。后续会话从本表、实际 Git 状态和模块通过标签继续。
 
@@ -2861,3 +2861,56 @@ git revert refactor/pay-tcc-entry-complete-20261114
 证据`target/backend-refactor-20261114/pay-closeout`。完成后建立`refactor/pay-closeout-complete-20261114`和同源码点`refactor/pay-complete-20261114`，保存十四切片逆序回退索引与实际SHA。临时index逆补丁恢复父树且真实index/README保持；实际回退只撤销本轮说明/排版后重编译，不全量clean/reset，不回退运行数据。无关README、pycache及忽略工件不入提交。
 
 收尾完成口径为已约定的Pay中等深度结构重构；各阶段原实库/本机HTTP/替身测试的边界分别保留，不扩张为真实TC资金全链、全商城、性能或生产可用性验收。后续按总方案进入跨模块回归范围梳理，再冻结所需服务、环境与证据，不自动恢复历史CM21维护队列。
+
+
+### 48.3 Pay范围验收结果
+
+本轮Git差异为5份生产源码的说明/排版：FeignAuthConfiguration、OrderClient、UserClient、PayProtocolMetrics、PayRecoveryLog。修复39项必需文档缺口（1个Bean方法、38个枚举值），补五个Feign局部record参数与三个类型职责说明，明确OrderView四参数兼容构造器的SUCCEEDED默认值与远端缺失字段null是不同来源。187份生产Java（含包说明）全格式检查通过；PayApplication另有仅CRLF/LF本地归一化，不形成Git源码差异。全部70,117个业务token与本轮基线相同，未改状态、注解、SQL或运行语句。
+
+JDK语法树复查显式public/接口/Bean/定时入口及非record成员JavaDoc缺口为0；record参数在声明说明，隐式生成方法不按手写入口计数。短变量清单仅八个PO的id字段，均为明确主键含义；没有为了字母数改变持久化字段。OrderClient、UserClient局部不可变record和唯一JDBC意图Mapper按兼容清单保留。
+
+| 模块检查项 | 结果与边界 |
+| --- | --- |
+| 命名与旧入口 | 无Cm编号生产类型；旧PayController、PayServiceImpl、空PayService及41个已迁移组件的旧运行引用清除。PayQueryWiringTest中三处旧类字符串用于ClassNotFoundException反向断言，属于有效测试 |
+| HTTP与接口 | 15个组合委托Controller、15条无重复声明路由（5公开、10内部证据读取）；11个非空Service接口。内部路径的原配置门和调用凭证保持 |
+| 数据与分层 | 9份PO保留9张表映射；Controller/Service无JdbcTemplate或内嵌SQL。PayDebitIntentMapper保留既有JDBC实现，其余Mapper及SQL/CAS契约保持，未宣称全部改为BaseMapper |
+| 包职责 | impl根包7类为五公开用例、PayProcessingSupport、PayWriteMonitor；其余41类分入legacy、callback、evidence、dispatch、receipt、execution、projection、delivery、cancellation、entry十组 |
+| 契约与持久标识 | Pay POM/application自query基线不变；本轮全部测试/资源/依赖及其他后端910个已跟踪文件逐字节保持。JSON字段、金额/时间/null、Feign、SQL/Redis/MQ/日志/指标标签沿原契约保留 |
+| 事务与调用链 | 查询鉴权与错误顺序、创建/成功/回调共享monitor、创建事务在锁外开始/提交、独立claim/决议/租约、NOT_SUPPORTED与RR证明等见第34至47节逐链记录，本轮业务token等价 |
+| 验证与资源 | 本轮682项首次通过；上一源码点688项/79类归档逐SHA校验，分别记账不相加。只使用本机HTTP夹具，无新增Docker、数据库或真实TC资金资源 |
+| 回退与限制 | 十四切片标签已按实际Git历史核验，并建立本轮收尾及模块结构通过点。冻结CM工具和历史失败卷不动，结构完成不替代资金全链/全商城/性能结论 |
+
+上述为用户确认的Pay中等深度结构重构完成口径。核心调用链已在各阶段按公开用例、Legacy恢复、回执/Fence、执行决议、只读取证、交付与取消逐项复核；保留Feign局部record、JDBC Mapper与历史测试工具名，不扩大为全面ORM替换、所有外部标识改名或生产就绪。
+
+本轮新执行：Common单测25、Pay全部现有单测656、PayOrderStateFeignIT 1，合计682项/78类，0失败、0错误、0跳过。FeignIT经实际Pay客户端、本机HTTP和实际Order MVC/Service核验paid/cancel路径、原身份头、金额及库存动作null语义，SQL/库存动作仍受控替身；不声称连接真实Order/Stock/User业务环境。八模块test-compile及Pay打包通过，Jar187个Pay生产class与最终classes逐字节一致，44个已移除/迁移旧类型和测试夹具均不在Jar中。
+
+### 48.4 回退索引与后续范围
+
+方案提交e7975890，基线标签`refactor/pay-closeout-baseline-20261114`；本轮完成标签`refactor/pay-closeout-complete-20261114`与模块结构通过标签`refactor/pay-complete-20261114`指向同一最终源码点。证据入口`target/backend-refactor-20261114/pay-closeout/verification.json`，包含本轮78份XML、旧688报告核验、语法树前后缺口、187文件token/格式对照、模块/路由/PO盘点、Jar、十四阶段索引与临时index回退证明。
+
+```powershell
+git revert refactor/pay-closeout-complete-20261114
+```
+
+上述命令只撤销本轮说明/排版。若继续撤销之前Pay结构改造，先撤销本轮，再由下表自上向下评估依赖和方案冲突；迁包阶段按对应记录精确处理旧class再重编译，不把索引当作无条件执行脚本。所有标签前缀为`refactor/`。
+
+| 逆序切片 | 实施提交 | 完成标签后缀 |
+| --- | --- | --- |
+| 公开TCC编排 | d0da1593 | pay-tcc-entry-complete-20261114 |
+| 取消/未决中止 | 11593f01 | pay-tcc-cancellation-complete-20261114 |
+| TCC交付 | de026ba6 | pay-tcc-delivery-complete-20261114 |
+| 回滚状态投影 | db9b9df4 | pay-tcc-projection-complete-20261113 |
+| 执行协调/恢复 | 0264d487 | pay-tcc-execution-complete-20261113 |
+| 资源回执/Fence | 497a967a | pay-tcc-receipt-complete-20261113 |
+| 派发桥 | 40844c98 | pay-tcc-dispatch-complete-20261113 |
+| 只读取证 | 57534d8b | pay-tcc-evidence-complete-20261113 |
+| Legacy/回调日志 | c0e51687 | pay-legacy-callback-complete-20261113 |
+| 公开回调与旧继承清理 | 9339a084 | pay-callback-complete-20261113 |
+| 公开失败 | 1f555de5 | pay-failure-complete-20261113 |
+| 公开成功 | 49238b39 | pay-success-complete-20261113 |
+| 公开创建 | 3d86f278 | pay-creation-complete-20261113 |
+| 公开查询 | 35ac1bb0 | pay-query-complete-20261113 |
+
+临时index按本轮精确路径逆补丁恢复父树，真实index及README保持；Git不恢复MySQL/Redis/Rabbit/Seata事实或忽略证据。本轮无新增失败测试/中间件实验，原bugfix_log.md记录文档根因、修复和验证；README与旧pycache未入提交。
+
+下一步按总方案梳理跨模块回归：以当前源码确认现有测试入口、调用链、所需独立服务/中间件、环境隔离和资源归属，再冻结新的执行范围。此前实库、TC及性能材料保持各自时间和源码归属，不把模块结构通过点当作全项目全链验收；历史CM21维护队列不自动恢复。
