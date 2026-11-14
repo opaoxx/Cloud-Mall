@@ -91,8 +91,73 @@ function Cart(){const {data,error,loading,setData}=useLoad(api.cart,[] as import
 function Checkout(){const [addresses,setAddresses]=useState<Address[]>([]); const [selected,setSelected]=useState<number[]>([]); const [addressId,setAddressId]=useState(''); const [preview,setPreview]=useState<import('./api').Settlement|null>(null); const [message,setMessage]=useState(''); const [addressForm,setAddressForm]=useState<AddressRequest>({receiver:'',phone:'',detailAddress:'',isDefault:false}); const nav=useNavigate(); useEffect(()=>{Promise.all([api.cart(),api.addresses()]).then(([cart,as])=>{setSelected(cart.filter(x=>x.checked).map(x=>x.skuId));setAddresses(as);setAddressId(String(as.find(x=>x.isDefault)?.id||as[0]?.id||''))}).catch(e=>setMessage(errorText(e)))},[]); const loadPreview=()=>api.preview({skuIds:selected}).then(setPreview).catch(e=>setMessage(errorText(e))); const addAddress=(e:FormEvent)=>{e.preventDefault();if(!isValidPhone(addressForm.phone)){setMessage('请输入有效的11位中国大陆手机号（仅数字）');return}setMessage('');api.addAddress(addressForm).then(created=>api.addresses().then(as=>{setAddresses(as);setAddressId(String(as.find(a=>a.id===created.id)?.id||created.id));setAddressForm({receiver:'',phone:'',detailAddress:'',isDefault:false})})).catch(e=>setMessage(errorText(e)))}; const create=()=>api.createOrder({items:(preview?.items||[]).map(x=>({skuId:x.skuId,quantity:x.quantity})),addressId:Number(addressId)}).then(o=>nav(`/pay/${o.orderNo}`)).catch(e=>setMessage(errorText(e))); return <section className="page narrow"><p className="eyebrow">CHECKOUT</p><h2>确认订单</h2><Feedback error={message}/><label htmlFor="checkout-address">收货地址</label><select id="checkout-address" value={addressId} onChange={e=>setAddressId(e.target.value)}><option value="">请选择收货地址</option>{addresses.map(a=><option key={a.id} value={a.id}>{a.receiver} · {a.phone} · {a.detailAddress}</option>)}</select><form className="address-form" onSubmit={addAddress}><h3>新增收货地址</h3><input required placeholder="收货人" value={addressForm.receiver} onChange={e=>setAddressForm({...addressForm,receiver:e.target.value})}/><input required type="tel" inputMode="numeric" pattern="1[3-9][0-9]{9}" maxLength={11} title="请输入11位中国大陆手机号" onInvalid={() => setMessage('请输入有效的11位中国大陆手机号（仅数字）')} placeholder="联系电话（11位手机号）" value={addressForm.phone} onChange={e=>setAddressForm({...addressForm,phone:normalizePhone(e.target.value)})}/><input required placeholder="详细地址" value={addressForm.detailAddress} onChange={e=>setAddressForm({...addressForm,detailAddress:e.target.value})}/><label><input type="checkbox" checked={addressForm.isDefault} onChange={e=>setAddressForm({...addressForm,isDefault:e.target.checked})}/> 设为默认地址</label><button className="button" type="submit">保存并使用此地址</button></form><button className="button ghost" disabled={!selected.length} onClick={loadPreview}>重新校验价格与库存</button>{preview&&<div className="card"><p>可结算商品：{preview.items.length} 件</p><p>应付金额：<span className="price">{money(preview.payAmount)}</span></p>{preview.invalidItems?.length?<Feedback error={`有 ${preview.invalidItems.length} 项商品失效，请返回购物车调整。`}/>:null}<button className="button" disabled={!addressId||!!preview.invalidItems?.length} onClick={create}>提交订单</button></div>}</section>}
 function Orders(){const {data,error,loading}=useLoad(()=>api.orders({page:1,pageSize:20}),{items:[],page:1,pageSize:20,total:0}); return <section className="page"><p className="eyebrow">ORDER CENTER</p><h2>我的订单</h2><Feedback error={error}/>{loading?<p>加载中…</p>:data.items.map(o=><Link className="line order" key={o.orderNo} to={`/orders/${o.orderNo}`}><div><strong>{o.orderNo}</strong><small>{new Date(o.createdAt).toLocaleString('zh-CN')}</small></div><b>{o.status}</b><span>{money(o.payAmount)}</span></Link>)}{!loading&&!data.items.length&&!error&&<Empty text="还没有订单"/>}</section>}
 function OrderDetailPage(){const {no=''}=useParams(); const {data,error,loading}=useLoad(()=>api.order(no),{} as import('./api').OrderDetail); const [message,setMessage]=useState(''); const action=(fn:()=>Promise<unknown>)=>fn().then(()=>location.reload()).catch(e=>setMessage(errorText(e))); if(loading)return <section className="page"><p>加载中…</p></section>; return <section className="page narrow"><Feedback error={error||message}/>{!error&&<><p className="eyebrow">ORDER {data.orderNo}</p><h2>{data.status}</h2><p>应付金额：<span className="price">{money(data.payAmount)}</span></p>{data.items?.map((i,n)=><div className="line" key={n}><span>{i.productNameSnapshot} × {i.quantity}</span><b>{money(i.lineAmount)}</b></div>)}<p>收货：{formatAddressSnapshot(data.addressSnapshot)}</p>{data.status==='PENDING_PAYMENT'&&<><button className="button" onClick={()=>action(()=>api.cancelOrder(data.orderNo,'用户取消'))}>取消订单</button><Link className="button ghost" to={`/pay/${data.orderNo}`}>去支付</Link></>}{data.status==='PAID'&&<button className="button" onClick={()=>action(()=>api.confirmOrder(data.orderNo))}>确认收货</button>}</>}</section>}
-function Pay(){const {no=''}=useParams(); const [amount,setAmount]=useState(''); const [payNo,setPayNo]=useState(''); const [message,setMessage]=useState(''); useEffect(()=>{api.order(no).then(o=>setAmount(String(o.payAmount))).catch(e=>setMessage(errorText(e)))},[no]); const create=()=>api.createPayment({orderNo:no,payAmount:amount}).then(p=>setPayNo(p.payNo)).catch(e=>setMessage(errorText(e))); return <section className="page narrow"><p className="eyebrow">BALANCE PAYMENT</p><h2>余额支付</h2><p>订单：{no}</p><Feedback error={message}/><input value={amount} readOnly placeholder="应付金额（字符串）"/>{payNo?<><p>支付单：{payNo}</p><p>点击支付后将从账户余额中扣除订单金额，余额不足时支付失败。</p><button className="button" onClick={()=>api.mockSuccess(payNo).then(()=>location.href=`/pay-result/${no}`).catch(e=>setMessage(errorText(e)))}>使用余额支付</button><button className="button ghost" onClick={()=>api.mockFail(payNo,'用户取消支付').then(()=>location.href=`/pay-result/${no}`).catch(e=>setMessage(errorText(e)))}>取消支付</button></>:<button className="button" disabled={!amount} onClick={create}>确认支付</button>}</section>}
-function PayResult(){const {no=''}=useParams(); const {data,error}=useLoad(()=>api.payment(no),{} as import('./api').Payment); return <section className="page narrow"><p className="eyebrow">PAYMENT RESULT</p><h2>{error?'支付状态暂不可用':data.status}</h2><p>{error||`订单 ${no} 的支付状态已从服务端读取。`}</p><Link className="button" to={`/orders/${no}`}>查看订单</Link></section>}
+export function Pay() {
+  const {no=''} = useParams()
+  const navigate = useNavigate()
+  const [amount, setAmount] = useState('')
+  const [payNo, setPayNo] = useState('')
+  const [message, setMessage] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+  useEffect(() => { api.order(no).then(order => setAmount(String(order.payAmount))).catch(error => setMessage(errorText(error))) }, [no])
+  const create = async () => {
+    if (submittingRef.current) return
+    submittingRef.current = true; setSubmitting(true); setMessage('')
+    try { const payment = await api.createPayment({orderNo:no, payAmount:amount}); setPayNo(payment.payNo) }
+    catch (error) { setMessage(errorText(error)) }
+    finally { submittingRef.current = false; setSubmitting(false) }
+  }
+  const settle = async (success: boolean) => {
+    if (submittingRef.current) return
+    submittingRef.current = true; setSubmitting(true); setMessage('')
+    try {
+      if (success) await api.mockSuccess(payNo)
+      else await api.mockFail(payNo, '用户取消支付')
+      navigate(`/pay-result/${no}`)
+    } catch (error) {
+      // Accepted/unknown writes are observed through GET; never resubmit the debit here.
+      if (error instanceof ApiError && error.status === 202) navigate(`/pay-result/${no}`)
+      else setMessage(errorText(error))
+    } finally { submittingRef.current = false; setSubmitting(false) }
+  }
+  return <section className="page narrow"><p className="eyebrow">BALANCE PAYMENT</p><h2>余额支付</h2><p>订单：{no}</p><Feedback error={message}/><input value={amount} readOnly placeholder="应付金额（字符串）"/>{payNo ? <><p>支付单：{payNo}</p><p>点击支付后将从账户余额中扣除订单金额，余额不足时支付失败。</p><button className="button" disabled={submitting} onClick={() => settle(true)}>使用余额支付</button><button className="button ghost" disabled={submitting} onClick={() => settle(false)}>取消支付</button></> : <button className="button" disabled={!amount || submitting} onClick={create}>确认支付</button>}</section>
+}
+export function PayResult() {
+  const {no=''} = useParams()
+  const [payment, setPayment] = useState<import('./api').Payment | null>(null)
+  const [message, setMessage] = useState('正在查询支付结果，请勿重复支付。')
+  useEffect(() => {
+    let cancelled = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout> | undefined
+    setPayment(null); setMessage('正在查询支付结果，请勿重复支付。')
+    const query = async () => {
+      attempts += 1
+      try {
+        const current = await api.payment(no)
+        if (cancelled) return
+        setPayment(current)
+        if (['SUCCESS', 'FAILED', 'REFUNDED'].includes(current.status)) {
+          setMessage(`订单 ${no} 的支付状态已从服务端读取。`)
+          return
+        }
+        setMessage('支付结果确认中，请勿重复支付。')
+      } catch (error) {
+        if (cancelled) return
+        setMessage(`${errorText(error)}，正在重新查询支付状态，请勿重复支付。`)
+      }
+      if (attempts >= 30) {
+        setMessage('支付结果仍待确认，请从订单详情查看最新状态，请勿重复支付。')
+        return
+      }
+      // Schedule only after the previous read finishes, avoiding overlapping requests.
+      timer = setTimeout(query, 2000)
+    }
+    void query()
+    return () => { cancelled = true; if (timer !== undefined) clearTimeout(timer) }
+  }, [no])
+  return <section className="page narrow"><p className="eyebrow">PAYMENT RESULT</p><h2>{payment?.status === 'SUCCESS' ? '支付成功' : payment?.status === 'FAILED' ? '支付失败' : payment?.status === 'REFUNDED' ? '已退款' : '支付结果确认中'}</h2><p role="status">{message}</p><Link className="button" to={`/orders/${no}`}>查看订单</Link></section>
+}
 function Profile(){const {data,error,loading,setData}=useLoad(api.me,{} as User); const [message,setMessage]=useState(''); const [editing,setEditing]=useState(false); const [form,setForm]=useState({nickname:'',phone:'',avatarUrl:''}); useEffect(()=>{if(data.id)setForm({nickname:data.nickname||'',phone:data.phone||'',avatarUrl:data.avatarUrl||''})},[data]); const save=()=>api.updateMe(form).then(u=>{setData(u);setEditing(false)}).catch(e=>setMessage(errorText(e))); return <section className="page narrow"><p className="eyebrow">ACCOUNT</p><h2>个人信息</h2><Feedback error={error||message}/>{loading?<p>加载中…</p>:editing?<div className="card"><input placeholder="昵称" value={form.nickname} onChange={e=>setForm({...form,nickname:e.target.value})}/><input placeholder="手机号" value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/><input placeholder="头像 URL" value={form.avatarUrl} onChange={e=>setForm({...form,avatarUrl:e.target.value})}/><button className="button" onClick={save}>保存</button></div>:<div className="card"><p>用户名：{data.username}</p><p>账户余额：<span className="price">{money(data.balance)}</span></p><p>昵称：{data.nickname||'未设置'}</p><p>角色：{data.roles?.join(', ')}</p><button className="button small" onClick={()=>setEditing(true)}>编辑资料</button><Link className="button small ghost" to="/addresses">管理收货地址</Link></div>}</section>}
 function Addresses(){const {data,error,loading,setData}=useLoad(api.addresses,[] as Address[]); const empty={receiver:'',phone:'',detailAddress:'',isDefault:false}; const [form,setForm]=useState<AddressRequest>(empty); const [editing,setEditing]=useState<number|null>(null); const [message,setMessage]=useState(''); const save=()=>{if(!isValidPhone(form.phone)){setMessage('请输入有效的11位中国大陆手机号（仅数字）');return}setMessage('');const action=editing===null?api.addAddress(form):api.updateAddress(editing,form); action.then(a=>{setData(editing===null?[...data,a]:data.map(x=>x.id===a.id?a:x));setForm(empty);setEditing(null)}).catch(e=>setMessage(errorText(e)))}; return <section className="page narrow"><p className="eyebrow">DELIVERY</p><h2>收货地址</h2><Feedback error={error||message}/>{loading?<p>加载中…</p>:data.map(a=><div className="card" key={a.id}><strong>{a.receiver} · {a.phone}</strong><p>{a.detailAddress}</p>{a.isDefault&&<span className="tag">默认</span>}<button className="link" onClick={()=>{setEditing(a.id);setForm({receiver:a.receiver,phone:a.phone,detailAddress:a.detailAddress,isDefault:a.isDefault})}}>编辑</button> <button className="link" onClick={()=>api.deleteAddress(a.id).then(()=>setData(data.filter(x=>x.id!==a.id))).catch(e=>setMessage(errorText(e)))}>删除</button></div>)}<div className="card"><h3>{editing===null?'新增地址':'编辑地址'}</h3><input required placeholder="收货人" value={form.receiver} onChange={e=>setForm({...form,receiver:e.target.value})}/><input required type="tel" inputMode="numeric" pattern="1[3-9][0-9]{9}" maxLength={11} title="请输入11位中国大陆手机号" onInvalid={() => setMessage('请输入有效的11位中国大陆手机号（仅数字）')} placeholder="电话（11位手机号）" value={form.phone} onChange={e=>setForm({...form,phone:normalizePhone(e.target.value)})}/><input required placeholder="详细地址" value={form.detailAddress} onChange={e=>setForm({...form,detailAddress:e.target.value})}/><label><input type="checkbox" checked={form.isDefault} onChange={e=>setForm({...form,isDefault:e.target.checked})}/> 设为默认</label><button className="button" onClick={save}>保存地址</button></div></section>}
 function AdminProducts(){

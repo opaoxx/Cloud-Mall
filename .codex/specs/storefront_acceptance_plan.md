@@ -39,3 +39,21 @@ Java子进程采用当前打包Jar、JDK17、+08时区/UTF-8及明确堆上限�
 前端Pay把202只当报错显示，PayResult也只读一次，导致后端已成功而页面仍提示待确认。先在bugfix_log记录，再限定改frontend/src/App.tsx的Pay/PayResult与frontend/src/App.test.tsx：202进入原订单支付结果页，结果页最多30次、每次完成后隔2秒串行只读GET，终态SUCCESS/FAILED/REFUNDED停止；暂时查询失败可继续，超出边界保持待确认/查看订单，不重发createPayment/mockSuccess/mockFail。写请求处理中禁用重复按钮；卸载停止后续查询。其它页面、后端、支付状态机和API不变。
 
 先补真实React组件测试复现202后未进入只读查询，验证无重复POST、非终态不误判成功、终态/卸载停止与次数边界，再实现并运行前端全量lint/test/build。首轮订单与202证据保留；用同一隔离环境的第二笔新UI订单验证修复，分别核账，不覆盖第一次记录。favicon缺失404、没有预置固定秒杀活动的404和外部图片ORB失败单列非阻断观察，不扩展为新页面改版。
+
+## 5. 执行结果与收尾
+
+普通购物LEGACY全链路已完成，详细结果见[验收报告](storefront_acceptance_report.md)。首笔支付暴露页面202后不跟踪的问题，后端原调度正确收敛；仅Pay/PayResult组件及5项组件回归发生源码变化。结果页每个有效effect实例最多30次查询，每次响应后隔2秒；终态停止，卸载的旧实例不再调度。Vite开发StrictMode初始化会出现一次被清理effect的额外GET，网络证据保留该事实，不称全开发页面绝对只有一次首次GET；没有重复扣款POST。
+
+修复后第二笔UI订单再次收到202，21:49:33开始只读查询，21:49:43已读取SUCCESS，早于21:50:10显示文案热更新；因此成功不是靠刷新或重发扣款。结果页使用“支付成功/支付失败/已退款/确认中”而非协议状态码。两笔各79.80，最终两条DEBIT共159.60，余额9840.40；第三笔39.90仅作为普通取消用例，由API创建后在页面取消，库存最终available9996/reserved0/sold4，余额不变。同一成功key重放两次账本保持，另一用户读订单403，UI退出及三枚夹具API token退出后均拒绝受保护访问。
+
+前端初始21项通过；新增组件红测首轮3失败/20通过（单App测试文件），修复与补充重复点击测试后全量26项通过，lint/build通过。复用的八个后端Jar共628生产class已与classes/SourceFile核对；没有更改后端或重跑旧1948项。1166份其它已跟踪backend/frontend/deploy与原README字节保持。
+
+归档工具问题均留痕：login.userId字段误读、分片名误猜t_order、Docker Mounts数组顺序误判、当前Playwright的_file响应体引用未被初版sha1采集器收集；分别按真实契约/元数据/挂载内容/200条文件引用修正，只补证据，没有改写业务状态。首轮资料、SQL dump、网络响应、截图和工具失败记录保留。
+
+归档完成后仅关闭本次浏览器session、Vite和七Java（按PID/命令/创建时间核对后Stop-Process，不能称自然退出）；Rabbit连接0，Nacos七个自有实例明确注销。六容器和项目网络已移除，七命名卷保留；35既有容器ID/镜像/挂载/重启计数与运行状态保持。Redis保留8个库存投影和2个30天扣款缓存，没有auth/购物车Key；Rabbit保留3条原订单TTL消息，未清空队列或删除业务数据。
+
+## 6. Git与证据
+
+初始方案4b807e56，首次前端修复范围冻结b8233a48。完成提交覆盖App.tsx、App.test.tsx、本方案、新报告及原重构验收汇总中的新验收链接，共五文件；不提交output/、target/、凭证或README。完成前执行git diff --check及临时index逆补丁验证，完成标签acceptance/storefront-complete-20261114；回退会撤销前端状态跟踪修复和本轮文档结果，不会撤销隔离实验交易。
+
+证据入口target/storefront-acceptance-20261114/verification.json；浏览器资料output/playwright/storefront-32b97a49。它们保留在当前工作区，Git不管理运行数据。TCC公开取消/未决中止、秒杀、完整性能矩阵及所有故障窗口仍未纳入本次通过结论。
