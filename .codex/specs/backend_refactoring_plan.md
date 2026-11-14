@@ -3416,3 +3416,33 @@ git revert refactor/pay-receipt-native-complete-20261114
 结果只提交本测试与方案；临时index逆补丁恢复父树，真实index/README保持。回退不会恢复已清理数据库/TC运行态或删除忽略证据/保留卷。原bugfix_log已记录固定环境根因、装配修正、归档日志判据修正和实际验证；README本地修改及旧pycache未入提交。
 
 下一步审查Pay coordinator自动全局事务编排验收的显式环境、Pay子进程参数和故障场景，再冻结有限范围。双资源资源级事实通过不代表自动begin/决议恢复、公开支付成功、Order/Stock/Gateway、完整商城或性能已通过。
+
+## 56. Pay coordinator 一次性编排与进程恢复有限回归（2026-11-14）
+
+### 56.1 源码清单与修改边界
+
+从9827d711继续，主Agent单独执行，依据batch16b2_cm18_pay_coordinator_review.md和当前实现。README旧清单为13项，当前PayTccCoordinatorIT实际15项，新增的旧NULL XID观察拒绝与同XID/NONE观察接受owner合法进展也纳入。本轮仅整理该IT的setup/startPay/killPay/startUser/stopUser：复用PayUserTccBridgeEnvironment，先校验全部地址再建库；NamingService、父Pay、两个User JVM和四次Pay故障子进程启动均接收同一隔离环境。子JVM显式Asia/Shanghai，保留Java17 add-opens，记录PID/端口/故障模式及准确退出回执，不在新回执输出控制凭证。
+
+不改15个@Test正文、交易/并发辅助方法、ProbeTransactions、PayCoordinatorFaultProcess、原故障屏障/控制协议、生产编排与事务语义。Pay子进程继续使用原classpath和@args文件，不改成生产Jar或新增公网接口；User仍使用实际启动Jar。保留原短TC超时2500ms/普通120000ms、一次性claim/begin权限、独立持久决议与原等待上限，不能通过放宽断言“修复”结果未知。
+
+### 56.2 有限验收范围与未知边界
+
+原15项覆盖：自动begin与双资源提交、余额不足回滚、User响应丢失回滚、并发execute/recover不抢begin、commit/rollback请求丢失后同决议恢复、commit响应丢失依永久事实、begin响应丢失不新建XID、决议前中断仅等TC超时、COMMIT意图落库后杀Pay/原appId重启、只有XID落库时杀Pay/重启仍UNKNOWN、载荷/全局或本地上下文拒绝、begin等待期间的并发观察、NULL XID旧观察拒绝、同XID/NONE旧观察接受原COMMIT进展。
+
+大部分用例将实际Spring Store/receipt/bridge/evidence与原SDK计数/故障包装器组装为生产Coordinator实例；并发用例的Mockito仅观察/暂停实际Store或receipt委托，并非用mock替代SQL、Feign或TC。两进程中断用例实际启动PayCoordinatorFaultProcess，各经历故障进程与恢复进程，共四个Pay PID，另有两个User PID。
+
+业务未知与实验清理必须分开：begin响应丢失保持BEGIN_UNKNOWN且execution.xid为空；仅XID持久化而无Try/决议时，重启后保持UNKNOWN/NONE。原AfterEach掌握的testOnlyKnownXids只用于结束真实TC事务，不回填execution、不伪造业务成功。15笔快照不要求全部业务终态；TC终态、冻结归零、无TRYING receipt是原清理门。原普通断言失败但已收敛仍可能删库，未决/worker未退出设置preserve；保留此限制。失败先写原bugfix_log并归档，禁止新支付号、直接改账本或扫前缀删库掩错。
+
+### 56.3 独立资源与运行前置
+
+新项目cloud-mall-refactor-pay-coordinator-20261114，基于deploy/experiments/compose.yml及本轮override启动MySQL8.0.46、Redis7.0、Nacos2.2.0、Seata1.5.2；候选MySQL19988、TC19989、NacosHTTP19990及gRPC20990/20991、Redis19991，子网10.254.217.0/24。新mysql_data/redis_data/seata_data/nacos_data/nacos_logs五卷，pull_policy=never/restart=no。初始化即建立root/root、空/public命名空间权限，保留Nacos认证/原healthcheck；TC为file模式，实际XID地址以证据为准。共享配置、默认/历史资源与旧失败库不动。
+
+新资源身份/镜像/端口/IPAM/健康/认证核验后，只从当前schema.sql准备User五表、Pay三表共八张空源表。原夹具克隆两个cm16b2_<UUID>库并通过原初始化器创建execution/receipt/dispatch等表。父子统一传入cloudmall.mysql.test.url、cloudmall.nacos.test.address、cloudmall.seata.test.tc、cloudmall.redis.test.port对应地址，禁用无关Rabbit health且不连默认broker。
+
+### 56.4 验证、证据和回退
+
+先提交本节并建立refactor/pay-coordinator-native-baseline-20261114。修改单Java执行google-java-format；运行PayUserTccBridgeEnvironmentTest、PayTccExecutionStoreTest、PayTccExecutionOwnerTest、PayTccExecutionSnapshotTest、PayTccExecutionEvidenceTest、PayTccExecutionWiringTest定向回归。离线构建User Jar核88个class，再单独JVM精确执行PayTccCoordinatorIT全15项，不能与其它真实TC类合跑污染SDK状态。
+
+证据target/backend-refactor-20261114/pay-coordinator-native保存方法/辅助保持、XML/日志、十五笔事实、SDK故障与TC终态、两类原未知状态、两个User/四个Pay启动停止回执、子进程实际参数（控制凭证仅保留原本地受控args文件）、源指纹及User Jar。成功后核对两库建删、八源表保持、Redis初末16DB空/Nacos组无实例，归档TC日志及停止后的file store，再down四容器/网络，无-v，五卷保留。
+
+仅提交PayTccCoordinatorIT与本方案，其它1119份既有backend/deploy及README保持。git diff --check、临时index逆补丁恢复父树且真实index/README保持后建立refactor/pay-coordinator-native-complete-20261114。Git回退不恢复实验数据或删除证据/保留卷。该范围仍不代表公开支付入口、定时自动恢复、Order/Stock交付、商城或性能验收。
