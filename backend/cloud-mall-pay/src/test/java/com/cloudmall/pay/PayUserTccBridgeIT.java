@@ -34,6 +34,9 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 /** 显式验收：真实 Pay Feign/Nacos、两个独立 User JVM、真实 MySQL 与 TC。 */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PayUserTccBridgeIT {
+  /** 在任何外部操作前核验，并传给父应用、发现客户端和两个子JVM的隔离环境。 */
+  private static PayUserTccBridgeEnvironment environment;
+
   /** 原库只读连接以及随机隔离库连接。 */
   private static JdbcTemplate source, userDb, payDb;
 
@@ -82,9 +85,8 @@ class PayUserTccBridgeIT {
 
   @BeforeAll
   static void setup() throws Exception {
-    String sourceUrl = System.getProperty("cloudmall.mysql.test.url");
-    if (sourceUrl == null || !sourceUrl.matches("jdbc:mysql://[^/]+/cloudmall_user(\\?.*)?"))
-      throw new IllegalStateException("显式 IT 需要 cloudmall.mysql.test.url 指向本地 cloudmall_user");
+    environment = PayUserTccBridgeEnvironment.read(System.getProperties());
+    String sourceUrl = environment.mysqlUrl();
     source = jdbc(sourceUrl);
     checksums = originalChecksums();
     batch = "cm16_" + UUID.randomUUID().toString().replace("-", "");
@@ -119,7 +121,7 @@ class PayUserTccBridgeIT {
         JSON.writeValueAsString(
             Map.of("group", batch, "userDatabase", userDatabase, "payDatabase", payDatabase)));
     Properties properties = new Properties();
-    properties.put("serverAddr", "127.0.0.1:18848");
+    properties.put("serverAddr", environment.nacosAddress());
     properties.put("username", "root");
     properties.put("password", "root");
     naming = NacosFactory.createNamingService(properties);
@@ -139,18 +141,21 @@ class PayUserTccBridgeIT {
           }
         },
         90);
+    List<String> payArguments = new ArrayList<>(environment.applicationArguments());
+    payArguments.addAll(
+        List.of(
+            "--spring.datasource.url=" + payUrl,
+            "--spring.cloud.nacos.discovery.group=" + batch,
+            "--spring.cloud.nacos.discovery.register-enabled=false",
+            "--spring.cloud.loadbalancer.cache.enabled=false",
+            "--seata.enabled=true",
+            "--seata.application-id=" + batch + "-pay",
+            "--seata.enable-auto-data-source-proxy=false",
+            "--cloudmall.pay.tcc-bridge.enabled=true"));
     application =
         new SpringApplicationBuilder(PayApplication.class)
             .web(WebApplicationType.NONE)
-            .run(
-                "--spring.datasource.url=" + payUrl,
-                "--spring.cloud.nacos.discovery.group=" + batch,
-                "--spring.cloud.nacos.discovery.register-enabled=false",
-                "--spring.cloud.loadbalancer.cache.enabled=false",
-                "--seata.enabled=true",
-                "--seata.application-id=" + batch + "-pay",
-                "--seata.enable-auto-data-source-proxy=false",
-                "--cloudmall.pay.tcc-bridge.enabled=true");
+            .run(payArguments.toArray(String[]::new));
     bridge = application.getBean(PayTccBridgeService.class);
   }
 
@@ -495,6 +500,7 @@ class PayUserTccBridgeIT {
             List.of(
                 Path.of(System.getProperty("java.home"), "bin", "java.exe").toString(),
                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "-Duser.timezone=Asia/Shanghai",
                 "-Xmx256m",
                 "-jar",
                 jar.toString(),
@@ -508,12 +514,33 @@ class PayUserTccBridgeIT {
                 "--cloudmall.user.tcc-debit.enabled=true",
                 "--cloudmall.user.tcc-resource.enabled=true",
                 "--cloudmall.user.tcc-http.enabled=true"));
+    command.addAll(environment.applicationArguments());
     users[index] =
         new ProcessBuilder(command)
             .redirectErrorStream(true)
             .redirectOutput(
                 artifacts.resolve("user-" + index + "-" + System.nanoTime() + ".log").toFile())
             .start();
+    Files.writeString(
+        artifacts.resolve("user-start-" + users[index].pid() + ".json"),
+        JSON.writeValueAsString(
+            Map.of(
+                "pid",
+                users[index].pid(),
+                "index",
+                index,
+                "batch",
+                batch,
+                "userPort",
+                userPorts[index],
+                "proxyPort",
+                proxies[index].port(),
+                "nacos",
+                environment.nacosAddress(),
+                "tc",
+                environment.tcAddress(),
+                "redisPort",
+                environment.redisPort())));
     await(
         () -> {
           if (!users[index].isAlive()) throw new AssertionError("User JVM 退出，检查 " + artifacts);
@@ -539,7 +566,19 @@ class PayUserTccBridgeIT {
   private static void stopUser(int index) throws Exception {
     if (users[index] != null && users[index].isAlive()) {
       users[index].destroyForcibly();
-      users[index].waitFor(15, TimeUnit.SECONDS);
+      assertTrue(users[index].waitFor(15, TimeUnit.SECONDS), "自有User进程未退出，不允许清理数据库");
+    }
+    if (users[index] != null) {
+      Files.writeString(
+          artifacts.resolve("user-stop-" + users[index].pid() + ".json"),
+          JSON.writeValueAsString(
+              Map.of(
+                  "pid",
+                  users[index].pid(),
+                  "alive",
+                  users[index].isAlive(),
+                  "exitCode",
+                  users[index].exitValue())));
     }
     if (naming != null && proxies[index] != null)
       naming.deregisterInstance("cloud-mall-user", batch, "127.0.0.1", proxies[index].port());

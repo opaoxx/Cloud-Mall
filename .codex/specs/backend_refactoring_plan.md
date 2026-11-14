@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归，以及User LocalTCC/官方Fence的真实TC有限回归。Pay/User跨进程发现派发与完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence真实TC回归，以及Pay/User跨进程Nacos/Feign派发桥有限回归。完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3300,3 +3300,49 @@ Nacos沿原standalone、稳定hostname、认证与现有healthcheck.py，使用�
 原夹具仅未决/收尾失败设置preserve；已收敛的普通断言失败仍可能删库，此限制如实记录。失败先写原bugfix_log并保存首轮证据；不改余额或删未知库结案。全部通过后核对八源表指纹、2UUID建删、九笔事实、TC终态、三次自有User进程启动/停止、Redis空库与Nacos清理，归档日志及TC file store后down本轮容器/网络，无-v，五卷保留。
 
 仅暂存三份测试文件与本方案，其他1117份既有backend/deploy及README保持。git diff --check及临时index逆补丁恢复父树、真实index/README保持后建立refactor/pay-user-bridge-complete-20261114。回退测试装配不恢复运行状态、不删除忽略证据或数据卷。
+
+54.3首轮准入修正：旧bootstrap的resource=:*:*只覆盖空命名空间；本轮Nacos2.2实际gRPC注册授权资源namespaceId=public，首User注册被拒且9个业务方法未执行，cleanup注销也被拒，两个UUID库留下。先完整归档首轮Maven/XML、User进程/日志、TC无业务全局事务证明、Nacos脱敏授权日志及两库dump；失败库精确保留在本轮卷，不为重跑删库。仅在本轮新Nacos为同root/cloudmall_admin补public:*:*的rw权限，鉴权/用户/共享Compose保持，重跑命令和9方法不变。最终预计4个创建库：失败2保留、成功2按原夹具删除，分别报告；修正后的权限配置仅属本次隔离实验，不宣称默认环境已修复。
+
+### 54.4 装配改动与实际结果
+
+新增PayUserTccBridgeEnvironment集中读取四个必填属性、限制loopback/源库/高位端口及派生gRPC冲突；NamingService、Pay启动参数和两个User子JVM复用同一结果。PayUserTccBridgeIT先校验环境再建库，子JVM显式时区，启动/结束回执记录PID与准确端口；原强制中断语义保持，waitFor未成功会阻止后续清理。原9个@Test方法正文逐段SHA核验完全保持，没有业务断言更改。
+
+新增环境测试5项与原四类派发/Feign/JSON测试合计5类33项首次通过。User离线打包通过，Jar内88个生产class逐字节匹配当前编译输出。首轮真实测试在Nacos注册授权处失败，9方法未执行；仅补本轮public权限后，同一命令的完整9项通过，0失败/错误/跳过。首轮Maven/XML、User日志/PID及两库dump独立归档；不将本次真实回归记为首次启动成功。
+
+| 原9项范围 | 本轮事实 |
+| --- | --- |
+| 提交与重复派发 | 仅1次POST，后续只GET；冻结10到唯一DEBIT账本，User余额90/冻结0；桥不推进Pay记录PENDING |
+| 取消 | 同一分支只释放一次，余额100/冻结0/0账本 |
+| 丢失POST响应 | 保持TRY_UNKNOWN，恢复只GET；原receive不变，无第二POST或分支 |
+| 余额不足 | 没有持久拒绝事实时保持未知；TC Cancel后CANCELLED且无资金副作用 |
+| 双User并发入站 | 两实例争同一接收归属，只登记1分支、冻结一次 |
+| 认证/身份与Legacy | 错凭证/用户/XID/匿名请求被拒，Legacy不产生派发/接收/资金事实 |
+| 冲突载荷 | 明确PAY_TCC_DISPATCH_CONFLICT，保留POST_ATTEMPTED，不误写网络未知；TC回滚原11元冻结 |
+| 双Pay并发派发 | 独立持久化权限只允许1次POST、1个分支 |
+| User中断/服务重选/重启 | 只终止选中实例，Nacos剩余实例承接GET和TC提交；重启原端口/稳定appId，无第二POST |
+
+实际调用为Pay dispatch→独立持久化POST权限→原UserTccClient经Nacos/OpenFeign到测试响应代理→真实User内部认证/receive认领→原LocalTCC资源与官方Fence→真实TC回调。代理只执行原截断/计数逻辑；未用mock替代Nacos、Feign、TC、SQL或User资金。Pay receipt/coordinator/公开入口未开启，不能凭桥接成功推导完整支付。
+
+TC日志记录9个真实全局事务、8个User分支，3个提交与6个回滚终态覆盖全部9笔快照；认证拒绝场景没有资金分支。第二轮原生目录的九笔dispatch/receive/attempt/funds/ledger/fence事实逐一保留，冻结均归零，最多唯一attempt/Fence/账本。三个User PID与停止回执一致，沿原destroyForcibly故障/收尾策略退出，exitCode=1不冒称自然退出；三次均有Tomcat、RM与Nacos register finished证据。重启实例在最后Started UserApplication日志前被收尾停止，归档脚本首次错误要求该日志而中止，后按实际三项就绪证据核对并如实记录缺少最后日志，未改变测试等待条件或重发交易。
+
+源八表DDL/计数/checksum保持，Redis16DB初末均为空；成功与失败Nacos分组最后均无User实例。4个UUID库创建、成功2个删除与binlog匹配，首轮失败2库保留，前后dump去除导出时间后完全相同。失败现场没有被清空换取成功；两库位于本轮mysql_data保留卷中。
+
+另外1117份既有backend/deploy及README按字节保持；原中间件容器ID/镜像/完整挂载/启动时间/重启次数保持。三份Java格式、适用编译、33定向/9原生回归与diff检查通过。归档TC日志与停止后的sessionStore/root.data后，已移除本轮四容器/网络，保留以下五卷：
+
+- cloud-mall-refactor-pay-user-bridge-20261114_mysql_data（包含首轮两个失败库）
+- cloud-mall-refactor-pay-user-bridge-20261114_redis_data
+- cloud-mall-refactor-pay-user-bridge-20261114_seata_data
+- cloud-mall-refactor-pay-user-bridge-20261114_nacos_data
+- cloud-mall-refactor-pay-user-bridge-20261114_nacos_logs
+
+### 54.5 回退与后续
+
+方案提交58bd2aeb，基线标签refactor/pay-user-bridge-baseline-20261114，完成标签refactor/pay-user-bridge-complete-20261114。证据入口target/backend-refactor-20261114/pay-user-bridge/verification.json，包含33/9报告、首轮失败与同命令重跑、原9方法保持、Jar指纹、九笔事实、TC9全局/8分支、父子环境/PID、源指纹、失败库dump和资源关闭。
+
+```powershell
+git revert refactor/pay-user-bridge-complete-20261114
+```
+
+仅提交三份测试与本方案；临时index逆补丁恢复父树，真实index/README保持。Git回退不恢复运行数据或删除证据/五卷；原bugfix_log持续记录固定环境问题、Nacos授权修正、归档日志判据修正及实际回归结果。旧README本地修改、pycache及忽略产物均未入提交。
+
+下一步按同样方式审查Pay receipt双资源测试的环境/失败现场与必要源表，冻结独立的Pay/User双资源TC范围。派发桥九项通过不替代Pay receipt/coordinator、公开支付入口、Order/Stock联动、完整TC故障矩阵或商城验收；不自动启动历史CM21或压测。
