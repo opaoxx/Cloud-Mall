@@ -3855,3 +3855,28 @@ git revert refactor/common-standards-complete-20261114
 ```
 
 该回退只撤销Common本批规范修改及配套记录，不回退运行数据或删除历史证据/卷。下一步先冻结Product21文件的说明、局部短名和格式收尾，沿同样的语义对照/适用回归/回退流程；完整商城及历史性能范围仍单独保留。
+
+
+## 62. Product 二十一文件规范收尾（2026-11-14）
+
+### 62.1 冻结范围
+
+从53e41b6b继续，主Agent单独执行第60/61节清单。精确21个Product生产Java按验收汇总§4.1及product-standards/owned-java.json冻结：启动类1、配置4、PO/VO3、Mapper7、索引接口1、index实现4、metrics实现1。只在这些文件处理34处必需说明绑定、16个格式差异、六处局部短名、23条泛化说明，并将同一既定方法内的空泛步骤注释改为实际流程。测试源码、其余模块、配置资源/POM、SQL schema、README和历史证据保持。
+
+说明重点为消息拓扑/Bean、原字节转换和重试/DLQ、Mapper持久事实/计时器、当前商品快照、ES版本写入/兼容删除以及ACK_CALL_RETURNED/PAUSED/UNKNOWN的真实边界。三个JavaDoc从注解之后移到之前；不得把ACK本地调用返回写成broker确认。既有doc/注释修订不改常量、Bean名、配置开关、类型/接口/字段名或数据格式。
+
+六处语义改名：Outbox Mapper的RowMapper局部rs→resultSet；ES兼容delete捕获e→deleteFailure；索引Consumer的consume捕获e→consumptionFailure、invokeUpsert捕获e→writeFailure、invokeDelete捕获e→deleteFailure、validateEnvelope日期解析捕获e→invalidTimestamp。只同步各自词法作用域内引用，保异常包装/日志/重抛及调用顺序。既有id与JSON/SQL/Feign名称保留，不进行批量机械改名。
+
+### 62.2 兼容检查与测试
+
+先保存21文件和全部1123份backend/deploy/README指纹、提交本节并建立refactor/product-standards-baseline-20261114，再实施。沿第15/52节既有索引和第60节规范边界，不改算法或恢复策略；SQL、ES脚本、指标/消息/错误字符串及所有字面量单独比对。完整Javac语法树仅允许六个作用域内局部符号更名及import排序/未使用import整理，说明/排版不计业务变更；若出现其它语法差异必须定位，不通过忽略整段方法绕过。
+
+Google Java Format使用原1.22.0并跳过长字符串重排，修改后只读检查Product全部102生产Java的格式、DocTrees说明与短名，保留语义明确id；复核泛化说明及步骤注释。沿原测试，不新增镜像实现的测试。执行Product原37类361项及Common四类25项，预计41类386项，以实际XML为准；保存Product原生命周期单测自有Java子进程自然退出/执行器关闭证据。此Java进程不是Agent，不涉及多Agent协作。
+
+八模块离线package（跳过重复测试）验证生产/测试编译及Jar与SourceFile；不运行真实MySQL/Rabbit/ES、旧IT/性能runner，不操作Docker或历史卷，不全量clean。上一阶段85及统一1948只核已有记录，不当作本轮新执行结果。
+
+### 62.3 记录与回退
+
+实施前后维护原bugfix_log。证据target/backend-refactor-20261114/product-standards包含前像、六符号白名单、AST/字面量/格式/文档检查、当前XML/Jar、源码保持及回退证明。完成后更新主方案和验收汇总，Product21完成后剩User5/Stock16共21文件；第60节原始清单和历史结论不回写。
+
+只提交21Java及两Markdown。适用测试/打包和git diff --check通过，临时index逆补丁恢复方案基线树且真实index/README保持后提交，建立refactor/product-standards-complete-20261114。Git回退不恢复运行数据，不删除证据/卷；不把本次规范收尾当作新增真实索引或完整商城验收。
