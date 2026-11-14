@@ -3639,3 +3639,32 @@ git revert refactor/pay-delivery-environment-complete-20261114
 3. 复核12项完整顺序及第1项原两分钟年龄门、MQ helper、Legacy切换、只读TC/Stage采集。定时器、故障注入、消息信封/键/确认和UNKNOWN保护保持；本轮仅离线79项不替代这些真实行为。
 4. 原夹具仍有“普通断言失败但随后已收敛可能删库”的历史限制，不能宣称任意失败都保库。运行前审清setup部分失败与所有自有子进程/代理的有限退出，保存每项资金/库存/TC状态及首个失败证据；未知业务不靠手工改账或删库清场。
 5. 成功后核四owned库、原vhost、Redis精确键/空库、Nacos实例、子进程及源指纹；归档MySQL/Rabbit/Redis/TC原生证据和停止后的TC file store，再down本轮容器/网络，无-v保留六卷。完整商城、全部历史风险与性能仍需另定范围。
+
+
+## 59. 四服务交付有限真实回归（2026-11-14）
+
+### 59.1 冻结范围
+
+从04f84a5e继续，主Agent单独执行，沿第58节已完成的显式环境接线。依据16C交付、16L租约及16T247建单/预留恢复规格，本阶段执行当前PayTccDeliveryIT完整12项，不按README早期8项裁剪，不重复历史性能/维护矩阵。先不改Java；发现实际阻断时先记原bugfix_log、保存首次证据，再作最小必要修正并回归。
+
+原12项包括真实A建单/事务可见性/支付交付与B首次预留响应未知后原Recovery释放，库存回滚前禁止退款，禁用账户退款及Pay替代进程，paid响应未知，ROLLEDBACK不交付，租约竞争，状态事务原子性，扫描公平，默认/显式Legacy新进程恢复，以及两类超时消息return/重投。第1项保留原2分钟年龄门及30秒调度，不改时间或手工改终态。其Product/Cart仅原只读metadata double，真实User/Order/Stock/Pay与Feign/Nacos路径不替换；不是完整商城或全部Product/Cart集成。
+
+### 59.2 新资源与原始数据
+
+新Compose项目cloud-mall-refactor-pay-delivery-20261114，基于deploy/experiments/compose.yml和本轮ignored override；MySQL20010、TC20011、Nacos HTTP20012/gRPC21012和21013、Redis20013、Rabbit AMQP20014/management20015，子网10.254.215.0/24。新mysql_data/redis_data/rabbit_data/nacos_data/nacos_logs/seata_data六卷，原MySQL8.0.46镜像、Redis7.0、Rabbit3.11、Nacos2.2.0、Seata1.5.2；pull never/restart no，root/root，Nacos保持鉴权并初始化空/public权限，Rabbit健康探针只在本轮override采用既有已验证10秒超时。
+
+先核项目/卷不存在、端口/IPAM/镜像/健康与标签，再创建四个空源库。只提取当前schema.sql中User7/Pay9/Order15/Stock9共40条CREATE TABLE（含原LIKE依赖顺序），不运行商品或示例数据。原fixture克隆四个cm16c_<UUID>库，Order按当前202611生成202610..202701四个月12表、Stock创建审计表，共53表；原表数与全部checksum断言保持。默认资源、旧实验卷和旧失败库不动。
+
+### 59.3 执行、证据和失败边界
+
+先提交方案与refactor/pay-delivery-native-baseline-20261114。核第58阶段79项报告/源SHA及四Jar生产class、Order测试helper排除；在当前同源代码上离线package四服务，随后单独Maven JVM仅运行PayTccDeliveryIT。显式传入七项环境属性、Java17 add-opens/Asia/Shanghai，TC属性使用本次Compose实际完整CID。旧79不算本轮新测试项。
+
+新证据目录target/backend-refactor-20261114/pay-delivery-native。保存命令/退出码/XML、原fixture阶段包和事务/资金/订单/库存/消息证据、每个测试子JVM的PID/实际存活代际与环境摘要（不输出控制key）、源表前后DDL/checksum、TC原生注册/全局方向、Rabbit元数据及Redis键事实、Docker归属/旧资源身份、Jar和源码SHA。原collector同源时钟/INFO解析与ACK_UNOBSERVED规则保持，不以全局COMMIT伪造逐分支commit ACK。
+
+原fixture的AfterEach可能经原业务调用收敛普通断言失败，而后删库；未决preserve保持。运行前已审查清理路径，不扩大删除范围、不用手工写资金/库存状态收尾。外部runner先保留首轮日志/XML/生成目录；若进程或业务未知，仅精确停止本轮可证归属进程、归档并保留数据库/卷，不把重跑成功覆盖首轮失败。部分setup失败清理也必须按实际返回和资源清单记录，不假定任意失败均留库。
+
+成功后核四库CREATE/DROP、vhost删除及零连接、Nacos精确组实例退出，源40表不变，Redis剩余键逐个归属记录（测试可能保留库存缓存，不以FLUSHDB制造空库）。归档五组件日志、SQL/缓存/消息事实及停止后的TC file store后，down本轮五容器/网络，无-v保留六卷；不清共享资源。只有实际12项全通过且资金/库存/TC核验通过才报告本有限交付闭环，完整商城/全部崩溃窗口/性能仍未验收。
+
+### 59.4 提交策略
+
+无生产改动时结果提交仅更新本方案；必要测试修正单列准确文件/原因。源码保持检查、适用格式及git diff --check通过，临时index逆补丁恢复父树并核真实index/README保持，再建立refactor/pay-delivery-native-complete-20261114。Git回退不恢复运行数据，也不删除本轮证据或六保留卷。
