@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约及Cart/User/Product/Stock独立MySQL/Redis联合数据回归；下一步细化Order/Pay持久事务与消息验证，尚未宣称真实全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归，以及Order/Pay持久事务与真实Rabbit消息回归；商品MQ/ES同步和真实服务链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3091,12 +3091,55 @@ Pay四类验证创建模式/幂等与插入后失败回滚、成功入口模式�
 
 源库只准备十张空表：Order三模板mall_order/mall_order_item/order_status_log及order_idempotency/reservation_intent/outbox/stock_action四台账；Pay三表pay_record/callback_log/debit_intent。SQL来自当前schema.sql，item/status模板取原202608定义仅替换表名，不创建多余业务月表。owned夹具再克隆模板并创建各自月份表，源表前后DDL/计数/checksum须相同。
 
-预计31个owned库：创建影子4（cm17eh_）、状态3（order_state_refactor_）、秒杀消息4（order_seckill_msg_）、超时5（order_timeout_refactor_）、Pay15（creation3/success3/failure4/callback5）。创建影子、消息、Pay按原成功门归档后才删库；OrderState原close/setup失败会删库，此限制明确保留。通过前不删除失败现场，不扫描前缀批量删库。成功后用原生清理记录、实际CREATE/DROP事件、源指纹和剩余schema互证，先归档再down本轮容器/网络（不带-v），保留两卷。
+预计32个owned库：创建影子4（cm17eh_）、状态3（order_state_refactor_）、秒杀消息4（order_seckill_msg_）、超时5（order_timeout_refactor_）、Pay16（creation4/success3/failure4/callback5；创建首方法分别验证LEGACY/TCC两个库）。创建影子、消息、Pay按原成功门归档后才删库；OrderState原close/setup失败会删库，此限制明确保留。通过前不删除失败现场，不扫描前缀批量删库。成功后用原生清理记录、实际CREATE/DROP事件、源指纹和剩余schema互证，先归档再down本轮容器/网络（不带-v），保留两卷。
 
 ### 51.3 顺序执行与回退
 
 先提交本节与`refactor/order-pay-transactions-baseline-20261114`。四组各用原Java17/Maven `-o -pl backend/cloud-mall-order或pay -am test`，精确类选择器、surefire.failIfNoSpecifiedTests=false与user.timezone=Asia/Shanghai。创建影子独立使用cloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:19969/cloudmall_order?allowPublicKeyRetrieval=true（原boundedUrl自行补超时/时区）；状态和消息用裸cloudmall_order URL，消息另设cloudmall.rabbit.test.port=19970；Pay组用裸cloudmall_pay URL。各夹具要求不同，不为合并命令放宽URL守卫。
 
-每组通过并完成前后资源检查才进入下一组；两消息类共用本轮broker但按默认非并行Surefire执行，各例按原代码停止消费者并核验空队列。创建影子的完整class-start/class-finish、物理/逻辑facts和连接关闭证据，Pay十五个UUID的before-cleanup/finished报告，消息原成功清理行和各组XML均归档到`target/backend-refactor-20261114/order-pay-transactions`。只统计本轮29方法，不混入历史XML。
+每组通过并完成前后资源检查才进入下一组；两消息类共用本轮broker但按默认非并行Surefire执行，各例按原代码停止消费者并核验空队列。创建影子的完整class-start/class-finish、物理/逻辑facts和连接关闭证据，Pay十六个UUID的before-cleanup/finished报告，消息原成功清理行和各组XML均归档到`target/backend-refactor-20261114/order-pay-transactions`。只统计本轮29方法，不混入历史XML。
 
 源码无改动时不重复此前1933离线/55数据或八模块打包；四组Maven完成各自适用编译与原生测试。1117份backend/deploy文件及README按字节保持；新增修复则另补适用回归。完成后建立`refactor/order-pay-transactions-complete-20261114`，临时index逆补丁恢复父树、真实index/README保持，不clean/reset。文档回退不恢复运行数据或删除忽略证据/保留卷。MQ/ES商品同步、真实Gateway/Nacos/TC及商城链仍为后续独立范围。
+
+
+51.3启动准入补充：本轮Rabbit服务已启动且管理HTTP认证正常，但原3秒rabbitmq-diagnostics ping健康探测连续超时。实测同一探测正常退出0、Ping succeeded，耗时约4.03秒；CPU/内存观察未见资源耗尽。业务测试尚未开跑，lab健康守卫阻断了DDL/测试。保存首个容器inspect/log与探测耗时后，仅在本轮compose.override.yml将Rabbit healthcheck.timeout改为10秒，保持原探测命令、间隔/次数、镜像/认证/资源限制和共享Compose不变。只重建本轮Rabbit容器，继续使用本轮刚建立且未投递业务消息的新卷，不访问历史卷；重新健康/协议/空队列准入后才执行原测试。
+
+
+### 51.4 本轮执行结果与启动问题闭环
+
+Rabbit启动准入问题经本轮局部10秒探测时限修正后，四组业务测试首次执行全部通过：8类29项，0失败、0错误、0跳过。开跑前按PayCreation双模式分支校正了资源清单，3个方法实际创建4个库；方法清单不变，最终Pay16库、全轮32库。未修改生产/测试/共享Compose、未降低原断言或重试守卫。启动门失败与业务测试结果分别记录，不能把首次容器准入写成一次通过。
+
+| 组 | 类/测试项 | 实际验证 |
+| --- | --- | --- |
+| 创建影子 | 1类/2项 | 4个UUID夹具，物理表/真实Sharding-JDBC对照，固定四月窗口与毫秒时间；独立intent、订单/明细/幂等/outbox提交、outbox故障回滚及原补偿 |
+| Order状态 | 1类/3项 | paid/cancel和stock action同事务；动作插入失败共同回滚；confirm原autocommit成功不因后读失败撤销 |
+| Order消息 | 2类/9项 | 实际broker原5队列/5业务交换机、秒杀消费与死信、TTL/DLX关单、原1秒/2倍/最多3次重试、SQL失败回滚、非法消息与终态重放 |
+| Pay公开事务 | 4类/15项 | 创建模式/幂等/并发和失败回滚；成功模式检查/回读；Legacy独立失败及实际TCC failure暂停/恢复；回调独立claim/complete及恢复扫描 |
+| 合计 | 8类/29项 | 四组Maven串行，实际方法与冻结清单一致，无遗漏或额外IT |
+
+创建影子的class-finish确认4库全部删除、source指纹保持、无preserveRequired/errors；物理/逻辑facts、连接关闭、delete-gate/cleanup和原生目录完整归档。Pay十六个UUID均有successful/deleted为true的finished报告；创建4、成功3、失败4、回调5。消息九例按原成功门清理，状态三例沿原close规则（失败也可能删库），这些不同清理语义未混写为同一保证。
+
+实际32库的CREATE/DROP集合完全一致：cm17eh_ 4、order_state_refactor_ 3、order_seckill_msg_ 4、order_timeout_refactor_ 5、Pay16。十张源表最终0行且DDL/checksum与初始相同。Rabbit `/` vhost保留原5队列/5业务交换机/空路由键绑定，组结束及最终ready/unacked/消费者均0、AMQP连接0；没有purge消息或删除未知资源来通过检查。十份initial/before/after/final资源快照、原生报告和binlog事件互证。
+
+本轮资源实际为MySQL8.0.46、RabbitMQ3.11.28。首个Rabbit实例服务正常，但3秒CLI探测超时；同命令实测约4.03秒退出0，管理认证和资源观察正常。本轮最终渲染配置与原渲染逐字段对照，唯一差异为rabbit.healthcheck.timeout从3s变10s。重建自有Rabbit后各阶段Docker健康检查均通过，宿主MySQL/AMQP/管理HTTP检查通过，9项真实消息测试及最终空队列检查通过。首次inspect/log、测时、局部覆盖及最终健康检查均保留；共享Compose未“顺手修复”，后续新实验需自行冻结适用健康时限。
+
+归档成功后才down本轮MySQL/Rabbit容器及网络，保留：
+
+- `cloud-mall-refactor-order-pay-data-20261114_mysql_data`
+- `cloud-mall-refactor-order-pay-data-20261114_rabbit_data`
+
+1117份已跟踪backend/deploy文件及README逐字节保持；现有broker、中间件及历史卷未动。四组Maven完成适用编译/测试，未重复此前1933离线/55实库或八Jar打包。没有新增业务测试失败或生产缺陷修复，启动时限调整仅属于本次隔离实验。
+
+### 51.5 边界、回退与后续
+
+真实消息验证覆盖Order的秒杀/超时/指定outbox发布路径；Pay验证本地持久化与事务，远端User/Order、Cart/Product/Stock及TCC资金证据仍按原夹具受控。没有部署完整Gateway/Nacos链或真实TC/RM资金，没有验证真实Stock端库存RPC、商品MQ/ES同步、全商城或性能。29项结果独立于此前55/1933，不相加为一次全链验证。
+
+方案提交0bca9a2f，基线标签`refactor/order-pay-transactions-baseline-20261114`，完成标签`refactor/order-pay-transactions-complete-20261114`。证据入口`target/backend-refactor-20261114/order-pay-transactions/verification.json`，包含精确29方法、四组XML/日志、创建影子和16个Pay夹具、32库事件、10源表/Rabbit拓扑快照、首个启动门失败与局部修正、两个保留卷、源码保持和逆补丁证明。
+
+```powershell
+git revert refactor/order-pay-transactions-complete-20261114
+```
+
+Git结果提交仅含方案记录，回退不恢复运行数据库/消息、忽略覆盖配置或证据。临时index逆补丁恢复父树，真实index/README保持；旧pycache与README未入提交，未clean/reset。原bugfix_log.md记录启动问题修复前现象、根因、局部方案及实际验证。
+
+下一步先梳理商品MQ/ES同步与真实服务链的现有入口和隔离要求，冻结新的有限验证范围；不直接启动历史CM21压测/guardian流水线，不把旧固定环境或未验证TC链当作本轮已完成。
