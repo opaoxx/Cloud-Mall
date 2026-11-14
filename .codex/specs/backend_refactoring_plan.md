@@ -4033,3 +4033,23 @@ git revert refactor/stock-standards-complete-20261114
 ```
 
 回退只撤销本批16Java规范变化与两文档，不恢复运行数据或删除证据/卷。
+
+## 65. 四批收尾后的统一规范与回归总复核（2026-11-14）
+
+### 65.1 范围与判定基线
+
+从673f5392继续，主Agent单独执行。第61–64节四批47文件清单已处理，本阶段在同一源码状态重新检查八模块全部641份生产Java，验收既定中等深度命名/分层/职责目标及已列规范项。默认只更新本方案和验收汇总，不改生产/测试代码、资源/POM/schema或README；若有新失败，先在原bugfix_log记录并界定修正范围，不放宽检查或隐去失败。
+
+沿前次JDK DocTrees检查成员/必需public方法、构造器、接口方法、Bean/定时任务/消费者说明绑定，Google Java Format 1.22.0只读dry-run且跳过长字符串重排；检查非id短名、既有模板说明模式、Cm编号生产类型、Controller继承ServiceImpl、空Service接口、Service HTTP映射、Controller/Service JDBC与SQL字面量候选、DTO/VO/PO后缀嵌套模型。保留已有语义id、Mapper内部JDBC、Feign局部record和表/Bean/消息/指标兼容标识；扫描结果与逐切片行为证据共同支持有限结论，不把扫描称为逐字段全语义证明。
+
+### 65.2 回归与产物
+
+先保存全部已跟踪backend/deploy与README指纹、当前测试清单及自有生命周期证据目录列表；提交本节并建立refactor/backend-standards-review-baseline-20261114。统一执行原265个*Test及StockSeckillFactFeignIT、PayOrderStateFeignIT，预计267类1948项，以当前日志/新XML逐类核对为准。两个IT是本机HTTP/实际Feign与响应类型、受控持久边界，不能称真实商城交易；前置只核实当前Stock/Order编译产物，必要时先补编译。
+
+核验原Product生命周期单测自有Java子进程自然退出、任务/执行器关闭与AMQPConnections=0，归档本轮Pay指标runId。八模块离线package跳过重复测试，检查628生产class与target/classes/SourceFile，保留实际解析版本和既有构建提示。不使用clean；不运行其它历史IT、压测、Docker或卷操作，不把历史实库结果累计为本轮测试数。
+
+### 65.3 历史证据、结论与回退
+
+只读复核四批完成标签/提交树/逆补丁及XML、AST证据哈希，并核对第60节以来45个Git内容变化文件均在四批冻结清单内，另两个文件仅历史工作区行尾归一。原失败现场、未知状态、Gateway版本差异和公开取消/全商城/性能限制不改写；历史卷资源状态沿第60节日期表述，不冒充本轮Docker检查。
+
+证据保存到target/backend-refactor-20261114/standards-final-review。只有本轮规范扫描无待办、适用统一测试/八包通过且源码保持，才将本次约定的结构重构与规范清单验收置完成；不自动开启新的真实场景或性能队列。完成后仅提交两份既有Markdown，执行git diff --check和临时index逆补丁恢复方案基线树验证，建立refactor/backend-standards-review-complete-20261114；Git回退只撤销本轮文档结论，不还原之前四批代码或运行数据。
