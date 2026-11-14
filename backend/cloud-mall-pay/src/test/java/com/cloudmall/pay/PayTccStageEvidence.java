@@ -394,9 +394,13 @@ final class PayTccStageEvidence {
 
   /** 绑定真实使用的 DataSource 及固定配置，后续每次连接前后都重新核对，禁止运行中换源。 */
   private record SourceBinding(
-      JdbcTemplate database, DriverManagerDataSource source, String url, String expected) {
+      JdbcTemplate database,
+      DriverManagerDataSource source,
+      String url,
+      String expected,
+      int mysqlPort) {
     private void verifyUnchanged() {
-      SourceBinding current = sourceBinding(database, expected);
+      SourceBinding current = sourceBinding(database, expected, mysqlPort);
       require(current.source == source && current.url.equals(url), "source configuration changed");
     }
 
@@ -481,7 +485,7 @@ final class PayTccStageEvidence {
     require(
         !"true".equals(parameters.get("requireSSL")) || !"false".equals(parameters.get("useSSL")),
         "contradictory source TLS parameters");
-    return new SourceBinding(database, source, url, expected);
+    return new SourceBinding(database, source, url, expected, mysqlPort);
   }
 
   private static boolean boundedMillis(String value, int maximum) {

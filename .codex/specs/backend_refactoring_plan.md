@@ -2,7 +2,7 @@
 
 日期为 2026-11-04。方案责任人为 `pm_arch`，实施责任人为 `backend`，验证责任人为 `qa` 与主协调 Agent。
 
-用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境及证据来源前置整理已完成离线验证；完整支付资金链仍需单独验证，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
+用户已确认采用中等深度重构，重点为规范命名、理顺分层、按业务职责组织代码，并在实施过程中通过 Git 保存可回退节点。当前已完成 Common 契约盘点及 Cart、Gateway、Product、User、Stock、Order、Pay 本轮中等深度结构重构；Pay公开入口、Legacy/回调日志及TCC职责分组已完成范围收尾。已完成八模块统一离线、两项本机HTTP契约、Cart/User/Product/Stock独立MySQL/Redis数据回归、Order/Pay持久事务与真实Rabbit消息回归、Product常规内容索引有限MySQL/Rabbit/ES同步回归、User LocalTCC/官方Fence、Pay/User派发桥、双资源receipt、coordinator一次性编排及指定进程/定时自动恢复的有限回归。交付四服务夹具的显式环境、证据来源及现有12项有限真实交付回归已验证；完整商城资金链与剩余入口仍需按范围核定，尚未宣称全链路与全部历史实验验收完成。最新验证、兼容保留项与回退信息见文末实施记录。
 
 ## 1. 使用方式与范围
 
@@ -3668,3 +3668,62 @@ git revert refactor/pay-delivery-environment-complete-20261114
 ### 59.4 提交策略
 
 无生产改动时结果提交仅更新本方案；必要测试修正单列准确文件/原因。源码保持检查、适用格式及git diff --check通过，临时index逆补丁恢复父树并核真实index/README保持，再建立refactor/pay-delivery-native-complete-20261114。Git回退不恢复运行数据，也不删除本轮证据或六保留卷。
+
+
+59.3首轮阻断及最小修正：首个真实支付已COMMITTED/COMMIT、User余额90/冻结0/DEBIT10，Order仍PENDING_PAYMENT、库存9/1/0；在首次Stage采集的initialOwnership前抛出source target does not belong to fixture。SourceBinding.verifyUnchanged重调旧两参数sourceBinding，丢失显式20010端口回退13307。53表断言已通过，TC原生双REGISTER/全局COMMIT证据已落盘；B创建尚未开始，后11项跳过，AfterAll按preserve拒绝删库。首轮13条XML含12方法与1条class收尾失败，不称13个业务场景。
+
+本轮追加只改PayTccStageEvidence的SourceBinding记录保存mysqlPort并在所有重检中沿用，及PayTccDeliveryEvidenceEndpointTest补“合法高位绑定再次验证通过、随后改端口拒绝”反例；先红后绿，旧默认13307/来源对象身份/URL严格相等及catalog守卫保持，不改业务IT/断言/清算。先归档首轮四库dump、业务事实、TC file store/消息/缓存与五容器日志并停止本轮自有进程，down首项目保留六卷和未交付样本，不手工清算或删数据。修复后第二次完整12项使用全新项目cloud-mall-refactor-pay-delivery-r2-20261114及六新卷；MySQL20016/TC20017/Nacos20018(gRPC21018/21019)/Redis20019/Rabbit20020/management20021，子网10.254.214.0/24，证据独立pay-delivery-native-r2目录。首轮未知交付事实不因新轮成功改写。
+
+r2前置端口探测发现20017已由既有PID27368监听，尚未创建资源；不操作该进程，仅将本轮TC端口改为已核可用20022，其余地址/新项目/新卷不变。拒绝与改选证据保存在r2/preflight-port-rejection.json。
+
+
+### 59.5 实际结果、缺陷修正与失败保留
+
+首轮真实测试在第1项阶段采集处失败，保留1方法error、11方法skip和1条AfterAll保留现场failure的原XML；不把13条XML记录称为13个业务用例。SourceBinding初次解析用20010，但verifyUnchanged调用旧两参数入口回退13307，导致正确隔离源被误拒。新增高位绑定重检断言先稳定复现同一异常；仅在私有SourceBinding保存mysqlPort，所有重检沿用，随后修改URL端口仍被拒绝。原对象/URL身份、catalog、凭据/选项和旧默认13307规则不变。
+
+修复只涉及PayTccStageEvidence与PayTccDeliveryEvidenceEndpointTest；PayTccDeliveryIT原12方法及全部业务辅助逐字节保持，生产代码、SQL、业务调度/状态机未改。修复后10类79项定向测试0失败/错误/跳过，四服务离线package通过；User88/Pay187/Order123/Stock88共486生产class匹配编译输出，测试helper不入Jar。红轮3项中的1项预期失败不混入绿轮79项计数；第58阶段旧79也不重复累加。
+
+首项目cloud-mall-refactor-pay-delivery-20261114的四个cm16c_5e17a7db7a8d42fbb32f357cbdcba780库保留在其mysql_data卷，并保存完整dump。该失败样本明确为TC COMMITTED、余额90/冻结0、一次DEBIT10，Pay仍PENDING、Order PENDING_PAYMENT、Stock9/1/0，尚未交付；B尚未创建。TC无未决全局事务，不等于业务交付完成。原vhost及五队列保留在该项目Rabbit卷，自有JVM已退出、容器/网络已移除、六卷保留，未手工结账/取消/删库。后续第二轮成功不改写这个失败事实。
+
+r2使用全新项目/卷及TC20022，其余端口按59.3。全12方法第二轮0失败/错误/跳过，外部runner405.6秒；第1项177.77秒，包含原真实恢复等待。没有重试同一失败交易或复用首轮Redis/数据库。具体结果：
+
+| 现有场景 | 本轮真实结果 |
+| --- | --- |
+| A实际建单与B首次reserve响应未知 | A的订单/item/idempotency/outbox提交前不可见，提交后原TCC支付与库存确认成功；B保持原orderNo/intent/SKU/快照，由原30秒Recovery等待真实年龄后释放 |
+| 库存回滚未完成、禁用用户退款/响应丢失 | 库存未成功回滚不退款；明确取消/回滚后唯一退款，禁用用户同样结清；新Pay进程读取原退款事实，不二次增加余额 |
+| paid响应丢失、已回滚execution | 前者原paid只一次，按Order/Stock只读事实判成功；后者不建delivery、不扣款/退款，原AfterEach取消订单释放库存 |
+| 过期租约、交付状态写故障、扫描公平 | 过期owner不能覆盖；delivery写失败连同Pay状态回滚，去故障后原状态成功；种子查询故障不阻塞已有交付 |
+| 默认/显式Legacy新JVM | 两种新进程均恢复原TCC意图，再各接受一笔新LEGACY支付；原持久模式与资金键不改变 |
+| Rabbit return后重试、提交后ACK前中断 | 原信封与eventId保持，真实return/重投/显式重复最终各一笔退款，无第二次库存动作或退款 |
+
+B的realWaitMillis=139595、ageAtReleaseMillis=139631，超过原120000ms年龄门，interval仍30000ms。RESERVE_UNKNOWN与RELEASED包的order/intent/key/items/SKU身份一致，四个成单表均0、Pay身份为空，User/Pay事实保持。其结果是未成单预留被释放，不能算第二笔支付。
+
+去重最终快照共14笔支付：12笔TCC（11 COMMITTED、1 ROLLEDBACK），2笔新LEGACY；支付状态7 SUCCESS、6 REFUNDED、1 PENDING，13条APPLIED DEBIT、6条APPLIED REFUND；最终样本冻结余额和预留库存均0。PENDING属于原ROLLEDBACK负例，它没有扣款/退款/交付，不代表公开失败状态投影已验收。真实TC有12个全局事务、Pay/User各12分支共24分支，11提交1回滚；XID摘要与12个TCC样本一一匹配。首轮另1个TC提交单列，不混入成功轮。
+
+31份Stage包四个数据库和MQ来源均OBSERVED，仍保留EVIDENCE_INCOMPLETE；它们不是跨服务原子快照，也没有凭空补全TC分支ACK/目标消息因果。两份MQ专项包为VERIFIED/eventCausalityProven=true，brokerAckHistoryProven仍false；普通A未来30分钟超时消息仅验证真实outbox发布，不声称已自然到期消费。3份TC原生final包保持双REGISTER/全局COMMIT且逐分支COMMIT ACK不可见的原保守规则。
+
+外部只读进程观察记录13个子JVM（User1、Stock1、Order各类6、Pay各类5），全部明确退出；真实环境参数/Asia/Shanghai一致，无控制key输出。退出沿原强停/有限等待流程，不能称自然退出。Maven父进程另记，不把子JVM当Agent。
+
+### 59.6 资源归档与验收边界
+
+r2四库CREATE/DROP与最终schema互证；每项目40张空源表DDL/计数/checksum不变，r2原vhost已删除、队列/连接0、五类Nacos服务在原组均无实例。r2 Redis DB0保留恰好两个balance:debit:7:<payNo>字符串Key，逐个匹配两笔新LEGACY支付，TTL仍为原30天范围，其余DB空；它们是原扣款缓存，已保存DUMP/TTL/SHA并留卷，未FLUSH/删Key。首轮Redis初末空。
+
+两轮均已归档日志、SQL/消息/缓存事实和停止后的TC sessionStore/root.data，然后仅down自己的五容器/网络，无-v。两个项目的mysql_data/redis_data/rabbit_data/nacos_data/nacos_logs/seata_data共12卷保留；首轮六卷metadata和证据SHA保持、未被r2挂载。
+
+r2关闭门曾因旧容器StartedAt变化停止。实际另一个Compose项目cloudnest的minio/redis/mysql于17:43:26从停止变运行；Docker事件只证明启动，不能确定调用者。本任务未操作这三个容器；35个旧容器ID/镜像/挂载/RestartCount均保持，其余32个StartedAt保持。差异与事件已单列，关闭门按精确三项外部变化记录后继续自有资源清理，未把所有旧资源启动状态描述为不变。
+
+1123份原跟踪backend/deploy中仅两个测试文件变化，其余1121份及README保持；原12业务方法/工具调用链、生产与既有Feign/JSON/SQL契约未改。两Java格式、适用编译/测试/打包与diff检查通过。主证据target/backend-refactor-20261114/pay-delivery-native/verification.json指向首轮红/绿测试、失败保留和pay-delivery-native-r2成功证据，两个实验目录均独立保留。
+
+本轮结论仅为当前12项四服务有限交付回归通过。Product/Cart仍是原只读metadata替身，未走Gateway/前端；首轮未交付样本、ROLLEDBACK负例公开PENDING、Stage保守缺证和未覆盖的网络/崩溃组合均按真实边界保留，不宣称完整商城、所有历史风险或性能验收完成。
+
+### 59.7 回退与后续
+
+方案提交40c60754，基线refactor/pay-delivery-native-baseline-20261114，完成标签refactor/pay-delivery-native-complete-20261114。结果提交仅本方案及上述两测试Java；临时index逆补丁验证恢复方案基线树，真实index/README保持。
+
+```powershell
+git revert refactor/pay-delivery-native-complete-20261114
+```
+
+回退只恢复源码/方案，不执行任何资金清算，也不恢复或删除数据库、TC、证据和12卷。原bugfix_log已补根因、红绿回归、两轮真实结果、外部环境变化和归档事实。
+
+下一步汇总本轮逐模块重构的全局验收矩阵，逐项区分结构目标已完成、当前真实覆盖和剩余取消/公开入口风险；只对结构调整直接影响且尚缺证的部分冻结最小补验，不自动重跑全部历史IT或开启性能维护任务。

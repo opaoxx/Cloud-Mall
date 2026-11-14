@@ -37,9 +37,11 @@ class PayTccDeliveryEvidenceEndpointTest {
                     + "?allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=5000",
                 "root",
                 "root"));
-    assertNotNull(
+    Object binding =
         ReflectionTestUtils.invokeMethod(
-            PayTccStageEvidence.class, "sourceBinding", database, schema, 20000));
+            PayTccStageEvidence.class, "sourceBinding", database, schema, 20000);
+    assertNotNull(binding);
+    assertDoesNotThrow(() -> ReflectionTestUtils.invokeMethod(binding, "verifyUnchanged"));
     assertThrows(
         IllegalArgumentException.class,
         () ->
@@ -55,6 +57,11 @@ class PayTccDeliveryEvidenceEndpointTest {
         () ->
             ReflectionTestUtils.invokeMethod(
                 PayTccStageEvidence.class, "sourceBinding", database, schema));
+    DriverManagerDataSource source = (DriverManagerDataSource) database.getDataSource();
+    source.setUrl(source.getUrl().replace(":20000/", ":20001/"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> ReflectionTestUtils.invokeMethod(binding, "verifyUnchanged"));
   }
 
   /** 指定端口上的两类响应只模拟管理协议，不启动消费者或真实 broker。 */
