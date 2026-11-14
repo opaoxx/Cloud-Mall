@@ -3069,3 +3069,34 @@ git revert refactor/cross-module-data-complete-20261114
 本轮Git结果提交仅含方案记录，回退不撤销已运行测试或恢复MySQL/Redis数据。临时index逆补丁恢复父树，真实index/README保持，未使用clean/reset；忽略工件与保留卷不受Git回退管理，旧pycache和README未入提交。原bugfix_log.md已补完整结果。
 
 下一步核对并冻结Order/Pay持久事务与消息回归清单，明确订单分片源表、支付意图/回执、Rabbit拓扑和各夹具URL/失败清理规则，再使用新的独立资源执行。真实TC资金与全商城全链仍单独规划，不从本轮55项数据验证推导完成。
+
+
+## 51. Order/Pay持久事务与真实消息回归（2026-11-14）
+
+### 51.1 范围与主Agent评审
+
+从83e74d1f继续，主Agent单独执行；上一55项实库报告逐SHA核验并独立保存，不与本轮累加。冻结四组8类29项现有IT，顺序为OrderCreationShardingShadowMySqlIT全2项、OrderStateMySqlIT全3项、OrderSeckillMessageMySqlRabbitIT全4项与OrderTimeoutMySqlRabbitIT全5项、PayCreation/Success/Failure/CallbackMySqlIT全3/3/4/5项。精确方法与源码SHA保存selection.json，不运行巨型OrderCreationPrecision全矩阵、固定环境TCC/全商城或性能测试。
+
+创建影子用同一原业务/事务逻辑分别走真实物理路由与Sharding-JDBC，四个月固定窗口202611/202612/202701/202702，验证独立intent先提交、订单/明细/幂等/outbox共同提交和outbox触发器故障时本地回滚/原补偿；Product/User/Stock/Cart为替身。状态测试验证paid/cancel与库存动作原子提交及失败回滚、confirm原autocommit写不因后读失败撤销。消息测试实际Rabbit投递/TTL+DLX/AUTO确认、原最多3次重试（1秒初始、2倍退避）、事务代理内失败回滚、死信原文/冲突证据及终态重放；不改变原Rabbit拓扑/消费者代码。
+
+Pay四类验证创建模式/幂等与插入后失败回滚、成功入口模式优先级/监视器/回读、Legacy失败独立事务/旧RR当前读及TCC failure真实暂停恢复、回调独立claim/complete和恢复扫描。User资金、Order远端及TCC证明仍为受控替身，不把真实SQL或Rabbit理解为真实TC资金全链。
+
+本轮预期只更新方案/验收记录，不改生产、测试、依赖或配置。失败先在bugfix_log记录并归档首轮，再定位和冻结必要最小修复；不删断言/跳过失败。源码、README和历史/default资源保持。
+
+### 51.2 独立资源、模板与清理
+
+新项目`cloud-mall-refactor-order-pay-data-20261114`，使用deploy/experiments/compose.yml的cm21 profile仅启动mysql/rabbit，候选MySQL19969、AMQP19970、管理HTTP19971，子网10.254.222.0/24，root/root，新mysql_data/rabbit_data卷。启动前核对资源不存在、端口bind/IPAM、镜像ID及渲染配置；保持pull_policy: never/restart: no，不启动现有broker或读取历史卷。
+
+此broker专属于本轮，测试沿用其默认vhost `/`及原OrderMessagingConfiguration五队列/五业务交换机；不是复用默认业务broker。组前后归档管理API队列/交换机/绑定/连接，消息组前必须无消息，之后要求五原队列ready/unacked/消费者为0、无残留AMQP连接；禁止purge或清理未知消息绕过失败。拓扑可保留在本轮卷，成功归档后随自有broker下线。
+
+源库只准备十张空表：Order三模板mall_order/mall_order_item/order_status_log及order_idempotency/reservation_intent/outbox/stock_action四台账；Pay三表pay_record/callback_log/debit_intent。SQL来自当前schema.sql，item/status模板取原202608定义仅替换表名，不创建多余业务月表。owned夹具再克隆模板并创建各自月份表，源表前后DDL/计数/checksum须相同。
+
+预计31个owned库：创建影子4（cm17eh_）、状态3（order_state_refactor_）、秒杀消息4（order_seckill_msg_）、超时5（order_timeout_refactor_）、Pay15（creation3/success3/failure4/callback5）。创建影子、消息、Pay按原成功门归档后才删库；OrderState原close/setup失败会删库，此限制明确保留。通过前不删除失败现场，不扫描前缀批量删库。成功后用原生清理记录、实际CREATE/DROP事件、源指纹和剩余schema互证，先归档再down本轮容器/网络（不带-v），保留两卷。
+
+### 51.3 顺序执行与回退
+
+先提交本节与`refactor/order-pay-transactions-baseline-20261114`。四组各用原Java17/Maven `-o -pl backend/cloud-mall-order或pay -am test`，精确类选择器、surefire.failIfNoSpecifiedTests=false与user.timezone=Asia/Shanghai。创建影子独立使用cloudmall.mysql.test.url=jdbc:mysql://127.0.0.1:19969/cloudmall_order?allowPublicKeyRetrieval=true（原boundedUrl自行补超时/时区）；状态和消息用裸cloudmall_order URL，消息另设cloudmall.rabbit.test.port=19970；Pay组用裸cloudmall_pay URL。各夹具要求不同，不为合并命令放宽URL守卫。
+
+每组通过并完成前后资源检查才进入下一组；两消息类共用本轮broker但按默认非并行Surefire执行，各例按原代码停止消费者并核验空队列。创建影子的完整class-start/class-finish、物理/逻辑facts和连接关闭证据，Pay十五个UUID的before-cleanup/finished报告，消息原成功清理行和各组XML均归档到`target/backend-refactor-20261114/order-pay-transactions`。只统计本轮29方法，不混入历史XML。
+
+源码无改动时不重复此前1933离线/55数据或八模块打包；四组Maven完成各自适用编译与原生测试。1117份backend/deploy文件及README按字节保持；新增修复则另补适用回归。完成后建立`refactor/order-pay-transactions-complete-20261114`，临时index逆补丁恢复父树、真实index/README保持，不clean/reset。文档回退不恢复运行数据或删除忽略证据/保留卷。MQ/ES商品同步、真实Gateway/Nacos/TC及商城链仍为后续独立范围。
