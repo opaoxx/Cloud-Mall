@@ -2914,3 +2914,45 @@ git revert refactor/pay-closeout-complete-20261114
 临时index按本轮精确路径逆补丁恢复父树，真实index及README保持；Git不恢复MySQL/Redis/Rabbit/Seata事实或忽略证据。本轮无新增失败测试/中间件实验，原bugfix_log.md记录文档根因、修复和验证；README与旧pycache未入提交。
 
 下一步按总方案梳理跨模块回归：以当前源码确认现有测试入口、调用链、所需独立服务/中间件、环境隔离和资源归属，再冻结新的执行范围。此前实库、TC及性能材料保持各自时间和源码归属，不把模块结构通过点当作全项目全链验收；历史CM21维护队列不自动恢复。
+
+
+## 49. 跨模块离线回归基线与后续环境分层（2026-11-14）
+
+### 49.1 本轮范围与主Agent评审
+
+从Pay结构通过点3f5d069c继续，主Agent单独执行。七业务/网关模块的结构切片和Common盘点完成后，先在同一源码点运行八模块现有单测和显式本机HTTP契约，验证模块单独迁移后能共同编译、装配并保持协议；不把分散历史测试结果累加为本轮结果。上一Pay收尾682项/78类XML SHA与最终源码路径已核验，独立保存为历史依据。
+
+现有*Test源文件共262份：Common4、Gateway5、User18、Product37、Cart13、Order64、Stock48、Pay73。另有107份*IT候选，不能按通配符整体启动。审阅资源入口后，本轮选择所有*Test，加Order的StockSeckillFactFeignIT与Pay的PayOrderStateFeignIT各一项；先完成八模块test-compile，确保Order引用的Stock标准class已就绪，再运行根工程测试。最终测试数按本轮XML实际结果登记，不拿源文件数代替测试数。
+
+Product若干IntegrationTest使用真实Spring事务/Mapper外加受控JDBC叶子，不创建真实MySQL。ProductMetricSchemaIndexContractTest只运行解析/配置拒绝/归属校验，其同文件资源夹具仅供显式IT使用；ProductMetricAdminConnectionLifecycleTest会创建自有Java子进程及target证据，核验自然退出且无AMQP连接，不启动Rabbit或流水线负载。PayTccStageEvidenceTest中的DataSource只提供配置身份，数据库执行被替身截获，不连接默认13307。Pay指标测试及Feign契约使用本机临时端口，按原finally关闭。
+
+本轮仅修改方案/验收记录，不改生产、测试、POM、版本、运行配置或冻结实验runner。若出现真实失败，先在原bugfix_log.md记录现象、定位归属，再冻结必要最小修复，不跳过失败/删断言来宣告通过。已有README与两个pycache保持。
+
+### 49.2 新执行命令、证据与Git策略
+
+先提交本节及`refactor/cross-module-offline-baseline-20261114`。使用原Java17/Maven工具，顺序执行根工程：
+
+```powershell
+mvn -o test-compile -DskipTests
+mvn -o test '-Dtest=*Test,StockSeckillFactFeignIT,PayOrderStateFeignIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-DargLine=-Duser.timezone=Asia/Shanghai'
+mvn -o package -DskipTests
+```
+
+实际命令使用已核验的本地mvn.cmd绝对路径，日志归档`target/backend-refactor-20261114/cross-module-offline`。测试选择器不会执行其他*IT；本轮不运行deploy的历史CM21执行器、不建立新Docker/数据库资源或连接默认中间件。归档每模块实际XML、明确本机HTTP/替身边界、Product自有子进程退出证据及Pay指标结果；八模块Jar逐class对应编译输出，并与各自生产源码类型清单核对，无遗留旧类或测试夹具混入。
+
+所有已跟踪backend/deploy文件及README按字节核验不变，差异应只含本节文档（bugfix_log仍按原忽略策略维护）。通过后写实际分模块测试数、缺口矩阵及下一阶段，建立`refactor/cross-module-offline-complete-20261114`；临时index逆补丁验证父树和真实index/README保持，不清理历史target证据、不改写Git历史。
+
+### 49.3 跨模块验证矩阵与后续准入
+
+| 范围 | 本轮可验证的实际入口 | 仍需后续独立验证 |
+| --- | --- | --- |
+| Gateway→业务身份 | GatewayAuthenticationContractTest、Http/MVC契约及Common异常/身份规则 | 真实Redis令牌、Gateway路由/Nacos、完整外部请求链 |
+| Cart→Product与Order→Cart | Cart原业务/HTTP测试、CartCleanupContractTest、OrderCartCommitBoundaryTest | 实际Redis Lua/TTL/竞争、真实Cart/Product HTTP与下单提交后清理 |
+| Order→Stock | 原StockFeign/秒杀受理单测、StockSeckillFactFeignIT的实际客户端与Stock VO、本机HTTP | 真实预扣/确认/回滚SQL、MQ、跨进程库存恢复与锁竞争 |
+| Pay→Order | PayOrderStateFeignIT的实际Feign、本机HTTP、实际Order MVC/Service，SQL为替身 | 真实订单数据/库存动作及进程异常恢复 |
+| Pay→User/TC | 原余额/TCC/证据/回调/装配单测和契约校验，依赖受控 | 真实余额账本、官方Fence/TC/RM、资金提交/取消/退款全链 |
+| 商品索引/销量与消息 | Product/Stock原状态、批处理、事务观察、消息字段单测 | 实际MySQL/Rabbit/ES索引同步及查询、消费恢复 |
+
+后续先盘点并冻结新的MySQL/Redis联合验证切片，候选为Cart十个Redis IT、UserAccountRefactoringIT、ProductRefactoringMySqlIT、StockCoreRefactoringMySqlIT及必要Order/Pay显式实库方法。逐一核对各夹具URL/源DDL/随机库、Redis DB/命名空间、失败保留和清理规则后才执行；不能把旧卷当fresh，也不能同时使用相互冲突的同名系统属性。每阶段使用deploy/experiments/compose.yml新项目和新卷，先归档后移除自有容器/网络，卷默认保留。
+
+MQ/ES、真实TC资金与全商城链条再按依赖顺序单独冻结；固定默认端口/数据库或要求真实Nacos/TC的旧测试，不通过放宽归属/开关守卫临时绕过。性能/JMeter、历史CM21 guardian/启动修复不属于本轮结构回归，未重新纳入前保持历史归档状态。本轮通过只表示统一离线与本机契约基线通过，不表示所有真实跨服务链路完成。
